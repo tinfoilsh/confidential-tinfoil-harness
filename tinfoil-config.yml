@@ -1,0 +1,64 @@
+# Measured workload definition: what tinfoild launches, and the only thing a
+# client's attestation of this enclave says it is running. Every byte here is
+# covered by the release measurement, so the container is pinned by digest and
+# the hosts it may reach are enumerated rather than inferred.
+cvm-version: 0.11.0
+
+cpus: 2
+memory: 4096
+
+# The shim terminates TLS on 443 and is the only way in. It forwards to the
+# harness's default listen port, refuses any path the harness does not serve,
+# and requires a Tinfoil API key on /v1/chat/completions -- the same key the
+# harness then forwards upstream, since it has none of its own.
+shim:
+  upstream-port: 8081
+  authenticated: true
+  paths:
+    - /v1/chat/completions
+    - /healthz
+
+networks:
+  # One attached network, so one egress policy. Everything the harness dials is
+  # either a host it attests or a service it needs in order to attest one; an
+  # unresolvable entry fails the whole set closed, which is the intended
+  # failure mode.
+  upstream:
+    egress: allowlist
+    allow:
+      # Data plane: the gateway that routes model turns, and the tools enclave
+      # the loop calls over MCP. Keep in step with the env block below.
+      - gateway.tinfoil.sh
+      - websearch.inf6.tinfoil.sh
+      # Attestation of every host in enclaves.go, fetched from the host itself.
+      # A replica the gateway names in a 422 is attested the same way, so it
+      # must resolve into this set too.
+      - kimi-k3.inf6.tinfoil.sh
+      - deepseek-v4-flash.inf6.tinfoil.sh
+      - gemma4-31b.inf6.tinfoil.sh
+      - gpt-oss-120b.inf6.tinfoil.sh
+      - llama3-3-70b.inf6.tinfoil.sh
+      # Verifying those attestations: the pinned repo's release and Sigstore
+      # bundle, the Sigstore trust root, and the AMD/Intel collateral proxies.
+      - github-proxy.tinfoil.sh
+      - tuf-repo-cdn.sigstore.dev
+      - kds-proxy.tinfoil.sh
+      - tdx-proxy.tinfoil.sh
+
+containers:
+  - name: harness
+    # Filled in by the image workflow; the digest is what makes the code
+    # running here part of the measurement.
+    image: ghcr.io/tinfoilsh/confidential-tinfoil-harness@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    networks: [upstream]
+    env:
+      - TINFOIL_GATEWAY_URL: https://gateway.tinfoil.sh
+      - TINFOIL_TOOLS_ENCLAVE: websearch.inf6.tinfoil.sh
+    # The harness keeps no state between requests, so nothing needs to survive
+    # a restart and nothing needs to be writable.
+    read_only: true
+    tmpfs:
+      /tmp: rw,noexec,nosuid,nodev,size=16m
+    # Both enclaves are attested at startup, so an unreachable one exits rather
+    # than serving; restarting is how it waits for them.
+    restart: always

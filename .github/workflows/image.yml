@@ -1,0 +1,60 @@
+# Builds the container that tinfoil-config.yml pins. The digest this prints is
+# the only thing that carries the harness's code into the measurement, so it
+# has to be copied into tinfoil-config.yml before the release tag is cut.
+name: Image
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: tinfoil-harness
+          persist-credentials: false
+
+      # go.mod still replaces tinfoil-go with a sibling checkout. Drop this
+      # step, and the build-contexts input below, once the seal-following
+      # release is tagged and the replace goes away.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: tinfoilsh/tinfoil-go
+          path: tinfoil-go
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: push
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: tinfoil-harness
+          build-contexts: sdk=tinfoil-go
+          push: true
+          tags: ghcr.io/${{ github.repository }}:${{ github.sha }}
+          # A plain manifest, so the digest below names the image itself
+          # rather than an index over it and its attestations.
+          provenance: false
+          sbom: false
+
+      - env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          echo "Pin this in tinfoil-config.yml:" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "    image: ghcr.io/${GITHUB_REPOSITORY}@${DIGEST}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
