@@ -9,13 +9,13 @@ memory: 4096
 
 # The shim terminates TLS on 443 and is the only way in. It forwards to the
 # harness's default listen port, refuses any path the harness does not serve,
-# and requires a Tinfoil API key on /v1/chat/completions -- the same key the
-# harness then forwards upstream, since it has none of its own.
+# and requires a Tinfoil API key on /agui -- the same key the harness then
+# forwards upstream, since it has none of its own.
 shim:
   upstream-port: 8081
   authenticated: true
   paths:
-    - /v1/chat/completions
+    - /agui
     - /healthz
 
 networks:
@@ -30,7 +30,7 @@ networks:
       # the loop calls over MCP. Keep in step with the env block below.
       - gateway.tinfoil.sh
       - websearch.inf6.tinfoil.sh
-      # Attestation of every host in enclaves.go, fetched from the host itself.
+      # Attestation of every host in main.go, fetched from the host itself.
       # A replica the gateway names in a 422 is attested the same way, so it
       # must resolve into this set too.
       - kimi-k3.inf6.tinfoil.sh
@@ -54,8 +54,8 @@ containers:
     env:
       - TINFOIL_GATEWAY_URL: https://gateway.tinfoil.sh
       - TINFOIL_TOOLS_ENCLAVE: websearch.inf6.tinfoil.sh
-    # The harness keeps no state between requests, so nothing needs to survive
-    # a restart and nothing needs to be writable.
+    # The harness keeps no state between runs, so nothing needs to survive a
+    # restart and nothing needs to be writable.
     read_only: true
     tmpfs:
       /tmp: rw,noexec,nosuid,nodev,size=16m
