@@ -1,9 +1,52 @@
 # confidential-tinfoil-harness
 
-Minimal streaming agent endpoint in front of Tinfoil's inference gateway used for confidential tool loops.
+Minimal [AG-UI](https://ag-ui.com) agent in front of Tinfoil's inference gateway
+used for confidential tool loops.
 
-    POST /v1/chat/completions      OpenAI-shaped, streaming only
+    POST /agui      RunAgentInput in, AG-UI events out
     GET  /healthz
+
+## Protocol
+
+The body is a `RunAgentInput`. `threadId`, `runId` and `messages` are read;
+`state`, `context`, `resume` and `parentRunId` are ignored, and a non-empty
+`tools` is refused -- the loop executes only tools it can attest.
+`forwardedProps.model` names a model or `auto`, since AG-UI has no model field.
+
+Eleven event types come back, framed as SSE:
+
+    RUN_STARTED  RUN_FINISHED  RUN_ERROR
+    TEXT_MESSAGE_CHUNK  REASONING_MESSAGE_CHUNK
+    TOOL_CALL_START  TOOL_CALL_ARGS  TOOL_CALL_END  TOOL_CALL_RESULT
+    ACTIVITY_SNAPSHOT  ACTIVITY_DELTA
+
+Tool calls run concurrently and are addressed by id, so their events may
+interleave; text and reasoning use chunk events, one message per turn. A call
+made in a turn that also spoke carries that message as its `parentMessageId`.
+`TOOL_CALL_RESULT` carries what the model read, truncation included; a call
+that failed carries `{"error": ...}`, which is what the model reads too.
+
+### Tool output as it happens
+
+A tool that reports progress streams it. Each call opens an activity of type
+`TOOL`, addressed as `act_<toolCallId>`, and every MCP progress notification
+from the enclave patches it:
+
+    ACTIVITY_SNAPSHOT  {"toolCallId": ..., "tool": "web_search", "progress": 0, "output": []}
+    ACTIVITY_DELTA     [{"op":"replace","path":"/progress","value":0.5},
+                        {"op":"add","path":"/output/-","value":"..."}]
+
+`output` is a list because RFC 6902 cannot grow a string; a client joins it.
+The result itself still arrives whole -- MCP has no partial tool result -- so a
+long-running tool is legible only as far as it reports progress.
+
+`RUN_FINISHED` carries the run's summed usage, every turn of it. A request that
+fails before the run opens answers with a status instead, so a gateway refusal
+reaches the caller as itself.
+
+Image parts must be inline: `source.type: "data"`, or a `data:` URL. A remote
+URL is refused because the model enclave, not the harness, would fetch it --
+off the attested path and outside its egress allowlist.
 
 ## Deployment
 
@@ -16,9 +59,9 @@ harness may reach is enumerated.
     tinctl deploy  tinfoilsh/confidential-tinfoil-harness   # launch it
 
 Ingress is the shim alone: TLS on 443, forwarded to the harness on 8081, with
-`/v1/chat/completions` and `/healthz` the only paths that reach it. The shim
-validates the caller's Tinfoil key and passes it through, which is the same key
-the harness forwards upstream -- it has none of its own.
+`/agui` and `/healthz` the only paths that reach it. The shim validates the
+caller's Tinfoil key and passes it through, which is the same key the harness
+forwards upstream -- it has none of its own.
 
 ### Egress
 
@@ -26,14 +69,14 @@ the harness forwards upstream -- it has none of its own.
 name that does not resolve fails the whole set closed. It covers three things:
 
 - the gateway and the tools enclave, which are the two hosts the harness dials;
-- every enclave in `enclave.go`, because attestation is fetched from the host
+- every enclave in `main.go`, because attestation is fetched from the host
   itself -- including a replica the gateway names in a 422 and the SDK re-seals
   to;
 - what verifying those attestations needs: `github-proxy` for the pinned repo's
   release and Sigstore bundle, `tuf-repo-cdn.sigstore.dev` for the trust root,
   and the AMD and Intel collateral proxies.
 
-Adding a model to `enclave.go` means adding its host here too.
+Adding a model to `main.go` means adding its host here too.
 
 ### Releasing
 
