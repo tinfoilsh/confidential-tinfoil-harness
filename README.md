@@ -3,15 +3,22 @@
 Minimal [AG-UI](https://ag-ui.com) agent in front of Tinfoil's inference gateway
 used for confidential tool loops.
 
-    POST /agui      RunAgentInput in, AG-UI events out
-    GET  /healthz
+    POST   /agui      RunAgentInput in, AG-UI events out
+    DELETE /agui      drop a stored run log
+    GET    /healthz
 
 ## Protocol
 
 The body is a `RunAgentInput`. `threadId`, `runId` and `messages` are read;
-`state`, `context`, `resume` and `parentRunId` are ignored, and a non-empty
-`tools` is refused -- the loop executes only tools it can attest.
-`forwardedProps.model` names a model or `auto`, since AG-UI has no model field.
+`state`, `context` and `parentRunId` are ignored. `tools` declares
+widgets the caller draws: they are advertised to the model and answered on the
+caller's behalf when it calls one, never dialled, so the loop still executes
+only what it attests. A tool naming `web_search` or `web_fetch` is refused
+rather than allowed to shadow one. `forwardedProps.model` names a model or
+`auto`, since AG-UI has no model field; `forwardedProps.webSearch: false`
+withholds the attested tools for that run, and absent means on;
+`forwardedProps.piiCheck: true` asks the model enclave to screen the run for
+PII, and absent means off.
 
 Eleven event types come back, framed as SSE:
 
@@ -44,6 +51,40 @@ long-running tool is legible only as far as it reports progress.
 fails before the run opens answers with a status instead, so a gateway refusal
 reaches the caller as itself.
 
+### Coming back to a run
+
+Every frame carries an `id:`, monotonic from zero. A caller that wants to be
+able to come back generates a `storageId` and a `resumeSecret`, both 128 random
+bits as hex, and sends them with the run. It comes back by posting the same
+pair with `resume: true` and a `Last-Event-ID`, and is served everything after
+that id -- from memory if this harness is still running it, otherwise from the
+stored log. Being able to open the log is the whole of the authorization: a
+secret that does not open it and a log that is not there are refused
+identically, and a run too young to have framed anything cannot be authorized
+either way, so it answers `503` with a `Retry-After` instead of a refusal.
+`DELETE /agui` with the same pair drops the log once the caller has the answer
+-- authorized by opening it, like everything else, and answering `502` rather
+than `204` if the store did not drop it. A log nobody drops expires with the
+store.
+
+A run outlives the connection that asked for it. While a caller is attached
+nothing is written anywhere: only when it disconnects does the harness seal off
+what it has to the store and keep writing there until the run ends. Frames are
+sealed as they are produced, under a key derived from the caller's secret, so
+the spill is a byte copy and the store holds ciphertext it has no way to read.
+When the run ends the key and the frames go with it, and a caller arriving
+after that reads the stored log instead. A log with no terminal event and no
+harness still running it belongs to a run that died, and replays as one. A run
+holds its whole log in memory while it lives, so there is a ceiling on both: a
+run that reaches it ends with `RUN_ERROR` and stops, rather than billing turns
+into a log nothing can read.
+
+Two things follow from this. A run that finishes with its caller attached is
+never written down at all, so a caller that loses the answer between the last
+byte and its own storage has nothing to come back to. And a `storageId` names
+nothing: it is not the thread, not the run, and not derived from either, so the
+store cannot tell which conversation a log belongs to.
+
 Image parts must be inline: `source.type: "data"`, or a `data:` URL. A remote
 URL is refused because the model enclave, not the harness, would fetch it --
 off the attested path and outside its egress allowlist.
@@ -66,7 +107,7 @@ forwards upstream -- it has none of its own.
 ### Egress
 
 `networks.upstream.allow` is resolved to IPs and enforced with nftables, and a
-name that does not resolve fails the whole set closed. It covers three things:
+name that does not resolve fails the whole set closed. It covers four things:
 
 - the gateway and the tools enclave, which are the two hosts the harness dials;
 - every enclave in `main.go`, because attestation is fetched from the host
@@ -74,7 +115,10 @@ name that does not resolve fails the whole set closed. It covers three things:
   to;
 - what verifying those attestations needs: `github-proxy` for the pinned repo's
   release and Sigstore bundle, `tuf-repo-cdn.sigstore.dev` for the trust root,
-  and the AMD and Intel collateral proxies.
+  and the AMD and Intel collateral proxies;
+- the controlplane, which is the one host here the harness does not attest. A
+  detached run spills its sealed log there and reads it back; see above for
+  what that host can and cannot see.
 
 Adding a model to `main.go` means adding its host here too.
 
