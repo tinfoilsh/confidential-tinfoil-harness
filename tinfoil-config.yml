@@ -29,15 +29,21 @@ networks:
       # Data plane: the gateway that routes model turns, and the tools enclave
       # the loop calls over MCP. Keep in step with the env block below.
       - gateway.tinfoil.sh
-      - websearch.inf6.tinfoil.sh
+      - websearch.tinfoil.sh
+      # The one host here the harness does not attest. A run whose caller
+      # disconnected spills its log there so the caller can come back to it;
+      # the frames are sealed under the caller's key, which never leaves the
+      # enclave, so the store holds bytes it cannot read addressed by an id
+      # that names nothing.
+      - api.tinfoil.sh
       # Attestation of every host in main.go, fetched from the host itself.
       # A replica the gateway names in a 422 is attested the same way, so it
       # must resolve into this set too.
-      - kimi-k3.inf6.tinfoil.sh
-      - deepseek-v4-flash.inf6.tinfoil.sh
-      - gemma4-31b.inf6.tinfoil.sh
-      - gpt-oss-120b.inf6.tinfoil.sh
-      - llama3-3-70b.inf6.tinfoil.sh
+      - kimi-k3-inf14.tinfoil.containers.tinfoil.dev
+      - deepseek-v4-flash-inf15.tinfoil.containers.tinfoil.dev
+      - gemma4-31b-inf6-0.tinfoil.containers.tinfoil.dev
+      - gpt-oss-120b-inf6-0.tinfoil.containers.tinfoil.dev
+      - llama3-3-70b-inf12.tinfoil.containers.tinfoil.dev
       # Verifying those attestations: the pinned repo's release and Sigstore
       # bundle, the Sigstore trust root, and the AMD/Intel collateral proxies.
       - github-proxy.tinfoil.sh
@@ -51,11 +57,15 @@ containers:
     # running here part of the measurement.
     image: ghcr.io/tinfoilsh/confidential-tinfoil-harness@sha256:0000000000000000000000000000000000000000000000000000000000000000
     networks: [upstream]
+    # The gateway is reached over TLS because EHBP seals the body and not the
+    # headers, and every model turn carries the caller's key in one of them.
     env:
       - TINFOIL_GATEWAY_URL: https://gateway.tinfoil.sh
-      - TINFOIL_TOOLS_ENCLAVE: websearch.inf6.tinfoil.sh
-    # The harness keeps no state between runs, so nothing needs to survive a
-    # restart and nothing needs to be writable.
+      - TINFOIL_TOOLS_ENCLAVE: websearch.tinfoil.sh
+      - TINFOIL_CONTROLPLANE_URL: https://api.tinfoil.sh
+    # A run's log lives in memory for as long as the run does and nowhere
+    # else, so nothing needs to survive a restart and nothing needs to be
+    # writable.
     read_only: true
     tmpfs:
       /tmp: rw,noexec,nosuid,nodev,size=16m
