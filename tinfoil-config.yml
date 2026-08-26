@@ -1,16 +1,12 @@
 # Measured workload definition: what tinfoild launches, and the only thing a
-# client's attestation of this enclave says it is running. Every byte here is
-# covered by the release measurement, so the container is pinned by digest and
-# the hosts it may reach are enumerated rather than inferred.
+# client's attestation of this enclave says it is running.
 cvm-version: 0.11.0
 
 cpus: 2
 memory: 4096
 
-# The shim terminates TLS on 443 and is the only way in. It forwards to the
-# harness's default listen port, refuses any path the harness does not serve,
-# and requires a Tinfoil API key on /agui -- the same key the harness then
-# forwards upstream, since it has none of its own.
+# The shim terminates TLS on 443 and is the only way in. It requires a Tinfoil
+# API key, which is the same key the harness then forwards upstream.
 shim:
   upstream-port: 8081
   authenticated: true
@@ -19,26 +15,21 @@ shim:
     - /healthz
 
 networks:
-  # One attached network, so one egress policy. Everything the harness dials is
-  # either a host it attests or a service it needs in order to attest one; an
-  # unresolvable entry fails the whole set closed, which is the intended
-  # failure mode.
+  # Everything here is a host the harness attests or a service it needs to
+  # attest one. An unresolvable entry fails the whole set closed.
   upstream:
     egress: allowlist
     allow:
-      # Data plane: the gateway that routes model turns, and the tools enclave
-      # the loop calls over MCP. Keep in step with the env block below.
+      # The gateway, and one host per tool family in tools.go. Keep the env
+      # block below in step.
       - gateway.tinfoil.sh
       - websearch.tinfoil.sh
-      # The one host here the harness does not attest. A run whose caller
-      # disconnected spills its log there so the caller can come back to it;
-      # the frames are sealed under the caller's key, which never leaves the
-      # enclave, so the store holds bytes it cannot read addressed by an id
-      # that names nothing.
+      - code-execution.tinfoil.sh
+      # The one host the harness does not attest. A detached run spills its
+      # log there, sealed under a caller key that never leaves the enclave.
       - api.tinfoil.sh
-      # Attestation of every host in main.go, fetched from the host itself.
-      # A replica the gateway names in a 422 is attested the same way, so it
-      # must resolve into this set too.
+      # Attestation of every host in main.go, fetched from the host itself,
+      # including any replica the gateway names in a 422.
       - kimi-k3-inf14.tinfoil.containers.tinfoil.dev
       - deepseek-v4-flash-inf15.tinfoil.containers.tinfoil.dev
       - gemma4-31b-inf6-0.tinfoil.containers.tinfoil.dev
@@ -57,18 +48,16 @@ containers:
     # running here part of the measurement.
     image: ghcr.io/tinfoilsh/confidential-tinfoil-harness@sha256:0000000000000000000000000000000000000000000000000000000000000000
     networks: [upstream]
-    # The gateway is reached over TLS because EHBP seals the body and not the
-    # headers, and every model turn carries the caller's key in one of them.
+    # TLS to the gateway: EHBP seals the body, not the header carrying the key.
     env:
       - TINFOIL_GATEWAY_URL: https://gateway.tinfoil.sh
       - TINFOIL_TOOLS_ENCLAVE: websearch.tinfoil.sh
+      - TINFOIL_CODE_ENCLAVE: code-execution.tinfoil.sh
       - TINFOIL_CONTROLPLANE_URL: https://api.tinfoil.sh
-    # A run's log lives in memory for as long as the run does and nowhere
-    # else, so nothing needs to survive a restart and nothing needs to be
-    # writable.
+    # A run's log lives in memory only, so nothing needs to survive a restart.
     read_only: true
     tmpfs:
       /tmp: rw,noexec,nosuid,nodev,size=16m
-    # Both enclaves are attested at startup, so an unreachable one exits rather
-    # than serving; restarting is how it waits for them.
+    # A harness that pinned no model enclave exits; restarting is how it waits
+    # for one. A tool enclave that did not verify is skipped, not fatal.
     restart: always

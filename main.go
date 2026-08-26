@@ -1,12 +1,5 @@
-// Command confidential-tinfoil-harness serves a streaming AG-UI endpoint that
-// seals every model turn and tool call to enclaves it attests before it starts
-// serving. It holds no credentials, and no run's content outlives the run: a
-// caller that may come back leaves a key, the frames are sealed with it as
-// they are produced, and both go when the run ends.
-//
-// Each file faces one counterparty: main.go the enclaves this harness pins,
-// agui.go the caller, agent.go the gateway and the tools enclave, recovery.go
-// the store a detached run is read back from.
+// Command confidential-tinfoil-harness serves an AG-UI endpoint whose model
+// turns and tool calls all go to enclaves it attests at startup.
 package main
 
 import (
@@ -29,13 +22,7 @@ import (
 	tinfoil "github.com/tinfoilsh/tinfoil-go"
 )
 
-const (
-	toolsRepo           = "tinfoilsh/confidential-websearch"
-	defaultToolsEnclave = "websearch.tinfoil.sh"
-)
-
-// repo is the trust anchor -- the gateway may reroute, but a host that does not
-// measure up is never sealed to. enclave is only where attestation starts.
+// repo is the trust anchor; enclave is only where attestation starts.
 type model struct {
 	name    string
 	repo    string
@@ -43,7 +30,7 @@ type model struct {
 	vision  bool
 	context int // usable prompt budget, in tokens
 
-	client *http.Client // the sealing client, once the enclave has measured up
+	client *http.Client // sealing client, set once the enclave verifies
 }
 
 var catalog = []*model{
@@ -55,37 +42,30 @@ var catalog = []*model{
 }
 
 type harness struct {
-	gateway       string
-	models        []*model
-	toolsEndpoint string
-	toolsClient   *http.Client
-	controlplane  string
-	cpClient      *http.Client
+	gateway      string
+	models       []*model
+	controlplane string
+	cpClient     *http.Client
 
 	mu   sync.Mutex
-	live int // every run in flight, since each one holds its whole log in memory
+	live int // runs in flight; each holds its whole log in memory
 	runs map[string]*run
 }
 
 func main() {
 	addr := flag.String("addr", ":8081", "listen address")
 	gateway := flag.String("gateway", env("TINFOIL_GATEWAY_URL", "https://gateway.tinfoil.sh"), "tinfoil-gateway base URL")
-	toolsHost := flag.String("tools-enclave", env("TINFOIL_TOOLS_ENCLAVE", defaultToolsEnclave), "host of the enclave serving web_search and web_fetch")
 	controlplane := flag.String("controlplane", env("TINFOIL_CONTROLPLANE_URL", "https://api.tinfoil.sh"), "base URL of the store a detached run spills its sealed log to")
 	flag.Parse()
 
 	gw := strings.TrimRight(*gateway, "/")
-	toolsClient, err := attest(*toolsHost, toolsRepo, "")
-	if err != nil {
-		slog.Error("verify tools enclave", "enclave", *toolsHost, "error", err)
-		os.Exit(1)
-	}
+	attestFamilies()
 	models, err := attestCatalog(gw)
 	if err != nil {
 		slog.Error("verify model enclaves", "gateway", gw, "error", err)
 		os.Exit(1)
 	}
-	h := &harness{gateway: gw, models: models, toolsEndpoint: "https://" + *toolsHost + "/mcp", toolsClient: toolsClient,
+	h := &harness{gateway: gw, models: models,
 		controlplane: strings.TrimRight(*controlplane, "/"),
 		cpClient:     &http.Client{Transport: &callerAuth{inner: http.DefaultTransport}},
 		runs:         map[string]*run{}}
@@ -108,7 +88,7 @@ func main() {
 		srv.Shutdown(ctx)
 	}()
 
-	slog.Info("listening", "addr", *addr, "gateway", gw, "tools", *toolsHost, "models", served(models))
+	slog.Info("listening", "addr", *addr, "gateway", gw, "models", served(models))
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		slog.Error("serve", "error", err)
 		os.Exit(1)
@@ -134,6 +114,20 @@ func attest(enclave, repo, baseURL string) (*http.Client, error) {
 	client := verified.HTTPClient()
 	client.Transport = &callerAuth{inner: client.Transport}
 	return client, nil
+}
+
+// A family is opt-in per run, so one that does not verify is skipped, not fatal.
+func attestFamilies() {
+	for _, f := range families {
+		f.enclave = env(f.env, f.enclave)
+		client, err := attest(f.enclave, f.repo, "")
+		if err != nil {
+			slog.Warn("tool enclave did not verify", "family", f.name, "enclave", f.enclave, "error", err)
+			continue
+		}
+		f.client = client
+		slog.Info("tool enclave verified", "family", f.name, "enclave", f.enclave)
+	}
 }
 
 func attestCatalog(gateway string) ([]*model, error) {
@@ -198,9 +192,7 @@ func (h *harness) unserved(req *request) string {
 
 type apiKeyKey struct{}
 
-// callerAuth signs every attested request -- model turn or tool call -- with
-// the caller's key, carried down on the context. Everything is metered against
-// the caller: the harness has no key of its own.
+// callerAuth signs every request with the caller's key; the harness has none.
 type callerAuth struct{ inner http.RoundTripper }
 
 func (t *callerAuth) RoundTrip(r *http.Request) (*http.Response, error) {

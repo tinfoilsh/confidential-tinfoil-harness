@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 const maxRequestBody = 8 << 20
@@ -35,8 +37,7 @@ func (h *harness) agui(w http.ResponseWriter, r *http.Request) {
 	}
 	req.from = resumeFrom(r.Header.Get("Last-Event-ID"))
 
-	// The key rides the context down to the transports that sign every model
-	// turn and tool call.
+	// The key rides the context down to the transports that sign every request.
 	ctx := context.WithValue(r.Context(), apiKeyKey{}, apiKey)
 	if req.storageID != "" {
 		live, err := h.lookup(req.storageID, req.secret)
@@ -78,9 +79,7 @@ func (h *harness) drop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := context.WithValue(r.Context(), apiKeyKey{}, apiKey)
-	// Deleting a log is authorized the way reading one is: by opening it. A
-	// live run is dropped where it stands, so the spill cannot write the log
-	// back out from under the delete.
+	// Authorized by opening the log; a live run is stopped so its spill cannot race the delete.
 	switch live, err := h.lookup(in.SessionID, in.RecoveryToken); {
 	case err != nil:
 		refuse(w, err)
@@ -100,9 +99,7 @@ func (h *harness) drop(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// refuse answers a lookup that could not authorize. A run too young to have
-// framed anything is not a run the caller may not have -- it is one nothing can
-// be decided about yet, so it is told to come back rather than turned away.
+// A run too young to have framed anything is told to come back, not turned away.
 func refuse(w http.ResponseWriter, err error) {
 	if err == errPending {
 		w.Header().Set("Retry-After", "1")
@@ -125,15 +122,14 @@ type request struct {
 	threadID   string
 	runID      string
 	model      string
-	cacheScope string // partitions the enclave's prompt cache per caller; a namespace, not a credential
-	// Widgets the caller draws. Advertised to the model but doesn't execute anything in the tool loop.
-	rendered  []json.RawMessage
-	webSearch bool
-	piiCheck  bool
-	storageID string
-	secret    secret
-	resume    bool
-	from      int
+	cacheScope string              // partitions the enclave's prompt cache per caller; a namespace, not a credential
+	rendered   []json.RawMessage   // widgets the caller draws: advertised, never dialled
+	families   map[string]mcp.Meta // tool enclaves this run dials, and what its calls carry
+	piiCheck   bool
+	storageID  string
+	secret     secret
+	resume     bool
+	from       int
 	prompt
 }
 
@@ -141,7 +137,6 @@ type secret string
 
 func (secret) LogValue() slog.Value { return slog.StringValue("REDACTED") }
 
-// prompt is the converted conversation and what it costs a model to read.
 type prompt struct {
 	messages []json.RawMessage
 	images   bool
@@ -181,30 +176,39 @@ func parseRequest(body []byte, apiKey string) (*request, error) {
 	if in.Resume && in.SessionID == "" {
 		return nil, errors.New(`"resume" needs a "sessionId"`)
 	}
-	// validate that all caller tools are valid (mostly used for genui)
-	for _, tool := range in.Tools {
-		if err := declaration(tool); err != nil {
-			return nil, err
-		}
-	}
 	p, err := convert(in.Messages)
 	if err != nil {
 		return nil, err
 	}
 	var props struct {
-		Model     string `json:"model"`
-		WebSearch *bool  `json:"webSearch"`
-		PIICheck  *bool  `json:"piiCheck"`
+		Model    string `json:"model"`
+		PIICheck *bool  `json:"piiCheck"`
 	}
 	json.Unmarshal(in.ForwardedProps, &props)
+	dialled := map[string]mcp.Meta{}
+	for _, f := range families {
+		on, meta, err := f.live(in.ForwardedProps)
+		if err != nil {
+			return nil, err
+		}
+		if !on {
+			continue
+		}
+		// Counted here: the loop prepends this prompt after h.pick has sized the run.
+		dialled[f.name], p.tokens = meta, p.tokens+len(f.prompt)/4
+	}
+	// After the families, since which are dialled is what a caller tool may not shadow.
+	for _, tool := range in.Tools {
+		if err := declaration(tool, dialled); err != nil {
+			return nil, err
+		}
+	}
 	runID := in.RunID
 	if runID == "" {
 		runID = "run_" + token()
 	}
 	return &request{threadID: in.ThreadID, runID: runID, model: props.Model,
-		cacheScope: cacheScope(apiKey), rendered: in.Tools,
-		// Absent means on: a caller that says nothing gets the tools.
-		webSearch: props.WebSearch == nil || *props.WebSearch,
+		cacheScope: cacheScope(apiKey), rendered: in.Tools, families: dialled,
 		piiCheck:  props.PIICheck != nil && *props.PIICheck,
 		storageID: in.SessionID, secret: in.RecoveryToken, resume: in.Resume,
 		prompt: p}, nil
@@ -256,12 +260,10 @@ func convert(messages []inMessage) (prompt, error) {
 	return p, nil
 }
 
-// imageTokens is what one image is charged against a model's budget; its
-// base64 is not text and sizing it as text fits nothing.
+// imageTokens is what one image costs; sizing its base64 as text fits nothing.
 const imageTokens = 1500
 
-// content renders one message's content for the gateway, charging its text and
-// images against the prompt's budget.
+// content renders one message for the gateway, charging it against the budget.
 func (p *prompt) content(raw json.RawMessage) (json.RawMessage, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil, nil
@@ -308,8 +310,7 @@ type inSource struct {
 	MimeType string `json:"mimeType"`
 }
 
-// inlined is why images cross as bytes: a remote URL would be dereferenced by
-// the model enclave, off the attested path and outside its egress allowlist.
+// Images cross as bytes: the model enclave would fetch a URL off the attested path.
 func inlined(source inSource) (string, error) {
 	switch {
 	case source.Type == "data" && source.MimeType != "":
@@ -412,8 +413,7 @@ func (s *stream) result(id, content string, meta json.RawMessage) {
 		ToolCallID: id, Role: "tool", Content: quote(content), Metadata: meta})
 }
 
-// activity opens one tool call's output, which progress then grows. Its id is
-// derived from the call, so a notification needs no state to find it.
+// activity opens one call's output under an id derived from the call itself.
 func (s *stream) activity(call toolCall) {
 	content, err := json.Marshal(map[string]any{
 		"toolCallId": call.id, "tool": call.name, "progress": 0, "output": []string{}})
@@ -423,8 +423,7 @@ func (s *stream) activity(call toolCall) {
 	s.emit(event{Type: "ACTIVITY_SNAPSHOT", MessageID: "act_" + call.id, Activity: activityTool, Content: content})
 }
 
-// progress appends what a tool has emitted so far. RFC 6902 cannot grow a
-// string, so output is a list and each note is one more entry.
+// output is a list because RFC 6902 cannot grow a string.
 func (s *stream) progress(call, note string, done float64) {
 	ops := []map[string]any{{"op": "replace", "path": "/progress", "value": done}}
 	if note != "" {
@@ -482,8 +481,7 @@ func (s *stream) frame(e event) {
 	if err != nil {
 		return
 	}
-	// A log that closes under a run still producing into it is a run nobody can
-	// read any more: stop it rather than let it bill turns into a closed log.
+	// Nothing can read a closed log, so stop the run rather than bill turns into it.
 	if s.run.log.grow(func(id int) []byte { return s.run.seal(id, encoded) }) != nil {
 		s.run.stop()
 	}
