@@ -54,7 +54,7 @@ reaches the caller as itself.
 ### Coming back to a run
 
 Every frame carries an `id:`, monotonic from zero. A caller that wants to be
-able to come back generates a `storageId` and a `resumeSecret`, both 128 random
+able to come back generates a `sessionId` and a `recoveryToken`, both 128 random
 bits as hex, and sends them with the run. It comes back by posting the same
 pair with `resume: true` and a `Last-Event-ID`, and is served everything after
 that id -- from memory if this harness is still running it, otherwise from the
@@ -81,7 +81,7 @@ into a log nothing can read.
 
 Two things follow from this. A run that finishes with its caller attached is
 never written down at all, so a caller that loses the answer between the last
-byte and its own storage has nothing to come back to. And a `storageId` names
+byte and its own storage has nothing to come back to. And a `sessionId` names
 nothing: it is not the thread, not the run, and not derived from either, so the
 store cannot tell which conversation a log belongs to.
 

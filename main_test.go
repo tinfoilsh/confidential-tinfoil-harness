@@ -228,7 +228,7 @@ func TestDroppingALogIsAuthorizedAndReported(t *testing.T) {
 
 	call := func(auth, secret string) int {
 		r := httptest.NewRequest("DELETE", "/agui",
-			strings.NewReader(`{"storageId":"`+id+`","resumeSecret":"`+secret+`"}`))
+			strings.NewReader(`{"sessionId":"`+id+`","recoveryToken":"`+secret+`"}`))
 		if auth != "" {
 			r.Header.Set("Authorization", "Bearer "+auth)
 		}

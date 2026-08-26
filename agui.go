@@ -73,27 +73,27 @@ func (h *harness) drop(w http.ResponseWriter, r *http.Request) {
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<12))
 	var in runAgentInput
-	if err != nil || json.Unmarshal(body, &in) != nil || !hexID(in.StorageID) || !hexID(string(in.ResumeSecret)) {
-		writeError(w, http.StatusBadRequest, `"storageId" and "resumeSecret" must be 32 hex characters`)
+	if err != nil || json.Unmarshal(body, &in) != nil || !hexID(in.SessionID) || !hexID(string(in.RecoveryToken)) {
+		writeError(w, http.StatusBadRequest, `"sessionId" and "recoveryToken" must be 32 hex characters`)
 		return
 	}
 	ctx := context.WithValue(r.Context(), apiKeyKey{}, apiKey)
 	// Deleting a log is authorized the way reading one is: by opening it. A
 	// live run is dropped where it stands, so the spill cannot write the log
 	// back out from under the delete.
-	switch live, err := h.lookup(in.StorageID, in.ResumeSecret); {
+	switch live, err := h.lookup(in.SessionID, in.RecoveryToken); {
 	case err != nil:
 		refuse(w, err)
 		return
 	case live != nil:
 		live.abandon()
 	default:
-		if _, err := h.stored(ctx, in.StorageID, in.ResumeSecret); err != nil {
+		if _, err := h.stored(ctx, in.SessionID, in.RecoveryToken); err != nil {
 			writeError(w, http.StatusForbidden, errNotYours.Error())
 			return
 		}
 	}
-	if err := h.dispose(ctx, in.StorageID); err != nil {
+	if err := h.dispose(ctx, in.SessionID); err != nil {
 		writeError(w, http.StatusBadGateway, "the store did not drop the log: "+err.Error())
 		return
 	}
@@ -154,8 +154,8 @@ type runAgentInput struct {
 	Messages       []inMessage       `json:"messages"`
 	Tools          []json.RawMessage `json:"tools"`
 	ForwardedProps json.RawMessage   `json:"forwardedProps"`
-	StorageID      string            `json:"storageId"`
-	ResumeSecret   secret            `json:"resumeSecret"`
+	SessionID      string            `json:"sessionId"`
+	RecoveryToken  secret            `json:"recoveryToken"`
 	Resume         bool              `json:"resume"`
 }
 
@@ -175,11 +175,11 @@ func parseRequest(body []byte, apiKey string) (*request, error) {
 	if len(in.Messages) == 0 {
 		return nil, errors.New(`"messages" must be a non-empty array`)
 	}
-	if in.StorageID != "" && !(hexID(in.StorageID) && hexID(string(in.ResumeSecret))) {
-		return nil, errors.New(`"storageId" and "resumeSecret" must be 32 hex characters`)
+	if in.SessionID != "" && !(hexID(in.SessionID) && hexID(string(in.RecoveryToken))) {
+		return nil, errors.New(`"sessionId" and "recoveryToken" must be 32 hex characters`)
 	}
-	if in.Resume && in.StorageID == "" {
-		return nil, errors.New(`"resume" needs a "storageId"`)
+	if in.Resume && in.SessionID == "" {
+		return nil, errors.New(`"resume" needs a "sessionId"`)
 	}
 	// validate that all caller tools are valid (mostly used for genui)
 	for _, tool := range in.Tools {
@@ -206,7 +206,7 @@ func parseRequest(body []byte, apiKey string) (*request, error) {
 		// Absent means on: a caller that says nothing gets the tools.
 		webSearch: props.WebSearch == nil || *props.WebSearch,
 		piiCheck:  props.PIICheck != nil && *props.PIICheck,
-		storageID: in.StorageID, secret: in.ResumeSecret, resume: in.Resume,
+		storageID: in.SessionID, secret: in.RecoveryToken, resume: in.Resume,
 		prompt: p}, nil
 }
 
