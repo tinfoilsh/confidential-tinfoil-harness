@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"slices"
 	"strings"
 	"sync"
 
@@ -17,30 +16,25 @@ import (
 )
 
 const (
-	maxTurns      = 8
-	maxToolOutput = 30000
-	maxSSEEvent   = 1 << 20
+	maxTurns = 16
+	// A tool result is bounded twice: what the model reads back, what the caller sees.
+	maxToolOutput  = 30000
+	maxShownOutput = 1 << 20
+	maxSSEEvent    = 1 << 20
 )
 
 func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model) error {
-	// No session when the caller turned search off: the enclave is dialled
-	// because the model was offered its tools, so not offering them is what
-	// leaves it undialled.
-	var set *toolset
-	if req.webSearch {
-		opened, err := openTools(ctx, h.toolsEndpoint, h.toolsClient, out.progress)
-		if err != nil {
-			return fmt.Errorf("tools: %w", err)
-		}
-		defer opened.close()
-		set = opened
+	set, err := openTools(ctx, req, out.progress)
+	if err != nil {
+		return fmt.Errorf("tools: %w", err)
 	}
+	defer set.close()
+
 	defs, err := offer(set, req.rendered)
 	if err != nil {
-		return err
+		return fmt.Errorf("tools: %w", err)
 	}
-
-	conversation := slices.Clone(req.messages)
+	conversation := append(set.system(), req.messages...)
 	for turn := 1; ; turn++ {
 		payload, err := body(req, m, conversation, defs)
 		if err != nil {
@@ -65,8 +59,7 @@ func body(req *request, m *model, conversation []json.RawMessage, defs json.RawM
 	payload := map[string]any{
 		"model":  m.name,
 		"stream": true,
-		// Without this the stream carries no usage chunk, so the run reports
-		// no tokens and the gateway meters the request as costing nothing.
+		// Without this the stream carries no usage chunk and nothing is metered.
 		"stream_options":    map[string]any{"include_usage": true},
 		"messages":          conversation,
 		"user_cache_secret": req.cacheScope,
@@ -80,15 +73,11 @@ func body(req *request, m *model, conversation []json.RawMessage, defs json.RawM
 	return json.Marshal(payload)
 }
 
-// offer is what the model sees: the tools this run may dial, then the ones the
-// caller draws. Order follows the enclave's so a caller's turns keep hitting
-// the same prompt cache.
+// Order follows the family table, so a caller's turns keep hitting the prompt cache.
 func offer(set *toolset, rendered []json.RawMessage) (json.RawMessage, error) {
 	var defs []json.RawMessage
-	if set != nil {
-		if err := json.Unmarshal(set.defs, &defs); err != nil {
-			return nil, fmt.Errorf("enclave published unreadable tool defs: %w", err)
-		}
+	for _, s := range set.sessions {
+		defs = append(defs, s.defs...)
 	}
 	defs = append(defs, rendered...)
 	if len(defs) == 0 {
@@ -97,24 +86,28 @@ func offer(set *toolset, rendered []json.RawMessage) (json.RawMessage, error) {
 	return json.Marshal(defs)
 }
 
-// declaration checks a caller tool is a function declaration, and that it does
-// not claim a name the loop attests -- a widget must not shadow web_search.
-func declaration(raw json.RawMessage) error {
-	var tool struct {
+// declaration refuses a caller tool that shadows one the run itself dials.
+func declaration(raw json.RawMessage, dialled map[string]mcp.Meta) error {
+	var decl struct {
 		Type     string `json:"type"`
 		Function struct {
 			Name string `json:"name"`
 		} `json:"function"`
 	}
-	if err := json.Unmarshal(raw, &tool); err != nil {
+	if err := json.Unmarshal(raw, &decl); err != nil {
 		return fmt.Errorf("tool is not an object: %w", err)
 	}
-	if tool.Type != "function" || tool.Function.Name == "" {
+	if decl.Type != "function" || decl.Function.Name == "" {
 		return errors.New(`each tool must be {"type":"function","function":{"name":...}}`)
 	}
-	for _, as := range exposed {
-		if tool.Function.Name == as {
-			return fmt.Errorf("tool %q is served by this agent and cannot be redeclared", as)
+	for _, f := range families {
+		if _, on := dialled[f.name]; !on {
+			continue
+		}
+		for _, t := range f.tools {
+			if decl.Function.Name == t.as {
+				return fmt.Errorf("tool %q is served by this run and cannot be redeclared", t.as)
+			}
 		}
 	}
 	return nil
@@ -123,22 +116,40 @@ func declaration(raw json.RawMessage) error {
 func execute(ctx context.Context, out *stream, set *toolset, calls []toolCall) []json.RawMessage {
 	messages := make([]json.RawMessage, len(calls))
 	var wg sync.WaitGroup
-	for i, call := range calls {
+	for _, queue := range schedule(set, calls) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			messages[i] = invoke(ctx, out, set, call)
+			for _, i := range queue {
+				messages[i] = invoke(ctx, out, set, calls[i])
+			}
 		}()
 	}
 	wg.Wait()
 	return messages
 }
 
+// schedule gives serial families one queue in call order, everything else its own.
+func schedule(set *toolset, calls []toolCall) [][]int {
+	var queues [][]int
+	held := map[*session]int{}
+	for i, call := range calls {
+		s := set.byName[call.name]
+		if at, ok := held[s]; ok {
+			queues[at] = append(queues[at], i)
+			continue
+		}
+		if s != nil && s.fam.serial {
+			held[s] = len(queues)
+		}
+		queues = append(queues, []int{i})
+	}
+	return queues
+}
+
 func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) json.RawMessage {
-	// The caller already has everything it needs from TOOL_CALL_ARGS, and the
-	// model needs a result to keep going, so the widget is answered here.
-	// Nothing is streamed back: there is no output to show.
-	if !attested(set, call.name) {
+	// A widget is drawn by the caller from TOOL_CALL_ARGS; the model just needs a result.
+	if set.byName[call.name] == nil {
 		return answered(call.id, "[rendered for the user]")
 	}
 	out.activity(call)
@@ -148,27 +159,14 @@ func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) json.
 		failure, _ := json.Marshal(map[string]string{"error": err.Error()})
 		content, meta = string(failure), nil
 	}
-	content = clip(content)
-	out.result(call.id, content, meta)
-	return answered(call.id, content)
+	// The caller's copy is clipped far later than the model's: present renders whole files.
+	out.result(call.id, clip(content, maxShownOutput), meta)
+	return answered(call.id, clip(content, maxToolOutput))
 }
 
-// attested reports whether the loop may dial this tool itself.
-func attested(set *toolset, name string) bool {
-	if set == nil {
-		return false
-	}
-	for _, as := range exposed {
-		if as == name {
-			return true
-		}
-	}
-	return false
-}
-
-func clip(out string) string {
-	if len(out) > maxToolOutput {
-		return out[:maxToolOutput] + "\n[truncated]"
+func clip(out string, limit int) string {
+	if len(out) > limit {
+		return out[:limit] + "\n[truncated]"
 	}
 	if out == "" {
 		return "[no output]"
@@ -266,8 +264,7 @@ type toolCallDelta struct {
 	} `json:"function"`
 }
 
-// parent names the message a tool call belongs to, and only once the caller
-// has seen one: a turn that opens with a call has no message to hang it on.
+// A turn that opens with a tool call has no message to hang it on.
 func parent(message string, answer *strings.Builder) string {
 	if answer.Len() == 0 {
 		return ""
@@ -275,9 +272,6 @@ func parent(message string, answer *strings.Builder) string {
 	return message
 }
 
-// announce accumulates one tool-call delta and streams it on. Calls are
-// addressed by id rather than by position, so parallel ones may interleave. A
-// call the model left unnamed still gets an id, so its result correlates.
 func announce(out *stream, message string, calls []toolCall, delta toolCallDelta) []toolCall {
 	for len(calls) <= delta.Index {
 		calls = append(calls, toolCall{id: "call_" + token()})
@@ -344,114 +338,3 @@ type refusal struct {
 }
 
 func (r *refusal) Error() string { return fmt.Sprintf("gateway returned %d: %s", r.status, r.detail) }
-
-// exposed maps the enclave's tool names to what the model is offered; a tool
-// this map does not name is never advertised.
-var exposed = map[string]string{"search": "web_search", "fetch": "web_fetch"}
-
-type toolset struct {
-	session *mcp.ClientSession
-	defs    json.RawMessage
-}
-
-func openTools(ctx context.Context, endpoint string, client *http.Client, progress func(string, string, float64)) (*toolset, error) {
-	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "confidential-tinfoil-harness", Version: "2"}, &mcp.ClientOptions{
-		ProgressNotificationHandler: func(_ context.Context, req *mcp.ProgressNotificationClientRequest) {
-			call, _ := req.Params.ProgressToken.(string)
-			progress(call, req.Params.Message, req.Params.Progress)
-		},
-	})
-	session, err := mcpClient.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: endpoint, HTTPClient: client}, nil)
-	if err != nil {
-		return nil, err
-	}
-	found, err := session.ListTools(ctx, nil)
-	if err != nil {
-		session.Close()
-		return nil, err
-	}
-	defs, err := advertise(found.Tools)
-	if err != nil {
-		session.Close()
-		return nil, err
-	}
-	return &toolset{session: session, defs: defs}, nil
-}
-
-// Order follows the enclave's, so one caller's turns keep hitting the same
-// prompt cache.
-func advertise(found []*mcp.Tool) (json.RawMessage, error) {
-	defs := []any{}
-	for _, tool := range found {
-		as, ok := exposed[tool.Name]
-		if !ok {
-			continue
-		}
-		schema, err := json.Marshal(tool.InputSchema)
-		if err != nil {
-			return nil, fmt.Errorf("tool %q published an unreadable schema: %w", tool.Name, err)
-		}
-		// json.RawMessage, not the []byte json.Marshal returned: a []byte in a
-		// map marshals as base64, which the enclave rejects as a non-object
-		// parameters field.
-		defs = append(defs, map[string]any{"type": "function", "function": map[string]any{
-			"name": as, "description": tool.Description, "parameters": json.RawMessage(schema)}})
-	}
-	if len(defs) == 0 {
-		return nil, errors.New("enclave serves neither search nor fetch")
-	}
-	return json.Marshal(defs)
-}
-
-func (t *toolset) call(ctx context.Context, name, token string, args json.RawMessage) (string, json.RawMessage, error) {
-	var remote string
-	for enclaves, as := range exposed {
-		if as == name {
-			remote = enclaves
-		}
-	}
-	if remote == "" {
-		return "", nil, fmt.Errorf("no such tool %q", name)
-	}
-	arguments := map[string]any{}
-	if len(bytes.TrimSpace(args)) > 0 {
-		if err := json.Unmarshal(args, &arguments); err != nil {
-			return "", nil, fmt.Errorf("arguments are not a JSON object: %w", err)
-		}
-	}
-	params := &mcp.CallToolParams{Name: remote, Arguments: arguments}
-	params.SetProgressToken(token)
-	result, err := t.session.CallTool(ctx, params)
-	if err != nil {
-		return "", nil, err
-	}
-	out := output(result)
-	if result.IsError {
-		if out == "" {
-			out = "tool call failed"
-		}
-		return "", nil, errors.New(out)
-	}
-	var meta json.RawMessage
-	if len(result.Meta) > 0 {
-		meta, _ = json.Marshal(result.Meta)
-	}
-	return out, meta, nil
-}
-
-func (t *toolset) close() { t.session.Close() }
-
-func output(result *mcp.CallToolResult) string {
-	if result.StructuredContent != nil {
-		if encoded, err := json.Marshal(result.StructuredContent); err == nil {
-			return string(encoded)
-		}
-	}
-	var parts []string
-	for _, content := range result.Content {
-		if text, ok := content.(*mcp.TextContent); ok {
-			parts = append(parts, text.Text)
-		}
-	}
-	return strings.Join(parts, "\n")
-}

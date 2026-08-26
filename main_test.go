@@ -143,8 +143,7 @@ func TestWarmReattachIsAuthorizedByOpeningTheLog(t *testing.T) {
 	}
 }
 
-// A secret is the whole of the key, so the same secret twice must not be the
-// same keystream twice: two runs sealing one plaintext at one index must differ.
+// A reused secret must not seal one plaintext at one index to the same bytes twice.
 func TestOneSecretTwiceIsNotOneKeystreamTwice(t *testing.T) {
 	plain := []byte(`{"type":"RUN_STARTED"}`)
 	if bytes.Equal(mustRun(t, "00", "aa").seal(0, plain), mustRun(t, "00", "aa").seal(0, plain)) {
@@ -228,7 +227,7 @@ func TestDroppingALogIsAuthorizedAndReported(t *testing.T) {
 
 	call := func(auth, secret string) int {
 		r := httptest.NewRequest("DELETE", "/agui",
-			strings.NewReader(`{"storageId":"`+id+`","resumeSecret":"`+secret+`"}`))
+			strings.NewReader(`{"sessionId":"`+id+`","recoveryToken":"`+secret+`"}`))
 		if auth != "" {
 			r.Header.Set("Authorization", "Bearer "+auth)
 		}

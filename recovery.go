@@ -17,8 +17,9 @@ import (
 )
 
 const (
-	maxRunLog     = 4 << 20
-	maxLiveRuns   = 128
+	// Logs are held in memory, so these two multiply into the enclave's 4 GiB.
+	maxRunLog     = 8 << 20
+	maxLiveRuns   = 64
 	runTimeout    = 30 * time.Minute
 	spillBatch    = 128 << 10
 	spillInterval = 2 * time.Second
@@ -45,8 +46,7 @@ type runlog struct {
 
 func newRunlog() *runlog { return &runlog{wake: make(chan struct{})} }
 
-// grow appends one sealed frame and reports the error the log has closed with,
-// which is how a run that outgrew its log learns to stop producing.
+// grow appends one sealed frame and reports the error the log has closed with.
 func (l *runlog) grow(seal func(id int) []byte) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -111,10 +111,7 @@ func newRun(id string, key secret) (*run, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Random nonces rather than the frame index. The key is the caller's secret
-	// and nothing else -- it has to be, since deriving it is how a returning
-	// caller is authorized -- so a secret used twice would otherwise seal frame
-	// N under the same key and nonce twice and hand the store both halves.
+	// Random nonces, not the frame index: a caller reusing a secret would repeat one.
 	aead, err := cipher.NewGCMWithRandomNonce(block)
 	if err != nil {
 		return nil, err
@@ -135,9 +132,7 @@ func (r *run) aad(id int) []byte {
 	return binary.BigEndian.AppendUint64([]byte(r.id), uint64(id))
 }
 
-// lookup finds a live run and authorizes the secret against it. Opening frame 0
-// is the whole of the authorization, so a run that has not framed anything yet
-// cannot be authorized at all -- which is not the same as being refused.
+// Opening frame 0 is the whole authorization, so a run without one is pending.
 func (h *harness) lookup(id string, key secret) (*run, error) {
 	h.mu.Lock()
 	rn := h.runs[id]
@@ -159,7 +154,6 @@ func (h *harness) lookup(id string, key secret) (*run, error) {
 	return rn, nil
 }
 
-// stored reads a detached run back out of the store, authorized the same way.
 func (h *harness) stored(ctx context.Context, id string, key secret) (*run, error) {
 	rn, err := newRun(id, key)
 	if err != nil {
@@ -176,8 +170,7 @@ func (h *harness) start(ctx context.Context, req *request, m *model) (*run, erro
 	runCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), runTimeout)
 	rn.stop, rn.begin = cancel, cancel
 	if req.storageID != "" {
-		// The spill outlives the run's own context, since a run that ends is
-		// still owed its last frames; only a delete under it stops the writing.
+		// The spill outlives the run: a run that ends is still owed its last frames.
 		spillCtx, endSpill := context.WithTimeout(context.WithoutCancel(runCtx), runTimeout)
 		rn.abandon = endSpill
 		rn.begin = sync.OnceFunc(func() {
@@ -187,8 +180,7 @@ func (h *harness) start(ctx context.Context, req *request, m *model) (*run, erro
 			}()
 		})
 	}
-	// Published only once begin is its final self: a reattach racing this would
-	// otherwise read the begin that cancels the run it meant to detach.
+	// Published only once begin is final, or a racing reattach cancels the run.
 	if err := h.enlist(req.storageID, rn); err != nil {
 		rn.abandon()
 		cancel()
@@ -210,8 +202,7 @@ func (h *harness) start(ctx context.Context, req *request, m *model) (*run, erro
 	return rn, nil
 }
 
-// enlist admits a run against the log every live run holds in memory, and makes
-// a storage id the property of exactly one of them.
+// enlist caps runs in flight and makes a storage id the property of exactly one.
 func (h *harness) enlist(id string, rn *run) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -228,8 +219,7 @@ func (h *harness) enlist(id string, rn *run) error {
 	return nil
 }
 
-// retire unregisters this run, and only this one: an id it no longer holds
-// belongs to whoever took it after.
+// retire unregisters this run only; an id it no longer holds belongs to another.
 func (h *harness) retire(id string, rn *run) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -305,8 +295,6 @@ func (h *harness) push(ctx context.Context, path string, body []byte) bool {
 	return false
 }
 
-// dispose deletes a stored log and says whether it is really gone: a caller
-// told its log was dropped has no other way to find out that it was not.
 func (h *harness) dispose(ctx context.Context, id string) error {
 	resp, err := h.store(ctx, http.MethodDelete, id, nil)
 	if err != nil {
