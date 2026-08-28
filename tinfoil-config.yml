@@ -44,9 +44,7 @@ networks:
 
 containers:
   - name: harness
-    # Filled in by the image workflow; the digest is what makes the code
-    # running here part of the measurement.
-    image: ghcr.io/tinfoilsh/confidential-tinfoil-harness@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    image: "ghcr.io/tinfoilsh/confidential-tinfoil-harness@sha256:0000000000000000000000000000000000000000000000000000000000000000"
     networks: [upstream]
     # TLS to the gateway: EHBP seals the body, not the header carrying the key.
     env:
