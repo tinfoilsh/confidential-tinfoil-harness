@@ -178,20 +178,25 @@ host here too.
 
 ### Releasing
 
-1. `Image` builds the container and prints the digest to push into
-   `tinfoil-config.yml`.
-2. Tagging `v*` runs `Release`, which measures the CVM this config describes and
-   publishes `tinfoil.hash` with a Sigstore bundle. That release is what the
-   Tinfoil SDKs verify a running instance against.
+Run `Tinfoil Release` from the branch you want released and give it the
+version. It builds the container, pins the digest into `tinfoil-config.yml`,
+cuts the tag, and dispatches `Tinfoil Release - Publish` on that tag, which
+measures the CVM the config describes and publishes `tinfoil.hash` with a
+Sigstore bundle. That release is what the Tinfoil SDKs verify a running
+instance against.
 
 ### One thing this is waiting on
 
-- `go.mod` still replaces `tinfoil-go` with a sibling checkout, and the
-  seal-following transport it needs is not in a tagged release. Until it is, the
-  image builds only against a local `../tinfoil-go`:
+- The seal-following transport this harness needs -- a gateway answers 422
+  naming the replica it routed to, and the SDK attests that host and re-seals
+  there -- is not in a tagged `tinfoil-go` release. `go.mod` pins the commit on
+  `work/pty1/gateway-refactor` instead, so a build only ever carries what is
+  pushed to that branch. Repin with:
 
-      docker build --build-context sdk=../tinfoil-go -t confidential-tinfoil-harness .
+      go get github.com/tinfoilsh/tinfoil-go@work/pty1/gateway-refactor
 
-  The `Image` workflow checks out `tinfoilsh/tinfoil-go@work/pty1/gateway-refactor`
-  for the same reason and will need updating once the transport lands on `main`
-  and the replace goes away.
+  and drop back to a tagged version once the transport lands on `main`. To build
+  against a local SDK checkout while iterating, point a `go.work` at it rather
+  than adding a `replace` back to `go.mod`:
+
+      go work init . ../tinfoil-go

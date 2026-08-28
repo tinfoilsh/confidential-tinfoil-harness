@@ -1,7 +1,6 @@
 # syntax=docker/dockerfile:1
 
 FROM golang:1.26-alpine@sha256:28d89ee9cc0ff9fec75c82ca201e6bf7fdf9a679d4b7b24dfa04f2bb766bb468 AS build
-COPY --from=sdk / /src/tinfoil-go/
 COPY go.mod go.sum *.go /src/tinfoil-harness/
 WORKDIR /src/tinfoil-harness
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w -buildid=' -o /confidential-tinfoil-harness .

@@ -4,7 +4,7 @@ go 1.26.6
 
 require (
 	github.com/modelcontextprotocol/go-sdk v1.5.0
-	github.com/tinfoilsh/tinfoil-go v0.15.3
+	github.com/tinfoilsh/tinfoil-go v0.15.4-0.20260828072713-251feb041ce8
 )
 
 require (
@@ -95,8 +95,3 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
 )
-
-// The seal-following transport this harness depends on -- a gateway answers
-// 422 naming the replica it routed to, and the SDK attests that host and
-// re-seals there -- is not in a tagged release yet.
-replace github.com/tinfoilsh/tinfoil-go => ../tinfoil-go
