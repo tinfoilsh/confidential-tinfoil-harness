@@ -34,7 +34,6 @@ networks:
       - gemma4-31b-inf6-0.tinfoil.containers.tinfoil.dev
       - gpt-oss-120b-inf6-0.tinfoil.containers.tinfoil.dev
       - llama3-3-70b-inf12.tinfoil.containers.tinfoil.dev
-      - llama3-3-70b-inf13.tinfoil.containers.tinfoil.dev
       - llama3-3-70b.inf13.tinfoil.sh
       # Verifying those attestations: the pinned repo's release and Sigstore
       # bundle, the Sigstore trust root, and the AMD/Intel collateral proxies.
