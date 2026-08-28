@@ -54,7 +54,7 @@ type harness struct {
 
 func main() {
 	addr := flag.String("addr", ":8081", "listen address")
-	gateway := flag.String("gateway", env("TINFOIL_GATEWAY_URL", "https://gateway.tinfoil.sh"), "tinfoil-gateway base URL")
+	gateway := flag.String("gateway", env("TINFOIL_GATEWAY_URL", "https://inference-gateway.tinfoil.sh"), "tinfoil-gateway base URL")
 	controlplane := flag.String("controlplane", env("TINFOIL_CONTROLPLANE_URL", "https://api.tinfoil.sh"), "base URL of the store a detached run spills its sealed log to")
 	flag.Parse()
 

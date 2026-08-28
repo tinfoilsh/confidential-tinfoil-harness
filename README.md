@@ -184,7 +184,7 @@ host here too.
    publishes `tinfoil.hash` with a Sigstore bundle. That release is what the
    Tinfoil SDKs verify a running instance against.
 
-### Two things this is waiting on
+### One thing this is waiting on
 
 - `go.mod` still replaces `tinfoil-go` with a sibling checkout, and the
   seal-following transport it needs is not in a tagged release. Until it is, the
@@ -192,9 +192,6 @@ host here too.
 
       docker build --build-context sdk=../tinfoil-go -t confidential-tinfoil-harness .
 
-  The `Image` workflow checks out `tinfoilsh/tinfoil-go@main` for the same reason
-  and will fail until the transport lands there.
-
-- `gateway.tinfoil.sh`, the compiled-in default and the name used in the
-  allowlist, is NXDOMAIN today. The deployment fails closed until the gateway has
-  a hostname; substitute the real one in both `env` and `allow`.
+  The `Image` workflow checks out `tinfoilsh/tinfoil-go@work/pty1/gateway-refactor`
+  for the same reason and will need updating once the transport lands on `main`
+  and the replace goes away.
