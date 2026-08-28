@@ -24,7 +24,6 @@ networks:
       # block below in step.
       - inference-gateway.tinfoil.sh
       - websearch.tinfoil.sh
-      - code-execution.tinfoil.sh
       # The one host the harness does not attest. A detached run spills its
       # log there, sealed under a caller key that never leaves the enclave.
       - api.tinfoil.sh
@@ -48,9 +47,9 @@ containers:
     networks: [upstream]
     # TLS to the gateway: EHBP seals the body, not the header carrying the key.
     env:
-      - TINFOIL_GATEWAY_URL=https://inference-gateway.tinfoil.sh
-      - TINFOIL_TOOLS_ENCLAVE=websearch.tinfoil.sh
-      - TINFOIL_CONTROLPLANE_URL=https://api.tinfoil.sh
+      - TINFOIL_GATEWAY_URL: https://inference-gateway.tinfoil.sh
+      - TINFOIL_TOOLS_ENCLAVE: websearch.tinfoil.sh
+      - TINFOIL_CONTROLPLANE_URL: https://api.tinfoil.sh
     # A run's log lives in memory only, so nothing needs to survive a restart.
     read_only: true
     tmpfs:
