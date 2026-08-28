@@ -22,7 +22,7 @@ networks:
     allow:
       # The gateway, and one host per tool family in tools.go. Keep the env
       # block below in step.
-      - gateway.tinfoil.sh
+      - inference-gateway.tinfoil.sh
       - websearch.tinfoil.sh
       - code-execution.tinfoil.sh
       # The one host the harness does not attest. A detached run spills its
@@ -50,7 +50,7 @@ containers:
     networks: [upstream]
     # TLS to the gateway: EHBP seals the body, not the header carrying the key.
     env:
-      - TINFOIL_GATEWAY_URL: https://gateway.tinfoil.sh
+      - TINFOIL_GATEWAY_URL: https://inference-gateway.tinfoil.sh
       - TINFOIL_TOOLS_ENCLAVE: websearch.tinfoil.sh
       - TINFOIL_CODE_ENCLAVE: code-execution.tinfoil.sh
       - TINFOIL_CONTROLPLANE_URL: https://api.tinfoil.sh
