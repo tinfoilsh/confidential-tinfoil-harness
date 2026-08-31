@@ -63,13 +63,19 @@ func TestFollowReplaysFromCursorAndEndsOnClose(t *testing.T) {
 	}
 }
 
-func TestRefusalBeforeTheRunOpensStaysAStatus(t *testing.T) {
+// The run is started before the gateway is dialled, so a refusal can no longer
+// be a status: it reaches the caller as a RUN_ERROR carrying the same detail.
+func TestARefusalReachesTheCallerAsARunError(t *testing.T) {
 	rn := mustRun(t, "00", "aa")
 	newStream(rn, "thread", "run").fail(&refusal{status: http.StatusTooManyRequests, detail: "slow down"})
 	rec := httptest.NewRecorder()
 	follow(rec, httptest.NewRequest("POST", "/agui", nil), rn, 0)
-	if rec.Code != http.StatusTooManyRequests || !strings.Contains(rec.Body.String(), "slow down") {
-		t.Fatalf("got %d %q", rec.Code, rec.Body.String())
+	body := rec.Body.String()
+	if !strings.HasPrefix(body, "id: 0\ndata: {\"type\":\"RUN_STARTED\"") {
+		t.Fatalf("a refused run never started: %q", body)
+	}
+	if !strings.Contains(body, "RUN_ERROR") || !strings.Contains(body, "429") || !strings.Contains(body, "slow down") {
+		t.Fatalf("the refusal lost its detail: %q", body)
 	}
 }
 
@@ -167,19 +173,18 @@ func TestAStorageIDBelongsToOneRun(t *testing.T) {
 	}
 }
 
-func TestARunTooYoungToAuthorizeIsToldToComeBack(t *testing.T) {
+// Starting the run frames the log, so there is no window in which a caller
+// holding the right secret is told its own run is not recoverable.
+func TestAStartedRunIsReattachableBeforeItProducesAnything(t *testing.T) {
 	id := strings.Repeat("f", 32)
 	h := &harness{runs: map[string]*run{}}
-	if err := h.enlist(id, mustRun(t, id, "bb")); err != nil {
+	rn := mustRun(t, id, "bb")
+	newStream(rn, "thread", "run")
+	if err := h.enlist(id, rn); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.lookup(id, "bb"); err != errPending {
-		t.Fatalf("a run with no frames yet answered %v", err)
-	}
-	rec := httptest.NewRecorder()
-	refuse(rec, errPending)
-	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") == "" {
-		t.Fatalf("got %d, Retry-After %q", rec.Code, rec.Header().Get("Retry-After"))
+	if live, err := h.lookup(id, "bb"); live != rn || err != nil {
+		t.Fatalf("a run that had only started answered live=%v err=%v", live != nil, err)
 	}
 }
 
