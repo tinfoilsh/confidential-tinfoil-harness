@@ -51,6 +51,7 @@ containers:
       - TINFOIL_GATEWAY_URL: https://inference-gateway.tinfoil.sh
       - TINFOIL_TOOLS_ENCLAVE: websearch.tinfoil.sh
       - TINFOIL_CONTROLPLANE_URL: https://api.tinfoil.sh
+      - TEST: "1"
     # A run's log lives in memory only, so nothing needs to survive a restart.
     read_only: true
     tmpfs:
