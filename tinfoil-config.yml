@@ -18,29 +18,32 @@ networks:
   # Everything here is a host the harness attests or a service it needs to
   # attest one. An unresolvable entry fails the whole set closed.
   upstream:
-    egress: allowlist
-    allow:
-      # The gateway, and one host per tool family in tools.go. Keep the env
-      # block below in step.
-      - inference-gateway.tinfoil.sh
-      - websearch.tinfoil.sh
-      # The one host the harness does not attest. A detached run spills its
-      # log there, sealed under a caller key that never leaves the enclave.
-      - api.tinfoil.sh
-      # Attestation of every host in main.go, fetched from the host itself,
-      # including any replica the gateway names in a 422.
-      - kimi-k3-inf14.tinfoil.containers.tinfoil.dev
-      - deepseek-v4-flash-inf15.tinfoil.containers.tinfoil.dev
-      - gemma4-31b-inf6-0.tinfoil.containers.tinfoil.dev
-      - gpt-oss-120b-inf6-0.tinfoil.containers.tinfoil.dev
-      - llama3-3-70b-inf12.tinfoil.containers.tinfoil.dev
-      - llama3-3-70b.inf13.tinfoil.sh
-      # Verifying those attestations: the pinned repo's release and Sigstore
-      # bundle, the Sigstore trust root, and the AMD/Intel collateral proxies.
-      - github-proxy.tinfoil.sh
-      - tuf-repo-cdn.sigstore.dev
-      - kds-proxy.tinfoil.sh
-      - tdx-proxy.tinfoil.sh
+    # for dev
+    egress: open
+    # allow:
+      # # The gateway, and one host per tool family in tools.go. Keep the env
+      # # block below in step.
+      # - inference-gateway.tinfoil.sh
+      # - websearch.tinfoil.sh
+      # # The one host the harness does not attest. A detached run spills its
+      # # log there, sealed under a caller key that never leaves the enclave.
+      # - api.tinfoil.sh
+      # # Attestation of every host in main.go, fetched from the host itself,
+      # # including any replica the gateway names in a 422.
+      # - kimi-k3-inf14-2.tinfoil.containers.tinfoil.dev
+      # - kimi-k3-inf18.tinfoil.containers.tinfoil.dev
+      # - kimi-k3-inf17.tinfoil.containers.tinfoil.dev
+      # - deepseek-v4-flash-inf15.tinfoil.containers.tinfoil.dev
+      # - gemma4-31b-inf6-0.tinfoil.containers.tinfoil.dev
+      # - gpt-oss-120b-inf6-0.tinfoil.containers.tinfoil.dev
+      # - llama3-3-70b-inf12.tinfoil.containers.tinfoil.dev
+      # - llama3-3-70b.inf13.tinfoil.sh
+      # # Verifying those attestations: the pinned repo's release and Sigstore
+      # # bundle, the Sigstore trust root, and the AMD/Intel collateral proxies.
+      # - github-proxy.tinfoil.sh
+      # - tuf-repo-cdn.sigstore.dev
+      # - kds-proxy.tinfoil.sh
+      # - tdx-proxy.tinfoil.sh
 
 containers:
   - name: harness
