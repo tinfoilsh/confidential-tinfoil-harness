@@ -32,7 +32,6 @@ var (
 	errTooLong   = errors.New("run outgrew the log this harness can hold for it")
 	errBusy      = errors.New("too many runs in flight")
 	errTaken     = errors.New("another run is already using this storage id")
-	errPending   = errors.New("run has not framed anything yet")
 	errNotYours  = errors.New("not a recoverable run")
 )
 
@@ -132,7 +131,8 @@ func (r *run) aad(id int) []byte {
 	return binary.BigEndian.AppendUint64([]byte(r.id), uint64(id))
 }
 
-// Opening frame 0 is the whole authorization, so a run without one is pending.
+// Opening frame 0 is the whole authorization, and a run is enlisted only once
+// its RUN_STARTED is framed, so every registered run has one to open.
 func (h *harness) lookup(id string, key secret) (*run, error) {
 	h.mu.Lock()
 	rn := h.runs[id]
@@ -146,7 +146,7 @@ func (h *harness) lookup(id string, key secret) (*run, error) {
 	}
 	frames, _, _ := rn.log.read(0)
 	if len(frames) == 0 {
-		return nil, errPending
+		return nil, errNotYours
 	}
 	if _, err := probe.open(0, frames[0]); err != nil {
 		return nil, errNotYours
@@ -180,6 +180,9 @@ func (h *harness) start(ctx context.Context, req *request, m *model) (*run, erro
 			}()
 		})
 	}
+	// Framed before the run is published: the caller sees RUN_STARTED without
+	// waiting on the gateway, and a reattach never lands on an unopenable log.
+	out := newStream(rn, req.threadID, req.runID)
 	// Published only once begin is final, or a racing reattach cancels the run.
 	if err := h.enlist(req.storageID, rn); err != nil {
 		rn.abandon()
@@ -189,7 +192,6 @@ func (h *harness) start(ctx context.Context, req *request, m *model) (*run, erro
 	go func() {
 		defer cancel()
 		defer h.retire(req.storageID, rn)
-		out := newStream(rn, req.threadID, req.runID)
 		defer out.done()
 		began := time.Now()
 		if err := h.loop(runCtx, out, req, m); err != nil {

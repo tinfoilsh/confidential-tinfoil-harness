@@ -43,7 +43,7 @@ func (h *harness) agui(w http.ResponseWriter, r *http.Request) {
 		live, err := h.lookup(req.storageID, req.secret)
 		switch {
 		case err != nil:
-			refuse(w, err)
+			writeError(w, http.StatusForbidden, errNotYours.Error())
 			return
 		case live != nil:
 			follow(w, r, live, req.from)
@@ -82,7 +82,7 @@ func (h *harness) drop(w http.ResponseWriter, r *http.Request) {
 	// Authorized by opening the log; a live run is stopped so its spill cannot race the delete.
 	switch live, err := h.lookup(in.SessionID, in.RecoveryToken); {
 	case err != nil:
-		refuse(w, err)
+		writeError(w, http.StatusForbidden, errNotYours.Error())
 		return
 	case live != nil:
 		live.abandon()
@@ -97,16 +97,6 @@ func (h *harness) drop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// A run too young to have framed anything is told to come back, not turned away.
-func refuse(w http.ResponseWriter, err error) {
-	if err == errPending {
-		w.Header().Set("Retry-After", "1")
-		writeError(w, http.StatusServiceUnavailable, err.Error())
-		return
-	}
-	writeError(w, http.StatusForbidden, errNotYours.Error())
 }
 
 func (h *harness) cold(w http.ResponseWriter, r *http.Request, req *request) {
@@ -378,14 +368,19 @@ type stream struct {
 	spend usage
 }
 
+// A run has started the moment it is accepted, not when the first upstream
+// turn yields: the caller gets a thinking state instead of an open connection
+// saying nothing, and an enlisted run always has the frame that authorizes it.
 func newStream(rn *run, threadID, runID string) *stream {
-	return &stream{run: rn, threadID: threadID, runID: runID}
+	s := &stream{run: rn, threadID: threadID, runID: runID}
+	s.frame(event{Type: "RUN_STARTED", ThreadID: threadID, RunID: runID})
+	return s
 }
 
 func (s *stream) emit(e event) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.send(e)
+	s.frame(e)
 }
 
 func (s *stream) text(message, delta string) {
@@ -453,11 +448,7 @@ func (s *stream) meter(raw json.RawMessage) {
 func (s *stream) fail(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.run.log.size() == 0 {
-		s.run.log.close(err)
-		return
-	}
-	s.send(event{Type: "RUN_ERROR", ThreadID: s.threadID, RunID: s.runID, Message: err.Error()})
+	s.frame(event{Type: "RUN_ERROR", ThreadID: s.threadID, RunID: s.runID, Message: err.Error()})
 	s.run.log.close(errDone)
 }
 
@@ -465,15 +456,8 @@ func (s *stream) done() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	metadata, _ := json.Marshal(map[string]usage{"usage": s.spend})
-	s.send(event{Type: "RUN_FINISHED", ThreadID: s.threadID, RunID: s.runID, Metadata: metadata})
+	s.frame(event{Type: "RUN_FINISHED", ThreadID: s.threadID, RunID: s.runID, Metadata: metadata})
 	s.run.log.close(errDone)
-}
-
-func (s *stream) send(e event) {
-	if s.run.log.size() == 0 {
-		s.frame(event{Type: "RUN_STARTED", ThreadID: s.threadID, RunID: s.runID})
-	}
-	s.frame(e)
 }
 
 func (s *stream) frame(e event) {
@@ -501,15 +485,6 @@ func follow(w http.ResponseWriter, r *http.Request, rn *run, from int) {
 	}
 	for {
 		frames, wake, closed := rn.log.read(from)
-		if closed != nil && !opened && rn.log.size() == 0 {
-			status, detail := http.StatusBadGateway, closed.Error()
-			var refused *refusal
-			if errors.As(closed, &refused) {
-				status, detail = refused.status, refused.detail
-			}
-			writeError(w, status, detail)
-			return
-		}
 		for i, frame := range frames {
 			plain, err := rn.open(from+i, frame)
 			if err != nil {
