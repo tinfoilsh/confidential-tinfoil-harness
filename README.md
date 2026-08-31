@@ -164,8 +164,10 @@ forwards upstream. It has none of its own.
 name that does not resolve fails the whole set closed. It covers four things:
 
 - the gateway and one host per tool family, which are the hosts it dials;
-- every enclave in `main.go`, because attestation is fetched from the host
-  itself, including a replica the gateway names in a 422 and the SDK re-seals to;
+- every replica in the gateway's catalog, because attestation is fetched from
+  the host itself, including the one a 421 names and the SDK re-seals to. This
+  is the one place a host is written down: `main.go` names no enclave, so the
+  list here has to mirror the gateway's config;
 - what verifying those attestations needs: `github-proxy` for the pinned repo's
   release and Sigstore bundle, `tuf-repo-cdn.sigstore.dev` for the trust root,
   and the AMD and Intel collateral proxies;
@@ -173,8 +175,8 @@ name that does not resolve fails the whole set closed. It covers four things:
   detached run spills its sealed log there and reads it back; see above for what
   that host can and cannot see.
 
-Adding a model to `main.go`, or a tool family to `tools.go`, means adding its
-host here too.
+Adding a model means allowing its repo in `main.go` and its replicas' hosts
+here; adding a tool family to `tools.go` means adding its host here too.
 
 ### Releasing
 
@@ -187,7 +189,7 @@ instance against.
 
 ### One thing this is waiting on
 
-- The seal-following transport this harness needs -- a gateway answers 422
+- The seal-following transport this harness needs -- a gateway answers 421
   naming the replica it routed to, and the SDK attests that host and re-seals
   there -- is not in a tagged `tinfoil-go` release. `go.mod` pins the commit on
   `work/pty1/gateway-refactor` instead, so a build only ever carries what is

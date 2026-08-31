@@ -28,8 +28,10 @@ networks:
       # # The one host the harness does not attest. A detached run spills its
       # # log there, sealed under a caller key that never leaves the enclave.
       # - api.tinfoil.sh
-      # # Attestation of every host in main.go, fetched from the host itself,
-      # # including any replica the gateway names in a 422.
+      # # Attestation of every replica in the gateway's catalog, fetched from
+      # # the host itself, including the one a 421 names and the SDK re-seals
+      # # to. main.go allows repos, not hosts, so this list is the only place
+      # # they are written down: keep it mirroring the gateway's config.
       # - kimi-k3-inf14-2.tinfoil.containers.tinfoil.dev
       # - kimi-k3-inf18.tinfoil.containers.tinfoil.dev
       # - kimi-k3-inf17.tinfoil.containers.tinfoil.dev
@@ -58,6 +60,4 @@ containers:
     read_only: true
     tmpfs:
       /tmp: rw,noexec,nosuid,nodev,size=16m
-    # A harness that pinned no model enclave exits; restarting is how it waits
-    # for one. A tool enclave that did not verify is skipped, not fatal.
     restart: always
