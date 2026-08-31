@@ -1,11 +1,12 @@
 // Command confidential-tinfoil-harness serves an AG-UI endpoint whose model
-// turns and tool calls all go to enclaves it attests at startup.
+// turns and tool calls all go to enclaves it attests against a pinned repo.
 package main
 
 import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -22,23 +24,22 @@ import (
 	tinfoil "github.com/tinfoilsh/tinfoil-go"
 )
 
-// repo is the trust anchor; enclave is only where attestation starts.
+// repo is the trust anchor; the gateway's catalog supplies the rest.
 type model struct {
 	name    string
 	repo    string
-	enclave string
 	vision  bool
 	context int // usable prompt budget, in tokens
 
-	client *http.Client // sealing client, set once the enclave verifies
+	client *http.Client // sealing client, set once a replica verifies
 }
 
-var catalog = []*model{
-	{name: "kimi-k3", repo: "tinfoilsh/confidential-kimi-k3", enclave: "kimi-k3-inf14.tinfoil.containers.tinfoil.dev", context: 256_000},
-	{name: "deepseek-v4-flash", repo: "tinfoilsh/confidential-deepseek-v4-flash", enclave: "deepseek-v4-flash-inf15.tinfoil.containers.tinfoil.dev", context: 128_000},
-	{name: "gemma4-31b", repo: "tinfoilsh/confidential-gemma4-31b", enclave: "gemma4-31b-inf6-0.tinfoil.containers.tinfoil.dev", context: 128_000, vision: true},
-	{name: "gpt-oss-120b", repo: "tinfoilsh/confidential-gpt-oss-120b", enclave: "gpt-oss-120b-inf6-0.tinfoil.containers.tinfoil.dev", context: 128_000},
-	{name: "llama3-3-70b", repo: "tinfoilsh/confidential-llama3-3-70b", enclave: "llama3-3-70b-inf12.tinfoil.containers.tinfoil.dev", context: 128_000},
+var pinned = []struct{ name, repo string }{
+	{"kimi-k3", "tinfoilsh/confidential-kimi-k3"},
+	{"deepseek-v4-flash", "tinfoilsh/confidential-deepseek-v4-flash"},
+	{"gemma4-31b", "tinfoilsh/confidential-gemma4-31b"},
+	{"gpt-oss-120b", "tinfoilsh/confidential-gpt-oss-120b"},
+	{"llama3-3-70b", "tinfoilsh/confidential-llama3-3-70b"},
 }
 
 type harness struct {
@@ -130,32 +131,80 @@ func attestFamilies() {
 	}
 }
 
+// attestCatalog serves the models the gateway offers and this harness pins,
+// attesting one replica of each to start from.
+//
+// The catalog is plaintext config, not a trust input. It can name any host, but
+// a host that does not attest against the pinned repo is never sealed to, and
+// the context and vision flags it reports only decide which runs are offered
+// which model -- a wrong one costs a refusal or a gateway error, never
+// confidentiality. That is what lets the enclave list live in one place, on the
+// side that already owns replica placement.
 func attestCatalog(gateway string) ([]*model, error) {
+	offered, err := fetchCatalog(gateway)
+	if err != nil {
+		return nil, err
+	}
+
+	models := make([]*model, len(pinned))
 	var wg sync.WaitGroup
-	for _, m := range catalog {
+	for i, p := range pinned {
+		entry, ok := offered[p.name]
+		if !ok {
+			slog.Warn("gateway offers no pool for a pinned model", "model", p.name)
+			continue
+		}
+		m := &model{name: p.name, repo: p.repo, vision: entry.Vision, context: entry.Context}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			client, err := attest(m.enclave, m.repo, gateway+"/v1/")
-			if err != nil {
-				slog.Warn("model enclave did not verify", "model", m.name, "enclave", m.enclave, "error", err)
+			// Any replica that verifies will do as the starting point: the
+			// gateway answers a 421 naming the one it routed to, and the SDK
+			// attests that host against the same repo before re-sealing there.
+			for _, host := range entry.Hosts {
+				client, err := attest(host, m.repo, gateway+"/v1/")
+				if err != nil {
+					slog.Warn("replica did not verify", "model", m.name, "enclave", host, "error", err)
+					continue
+				}
+				m.client = client
+				models[i] = m
 				return
 			}
-			m.client = client
 		}()
 	}
 	wg.Wait()
 
-	var live []*model
-	for _, m := range catalog {
-		if m.client != nil {
-			live = append(live, m)
-		}
-	}
+	live := slices.DeleteFunc(models, func(m *model) bool { return m == nil })
 	if len(live) == 0 {
-		return nil, errors.New("no pinned model enclave verified")
+		return nil, errors.New("no replica of any pinned model verified")
 	}
 	return live, nil
+}
+
+// catalogEntry is the gateway's description of one model pool.
+type catalogEntry struct {
+	Hosts   []string `json:"hosts"`
+	Vision  bool     `json:"vision"`
+	Context int      `json:"context"`
+}
+
+// fetchCatalog reads the pools the gateway routes to. It needs no API key: the
+// harness holds none, and every caller's key belongs to a request.
+func fetchCatalog(gateway string) (map[string]catalogEntry, error) {
+	resp, err := http.Get(gateway + "/catalog")
+	if err != nil {
+		return nil, fmt.Errorf("read catalog: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("read catalog: gateway answered %d", resp.StatusCode)
+	}
+	var offered map[string]catalogEntry
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&offered); err != nil {
+		return nil, fmt.Errorf("decode catalog: %w", err)
+	}
+	return offered, nil
 }
 
 func served(models []*model) string {
