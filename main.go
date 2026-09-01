@@ -22,6 +22,7 @@ import (
 	"time"
 
 	tinfoil "github.com/tinfoilsh/tinfoil-go"
+	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
 // repo is the trust anchor; the gateway's catalog supplies the rest.
@@ -59,9 +60,15 @@ func main() {
 	controlplane := flag.String("controlplane", env("TINFOIL_CONTROLPLANE_URL", "https://api.tinfoil.sh"), "base URL of the store a detached run spills its sealed log to")
 	flag.Parse()
 
+	usageSecret := os.Getenv("USAGE_CONTEXT_SECRET")
+	if usageSecret == "" {
+		slog.Error("USAGE_CONTEXT_SECRET is required: without it every turn of a run bills as its own request")
+		os.Exit(1)
+	}
+
 	gw := strings.TrimRight(*gateway, "/")
-	attestFamilies()
-	models, err := attestCatalog(gw)
+	attestFamilies(usageSecret)
+	models, err := attestCatalog(gw, usageSecret)
 	if err != nil {
 		slog.Error("verify model enclaves", "gateway", gw, "error", err)
 		os.Exit(1)
@@ -103,7 +110,7 @@ func env(key, fallback string) string {
 	return fallback
 }
 
-func attest(enclave, repo, baseURL string) (*http.Client, error) {
+func attest(enclave, repo, baseURL, usageSecret string) (*http.Client, error) {
 	opts := []tinfoil.ClientOption{tinfoil.WithEnclave(enclave), tinfoil.WithRepo(repo)}
 	if baseURL != "" { // the tools enclave is dialled directly, not via the gateway
 		opts = append(opts, tinfoil.WithBaseURL(baseURL))
@@ -113,15 +120,15 @@ func attest(enclave, repo, baseURL string) (*http.Client, error) {
 		return nil, err
 	}
 	client := verified.HTTPClient()
-	client.Transport = &callerAuth{inner: client.Transport}
+	client.Transport = &callerAuth{inner: client.Transport, usageSecret: usageSecret}
 	return client, nil
 }
 
 // A family is opt-in per run, so one that does not verify is skipped, not fatal.
-func attestFamilies() {
+func attestFamilies(usageSecret string) {
 	for _, f := range families {
 		f.enclave = env(f.env, f.enclave)
-		client, err := attest(f.enclave, f.repo, "")
+		client, err := attest(f.enclave, f.repo, "", usageSecret)
 		if err != nil {
 			slog.Warn("tool enclave did not verify", "family", f.name, "enclave", f.enclave, "error", err)
 			continue
@@ -140,7 +147,7 @@ func attestFamilies() {
 // which model -- a wrong one costs a refusal or a gateway error, never
 // confidentiality. That is what lets the enclave list live in one place, on the
 // side that already owns replica placement.
-func attestCatalog(gateway string) ([]*model, error) {
+func attestCatalog(gateway, usageSecret string) ([]*model, error) {
 	offered, err := fetchCatalog(gateway)
 	if err != nil {
 		return nil, err
@@ -162,7 +169,7 @@ func attestCatalog(gateway string) ([]*model, error) {
 			// gateway answers a 421 naming the one it routed to, and the SDK
 			// attests that host against the same repo before re-sealing there.
 			for _, host := range entry.Hosts {
-				client, err := attest(host, m.repo, gateway+"/v1/")
+				client, err := attest(host, m.repo, gateway+"/v1/", usageSecret)
 				if err != nil {
 					slog.Warn("replica did not verify", "model", m.name, "enclave", host, "error", err)
 					continue
@@ -241,13 +248,24 @@ func (h *harness) unserved(req *request) string {
 
 type apiKeyKey struct{}
 
+type usageContextKey struct{}
+
 // callerAuth signs every request with the caller's key; the harness has none.
-type callerAuth struct{ inner http.RoundTripper }
+type callerAuth struct {
+	inner       http.RoundTripper
+	usageSecret string
+}
 
 func (t *callerAuth) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
 	if key, ok := r.Context().Value(apiKeyKey{}).(string); ok && key != "" {
-		r = r.Clone(r.Context())
 		r.Header.Set("Authorization", "Bearer "+key)
+	}
+	if usage, ok := r.Context().Value(usageContextKey{}).(usagereporting.Context); ok {
+		usage.IssuedAt = time.Now().UTC()
+		if err := usagereporting.SetHeaders(r.Header, usage, t.usageSecret); err != nil {
+			return nil, err
+		}
 	}
 	return t.inner.RoundTrip(r)
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
 const (
@@ -24,6 +26,19 @@ const (
 )
 
 func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model) error {
+	apiKey, _ := ctx.Value(apiKeyKey{}).(string)
+	inRun := usagereporting.Context{
+		ContextID:     req.runID,
+		RootRequestID: req.runID,
+		ParentService: "harness",
+		APIKeyHash:    usagereporting.HashAPIKey(apiKey),
+		Depth:         1,
+	}
+	billing := inRun
+	billing.BillCustomerRequest = true
+	ctx = context.WithValue(ctx, usageContextKey{}, inRun)
+	first := context.WithValue(ctx, usageContextKey{}, billing)
+
 	set, err := openTools(ctx, req, out.progress)
 	if err != nil {
 		return fmt.Errorf("tools: %w", err)
@@ -40,7 +55,11 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 		if err != nil {
 			return err
 		}
-		calls, answer, err := h.turn(ctx, out, m, payload)
+		turnCtx := ctx
+		if turn == 1 {
+			turnCtx = first
+		}
+		calls, answer, err := h.turn(turnCtx, out, m, payload)
 		if err != nil {
 			return err
 		}
@@ -209,9 +228,11 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 		var chunk struct {
 			Choices []struct {
 				Delta struct {
-					Content   string          `json:"content"`
-					Reasoning string          `json:"reasoning_content"`
-					ToolCalls []toolCallDelta `json:"tool_calls"`
+					Content string `json:"content"`
+					// Enclaves disagree on the field because of diverging vLLM versions
+					Reasoning    string          `json:"reasoning_content"`
+					ReasoningAlt string          `json:"reasoning"`
+					ToolCalls    []toolCallDelta `json:"tool_calls"`
 				} `json:"delta"`
 			} `json:"choices"`
 			Usage json.RawMessage `json:"usage"`
@@ -230,8 +251,8 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 			answer.WriteString(delta.Content)
 			out.text(message, delta.Content)
 		}
-		if delta.Reasoning != "" {
-			out.reasoning(message, delta.Reasoning)
+		if reasoning := cmp.Or(delta.Reasoning, delta.ReasoningAlt); reasoning != "" {
+			out.reasoning(message, reasoning)
 		}
 		for _, called := range delta.ToolCalls {
 			calls = announce(out, parent(message, &answer), calls, called)
