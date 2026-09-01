@@ -49,7 +49,7 @@ networks:
 
 containers:
   - name: harness
-    image: "ghcr.io/tinfoilsh/confidential-tinfoil-harness@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    image: "ghcr.io/tinfoilsh/confidential-tinfoil-harness@sha256:db823050db76ff5d25b9cdb0765b40c01edd9bb94e27823c48dabad4277a9995" # v0.1.10
     networks: [upstream]
     # TLS to the gateway: EHBP seals the body, not the header carrying the key.
     env:
