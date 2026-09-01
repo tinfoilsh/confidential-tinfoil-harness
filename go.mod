@@ -5,6 +5,7 @@ go 1.26.6
 require (
 	github.com/modelcontextprotocol/go-sdk v1.5.0
 	github.com/tinfoilsh/tinfoil-go v0.15.4-0.20260828072713-251feb041ce8
+	github.com/tinfoilsh/usage-reporting-go v0.1.3
 )
 
 require (
