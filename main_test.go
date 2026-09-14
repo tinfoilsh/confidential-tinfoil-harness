@@ -10,9 +10,15 @@ import (
 	"testing"
 )
 
+// caller is a request context carrying one API key, which is what a run log is
+// scoped to on top of its secret.
+func caller(apiKey string) context.Context {
+	return context.WithValue(context.Background(), apiKeyKey{}, apiKey)
+}
+
 func mustRun(t *testing.T, id string, key secret) *run {
 	t.Helper()
-	rn, err := newRun(id, key)
+	rn, err := newRun(caller("key"), id, key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,22 +112,29 @@ func TestSpilledRunComesBackFromTheStore(t *testing.T) {
 		t.Fatalf("spill: created=%v completed=%v bytes=%d", created, completed, stored.Len())
 	}
 
+	mine := httptest.NewRequest("POST", "/agui", nil).WithContext(caller("key"))
 	req := &request{storageID: strings.Repeat("a", 32), secret: "bb"}
 	rec := httptest.NewRecorder()
-	h.cold(rec, httptest.NewRequest("POST", "/agui", nil), req)
+	h.cold(rec, mine, req)
 	if !strings.Contains(rec.Body.String(), "hello") || !strings.Contains(rec.Body.String(), "RUN_FINISHED") {
 		t.Fatalf("cold resume lost the run: %q", rec.Body.String())
 	}
 
 	wrong := httptest.NewRecorder()
-	h.cold(wrong, httptest.NewRequest("POST", "/agui", nil), &request{storageID: req.storageID, secret: "cc"})
+	h.cold(wrong, mine, &request{storageID: req.storageID, secret: "cc"})
 	if wrong.Code != http.StatusForbidden {
 		t.Fatalf("wrong secret got %d", wrong.Code)
 	}
 	missing := httptest.NewRecorder()
-	h.cold(missing, httptest.NewRequest("POST", "/agui", nil), &request{storageID: strings.Repeat("b", 32), secret: "bb"})
+	h.cold(missing, mine, &request{storageID: strings.Repeat("b", 32), secret: "bb"})
 	if missing.Code != wrong.Code {
 		t.Fatalf("absent log answered %d, wrong secret answered %d", missing.Code, wrong.Code)
+	}
+	// The right pair under another API key is the same refusal as a wrong secret.
+	foreign := httptest.NewRecorder()
+	h.cold(foreign, httptest.NewRequest("POST", "/agui", nil).WithContext(caller("other")), req)
+	if foreign.Code != wrong.Code {
+		t.Fatalf("another key read the stored log: %d, %q", foreign.Code, foreign.Body.String())
 	}
 }
 
@@ -134,17 +147,20 @@ func TestWarmReattachIsAuthorizedByOpeningTheLog(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if live, err := h.lookup(id, "bb"); live != rn || err != nil {
+	if live, err := h.lookup(caller("key"), id, "bb"); live != rn || err != nil {
 		t.Fatalf("the right secret did not reattach: %v", err)
 	}
-	if live, err := h.lookup(id, "zz"); live != nil || err != errNotYours {
+	if live, err := h.lookup(caller("key"), id, "zz"); live != nil || err != errNotYours {
 		t.Fatalf("wrong secret reattached: live=%v err=%v", live != nil, err)
 	}
-	if live, err := h.lookup(strings.Repeat("d", 32), "bb"); live != nil || err != nil {
+	if live, err := h.lookup(caller("other"), id, "bb"); live != nil || err != errNotYours {
+		t.Fatalf("another key reattached with the right secret: live=%v err=%v", live != nil, err)
+	}
+	if live, err := h.lookup(caller("key"), strings.Repeat("d", 32), "bb"); live != nil || err != nil {
 		t.Fatalf("an unknown run reported itself: live=%v err=%v", live != nil, err)
 	}
 	h.retire(id, rn)
-	if live, err := h.lookup(id, "bb"); live != nil || err != nil {
+	if live, err := h.lookup(caller("key"), id, "bb"); live != nil || err != nil {
 		t.Fatalf("a retired run stayed in the registry: live=%v err=%v", live != nil, err)
 	}
 }
@@ -183,7 +199,7 @@ func TestAStartedRunIsReattachableBeforeItProducesAnything(t *testing.T) {
 	if err := h.enlist(id, rn); err != nil {
 		t.Fatal(err)
 	}
-	if live, err := h.lookup(id, "bb"); live != rn || err != nil {
+	if live, err := h.lookup(caller("key"), id, "bb"); live != rn || err != nil {
 		t.Fatalf("a run that had only started answered live=%v err=%v", live != nil, err)
 	}
 }
@@ -281,5 +297,79 @@ func TestLogWithoutATerminalFrameReplaysAsAbandoned(t *testing.T) {
 	follow(rec, httptest.NewRequest("POST", "/agui", nil), back, 0)
 	if !strings.Contains(rec.Body.String(), "RUN_ERROR") {
 		t.Fatalf("abandoned run did not report itself: %q", rec.Body.String())
+	}
+}
+
+// The whole of the authorization is opening the log, and the caller's API key
+// scopes which log that is. A foreign key holding the right pair is refused
+// like any other, and refused before it can reach a model or the store.
+func TestALogBelongsToTheKeyThatSealedIt(t *testing.T) {
+	id, tok := strings.Repeat("a", 32), strings.Repeat("b", 32)
+	h := &harness{runs: map[string]*run{}}
+	rn := mustRun(t, id, secret(tok))
+	out := newStream(rn, "victim-thread", "victim-run")
+	out.emit(event{Type: "TEXT_MESSAGE_CHUNK", Delta: "the victim's answer"})
+	out.done()
+	if err := h.enlist(id, rn); err != nil {
+		t.Fatal(err)
+	}
+
+	// Not a resume: the live-run branch is taken on any request naming the pair.
+	body := `{"messages":[{"role":"user","content":"hi"}],"sessionId":"` + id +
+		`","recoveryToken":"` + tok + `"}`
+	post := func(apiKey string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("POST", "/agui", strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer "+apiKey)
+		rec := httptest.NewRecorder()
+		h.agui(rec, r)
+		return rec
+	}
+	if got := post("key"); !strings.Contains(got.Body.String(), "the victim's answer") {
+		t.Fatalf("the key that sealed the log could not reattach: %d %q", got.Code, got.Body.String())
+	}
+	got := post("another-key")
+	if got.Code != http.StatusForbidden || strings.Contains(got.Body.String(), "victim") {
+		t.Fatalf("another key reattached to a live run: %d %q", got.Code, got.Body.String())
+	}
+}
+
+func TestARunIsNamedByABoundedIdentifier(t *testing.T) {
+	body := func(field, value string) []byte {
+		return []byte(`{"messages":[{"role":"user","content":"hi"}],"` + field + `":"` + value + `"}`)
+	}
+	for _, field := range []string{"runId", "threadId"} {
+		if _, err := parseRequest(body(field, strings.Repeat("z", maxIDLength)), "key"); err != nil {
+			t.Fatalf("%s of the largest allowed size was refused: %v", field, err)
+		}
+		if _, err := parseRequest(body(field, strings.Repeat("z", maxIDLength+1)), "key"); err == nil {
+			t.Fatalf("an oversized %s was accepted", field)
+		}
+		if _, err := parseRequest(body(field, `a\u0000b`), "key"); err == nil {
+			t.Fatalf("a %s carrying a control character was accepted", field)
+		}
+	}
+	// Absent is still allowed: the harness names the run itself.
+	req, err := parseRequest(body("model", "auto"), "key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(req.runID, "run_") {
+		t.Fatalf("an unnamed run was not named by the harness: %q", req.runID)
+	}
+}
+
+func TestAPanickingToolCallDoesNotTakeTheRun(t *testing.T) {
+	// byName holds the call's name, so invoke gets past the widget branch and
+	// panics on the nil session behind it.
+	set := &toolset{byName: map[string]*session{"boom": nil}}
+	set.byName["boom"] = &session{}
+	rn := mustRun(t, "00", "aa")
+	out := newStream(rn, "thread", "run")
+	message := invoke(context.Background(), out, set, toolCall{id: "call_1", name: "boom"})
+	if !strings.Contains(string(message), "tool boom failed") {
+		t.Fatalf("a panicking tool call answered %q", message)
+	}
+	if rn.log.closed != nil {
+		t.Fatalf("a panicking tool call closed the log: %v", rn.log.closed)
 	}
 }

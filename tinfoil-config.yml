@@ -1,65 +1,71 @@
-# Measured workload definition: what tinfoild launches, and the only thing a
-# client's attestation of this enclave says it is running.
+# Release automation replaces the image digest before measuring this workload.
 cvm-version: 0.11.0
-
 cpus: 2
 memory: 4096
 
-# The shim terminates TLS on 443 and is the only way in. It requires a Tinfoil
-# API key, which is the same key the harness then forwards upstream.
 shim:
   upstream-port: 8081
   authenticated: true
+  # The legacy route uses Tinfoil API keys. /v1/* validates Clerk inside Go.
+  authenticated-endpoints:
+    - /agui
   paths:
     - /agui
     - /healthz
+    - /v1/*
 
 networks:
-  # Everything here is a host the harness attests or a service it needs to
-  # attest one. An unresolvable entry fails the whole set closed.
   upstream:
-    # for dev
-    egress: open
-    # allow:
-      # # The gateway, and one host per tool family in tools.go. Keep the env
-      # # block below in step.
-      # - inference-gateway.tinfoil.sh
-      # - websearch.tinfoil.sh
-      # # The one host the harness does not attest. A detached run spills its
-      # # log there, sealed under a caller key that never leaves the enclave.
-      # - api.tinfoil.sh
-      # # Attestation of every replica in the gateway's catalog, fetched from
-      # # the host itself, including the one a 421 names and the SDK re-seals
-      # # to. main.go allows repos, not hosts, so this list is the only place
-      # # they are written down: keep it mirroring the gateway's config.
-      # - kimi-k3-inf14-2.tinfoil.containers.tinfoil.dev
-      # - kimi-k3-inf18.tinfoil.containers.tinfoil.dev
-      # - kimi-k3-inf17.tinfoil.containers.tinfoil.dev
-      # - deepseek-v4-flash-inf15.tinfoil.containers.tinfoil.dev
-      # - gemma4-31b-inf6-0.tinfoil.containers.tinfoil.dev
-      # - gpt-oss-120b-inf6-0.tinfoil.containers.tinfoil.dev
-      # - llama3-3-70b-inf12.tinfoil.containers.tinfoil.dev
-      # - llama3-3-70b.inf13.tinfoil.sh
-      # # Verifying those attestations: the pinned repo's release and Sigstore
-      # # bundle, the Sigstore trust root, and the AMD/Intel collateral proxies.
-      # - github-proxy.tinfoil.sh
-      # - tuf-repo-cdn.sigstore.dev
-      # - kds-proxy.tinfoil.sh
-      # - tdx-proxy.tinfoil.sh
+    egress: allowlist
+    allow:
+      - inference-gateway.tinfoil.sh
+      - inference.tinfoil.sh
+      - websearch.tinfoil.sh
+      - code-execution.tinfoil.sh
+      - sync.tinfoil.sh
+      - summarizer.tinfoil.sh
+      - docling.tinfoil.sh
+      - opengraph-metadata.tinfoil.sh
+      - clerk.tinfoil.sh
+      - api.tinfoil.sh
+      # Keep replicas synchronized with the deployment's gateway catalog.
+      # Add its voxtral-small-24b replicas to enable transcription.
+      - kimi-k3-inf14-2.tinfoil.containers.tinfoil.dev
+      - kimi-k3-inf18.tinfoil.containers.tinfoil.dev
+      - kimi-k3-inf17.tinfoil.containers.tinfoil.dev
+      - deepseek-v4-flash-inf15.tinfoil.containers.tinfoil.dev
+      - gemma4-31b-inf6-0.tinfoil.containers.tinfoil.dev
+      - gpt-oss-120b-inf6-0.tinfoil.containers.tinfoil.dev
+      - llama3-3-70b-inf12.tinfoil.containers.tinfoil.dev
+      - llama3-3-70b.inf13.tinfoil.sh
+      - github-proxy.tinfoil.sh
+      - tuf-repo-cdn.sigstore.dev
+      - kds-proxy.tinfoil.sh
+      - tdx-proxy.tinfoil.sh
 
 containers:
   - name: harness
     image: "ghcr.io/tinfoilsh/confidential-tinfoil-harness@sha256:0000000000000000000000000000000000000000000000000000000000000000"
     networks: [upstream]
-    # TLS to the gateway: EHBP seals the body, not the header carrying the key.
     env:
       - TINFOIL_GATEWAY_URL: https://inference-gateway.tinfoil.sh
-      - TINFOIL_TOOLS_ENCLAVE: websearch.tinfoil.sh
       - TINFOIL_CONTROLPLANE_URL: https://api.tinfoil.sh
+      - CLERK_ISSUER: https://clerk.tinfoil.sh
+      - TINFOIL_TRUSTED_PROXIES: "127.0.0.0/8,::1/128,172.31.255.1/32"
+      - TINFOIL_TOOLS_ENCLAVE: websearch.tinfoil.sh
+      - TINFOIL_CODE_ENCLAVE: code-execution.tinfoil.sh
+      - TINFOIL_SYNC_ENCLAVE: sync.tinfoil.sh
+      - TINFOIL_ROUTER_ENCLAVE: inference.tinfoil.sh
+      - TINFOIL_SUMMARIZER_ENCLAVE: summarizer.tinfoil.sh
+      - TINFOIL_DOCUMENT_ENCLAVE: docling.tinfoil.sh
+      - TINFOIL_METADATA_ENCLAVE: opengraph-metadata.tinfoil.sh
+      - TINFOIL_MEMORY_ENABLED: "false"
     secrets:
       - USAGE_CONTEXT_SECRET
-    # A run's log lives in memory only, so nothing needs to survive a restart.
+      - HARNESS_IDENTITY_SECRET
     read_only: true
+    # Imports may hold the input and transformed archive simultaneously.
+    # Every byte written here has already been encrypted by sealedSpool.
     tmpfs:
-      /tmp: rw,noexec,nosuid,nodev,size=16m
+      /tmp: rw,noexec,nosuid,nodev,size=1100m
     restart: always

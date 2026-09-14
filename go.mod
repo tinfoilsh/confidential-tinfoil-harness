@@ -3,12 +3,19 @@ module github.com/tinfoilsh/confidential-tinfoil-harness
 go 1.26.6
 
 require (
+	github.com/MicahParks/keyfunc/v3 v3.7.0
+	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/google/jsonschema-go v0.4.2
+	github.com/google/uuid v1.6.0
 	github.com/modelcontextprotocol/go-sdk v1.5.0
+	github.com/tiktoken-go/tokenizer v0.5.1
 	github.com/tinfoilsh/tinfoil-go v0.15.4-0.20260828072713-251feb041ce8
 	github.com/tinfoilsh/usage-reporting-go v0.1.3
+	golang.org/x/image v0.38.0
 )
 
 require (
+	github.com/MicahParks/jwkset v0.11.0 // indirect
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
 	github.com/blang/semver v3.5.1+incompatible // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
@@ -16,6 +23,7 @@ require (
 	github.com/cyberphone/json-canonicalization v0.0.0-20241213102144-19d51d7fe467 // indirect
 	github.com/digitorus/pkcs7 v0.0.0-20250730155240-ffadbf3f398c // indirect
 	github.com/digitorus/timestamp v0.0.0-20250524132541-c45532741eea // indirect
+	github.com/dlclark/regexp2 v1.11.5 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-openapi/analysis v0.25.3 // indirect
@@ -44,9 +52,7 @@ require (
 	github.com/google/certificate-transparency-go v1.3.3 // indirect
 	github.com/google/go-containerregistry v0.21.7 // indirect
 	github.com/google/go-tdx-guest v0.3.1 // indirect
-	github.com/google/jsonschema-go v0.4.2 // indirect
 	github.com/google/logger v1.1.2 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0 // indirect
 	github.com/in-toto/attestation v1.2.0 // indirect
 	github.com/in-toto/in-toto-golang v0.11.0 // indirect
@@ -90,6 +96,7 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/term v0.45.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260713224248-f5fc221cf8c4 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260713224248-f5fc221cf8c4 // indirect
 	google.golang.org/grpc v1.82.1 // indirect

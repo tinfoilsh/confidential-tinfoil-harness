@@ -26,7 +26,7 @@ const (
 )
 
 func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model) error {
-	apiKey, _ := ctx.Value(apiKeyKey{}).(string)
+	apiKey := callerKey(ctx)
 	inRun := usagereporting.Context{
 		ContextID:     req.runID,
 		RootRequestID: req.runID,
@@ -44,13 +44,38 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 		return fmt.Errorf("tools: %w", err)
 	}
 	defer set.close()
+	if req.managed {
+		set.widgets = map[string]widget{}
+		for _, offered := range req.rendered {
+			declaration := obj(obj(decodeValue(offered))["function"])
+			for _, w := range widgetCatalog() {
+				if w.Name == str(declaration["name"]) {
+					set.widgets[w.Name] = w
+				}
+			}
+		}
+		set.local = h.widgetResult
+	}
 
 	defs, err := offer(set, req.rendered)
 	if err != nil {
 		return fmt.Errorf("tools: %w", err)
 	}
 	conversation := append(set.system(), req.messages...)
+	if req.managed {
+		conversation, err = budgetConversation(req, set, defs)
+		if err != nil {
+			return err
+		}
+	}
+	refreshed := false
 	for turn := 1; ; turn++ {
+		if req.managed {
+			conversation, err = trimToolHistory(req, conversation, defs)
+			if err != nil {
+				return err
+			}
+		}
 		payload, err := body(req, m, conversation, defs)
 		if err != nil {
 			return err
@@ -60,6 +85,24 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 			turnCtx = first
 		}
 		calls, answer, err := h.turn(turnCtx, out, m, payload)
+		if err != nil && req.refreshAuth != nil && !refreshed && asAPIError(err).HTTP == http.StatusUnauthorized {
+			// A 401 rejected this model request before processing. Replay its
+			// exact body once, retaining the run ID and request billing flag.
+			refreshed = true
+			credential, refreshErr := req.refreshAuth(ctx)
+			if refreshErr != nil {
+				return refreshErr
+			}
+			inRun.APIKeyHash = usagereporting.HashAPIKey(string(credential.Key))
+			ctx = context.WithValue(ctx, apiKeyKey{}, string(credential.Key))
+			ctx = context.WithValue(ctx, usageContextKey{}, inRun)
+			turnCtx = ctx
+			if turn == 1 {
+				billing.APIKeyHash = inRun.APIKeyHash
+				turnCtx = context.WithValue(ctx, usageContextKey{}, billing)
+			}
+			calls, answer, err = h.turn(turnCtx, out, m, payload)
+		}
 		if err != nil {
 			return err
 		}
@@ -67,9 +110,20 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 			return nil
 		}
 		if turn == maxTurns {
-			return fmt.Errorf("model called tools for %d turns without answering", maxTurns)
+			return apiErr(502, "MAX_TURNS", fmt.Sprintf("The model called tools for %d turns without answering", maxTurns))
 		}
-		conversation = append(conversation, requested(answer, calls))
+		reply := requested(answer, calls)
+		if req.managed && (req.policy == "all" || req.policy == "tool-call-only") {
+			out.mu.Lock()
+			reasoning := out.turnReasoning
+			out.mu.Unlock()
+			if reasoning != "" {
+				value := obj(decodeValue(reply))
+				value["reasoning_content"] = reasoning
+				reply = raw(value)
+			}
+		}
+		conversation = append(conversation, reply)
 		conversation = append(conversation, execute(ctx, out, set, calls)...)
 	}
 }
@@ -82,6 +136,12 @@ func body(req *request, m *model, conversation []json.RawMessage, defs json.RawM
 		"stream_options":    map[string]any{"include_usage": true},
 		"messages":          conversation,
 		"user_cache_secret": req.cacheScope,
+	}
+	if req.managed {
+		payload["model"] = req.model
+		for key, value := range req.params {
+			payload[key] = value
+		}
 	}
 	if len(defs) > 0 {
 		payload["tools"] = defs
@@ -166,9 +226,35 @@ func schedule(set *toolset, calls []toolCall) [][]int {
 	return queues
 }
 
-func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) json.RawMessage {
+func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) (message json.RawMessage) {
+	// One tool goroutine's panic is that call's failure, read by the model like
+	// any other. Nothing is emitted from here: a frame is what may have panicked.
+	defer func() {
+		if err := rescued("tool "+call.name, recover()); err != nil {
+			failure, _ := json.Marshal(map[string]string{"error": err.Error()})
+			message = answered(call.id, string(failure))
+		}
+	}()
 	// A widget is drawn by the caller from TOOL_CALL_ARGS; the model just needs a result.
 	if set.byName[call.name] == nil {
+		if set.widgets != nil {
+			w, ok := set.widgets[call.name]
+			if !ok {
+				return answered(call.id, `{"error":"unknown tool"}`)
+			}
+			var args any
+			if json.Unmarshal([]byte(call.args), &args) != nil || validateSchema(w.Schema, args) != nil {
+				out.result(call.id, `{"error":"invalid widget arguments"}`, nil)
+				return answered(call.id, `{"error":"invalid widget arguments"}`)
+			}
+			content, err := set.local(ctx, call)
+			if err != nil {
+				content = object{"error": asAPIError(err).Message}
+			}
+			out.emit(event{Type: "TOOL_CALL_RESULT", MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: raw(content)})
+			return answered(call.id, "[rendered for the user]")
+		}
+		out.result(call.id, "[rendered for the user]", nil)
 		return answered(call.id, "[rendered for the user]")
 	}
 	out.activity(call)
@@ -179,7 +265,11 @@ func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) json.
 		content, meta = string(failure), nil
 	}
 	// The caller's copy is clipped far later than the model's: present renders whole files.
-	out.result(call.id, clip(content, maxShownOutput), meta)
+	if set.widgets != nil {
+		out.emit(event{Type: "TOOL_CALL_RESULT", MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: raw(normalizeToolResult(call, clip(content, maxShownOutput))), Metadata: meta})
+	} else {
+		out.result(call.id, clip(content, maxShownOutput), meta)
+	}
 	return answered(call.id, clip(content, maxToolOutput))
 }
 
@@ -194,7 +284,11 @@ func clip(out string, limit int) string {
 }
 
 func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byte) ([]toolCall, string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.gateway+"/v1/chat/completions", bytes.NewReader(payload))
+	endpoint := m.endpoint
+	if endpoint == "" {
+		endpoint = h.gateway + "/v1/chat/completions"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return nil, "", err
 	}
@@ -211,9 +305,22 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 		return nil, "", &refusal{status: resp.StatusCode, detail: string(bytes.TrimSpace(detail))}
 	}
 
+	out.mu.Lock()
+	out.modelAccepted = true
+	out.mu.Unlock()
 	var calls []toolCall
-	var answer strings.Builder
+	ended := false
+	var answer, reasoningText strings.Builder
 	message := "msg_" + token()
+	if out.managed {
+		out.mu.Lock()
+		if out.replyID == "" {
+			out.replyID = message
+		}
+		message = out.replyID
+		out.mu.Unlock()
+	}
+	defer func() { out.mu.Lock(); out.turnReasoning = reasoningText.String(); out.mu.Unlock() }()
 	events := bufio.NewScanner(resp.Body)
 	events.Buffer(nil, maxSSEEvent)
 	for events.Scan() {
@@ -222,12 +329,19 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 			continue
 		}
 		data = strings.TrimSpace(data)
-		if data == "" || data == "[DONE]" {
+		if data == "[DONE]" {
+			ended = true
+			break
+		}
+		if data == "" {
 			continue
 		}
 		var chunk struct {
+			Model   string          `json:"model"`
+			Error   json.RawMessage `json:"error"`
 			Choices []struct {
-				Delta struct {
+				FinishReason string `json:"finish_reason"`
+				Delta        struct {
 					Content string `json:"content"`
 					// Enclaves disagree on the field because of diverging vLLM versions
 					Reasoning    string          `json:"reasoning_content"`
@@ -238,7 +352,18 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 			Usage json.RawMessage `json:"usage"`
 		}
 		if json.Unmarshal([]byte(data), &chunk) != nil {
+			if out.managed {
+				return nil, answer.String(), apiErr(502, "UPSTREAM_REFUSED", "The model stream contains invalid JSON")
+			}
 			continue
+		}
+		if len(chunk.Error) > 0 && string(chunk.Error) != "null" {
+			return nil, answer.String(), downstreamError(502, chunk.Error)
+		}
+		if chunk.Model != "" && chunk.Model != "auto" {
+			out.mu.Lock()
+			out.concreteModel = chunk.Model
+			out.mu.Unlock()
 		}
 		if len(chunk.Usage) > 0 {
 			out.meter(chunk.Usage)
@@ -246,16 +371,23 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 		if len(chunk.Choices) == 0 {
 			continue
 		}
+		if chunk.Choices[0].FinishReason != "" {
+			ended = true
+		}
 		delta := chunk.Choices[0].Delta
 		if delta.Content != "" {
 			answer.WriteString(delta.Content)
 			out.text(message, delta.Content)
 		}
 		if reasoning := cmp.Or(delta.Reasoning, delta.ReasoningAlt); reasoning != "" {
+			reasoningText.WriteString(reasoning)
 			out.reasoning(message, reasoning)
 		}
 		for _, called := range delta.ToolCalls {
-			calls = announce(out, parent(message, &answer), calls, called)
+			if called.Index < 0 || called.Index >= 128 {
+				return nil, answer.String(), apiErr(502, "UPSTREAM_REFUSED", "The model exceeded the tool call limit")
+			}
+			calls = announce(out, message, calls, called)
 		}
 	}
 	for i := range calls {
@@ -268,7 +400,13 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 		}
 		out.callEnd(calls[i].id)
 	}
-	return calls, answer.String(), events.Err()
+	if events.Err() != nil {
+		return calls, answer.String(), events.Err()
+	}
+	if out.managed && !ended {
+		return calls, answer.String(), apiErr(502, "UPSTREAM_REFUSED", "The model stream ended before completion")
+	}
+	return calls, answer.String(), nil
 }
 
 type toolCall struct {

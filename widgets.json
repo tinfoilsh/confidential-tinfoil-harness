@@ -1,0 +1,762 @@
+[
+  {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "stats": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "label": {
+                "type": "string"
+              },
+              "value": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ]
+              },
+              "trend": {
+                "type": "string",
+                "enum": [
+                  "up",
+                  "down"
+                ]
+              }
+            },
+            "required": [
+              "label",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "description": "Metrics or KPIs to display in a responsive grid"
+        }
+      },
+      "required": [
+        "stats"
+      ],
+      "additionalProperties": false
+    },
+    "name": "render_stat_cards",
+    "description": "Display a grid of metrics or KPIs. Use when presenting multiple numeric summaries.",
+    "promptHint": "grid of numeric KPIs or metrics",
+    "surface": "inline"
+  },
+  {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "date": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "date",
+              "title"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "description": "Chronological events"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "events"
+      ],
+      "additionalProperties": false
+    },
+    "name": "render_timeline",
+    "description": "Display a chronological timeline of events. Use for history, news recaps, or project milestones.",
+    "promptHint": "chronological events, history, news recaps, or milestones",
+    "surface": "inline"
+  },
+  {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "bar",
+            "line",
+            "pie"
+          ],
+          "description": "Chart type. \"bar\" for categorical comparisons, \"line\" for trends or sequences, \"pie\" for parts of a whole."
+        },
+        "data": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                }
+              ]
+            }
+          },
+          "minItems": 1,
+          "description": "Data points sharing the same keys — e.g. [{\"label\":\"A\",\"value\":10}, ...]"
+        },
+        "xKey": {
+          "type": "string",
+          "description": "For bar/line: key for the category axis. For pie: key for slice names. Defaults to the first string field."
+        },
+        "yKey": {
+          "type": "string",
+          "description": "For bar/line: key for the numeric axis. For pie: key for slice values. Defaults to the first numeric field."
+        },
+        "title": {
+          "type": "string"
+        },
+        "color": {
+          "type": "string",
+          "description": "Primary series color for bar/line charts. Pie slices use a built-in palette."
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "name": "render_chart",
+    "description": "Render a chart from tabular data. Choose `type`: \"bar\" for categorical comparisons, \"line\" for trends or sequences over time, \"pie\" for proportions/parts of a whole.",
+    "promptHint": "a chart from tabular data — pass type \"bar\" | \"line\" | \"pie\" depending on whether you are comparing categories, showing a trend, or showing parts of a whole",
+    "surface": "inline"
+  },
+  {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "images": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string",
+                "description": "Image URL"
+              },
+              "alt": {
+                "type": "string",
+                "description": "Accessible alt text"
+              },
+              "caption": {
+                "type": "string"
+              },
+              "link": {
+                "type": "string",
+                "description": "Optional destination when clicked"
+              }
+            },
+            "required": [
+              "url"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "description": "One or more images. A single image renders large with an optional caption; multiple images render in a responsive grid."
+        },
+        "title": {
+          "type": "string"
+        },
+        "aspectRatio": {
+          "type": "string",
+          "enum": [
+            "square",
+            "video",
+            "auto"
+          ],
+          "description": "Single-image only. Container shape: square (1:1), video (16:9), or auto. Ignored when multiple images are provided."
+        }
+      },
+      "required": [
+        "images"
+      ],
+      "additionalProperties": false
+    },
+    "name": "render_image",
+    "description": "Display one or more images. Pass a single item for a large standalone image; pass multiple items to render a responsive grid (galleries, comparisons, multi-visual references).",
+    "promptHint": "one or more images — pass a single item for a large standalone image, or multiple items for a responsive grid",
+    "surface": "inline"
+  },
+  {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "Full URL of the resource"
+        },
+        "title": {
+          "type": "string",
+          "description": "Best guess at the page or resource title. Used as a fallback if the metadata fetch fails."
+        }
+      },
+      "required": [
+        "url",
+        "title"
+      ],
+      "additionalProperties": false
+    },
+    "name": "render_link_preview",
+    "description": "Display a rich preview card for a single web link. Use when linking to an article, page, or resource and you want to surface title, description, and favicon. The card fetches metadata (title, description, site name, image, favicon) from the opengraph-metadata.tinfoil.sh enclave. Provide only the URL and a fallback title — every other field is resolved server-side.",
+    "promptHint": "rich preview card for a single web link",
+    "surface": "inline"
+  },
+  {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "url"
+                  ]
+                },
+                "url": {
+                  "type": "string",
+                  "description": "Absolute URL rendered inside a sandboxed iframe"
+                }
+              },
+              "required": [
+                "type",
+                "url"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "html"
+                  ]
+                },
+                "html": {
+                  "type": "string",
+                  "description": "Raw HTML rendered in a sandboxed iframe. Use exactly {\"type\":\"html\",\"html\":\"...\"}."
+                }
+              },
+              "required": [
+                "type",
+                "html"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "markdown"
+                  ]
+                },
+                "markdown": {
+                  "type": "string",
+                  "description": "Markdown source. Use exactly {\"type\":\"markdown\",\"markdown\":\"...\"}."
+                }
+              },
+              "required": [
+                "type",
+                "markdown"
+              ],
+              "additionalProperties": false
+            }
+          ],
+          "description": "The artifact payload. Pick the `type` that matches your content: `url` for a live site, `html` for a self-contained page, or `markdown` for rich text. For SVG illustrations and Mermaid diagrams, emit a fenced ```svg or ```mermaid code block in the regular assistant message instead — the renderer shows the source and a live preview side-by-side automatically."
+        },
+        "footer": {
+          "type": "string",
+          "description": "Optional small footnote text"
+        }
+      },
+      "required": [
+        "source"
+      ],
+      "additionalProperties": false
+    },
+    "name": "render_artifact_preview",
+    "description": "Display a visual artifact in a side panel: a hosted URL, a self-contained HTML snippet, or Markdown. Use for content worth inspecting at full size — interactive demos, long-form documents, or rich HTML mockups. For SVG illustrations and Mermaid diagrams, emit a fenced `svg` or `mermaid` code block in the regular assistant message instead. The chat shows a compact summary card; clicking it opens the full artifact in the right sidebar.",
+    "promptHint": "large artifacts (markdown/html/url) opened in a side panel",
+    "surface": "inline"
+  },
+  {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "clock",
+            "timer"
+          ],
+          "description": "What to display. \"clock\" shows the current time as an analog face. \"timer\" counts down from a duration or to a target time. Defaults to \"clock\"."
+        },
+        "label": {
+          "type": "string",
+          "description": "Short label, e.g. \"New York\" for a clock or \"Tea\" for a timer."
+        },
+        "title": {
+          "type": "string",
+          "description": "Main title (timer mode)"
+        },
+        "description": {
+          "type": "string",
+          "description": "Optional description"
+        },
+        "timeZone": {
+          "type": "string",
+          "description": "Clock mode only. IANA time zone, e.g. \"America/New_York\". Defaults to local."
+        },
+        "showSeconds": {
+          "type": "boolean",
+          "description": "Clock mode: include the second hand (default true)."
+        },
+        "showDate": {
+          "type": "boolean",
+          "description": "Clock mode: include date line (default true)."
+        },
+        "durationSeconds": {
+          "type": "number",
+          "exclusiveMinimum": true,
+          "minimum": 0,
+          "maximum": 604800,
+          "description": "Timer mode. Duration in seconds. Prefer this for requests like \"set a 5 minute timer\"."
+        },
+        "target": {
+          "type": "string",
+          "description": "Timer mode. ISO date-time when the timer should end, e.g. \"2026-12-31T23:59:59Z\". Use when an exact end time is known."
+        },
+        "completedMessage": {
+          "type": "string",
+          "description": "Timer mode. Message shown when the timer finishes."
+        },
+        "alarmMode": {
+          "type": "string",
+          "enum": [
+            "sound",
+            "flash"
+          ],
+          "description": "Timer mode. Alarm behavior when done. \"sound\" beeps; \"flash\" stays silent and flashes visually. Defaults to sound."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Display either a live analog clock or an interactive countdown timer."
+    },
+    "name": "render_clock",
+    "description": "Display either a live analog clock (mode \"clock\") or an interactive countdown timer (mode \"timer\"). Use \"clock\" for the current time in a time zone. Use \"timer\" for \"set a 5 minute timer\", reminders, breaks, workouts, cooking, etc.",
+    "promptHint": "a live analog clock OR a countdown timer — pass mode \"clock\" with optional timeZone for time display, or mode \"timer\" with durationSeconds (or target ISO date) for countdowns",
+    "surface": "inline"
+  },
+  {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string"
+        },
+        "image": {
+          "type": "string"
+        },
+        "cuisine": {
+          "type": "string"
+        },
+        "difficulty": {
+          "type": "string",
+          "enum": [
+            "easy",
+            "medium",
+            "hard"
+          ]
+        },
+        "servings": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "number"
+            }
+          ]
+        },
+        "prepTime": {
+          "type": "string"
+        },
+        "cookTime": {
+          "type": "string"
+        },
+        "totalTime": {
+          "type": "string"
+        },
+        "ingredients": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "quantity": {
+                "type": "string"
+              },
+              "item": {
+                "type": "string"
+              },
+              "note": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "item"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string"
+              },
+              "content": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "content"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "sourceUrl": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "additionalProperties": false
+    },
+    "name": "render_recipe_card",
+    "description": "Display a cookable recipe card with ingredients and step-by-step instructions. Use when presenting a recipe, cooking procedure, or multi-step preparation with ingredients.",
+    "promptHint": "a cookable recipe card with ingredients and steps",
+    "surface": "inline"
+  },
+  {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "channel": {
+          "type": "string",
+          "enum": [
+            "email",
+            "message"
+          ],
+          "description": "email (shows subject + \"Open in Mail\") or message (body only)"
+        },
+        "to": {
+          "type": "string",
+          "description": "Recipient — used for mailto:"
+        },
+        "title": {
+          "type": "string",
+          "description": "Card title, e.g. \"Draft reply to Alice\""
+        },
+        "variants": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "label": {
+                "type": "string",
+                "description": "Short variant label, e.g. \"Formal\", \"Concise\", \"Apologetic\""
+              },
+              "subject": {
+                "type": "string"
+              },
+              "body": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "label",
+              "body"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "description": "One or more message drafts to offer. First variant is selected by default."
+        }
+      },
+      "required": [
+        "variants"
+      ],
+      "additionalProperties": false
+    },
+    "name": "render_message_compose",
+    "description": "Draft a message or email with one or more tone variants. Includes Copy and (for email) Open in Mail. Use when proposing a reply, message, or email draft to send.",
+    "promptHint": "a draft message or email with optional tone variants and Copy / Open in Mail",
+    "surface": "inline"
+  },
+  {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "sport": {
+          "type": "string",
+          "description": "e.g. \"NBA\", \"Premier League\""
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "fixture",
+            "standings"
+          ],
+          "description": "`fixture` for a single game (scoreline), `standings` for a league table"
+        },
+        "title": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "description": "e.g. \"Final\", \"Live — 3rd quarter\", \"Scheduled\""
+        },
+        "venue": {
+          "type": "string"
+        },
+        "startTime": {
+          "type": "string"
+        },
+        "home": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "score": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                }
+              ]
+            },
+            "logo": {
+              "type": "string"
+            },
+            "rank": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "additionalProperties": false
+        },
+        "away": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "score": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                }
+              ]
+            },
+            "logo": {
+              "type": "string"
+            },
+            "rank": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "additionalProperties": false
+        },
+        "standings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "team": {
+                "type": "string"
+              },
+              "wins": {
+                "type": "number"
+              },
+              "losses": {
+                "type": "number"
+              },
+              "ties": {
+                "type": "number"
+              },
+              "points": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ]
+              },
+              "gamesBack": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "team"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "additionalProperties": false
+    },
+    "name": "render_sports_data",
+    "description": "Display a sports fixture (game scoreline) or a league standings table. Use when the user asks about a game score, match result, or league table.",
+    "promptHint": "a sports fixture scoreline or a league standings table",
+    "surface": "inline"
+  },
+  {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "place",
+            "search",
+            "directions"
+          ],
+          "description": "`place` (default) for a single location, `search` for a POI query, `directions` for a routed list"
+        },
+        "query": {
+          "type": "string",
+          "description": "Used when `mode === \"search\"`, e.g. \"coffee\""
+        },
+        "locations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Display name shown on the pin"
+              },
+              "address": {
+                "type": "string",
+                "description": "Full address or place query (e.g. \"1 Apple Park Way, Cupertino, CA\" or \"Eiffel Tower, Paris\"). Used for geocoding when coordinates are not provided."
+              },
+              "latitude": {
+                "type": "number",
+                "description": "Latitude in degrees. Always provide this when you know it — relying on geocoding alone can fail for ambiguous names."
+              },
+              "longitude": {
+                "type": "number",
+                "description": "Longitude in degrees. Always provide this when you know it — relying on geocoding alone can fail for ambiguous names."
+              },
+              "description": {
+                "type": "string",
+                "description": "One-line subtitle"
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1
+        },
+        "travelMode": {
+          "type": "string",
+          "enum": [
+            "driving",
+            "walking",
+            "transit",
+            "cycling"
+          ]
+        },
+        "mapType": {
+          "type": "string",
+          "enum": [
+            "standard",
+            "hybrid",
+            "satellite",
+            "muted"
+          ],
+          "description": "Visual style of the map tiles"
+        }
+      },
+      "required": [
+        "locations"
+      ],
+      "additionalProperties": false
+    },
+    "name": "render_map",
+    "description": "Display an interactive Apple Map with one or more pinned locations and a button to open the map (or directions, when multiple stops are provided) in Apple Maps. Use when the user asks about places, addresses, routes, or wants to see somewhere on a map. Provide latitude/longitude when known; otherwise an address string is geocoded automatically.",
+    "promptHint": "an interactive Apple Map with one or more locations and a button to open in Apple Maps",
+    "surface": "inline"
+  }
+]

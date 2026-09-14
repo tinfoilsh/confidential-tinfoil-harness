@@ -16,13 +16,14 @@ import (
 // A family's tools are named here rather than discovered, so an enclave that
 // grows one does not widen what this harness offers.
 type family struct {
-	name    string
-	env     string
-	repo    string
-	enclave string
-	tools   []tool
-	prompt  string
-	serial  bool // holds state between calls, so never two in flight at once
+	verifiedAt string
+	name       string
+	env        string
+	repo       string
+	enclave    string
+	tools      []tool
+	prompt     string
+	serial     bool // holds state between calls, so never two in flight at once
 	// live reads forwardedProps: whether this family runs, and what its calls carry.
 	live func(json.RawMessage) (bool, mcp.Meta, error)
 
@@ -100,6 +101,8 @@ func codeLive(props json.RawMessage) (bool, mcp.Meta, error) {
 }
 
 type toolset struct {
+	widgets  map[string]widget
+	local    func(context.Context, toolCall) (any, error)
 	sessions []*session
 	byName   map[string]*session
 }
