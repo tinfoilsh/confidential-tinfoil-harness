@@ -1,212 +1,159 @@
 # confidential-tinfoil-harness
 
-Minimal [AG-UI](https://ag-ui.com) agent in front of Tinfoil's inference gateway,
-for confidential tool loops.
+An attested Go service that owns chat prompts, turns, tools, persistence, and
+run recovery. The `/v1` API accepts a Clerk session and, for stored data, a
+base64 32-byte content encryption key (CEK) in the encrypted request body.
+[DESIGN.md](DESIGN.md) describes the intended client migration.
+[IMPLEMENTATION.md](IMPLEMENTATION.md) records the implemented scope and the
+remaining rollout and contract gaps. The webapp source now uses the harness
+on all chat routes while preserving its UI. Deployment and the iOS cutover
+remain separate work.
 
-    POST   /agui      RunAgentInput in, AG-UI events out
-    DELETE /agui      drop a stored run log
-    GET    /healthz
+All application routes are POST. JSON requests are limited to 8 MiB. Uploads
+and imports use bounded multipart bodies. `GET /healthz` is public. The
+transitional [AG-UI API](LEGACY.md) remains at `/agui` for comparison with
+existing clients.
 
-## Protocol
+## Requests and events
 
-The body is a `RunAgentInput`. The harness reads `threadId`, `runId` and
-`messages`, and ignores `state`, `context` and `parentRunId`. The two ids are
-echoed into every frame of the run's log and `runId` is signed into the usage
-context of every request the run makes upstream, so both are held to 128
-printable ASCII characters. Either one absent is named by the harness instead.
+Use the Tinfoil SDK's attested fetch transport to this service. The client must
+retain custody of the CEK; it sends neither a constructed prompt nor tool
+schemas. For example, a first stored turn has this JSON body:
 
-`tools` declares widgets the caller draws. They are advertised to the model and
-answered on the caller's behalf, never dialled, so the loop only executes what it
-attests. A widget that claims a name the run itself serves is rejected instead of
-allowed to shadow it. AG-UI has no model field, so `forwardedProps.model` names a
-model or `auto`. `forwardedProps.piiCheck: true` asks the model enclave to screen
-the run for PII, and absent means off.
+```json
+{
+  "key": "<base64 CEK>",
+  "threadId": null,
+  "clientRequestId": "<UUID nonce>",
+  "kind": "send",
+  "content": "Explain the attached document",
+  "attachments": [],
+  "widgets": ["render_chart"],
+  "options": {"model": "kimi-k3", "timezone": "America/Los_Angeles"}
+}
+```
 
-### Tool families
+`Authorization: Bearer <Clerk JWT>` authenticates the caller. The harness
+exchanges it for an inference credential, but forwards the original Clerk
+JWT to sync. A model request rejected with HTTP 401 refreshes the inference
+credential and retries its unchanged body once under the same run ID.
+Public anonymous turns require `ephemeral: true`; temporary
+uploads also use the multipart field `ephemeral=true`.
 
-A family is one enclave the loop dials and the tools it advertises out of it.
-`tools.go` holds them in one table. A row names the family, its pinned repo and
-host, its tools, the system prompt the model reads for them, and one function
-that reads `forwardedProps` to decide whether the run dials that enclave at all
-and what its calls carry. Two are served:
+The response is SSE with monotonically increasing numeric IDs per run:
+`RUN_STARTED`, message/state snapshots, text/reasoning/tool events, and a
+terminal `RUN_FINISHED` or `RUN_ERROR`. The harness mints thread, message,
+run, attachment, and queue IDs. A `clientRequestId` retry uses the original
+thread and run, including after a process restart for stored threads.
 
-    webSearch       web_search, web_fetch
-    codeExecution   bash, view, str_replace, create, insert, present
+`POST /v1/threads/follow` takes `{key, threadId, runId}` and optionally
+`Last-Event-ID`. It sends an unnumbered message snapshot of the cursor prefix
+before replaying subsequent numbered frames. A client replaces its messages
+with that snapshot; it must not append it. Closing a connection does not cancel
+a run. `POST /v1/threads/cancel` commits partial output as interrupted and
+preserves the queue. SSE comments keep idle connections alive.
 
-Tool names live in the table instead of being read off the enclave, which buys
-three things. The harness can reject a shadowing widget before the run starts,
-the advertised order stays fixed so a caller keeps hitting the same prompt cache,
-and an enclave that grows a seventh tool does not widen what this agent offers.
-Only the families a run dials reserve their names, and the sandbox's are ordinary
-words, so a widget called `view` or `create` is the caller's own on every run
-that does not ask for code execution.
+The other route families cover session/catalog display, thread CRUD/search,
+projects/documents/memory, profile settings, attachments/transcription,
+sharing, native v2 and Claude project exports, staged imports, key passthrough,
+and downstream verification. The complete route table is in `api.go` and
+`records.go`; bodies and response shapes are specified in DESIGN §5.
 
-Each family the run dials also prepends its system prompt, which counts against
-the model's context the same as the caller's messages do.
+## Keys, persistence, and compatibility
 
-A tool enclave that does not verify at startup is logged and skipped, not fatal.
-Runs that ask for that family are refused, everything else is served, and the
-next restart is the next chance to pin it.
+The CEK is never logged or written to a local file. Code execution derives the
+same HKDF keys as the web and iOS clients. Managed run logs use
+`HKDF-SHA256(CEK, "confidential-tinfoil-harness run log v2:" + runId)` and
+AES-GCM with frame indices authenticated as associated data. Stored runs spill
+ciphertext from their start, including while the client is attached. Their
+recovery authorization is independent of inference credential rotation.
 
-`forwardedProps.webSearch: false` withholds web search for that run, and absent
-means on. Code execution works the other way round, since its sandbox cannot be
-dialled without the caller's tokens:
+Stored rows are read and written through confidential-sync's actual v2 wire
+contract, including base64 plaintext, `if_match`, and `X-Sync-Protocol: 2`.
+CAS retries reapply changes to freshly pulled rows, preserve unknown fields,
+and maintain iOS edit clocks and profile field clocks. Legacy recovery fields
+are carried through. Favorites are mirrored into the legacy profile field
+while iOS still writes it.
 
-    "forwardedProps": {
-      "codeExecution": {
-        "accessToken": ..., "encryptionKey": ..., "containerAuthToken": ...,
-        "uploads": [{"fileAccessToken": ..., "filename": ..., "sha256": ...}]
-      }
-    }
+Completed stored runs discard their CEK, JWT, input, and assembled plaintext.
+Their sealed logs and run decryption context remain available in RAM for the
+30-minute recovery window. Temporary conversations and their keys remain in
+RAM for that window and are never spilled. `ask` reads a stored source thread
+but runs a temporary side conversation with that transcript hidden from the
+returned message window.
 
-All three tokens are required, `uploads` is optional, and a block missing one
-answers `400`. The harness never reads them. They cross to the enclave as call
-metadata, which is what lets a workspace outlive the run. `accessToken` names the
-container, so a caller that sends the same one comes back to the same shell, the
-same files and the same installed packages. A family that holds a shell takes its
-calls one at a time, in the order the model made them. Everything else still runs
-concurrently.
+Images and document pages use sync attachment references in stored rows. The
+harness makes thumbnails, extracts documents, transcribes audio, and caches
+image descriptions in the thread. Export/import staging uses temporary files
+containing only AES-GCM ciphertext; chunk indices are authenticated. Temporary
+archive keys are random and discarded when the request ends.
 
-`present` renders a file for the user. Its output comes back as that call's
-`TOOL_CALL_RESULT`, like any other tool's, and the prompt tells the model the
-user is already looking at it. A client that offers code execution has to draw
-it. Results are truncated for both the model and the caller, but the caller's
-limit is much the larger of the two, because the model is told not to repeat what
-it presented.
+## Build and checks
 
-Eleven event types come back, framed as SSE:
+Go 1.26.6 or later is required. From this directory:
 
-    RUN_STARTED  RUN_FINISHED  RUN_ERROR
-    TEXT_MESSAGE_CHUNK  REASONING_MESSAGE_CHUNK
-    TOOL_CALL_START  TOOL_CALL_ARGS  TOOL_CALL_END  TOOL_CALL_RESULT
-    ACTIVITY_SNAPSHOT  ACTIVITY_DELTA
+```sh
+GOWORK=off go test -race -timeout 60s ./...
+GOWORK=off go vet ./...
+GOWORK=off go build ./...
+```
 
-Tool calls run concurrently and are addressed by id, so their events may
-interleave. Text and reasoning use chunk events, one message per turn. A call
-made in a turn that also produced text carries that message as its
-`parentMessageId`. `TOOL_CALL_RESULT` carries the tool's output, truncated only
-if it outgrew what a frame may hold. A call that failed carries
-`{"error": ...}`, which is what the model reads too.
+If `../tinfoil-webapp/node_modules` is installed, the tests also run frozen reference
+validators from `scripts/fixtures/legacy-webapp/` against Go-produced
+artifacts. Without that checkout or Node, those reference checks explicitly
+skip. The remaining Go tests have no live service dependency.
 
-### Tool output as it happens
+The companion web client is in `../tinfoil-webapp/src/services/harness/`.
+Configure `NEXT_PUBLIC_HARNESS_ENCLAVE_URL` with the deployed HTTPS origin
+and open the main chat page to exercise the API. See the webapp's `HARNESS.md` for
+its scope and tests. Go-produced event fixtures also run through that reducer.
 
-A tool that reports progress streams it. Each call opens an activity of type
-`TOOL`, addressed as `act_<toolCallId>`, and every MCP progress notification from
-the enclave patches it:
+Embedded widget declarations, presets, and memory schemas are maintained here.
+Check the web renderer schemas against those declarations with:
 
-    ACTIVITY_SNAPSHOT  {"toolCallId": ..., "tool": "web_search", "progress": 0, "output": []}
-    ACTIVITY_DELTA     [{"op":"replace","path":"/progress","value":0.5},
-                        {"op":"add","path":"/output/-","value":"..."}]
+```sh
+node scripts/check-widgets.cjs ../tinfoil-webapp
+```
 
-`output` is a list because RFC 6902 cannot grow a string; a client joins it. The
-result itself still arrives whole, since MCP has no partial tool result, so a
-long-running tool is legible only as far as it reports progress.
-
-A run answers within 16 tool-calling turns or ends with `RUN_ERROR`, and widget
-calls count against that too. `RUN_FINISHED` carries the run's summed usage
-across every turn. A request that fails before the run opens answers with an HTTP
-status instead, so a gateway refusal reaches the caller as itself.
-
-### Coming back to a run
-
-Every frame carries an `id:`, monotonic from zero. A caller that wants to be able
-to come back generates a `sessionId` and a `recoveryToken`, both 128 random bits
-as hex, and sends them with the run. It comes back by posting the same pair with
-`resume: true` and a `Last-Event-ID`, and is served everything after that id,
-from memory if this harness is still running it and from the stored log
-otherwise.
-
-Being able to open the log is the whole of the authorization, and the caller's
-API key is part of what seals it: the same pair presented under another key
-opens nothing, warm or cold, so a client that reuses or under-randomizes a
-`recoveryToken` still cannot reach across keys with it. A secret that does not
-open it and a log that is not there are refused identically, and a run too
-young to have framed anything cannot be authorized either way, so it answers
-`503` with a `Retry-After` instead of a refusal. `DELETE /agui` with the same
-pair drops the log once the caller has the answer, authorized by opening it like
-everything else, and answers `502` rather than `204` if the store did not drop
-it. A log nobody drops expires with the store.
-
-A run outlives the connection that asked for it. Nothing is written anywhere
-while a caller is attached. Once the caller disconnects, the harness seals off
-what it has to the store and keeps writing there until the run ends. Frames are
-sealed as they are produced, under a key derived from the caller's secret and its
-API key, so the
-spill is a byte copy and the store holds ciphertext it has no way to read. When
-the run ends the key and the frames go with it, and a caller arriving after that
-reads the stored log instead. A log with no terminal event and no harness still
-running it belongs to a run that died, and replays as one. A run holds its whole
-log in memory while it lives, so there is a ceiling on it: a run that reaches it
-ends with `RUN_ERROR` and stops, rather than billing turns into a log nothing can
-read. Nothing caps how many runs are in flight, so that ceiling times the runs a
-deployment expects is what the enclave has to be sized for.
-
-Two things follow. A run that finishes with its caller attached is never written
-down at all, so a caller that loses the answer between the last byte and its own
-storage has nothing to come back to. And a `sessionId` names nothing. It is not
-the thread, not the run, and not derived from either, so the store cannot tell
-which conversation a log belongs to.
-
-Image parts must be inline, either `source.type: "data"` or a `data:` URL. A
-remote URL is refused because the model enclave, not the harness, would fetch it,
-off the attested path and outside its egress allowlist.
+The Docker build includes those embedded JSON files and a timezone database.
+The SDK remains pinned to the existing gateway transport commit in `go.mod`.
+No local module replacements are required.
 
 ## Deployment
 
-The harness runs as the single container of a Tinfoil CVM. `tinfoil-config.yml`
-is the measured description of that CVM: a client attesting this enclave is told
-exactly this file, so the container is pinned by digest and every host the
-harness may reach is enumerated.
+`tinfoil-config.yml` exposes `/v1/*` through the shim and leaves Clerk
+verification to Go. Only legacy `/agui` requires shim API-key authentication.
+Trusted proxy defaults include the shim bridge's `172.31.255.1/32` and
+loopback. Set `TINFOIL_TRUSTED_PROXIES` for a different ingress topology;
+forwarded addresses are accepted only from those proxies.
 
-    tinctl inspect tinfoilsh/confidential-tinfoil-harness   # resolve the config
-    tinctl deploy  tinfoilsh/confidential-tinfoil-harness   # launch it
+Required configuration:
 
-Ingress is the shim alone: TLS on 443, forwarded to the harness on 8081, with
-`/agui` and `/healthz` the only paths that reach it. The shim validates the
-caller's Tinfoil key and passes it through, which is the same key the harness
-forwards upstream. It has none of its own.
+- `USAGE_CONTEXT_SECRET`: shared with the gateway and downstream usage
+  reporters, so one model/tool/derived-call tree counts as one customer run.
+- `HARNESS_IDENTITY_SECRET`: a separate secret shared with controlplane.
+  The companion controlplane change verifies signed, short-lived source-IP
+  assertions for `/api/keys/chat`. Anonymous key exchange fails if the
+  assertion is not acknowledged. Existing browser key exchange is unchanged.
+- `CLERK_ISSUER`, and optionally `CLERK_AUDIENCE`, must match sync and the
+  configured Clerk instance. The issuer's JWKS host must be allowed in egress.
+- Gateway/controlplane URLs and downstream enclave hosts can be changed with
+  the `TINFOIL_*` variables shown in the measured configuration.
 
-### Egress
+Sync and the Auto router are required at boot. Optional tool, document,
+metadata, summary, and audio services are advertised only after attestation.
+Memory extraction is disabled unless `TINFOIL_MEMORY_ENABLED=true`;
+individual projects may opt out with `memoryEnabled=false`. Sandbox tools are
+unavailable because the referenced sandbox service exposes a different API.
 
-`networks.upstream.allow` is resolved to IPs and enforced with nftables, and a
-name that does not resolve fails the whole set closed. It covers four things:
+The egress allowlist includes the previously documented model replicas and
+the new services. Before release, reconcile it with the actual gateway catalog,
+including Voxtral replica hosts; these hosts are not present in the reference
+checkouts. DNS failures fail allowlist setup closed. The zero image digest is
+replaced by the existing release workflow before measurement and publication.
 
-- the gateway and one host per tool family, which are the hosts it dials;
-- every replica in the gateway's catalog, because attestation is fetched from
-  the host itself, including the one a 421 names and the SDK re-seals to. This
-  is the one place a host is written down: `main.go` names no enclave, so the
-  list here has to mirror the gateway's config;
-- what verifying those attestations needs: `github-proxy` for the pinned repo's
-  release and Sigstore bundle, `tuf-repo-cdn.sigstore.dev` for the trust root,
-  and the AMD and Intel collateral proxies;
-- the controlplane, which is the one host here the harness does not attest. A
-  detached run spills its sealed log there and reads it back; see above for what
-  that host can and cannot see.
-
-Adding a model means allowing its repo in `main.go` and its replicas' hosts
-here; adding a tool family to `tools.go` means adding its host here too.
-
-### Releasing
-
-Run `Tinfoil Release` from the branch you want released and give it the
-version. It builds the container, pins the digest into `tinfoil-config.yml`,
-cuts the tag, and dispatches `Tinfoil Release - Publish` on that tag, which
-measures the CVM the config describes and publishes `tinfoil.hash` with a
-Sigstore bundle. That release is what the Tinfoil SDKs verify a running
-instance against.
-
-### One thing this is waiting on
-
-- The seal-following transport this harness needs -- a gateway answers 421
-  naming the replica it routed to, and the SDK attests that host and re-seals
-  there -- is not in a tagged `tinfoil-go` release. `go.mod` pins the commit on
-  `work/pty1/gateway-refactor` instead, so a build only ever carries what is
-  pushed to that branch. Repin with:
-
-      go get github.com/tinfoilsh/tinfoil-go@work/pty1/gateway-refactor
-
-  and drop back to a tagged version once the transport lands on `main`. To build
-  against a local SDK checkout while iterating, point a `go.work` at it rather
-  than adding a `replace` back to `go.mod`:
-
-      go work init . ../tinfoil-go
+The registry is bounded to 128 accepted runs/threads, with at most 32 queued
+turns per thread. Run logs are capped at 8 MiB. Temporary attachments share a
+128 MiB RAM budget. Four uploads and one archive operation can run concurrently.
+Archive input is capped at 512 MiB; native exports also cap total entry bytes
+and entry count. These limits should be sized against the deployment workload.

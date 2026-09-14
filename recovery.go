@@ -40,7 +40,7 @@ var (
 // rescued logs a panic and turns it into an error worth surfacing. Without one
 // of these on every goroutine the harness spawns, a panic in any single run
 // takes the process, and with it every other run this enclave holds in memory.
-// The value stays in the log; the caller is told only that its run failed.
+// The panic value may contain plaintext, so only the stack is logged.
 //
 // It takes the recovered value rather than recovering itself, because recover
 // works only in the function a defer names, which is one frame above this.
@@ -48,7 +48,7 @@ func rescued(what string, p any) error {
 	if p == nil {
 		return nil
 	}
-	slog.Error("recovered a panic", "in", what, "value", p, "stack", string(debug.Stack()))
+	slog.Error("recovered a panic", "in", what, "stack", string(debug.Stack()))
 	return fmt.Errorf("%s failed", what)
 }
 
@@ -300,6 +300,7 @@ func (h *harness) spill(ctx context.Context, rn *run) {
 }
 
 func (h *harness) store(ctx context.Context, method, path string, body []byte) (*http.Response, error) {
+	ctx = context.WithValue(ctx, usageContextKey{}, false)
 	req, err := http.NewRequestWithContext(ctx, method, h.controlplane+"/recovery/"+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -347,23 +348,34 @@ func (h *harness) fetch(ctx context.Context, id string) []byte {
 	if resp.StatusCode != http.StatusOK {
 		return nil
 	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxRunLog))
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxRunLog+4*(maxRunLog/32)+1))
 	return body
 }
 
 func (r *run) rehydrate(raw []byte) error {
+	if len(raw) > maxRunLog+4*(maxRunLog/32) {
+		return errTooLong
+	}
+	r.log.frames = nil
+	r.log.bytes = 0
 	for len(raw) >= 4 {
 		size := int(binary.BigEndian.Uint32(raw[:4]))
 		if size == 0 || size+4 > len(raw) {
 			break
 		}
 		r.log.frames, raw = append(r.log.frames, raw[4:4+size]), raw[4+size:]
+		r.log.bytes += size
+		if r.log.bytes > maxRunLog {
+			return errTooLong
+		}
 	}
 	if len(r.log.frames) == 0 {
 		return errors.New("nothing stored")
 	}
-	if _, err := r.open(0, r.log.frames[0]); err != nil {
-		return err
+	for index, frame := range r.log.frames {
+		if _, err := r.open(index, frame); err != nil {
+			return err
+		}
 	}
 	last := len(r.log.frames) - 1
 	r.log.closed = errAbandoned

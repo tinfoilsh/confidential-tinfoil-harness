@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -109,17 +110,24 @@ func (h *harness) cold(w http.ResponseWriter, r *http.Request, req *request) {
 }
 
 type request struct {
-	threadID   string
-	runID      string
-	model      string
-	cacheScope string              // partitions the enclave's prompt cache per caller; a namespace, not a credential
-	rendered   []json.RawMessage   // widgets the caller draws: advertised, never dialled
-	families   map[string]mcp.Meta // tool enclaves this run dials, and what its calls carry
-	piiCheck   bool
-	storageID  string
-	secret     secret
-	resume     bool
-	from       int
+	managed                    bool
+	refreshAuth                func(context.Context) (inferenceCredential, error)
+	params                     object
+	system, widgetHint, policy string
+	window                     int
+	groups                     [][]json.RawMessage
+	reminder                   json.RawMessage
+	threadID                   string
+	runID                      string
+	model                      string
+	cacheScope                 string              // partitions the enclave's prompt cache per caller; a namespace, not a credential
+	rendered                   []json.RawMessage   // widgets the caller draws: advertised, never dialled
+	families                   map[string]mcp.Meta // tool enclaves this run dials, and what its calls carry
+	piiCheck                   bool
+	storageID                  string
+	secret                     secret
+	resume                     bool
+	from                       int
 	prompt
 }
 
@@ -352,6 +360,7 @@ func writeError(w http.ResponseWriter, status int, message string) {
 
 type event struct {
 	Type       string          `json:"type"`
+	Timestamp  string          `json:"timestamp,omitempty"`
 	ThreadID   string          `json:"threadId,omitempty"`
 	RunID      string          `json:"runId,omitempty"`
 	MessageID  string          `json:"messageId,omitempty"`
@@ -359,7 +368,15 @@ type event struct {
 	ToolCallID string          `json:"toolCallId,omitempty"`
 	ToolName   string          `json:"toolCallName,omitempty"`
 	Role       string          `json:"role,omitempty"`
-	Delta      string          `json:"delta,omitempty"`
+	Delta      any             `json:"delta,omitempty"`
+	Snapshot   any             `json:"snapshot,omitempty"`
+	Messages   any             `json:"messages,omitempty"`
+	HasOlder   *bool           `json:"hasOlder,omitempty"`
+	Queued     bool            `json:"queued,omitempty"`
+	Code       string          `json:"code,omitempty"`
+	Kind       string          `json:"kind,omitempty"`
+	ResetsAt   string          `json:"resetsAt,omitempty"`
+	RetryAfter int             `json:"retryAfter,omitempty"`
 	Content    json.RawMessage `json:"content,omitempty"`
 	Activity   string          `json:"activityType,omitempty"`
 	Patch      json.RawMessage `json:"patch,omitempty"`
@@ -382,13 +399,19 @@ func terminal(frame []byte) bool {
 }
 
 type stream struct {
-	run      *run
-	threadID string
-	runID    string
+	run           *run
+	managed       bool
+	concreteModel string
+	modelAccepted bool
+	replyID       string
+	turnReasoning string
+	threadID      string
+	runID         string
 
 	// mu serializes writes against the tool goroutines.
-	mu    sync.Mutex
-	spend usage
+	mu      sync.Mutex
+	spend   usage
+	observe func(event)
 }
 
 // A run has started the moment it is accepted, not when the first upstream
@@ -403,6 +426,9 @@ func newStream(rn *run, threadID, runID string) *stream {
 func (s *stream) emit(e event) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.managed && e.Timestamp == "" {
+		e.Timestamp = timestamp()
+	}
 	s.frame(e)
 }
 
@@ -491,11 +517,15 @@ func (s *stream) frame(e event) {
 	// Nothing can read a closed log, so stop the run rather than bill turns into it.
 	if s.run.log.grow(func(id int) []byte { return s.run.seal(id, encoded) }) != nil {
 		s.run.stop()
+	} else if s.observe != nil {
+		s.observe(e)
 	}
 }
 
 func follow(w http.ResponseWriter, r *http.Request, rn *run, from int) {
 	flush := http.NewResponseController(w)
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
 	opened := false
 	open := func() {
 		if opened {
@@ -514,16 +544,22 @@ func follow(w http.ResponseWriter, r *http.Request, rn *run, from int) {
 				return
 			}
 			open()
-			fmt.Fprintf(w, "id: %d\ndata: %s\n\n", from+i, plain)
+			if _, err := fmt.Fprintf(w, "id: %d\ndata: %s\n\n", from+i, plain); err != nil {
+				rn.begin()
+				return
+			}
 		}
 		from += len(frames)
 		if len(frames) > 0 {
-			flush.Flush()
+			if err := flush.Flush(); err != nil {
+				rn.begin()
+				return
+			}
 		}
 		if closed != nil {
 			open()
 			if closed != errDone {
-				encoded, _ := json.Marshal(event{Type: "RUN_ERROR", Message: closed.Error()})
+				encoded, _ := json.Marshal(event{Type: "RUN_ERROR", Message: closed.Error(), Code: asAPIError(closed).Code})
 				fmt.Fprintf(w, "id: %d\ndata: %s\n\n", from, encoded)
 				flush.Flush()
 			}
@@ -531,6 +567,16 @@ func follow(w http.ResponseWriter, r *http.Request, rn *run, from int) {
 		}
 		select {
 		case <-wake:
+		case <-heartbeat.C:
+			open()
+			if _, err := io.WriteString(w, ": keep-alive\n\n"); err != nil {
+				rn.begin()
+				return
+			}
+			if err := flush.Flush(); err != nil {
+				rn.begin()
+				return
+			}
 		case <-r.Context().Done():
 			rn.begin()
 			return

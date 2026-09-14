@@ -20,6 +20,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	_ "time/tzdata"
 
 	tinfoil "github.com/tinfoilsh/tinfoil-go"
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
@@ -27,10 +28,11 @@ import (
 
 // repo is the trust anchor; the gateway's catalog supplies the rest.
 type model struct {
-	name    string
-	repo    string
-	vision  bool
-	context int // usable prompt budget, in tokens
+	endpoint, enclave, verifiedAt string
+	name                          string
+	repo                          string
+	vision                        bool
+	context                       int // usable prompt budget, in tokens
 
 	client *http.Client // sealing client, set once a replica verifies
 }
@@ -44,10 +46,23 @@ var pinned = []struct{ name, repo string }{
 }
 
 type harness struct {
-	gateway      string
-	models       []*model
-	controlplane string
-	cpClient     *http.Client
+	gateway       string
+	models        []*model
+	controlplane  string
+	cpClient      *http.Client
+	storeRows     rowStore
+	syncAPI       *syncClient
+	auth          *authenticator
+	catalog       catalogCache
+	autoModel     *model
+	services      map[string]*downstreamService
+	memoryEnabled bool
+	chatMu        sync.Mutex
+	closing       bool
+	threads       map[string]*threadSession
+	requests      map[string]*chatRun
+	starting      map[string]chan struct{}
+	attachments   map[string]*pendingAttachment
 
 	mu   sync.Mutex
 	runs map[string]*run
@@ -77,22 +92,25 @@ func main() {
 		cpClient:     &http.Client{Transport: &callerAuth{inner: http.DefaultTransport}},
 		runs:         map[string]*run{}}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `{"resume":true}`)
-	})
-	mux.HandleFunc("POST /agui", h.agui)
-	mux.HandleFunc("DELETE /agui", h.drop)
+	ctx, shutdown := context.WithCancel(context.Background())
+	defer shutdown()
+	if err := h.bootChat(ctx, usageSecret); err != nil {
+		slog.Error("initialize chat service", "error", err)
+		os.Exit(1)
+	}
 
-	srv := &http.Server{Addr: *addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Addr: *addr, Handler: h.routes(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: time.Minute}
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	stopped := make(chan struct{})
 	go func() {
 		<-stop
+		defer close(stopped)
+		active := h.stopRuns()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		srv.Shutdown(ctx)
+		waitRuns(ctx, active)
 	}()
 
 	slog.Info("listening", "addr", *addr, "gateway", gw, "models", served(models))
@@ -100,6 +118,7 @@ func main() {
 		slog.Error("serve", "error", err)
 		os.Exit(1)
 	}
+	<-stopped
 }
 
 func env(key, fallback string) string {
@@ -133,6 +152,7 @@ func attestFamilies(usageSecret string) {
 			continue
 		}
 		f.client = client
+		f.verifiedAt = timestamp()
 		slog.Info("tool enclave verified", "family", f.name, "enclave", f.enclave)
 	}
 }
@@ -174,6 +194,7 @@ func attestCatalog(gateway, usageSecret string) ([]*model, error) {
 					continue
 				}
 				m.client = client
+				m.enclave, m.verifiedAt = host, timestamp()
 				models[i] = m
 				return
 			}
@@ -198,7 +219,7 @@ type catalogEntry struct {
 // fetchCatalog reads the pools the gateway routes to. It needs no API key: the
 // harness holds none, and every caller's key belongs to a request.
 func fetchCatalog(gateway string) (map[string]catalogEntry, error) {
-	resp, err := http.Get(gateway + "/catalog")
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Get(gateway + "/catalog")
 	if err != nil {
 		return nil, fmt.Errorf("read catalog: %w", err)
 	}
