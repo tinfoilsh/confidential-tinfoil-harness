@@ -9,17 +9,20 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"sync"
 	"time"
+
+	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
 const (
-	// Logs are held in memory, so these two multiply into the enclave's 4 GiB.
+	// A run holds its whole log in memory, so this is its share of the enclave.
 	maxRunLog     = 8 << 20
-	maxLiveRuns   = 64
 	runTimeout    = 30 * time.Minute
 	spillBatch    = 128 << 10
 	spillInterval = 2 * time.Second
@@ -30,10 +33,24 @@ var (
 	errDone      = errors.New("run finished")
 	errAbandoned = errors.New("run did not survive the harness that started it")
 	errTooLong   = errors.New("run outgrew the log this harness can hold for it")
-	errBusy      = errors.New("too many runs in flight")
 	errTaken     = errors.New("another run is already using this storage id")
 	errNotYours  = errors.New("not a recoverable run")
 )
+
+// rescued logs a panic and turns it into an error worth surfacing. Without one
+// of these on every goroutine the harness spawns, a panic in any single run
+// takes the process, and with it every other run this enclave holds in memory.
+// The value stays in the log; the caller is told only that its run failed.
+//
+// It takes the recovered value rather than recovering itself, because recover
+// works only in the function a defer names, which is one frame above this.
+func rescued(what string, p any) error {
+	if p == nil {
+		return nil
+	}
+	slog.Error("recovered a panic", "in", what, "value", p, "stack", string(debug.Stack()))
+	return fmt.Errorf("%s failed", what)
+}
 
 type runlog struct {
 	mu     sync.Mutex
@@ -101,8 +118,13 @@ type run struct {
 	abandon func() // the caller deleted the log: stop writing to the store
 }
 
-func newRun(id string, key secret) (*run, error) {
-	material, err := hkdf.Key(sha256.New, []byte(key), nil, "confidential-tinfoil-harness run log v1", 32)
+// The caller's API key salts the derivation, so a session id and secret that
+// belong to another key open nothing here, warm or cold. Opening the log is
+// still the whole of the authorization; the key just scopes whose log it is.
+func newRun(ctx context.Context, id string, key secret) (*run, error) {
+	material, err := hkdf.Key(sha256.New, []byte(key),
+		[]byte(usagereporting.HashAPIKey(callerKey(ctx))),
+		"confidential-tinfoil-harness run log v1", 32)
 	if err != nil {
 		return nil, err
 	}
@@ -133,14 +155,14 @@ func (r *run) aad(id int) []byte {
 
 // Opening frame 0 is the whole authorization, and a run is enlisted only once
 // its RUN_STARTED is framed, so every registered run has one to open.
-func (h *harness) lookup(id string, key secret) (*run, error) {
+func (h *harness) lookup(ctx context.Context, id string, key secret) (*run, error) {
 	h.mu.Lock()
 	rn := h.runs[id]
 	h.mu.Unlock()
 	if rn == nil {
 		return nil, nil
 	}
-	probe, err := newRun(id, key)
+	probe, err := newRun(ctx, id, key)
 	if err != nil {
 		return nil, errNotYours
 	}
@@ -155,7 +177,7 @@ func (h *harness) lookup(id string, key secret) (*run, error) {
 }
 
 func (h *harness) stored(ctx context.Context, id string, key secret) (*run, error) {
-	rn, err := newRun(id, key)
+	rn, err := newRun(ctx, id, key)
 	if err != nil {
 		return nil, err
 	}
@@ -163,7 +185,7 @@ func (h *harness) stored(ctx context.Context, id string, key secret) (*run, erro
 }
 
 func (h *harness) start(ctx context.Context, req *request, m *model) (*run, error) {
-	rn, err := newRun(req.storageID, req.secret)
+	rn, err := newRun(ctx, req.storageID, req.secret)
 	if err != nil {
 		return nil, err
 	}
@@ -176,6 +198,7 @@ func (h *harness) start(ctx context.Context, req *request, m *model) (*run, erro
 		rn.begin = sync.OnceFunc(func() {
 			go func() {
 				defer endSpill()
+				defer func() { rescued("run log spill", recover()) }()
 				h.spill(spillCtx, rn)
 			}()
 		})
@@ -193,6 +216,13 @@ func (h *harness) start(ctx context.Context, req *request, m *model) (*run, erro
 		defer cancel()
 		defer h.retire(req.storageID, rn)
 		defer out.done()
+		// Last deferred, so it unwinds first and the panic becomes this run's
+		// RUN_ERROR: out.done below then finds the log already closed.
+		defer func() {
+			if err := rescued("run", recover()); err != nil {
+				out.fail(err)
+			}
+		}()
 		began := time.Now()
 		if err := h.loop(runCtx, out, req, m); err != nil {
 			slog.Error("run", "model", m.name, "error", err)
@@ -204,20 +234,16 @@ func (h *harness) start(ctx context.Context, req *request, m *model) (*run, erro
 	return rn, nil
 }
 
-// enlist caps runs in flight and makes a storage id the property of exactly one.
+// enlist makes a storage id the property of exactly one run.
 func (h *harness) enlist(id string, rn *run) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.live >= maxLiveRuns {
-		return errBusy
-	}
 	if id != "" {
 		if _, taken := h.runs[id]; taken {
 			return errTaken
 		}
 		h.runs[id] = rn
 	}
-	h.live++
 	return nil
 }
 
@@ -225,7 +251,6 @@ func (h *harness) enlist(id string, rn *run) error {
 func (h *harness) retire(id string, rn *run) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.live--
 	if h.runs[id] == rn {
 		delete(h.runs, id)
 	}

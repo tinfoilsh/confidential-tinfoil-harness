@@ -26,7 +26,7 @@ const (
 )
 
 func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model) error {
-	apiKey, _ := ctx.Value(apiKeyKey{}).(string)
+	apiKey := callerKey(ctx)
 	inRun := usagereporting.Context{
 		ContextID:     req.runID,
 		RootRequestID: req.runID,
@@ -166,7 +166,15 @@ func schedule(set *toolset, calls []toolCall) [][]int {
 	return queues
 }
 
-func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) json.RawMessage {
+func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) (message json.RawMessage) {
+	// One tool goroutine's panic is that call's failure, read by the model like
+	// any other. Nothing is emitted from here: a frame is what may have panicked.
+	defer func() {
+		if err := rescued("tool "+call.name, recover()); err != nil {
+			failure, _ := json.Marshal(map[string]string{"error": err.Error()})
+			message = answered(call.id, string(failure))
+		}
+	}()
 	// A widget is drawn by the caller from TOOL_CALL_ARGS; the model just needs a result.
 	if set.byName[call.name] == nil {
 		return answered(call.id, "[rendered for the user]")

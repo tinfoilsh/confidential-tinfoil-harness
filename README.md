@@ -10,7 +10,10 @@ for confidential tool loops.
 ## Protocol
 
 The body is a `RunAgentInput`. The harness reads `threadId`, `runId` and
-`messages`, and ignores `state`, `context` and `parentRunId`.
+`messages`, and ignores `state`, `context` and `parentRunId`. The two ids are
+echoed into every frame of the run's log and `runId` is signed into the usage
+context of every request the run makes upstream, so both are held to 128
+printable ASCII characters. Either one absent is named by the harness instead.
 
 `tools` declares widgets the caller draws. They are advertised to the model and
 answered on the caller's behalf, never dialled, so the loop only executes what it
@@ -113,8 +116,11 @@ as hex, and sends them with the run. It comes back by posting the same pair with
 from memory if this harness is still running it and from the stored log
 otherwise.
 
-Being able to open the log is the whole of the authorization. A secret that does
-not open it and a log that is not there are refused identically, and a run too
+Being able to open the log is the whole of the authorization, and the caller's
+API key is part of what seals it: the same pair presented under another key
+opens nothing, warm or cold, so a client that reuses or under-randomizes a
+`recoveryToken` still cannot reach across keys with it. A secret that does not
+open it and a log that is not there are refused identically, and a run too
 young to have framed anything cannot be authorized either way, so it answers
 `503` with a `Retry-After` instead of a refusal. `DELETE /agui` with the same
 pair drops the log once the caller has the answer, authorized by opening it like
@@ -124,14 +130,16 @@ it. A log nobody drops expires with the store.
 A run outlives the connection that asked for it. Nothing is written anywhere
 while a caller is attached. Once the caller disconnects, the harness seals off
 what it has to the store and keeps writing there until the run ends. Frames are
-sealed as they are produced, under a key derived from the caller's secret, so the
+sealed as they are produced, under a key derived from the caller's secret and its
+API key, so the
 spill is a byte copy and the store holds ciphertext it has no way to read. When
 the run ends the key and the frames go with it, and a caller arriving after that
 reads the stored log instead. A log with no terminal event and no harness still
 running it belongs to a run that died, and replays as one. A run holds its whole
-log in memory while it lives, so there is a ceiling on both: a run that reaches
-it ends with `RUN_ERROR` and stops, rather than billing turns into a log nothing
-can read.
+log in memory while it lives, so there is a ceiling on it: a run that reaches it
+ends with `RUN_ERROR` and stops, rather than billing turns into a log nothing can
+read. Nothing caps how many runs are in flight, so that ceiling times the runs a
+deployment expects is what the enclave has to be sized for.
 
 Two things follow. A run that finishes with its caller attached is never written
 down at all, so a caller that loses the answer between the last byte and its own

@@ -40,7 +40,7 @@ func (h *harness) agui(w http.ResponseWriter, r *http.Request) {
 	// The key rides the context down to the transports that sign every request.
 	ctx := context.WithValue(r.Context(), apiKeyKey{}, apiKey)
 	if req.storageID != "" {
-		live, err := h.lookup(req.storageID, req.secret)
+		live, err := h.lookup(ctx, req.storageID, req.secret)
 		switch {
 		case err != nil:
 			writeError(w, http.StatusForbidden, errNotYours.Error())
@@ -80,7 +80,7 @@ func (h *harness) drop(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := context.WithValue(r.Context(), apiKeyKey{}, apiKey)
 	// Authorized by opening the log; a live run is stopped so its spill cannot race the delete.
-	switch live, err := h.lookup(in.SessionID, in.RecoveryToken); {
+	switch live, err := h.lookup(ctx, in.SessionID, in.RecoveryToken); {
 	case err != nil:
 		writeError(w, http.StatusForbidden, errNotYours.Error())
 		return
@@ -166,6 +166,9 @@ func parseRequest(body []byte, apiKey string) (*request, error) {
 	if in.Resume && in.SessionID == "" {
 		return nil, errors.New(`"resume" needs a "sessionId"`)
 	}
+	if !identifier(in.RunID) || !identifier(in.ThreadID) {
+		return nil, fmt.Errorf(`"runId" and "threadId" must be at most %d printable ASCII characters`, maxIDLength)
+	}
 	p, err := convert(in.Messages)
 	if err != nil {
 		return nil, err
@@ -202,6 +205,26 @@ func parseRequest(body []byte, apiKey string) (*request, error) {
 		piiCheck:  props.PIICheck != nil && *props.PIICheck,
 		storageID: in.SessionID, secret: in.RecoveryToken, resume: in.Resume,
 		prompt: p}, nil
+}
+
+// maxIDLength bounds the ids a caller names its run with. Both are echoed into
+// every frame of its log, and runId is signed into the usage context header of
+// every request the run makes upstream, so an unbounded one is an unbounded
+// header on a connection this harness shares with every other caller.
+const maxIDLength = 128
+
+// identifier holds a caller's id to printable ASCII, short of the length at
+// which it stops being a name. Empty is allowed: the harness generates one.
+func identifier(s string) bool {
+	if len(s) > maxIDLength {
+		return false
+	}
+	for _, r := range s {
+		if r < ' ' || r > '~' {
+			return false
+		}
+	}
+	return true
 }
 
 func hexID(s string) bool {

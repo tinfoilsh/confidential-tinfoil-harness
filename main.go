@@ -50,7 +50,6 @@ type harness struct {
 	cpClient     *http.Client
 
 	mu   sync.Mutex
-	live int // runs in flight; each holds its whole log in memory
 	runs map[string]*run
 }
 
@@ -248,6 +247,12 @@ func (h *harness) unserved(req *request) string {
 
 type apiKeyKey struct{}
 
+// callerKey is the key the request was signed with; the harness has none of its own.
+func callerKey(ctx context.Context) string {
+	key, _ := ctx.Value(apiKeyKey{}).(string)
+	return key
+}
+
 type usageContextKey struct{}
 
 // callerAuth signs every request with the caller's key; the harness has none.
@@ -258,7 +263,7 @@ type callerAuth struct {
 
 func (t *callerAuth) RoundTrip(r *http.Request) (*http.Response, error) {
 	r = r.Clone(r.Context())
-	if key, ok := r.Context().Value(apiKeyKey{}).(string); ok && key != "" {
+	if key := callerKey(r.Context()); key != "" {
 		r.Header.Set("Authorization", "Bearer "+key)
 	}
 	if usage, ok := r.Context().Value(usageContextKey{}).(usagereporting.Context); ok {
