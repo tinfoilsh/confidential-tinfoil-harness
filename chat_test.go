@@ -11,7 +11,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -98,6 +97,15 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 	var spillMu sync.Mutex
 	logs := map[string][]byte{}
 	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/shim/validate-key" {
+			var in object
+			if json.NewDecoder(r.Body).Decode(&in) != nil || str(in["api_key"]) != "free_anonymous-key" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			io.WriteString(w, "OK")
+			return
+		}
 		spillMu.Lock()
 		defer spillMu.Unlock()
 		id := strings.TrimPrefix(r.URL.Path, "/recovery/")
@@ -118,11 +126,10 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 			return "", errors.New("bad session")
 		}
 		return strings.TrimPrefix(s, "clerk-"), nil
-	}, credentials: map[string]inferenceCredential{}}
+	}, client: cp.Client(), controlplane: cp.URL, credentials: map[string]inferenceCredential{}}
 	for _, subject := range []string{"alice", "bob"} {
 		h.auth.credentials["user:"+subject] = inferenceCredential{Key: "inference-" + secret(subject), Expires: nowUTC().Add(time.Hour)}
 	}
-	h.auth.credentials["anonymous:"+hashHex([]byte("192.0.2.1"))] = inferenceCredential{Key: "anonymous-key", Expires: nowUTC().Add(time.Hour)}
 	m := &model{name: "kimi-k3", repo: "tinfoilsh/confidential-kimi-k3", context: 8192, client: &http.Client{Transport: &callerAuth{inner: server.Client().Transport, usageSecret: "test-usage-secret"}}}
 	h.models = []*model{m}
 	h.autoModel = m
@@ -176,6 +183,8 @@ func postRoute(h *harness, path string, in object, user string) *httptest.Respon
 	r.RemoteAddr = "192.0.2.1:1234"
 	if user != "" {
 		r.Header.Set("Authorization", "Bearer clerk-"+user)
+	} else {
+		r.Header.Set("Authorization", "Bearer free_anonymous-key")
 	}
 	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -556,7 +565,7 @@ func TestSealedArchiveRandomAccessAndNativeRoundTrip(t *testing.T) {
 		t.Fatal("random archive read crossed a bad chunk")
 	}
 }
-func TestTypedErrorsAndProxyIdentity(t *testing.T) {
+func TestTypedErrors(t *testing.T) {
 	for _, code := range []string{"STALE_KEY", "EXISTING_DATA_UNDER_OTHER_KEY"} {
 		e := downstreamError(409, raw(object{"code": code, "current_key_id": "kid"}))
 		if e.Code != "KEY_MISMATCH" || e.KeyID != "kid" {
@@ -565,17 +574,6 @@ func TestTypedErrorsAndProxyIdentity(t *testing.T) {
 	}
 	if e := downstreamError(409, []byte(`{"code":"SYNC_CONFLICT"}`)); e.Code != "REVISION_CONFLICT" {
 		t.Fatal(e)
-	}
-	a := &authenticator{trustedProxies: []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}}
-	r := httptest.NewRequest("POST", "/", nil)
-	r.RemoteAddr = "192.0.2.1:1"
-	r.Header.Set("X-Forwarded-For", "198.51.100.7")
-	if a.clientIP(r) != "192.0.2.1" {
-		t.Fatal("untrusted forwarded IP")
-	}
-	r.RemoteAddr = "127.0.0.1:1"
-	if a.clientIP(r) != "198.51.100.7" {
-		t.Fatal("trusted shim IP not forwarded")
 	}
 }
 func TestRehydrationChecksEveryFrame(t *testing.T) {

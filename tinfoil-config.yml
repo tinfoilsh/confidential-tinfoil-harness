@@ -16,32 +16,7 @@ shim:
 
 networks:
   upstream:
-    egress: allowlist
-    allow:
-      - inference-gateway.tinfoil.sh
-      - inference.tinfoil.sh
-      - websearch.tinfoil.sh
-      - code-execution.tinfoil.sh
-      - sync.tinfoil.sh
-      - summarizer.tinfoil.sh
-      - docling.tinfoil.sh
-      - opengraph-metadata.tinfoil.sh
-      - clerk.tinfoil.sh
-      - api.tinfoil.sh
-      # Keep replicas synchronized with the deployment's gateway catalog.
-      # Add its voxtral-small-24b replicas to enable transcription.
-      - kimi-k3-inf14-2.tinfoil.containers.tinfoil.dev
-      - kimi-k3-inf18.tinfoil.containers.tinfoil.dev
-      - kimi-k3-inf17.tinfoil.containers.tinfoil.dev
-      - deepseek-v4-flash-inf15.tinfoil.containers.tinfoil.dev
-      - gemma4-31b-inf6-0.tinfoil.containers.tinfoil.dev
-      - gpt-oss-120b-inf6-0.tinfoil.containers.tinfoil.dev
-      - llama3-3-70b-inf12.tinfoil.containers.tinfoil.dev
-      - llama3-3-70b.inf13.tinfoil.sh
-      - github-proxy.tinfoil.sh
-      - tuf-repo-cdn.sigstore.dev
-      - kds-proxy.tinfoil.sh
-      - tdx-proxy.tinfoil.sh
+    egress: open
 
 containers:
   - name: harness
@@ -51,9 +26,7 @@ containers:
       - TINFOIL_GATEWAY_URL: https://inference-gateway.tinfoil.sh
       - TINFOIL_CONTROLPLANE_URL: https://api.tinfoil.sh
       - CLERK_ISSUER: https://clerk.tinfoil.sh
-      - TINFOIL_TRUSTED_PROXIES: "127.0.0.0/8,::1/128,172.31.255.1/32"
       - TINFOIL_TOOLS_ENCLAVE: websearch.tinfoil.sh
-      - TINFOIL_CODE_ENCLAVE: code-execution.tinfoil.sh
       - TINFOIL_SYNC_ENCLAVE: sync.tinfoil.sh
       - TINFOIL_ROUTER_ENCLAVE: inference.tinfoil.sh
       - TINFOIL_SUMMARIZER_ENCLAVE: summarizer.tinfoil.sh
@@ -62,7 +35,6 @@ containers:
       - TINFOIL_MEMORY_ENABLED: "false"
     secrets:
       - USAGE_CONTEXT_SECRET
-      - HARNESS_IDENTITY_SECRET
     read_only: true
     # Imports may hold the input and transformed archive simultaneously.
     # Every byte written here has already been encrypted by sealedSpool.

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -33,12 +34,12 @@ func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
 		{"router", "tinfoilsh/confidential-model-router", "inference.tinfoil.sh", "TINFOIL_ROUTER_ENCLAVE", true},
 	} {
 		host := env(config.variable, config.host)
-		client, err := attest(host, config.repo, "", usageSecret)
+		client, err := attest(ctx, host, config.repo, "", usageSecret)
 		if err != nil {
 			if config.required {
-				return err
+				return fmt.Errorf("verify required %s enclave %s: %w", config.role, host, err)
 			}
-			slog.Warn("downstream enclave unavailable", "role", config.role)
+			slog.Warn("downstream enclave unavailable", "role", config.role, "enclave", host, "error", err)
 			continue
 		}
 		h.services[config.role] = &downstreamService{Role: config.role, Repo: config.repo, Enclave: host, URL: "https://" + host, Client: client, At: timestamp()}
@@ -48,15 +49,13 @@ func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
 	h.storeRows = h.syncAPI
 	router := h.services["router"]
 	h.autoModel = &model{name: "auto", repo: router.Repo, client: router.Client, endpoint: router.URL + "/v1/chat/completions"}
-	if catalog, err := fetchCatalog(h.gateway); err == nil {
+	if catalog, err := fetchCatalog(ctx, h.gateway); err == nil {
 		if audio, ok := catalog["voxtral-small-24b"]; ok {
-			for _, host := range audio.Hosts {
-				client, err := attest(host, "tinfoilsh/confidential-voxtral-small-24b", h.gateway+"/v1/", usageSecret)
-				if err != nil {
-					continue
-				}
+			host, client, err := attestReplicas(ctx, audio.Hosts, "tinfoilsh/confidential-voxtral-small-24b", h.gateway+"/v1/", usageSecret, attest)
+			if err != nil {
+				slog.Warn("transcription unavailable", "error", err)
+			} else {
 				h.services["audio"] = &downstreamService{Role: "audio", Repo: "tinfoilsh/confidential-voxtral-small-24b", Enclave: host, URL: h.gateway, Client: client, At: timestamp()}
-				break
 			}
 		}
 	}

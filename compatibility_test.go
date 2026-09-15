@@ -368,14 +368,6 @@ func TestWidgetRetryReplacesOnlyTheArguments(t *testing.T) {
 	}
 }
 
-func TestClientIdentitySignatureVector(t *testing.T) {
-	req := httptest.NewRequest("GET", "https://api.example/api/keys/chat", nil)
-	signClientIP(req, "192.0.2.9", "test-harness-secret", time.Unix(1700000000, 0))
-	if req.Header.Get(clientIPSignatureHeader) != "64ad56cd55ad6a1d5ff70968fb1d1506587dbf99f3c13d13a1f938420dcebcab" {
-		t.Fatal(req.Header.Get(clientIPSignatureHeader))
-	}
-}
-
 func TestRecoveredWidgetRetryChecksConcurrentChanges(t *testing.T) {
 	for _, changed := range []bool{false, true} {
 		t.Run(strconv.FormatBool(changed), func(t *testing.T) {
