@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/google/uuid"
 )
@@ -108,13 +109,22 @@ func (s *syncClient) list(ctx context.Context, p *principal, key contentKey, sco
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
-	err := s.call(ctx, p, "/v1/sync/list-status", object{"scope": scope, "cursor": cursor, "limit": limit, "project_id": project, "direction": "desc"}, &status)
+	in := object{"scope": scope, "cursor": cursor, "limit": limit, "direction": "desc"}
+	if scope == "chat" && project != "" {
+		in["project_id"] = project
+	}
+	err := s.call(ctx, p, "/v1/sync/list-status", in, &status)
 	if err != nil {
 		return rowPage{}, err
 	}
 	page := rowPage{Rows: []storedRow{}, Next: status.Next}
 	ids := []string{}
 	for _, item := range status.Updates {
+		// Sync only filters chats by project. Document IDs encode their
+		// parent, so select them before pulling any document contents.
+		if scope == "project_document" && project != "" && !strings.HasPrefix(item.ID, project+"/") {
+			continue
+		}
 		ids = append(ids, item.ID)
 	}
 	if len(ids) != 0 {

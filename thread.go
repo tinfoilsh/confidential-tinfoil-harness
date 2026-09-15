@@ -204,6 +204,16 @@ func (h *harness) acceptTurn(ctx context.Context, p *principal, key contentKey, 
 		return previous, nil
 	}
 	h.chatMu.Unlock()
+	credential, err := h.auth.inference(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+	if p.Anonymous && credential.Limit.Kind != nil && credential.Limit.Remaining <= 0 {
+		e := apiErr(429, "QUOTA_EXHAUSTED", "The daily quota is exhausted")
+		e.Kind = str(credential.Limit.Kind)
+		e.ResetsAt = credential.Limit.ResetsAt
+		return nil, e
+	}
 	ephemeral, id := boolean(in["ephemeral"], false), str(in["threadId"])
 	var source object
 	if in["kind"] == "ask" {
@@ -305,10 +315,6 @@ func (h *harness) acceptTurn(ctx context.Context, p *principal, key contentKey, 
 	if state.active != nil && len(state.queue) >= 32 {
 		return nil, apiErr(429, "QUOTA_EXHAUSTED", "The turn queue is full")
 	}
-	credential, err := h.auth.inference(ctx, p)
-	if err != nil {
-		return nil, err
-	}
 	if saved := obj(obj(state.row.Data["harnessRequests"])[nonce]); len(saved) > 0 {
 		if str(saved["digest"]) != digest {
 			return nil, apiErr(409, "REVISION_CONFLICT", "The request nonce was already used")
@@ -332,6 +338,7 @@ func (h *harness) acceptTurn(ctx context.Context, p *principal, key contentKey, 
 		h.chatMu.Unlock()
 		return recovered, nil
 	}
+	// Stored nonce recovery remains available after the last free request.
 	if credential.Limit.Kind != nil && credential.Limit.Remaining <= 0 {
 		e := apiErr(429, "QUOTA_EXHAUSTED", "The daily quota is exhausted")
 		e.Kind = str(credential.Limit.Kind)
@@ -655,7 +662,7 @@ func (h *harness) finishChatRun(r *chatRun, runErr error) {
 		r.out.mu.Unlock()
 		r.input, r.retryTarget, r.assembler = nil, nil, nil
 		r.replacement = ""
-		r.principal = &principal{ID: r.principal.ID, IP: r.principal.IP, Anonymous: r.principal.Anonymous}
+		r.principal = &principal{ID: r.principal.ID, AnonymousID: r.principal.AnonymousID, Anonymous: r.principal.Anonymous}
 		r.credential.Key = ""
 		if !s.ephemeral && s.active == nil {
 			s.row = nil
@@ -719,6 +726,9 @@ func (h *harness) finishChatRun(r *chatRun, runErr error) {
 	limit := h.auth.currentLimit(r.principal)
 	if r.out.modelAccepted {
 		limit = h.auth.consumed(r.principal)
+	}
+	if r.principal.Anonymous && runErr != nil && asAPIError(runErr).Code == "QUOTA_EXHAUSTED" {
+		limit = rateLimit{Kind: "free_daily"}
 	}
 	if runErr == nil && !s.ephemeral {
 		h.extractMemory(ctx, r, s.row)
@@ -849,7 +859,7 @@ func (h *harness) removeQueued(ctx context.Context, p *principal, _ contentKey, 
 	clear(r.key[:])
 	r.input = nil
 	r.credential.Key = ""
-	r.principal = &principal{ID: p.ID, IP: p.IP, Anonymous: p.Anonymous}
+	r.principal = &principal{ID: p.ID, AnonymousID: p.AnonymousID, Anonymous: p.Anonymous}
 	close(r.finished)
 	if s.active != nil {
 		s.active.out.emit(event{Type: "STATE_DELTA", Delta: []object{{"op": "replace", "path": "/queue", "value": queueItems(s)}}})

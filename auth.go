@@ -1,15 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
-	"net"
 	"net/http"
-	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -19,18 +16,18 @@ import (
 )
 
 type principal struct {
-	ID        string
-	JWT       secret
-	IP        string
-	Anonymous bool
+	ID           string
+	JWT          secret
+	Anonymous    bool
+	AnonymousID  string
+	InferenceKey secret
 }
 
 func (p *principal) scope() string {
 	if !p.Anonymous {
 		return "user:" + p.ID
 	}
-	digest := sha256.Sum256([]byte(p.IP))
-	return "anonymous:" + hex.EncodeToString(digest[:])
+	return "anonymous:" + p.AnonymousID
 }
 
 type rateLimit struct {
@@ -45,14 +42,12 @@ type inferenceCredential struct {
 	Limit   rateLimit
 }
 type authenticator struct {
-	verify         func(context.Context, string) (string, error)
-	client         *http.Client
-	controlplane   string
-	trustedProxies []netip.Prefix
-	mu             sync.Mutex
-	credentials    map[string]inferenceCredential
-	identitySecret secret
-	refreshing     map[string]chan struct{}
+	verify       func(context.Context, string) (string, error)
+	client       *http.Client
+	controlplane string
+	mu           sync.Mutex
+	credentials  map[string]inferenceCredential
+	refreshing   map[string]chan struct{}
 }
 
 func newAuthenticator(ctx context.Context, issuer, audience, cp string) (*authenticator, error) {
@@ -68,7 +63,10 @@ func newAuthenticator(ctx context.Context, issuer, audience, cp string) (*authen
 	if audience != "" {
 		options = append(options, jwt.WithAudience(audience))
 	}
-	a := &authenticator{client: &http.Client{Timeout: 15 * time.Second}, controlplane: cp, identitySecret: secret(env("HARNESS_IDENTITY_SECRET", "")), credentials: map[string]inferenceCredential{}}
+	a := &authenticator{client: &http.Client{
+		Timeout:       15 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}, controlplane: cp, credentials: map[string]inferenceCredential{}}
 	a.verify = func(ctx context.Context, token string) (string, error) {
 		parsed, err := jwt.NewParser(options...).Parse(token, kf.KeyfuncCtx(ctx))
 		if err != nil || !parsed.Valid {
@@ -80,13 +78,6 @@ func newAuthenticator(ctx context.Context, issuer, audience, cp string) (*authen
 		}
 		return sub, nil
 	}
-	for _, value := range strings.Split(env("TINFOIL_TRUSTED_PROXIES", "127.0.0.0/8,::1/128,172.31.255.1/32"), ",") {
-		prefix, err := netip.ParsePrefix(strings.TrimSpace(value))
-		if err != nil {
-			return nil, errors.New("invalid TINFOIL_TRUSTED_PROXIES")
-		}
-		a.trustedProxies = append(a.trustedProxies, prefix)
-	}
 	return a, nil
 }
 
@@ -96,50 +87,68 @@ func (a *authenticator) authenticate(r *http.Request, anonymous bool) (*principa
 	}
 	header := r.Header.Get("Authorization")
 	if header == "" && anonymous {
-		return &principal{Anonymous: true, IP: a.clientIP(r)}, nil
+		return &principal{Anonymous: true}, nil
 	}
 	token := bearer(header)
 	if token == "" {
 		return nil, apiErr(401, "UNAUTHENTICATED", "A Clerk session is required")
 	}
+	if anonymous && strings.HasPrefix(token, "free_") && len(token) > len("free_") && len(token) <= 256 {
+		// Possession scopes ephemeral state. The prefix is not validation:
+		// inference checks the key with controlplane before accepting work.
+		return &principal{Anonymous: true, AnonymousID: hashHex([]byte(token)), InferenceKey: secret(token)}, nil
+	}
 	id, err := a.verify(r.Context(), token)
 	if err != nil {
 		return nil, apiErr(401, "UNAUTHENTICATED", "The Clerk session is invalid or expired")
 	}
-	return &principal{ID: id, JWT: secret(token), IP: a.clientIP(r)}, nil
+	return &principal{ID: id, JWT: secret(token)}, nil
 }
 
-func (a *authenticator) trusted(ip netip.Addr) bool {
-	for _, p := range a.trustedProxies {
-		if p.Contains(ip) {
-			return true
-		}
+func (a *authenticator) anonymousInference(ctx context.Context, p *principal) (inferenceCredential, error) {
+	if p.InferenceKey == "" {
+		return inferenceCredential{}, apiErr(401, "UNAUTHENTICATED", "An anonymous chat key is required")
 	}
-	return false
-}
-func (a *authenticator) clientIP(r *http.Request) string {
-	host, _, _ := net.SplitHostPort(r.RemoteAddr)
-	ip, _ := netip.ParseAddr(host)
-	if a.trusted(ip) {
-		chain := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
-		for i := len(chain) - 1; i >= 0; i-- {
-			candidate, err := netip.ParseAddr(strings.TrimSpace(chain[i]))
-			if err != nil {
-				break
-			}
-			ip = candidate
-			if !a.trusted(ip) {
-				break
-			}
-		}
+	// Reuse the validation endpoint already used by shims on Tinfoil hosts.
+	// No key issuance, client IP, expiry, or quota metadata comes from this call.
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.controlplane+"/api/shim/validate-key", bytes.NewReader(raw(object{"api_key": p.InferenceKey})))
+	if err != nil {
+		return inferenceCredential{}, err
 	}
-	if !ip.IsValid() {
-		return ""
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return inferenceCredential{}, err
 	}
-	return ip.Unmap().String()
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<10))
+	if err != nil {
+		return inferenceCredential{}, err
+	}
+	if resp.StatusCode == http.StatusOK && string(body) == "OK" {
+		// Downstream shims still check validity, model access, and quota on
+		// each call. The browser's issuance metadata is only for its display.
+		return inferenceCredential{Key: p.InferenceKey}, nil
+	}
+	var detail object
+	if resp.StatusCode == http.StatusTooManyRequests && json.Unmarshal(body, &detail) == nil && str(obj(detail["error"])["code"]) == "insufficient_quota" {
+		// An exhausted key may still open the session and show the quota
+		// banner. acceptTurn refuses to start work with this zero balance.
+		return inferenceCredential{Key: p.InferenceKey, Limit: rateLimit{Kind: "free_daily"}}, nil
+	}
+	if resp.StatusCode/100 == 2 {
+		return inferenceCredential{}, errors.New("invalid key validation response")
+	}
+	if resp.StatusCode == http.StatusPaymentRequired {
+		return inferenceCredential{}, apiErr(403, "UPSTREAM_REFUSED", "This chat key is disabled")
+	}
+	return inferenceCredential{}, downstreamError(resp.StatusCode, body)
 }
 
 func (a *authenticator) inference(ctx context.Context, p *principal) (inferenceCredential, error) {
+	if p.Anonymous {
+		return a.anonymousInference(ctx, p)
+	}
 	a.mu.Lock()
 	if cached, ok := a.credentials[p.scope()]; ok && nowUTC().Add(time.Minute).Before(cached.Expires) {
 		a.mu.Unlock()
@@ -160,22 +169,11 @@ func (a *authenticator) inference(ctx context.Context, p *principal) (inferenceC
 	a.refreshing[p.scope()] = make(chan struct{})
 	a.mu.Unlock()
 	defer func() { a.mu.Lock(); close(a.refreshing[p.scope()]); delete(a.refreshing, p.scope()); a.mu.Unlock() }()
-	if p.Anonymous && a.identitySecret == "" {
-		return inferenceCredential{}, apiErr(503, "UPSTREAM_REFUSED", "Anonymous identity forwarding is not configured")
-	}
-	paths := []string{"/api/keys/chat"}
-	if !p.Anonymous {
-		paths = append([]string{"/api/chat/token"}, paths...)
-	}
+	paths := []string{"/api/chat/token", "/api/keys/chat"}
 	for i, path := range paths {
 		req, _ := http.NewRequestWithContext(ctx, "GET", a.controlplane+path, nil)
 		if p.JWT != "" {
 			req.Header.Set("Authorization", "Bearer "+string(p.JWT))
-		}
-		if p.IP != "" {
-			if a.identitySecret != "" && path == "/api/keys/chat" {
-				signClientIP(req, p.IP, a.identitySecret, nowUTC())
-			}
 		}
 		resp, err := a.client.Do(req)
 		if err != nil {
@@ -191,9 +189,6 @@ func (a *authenticator) inference(ctx context.Context, p *principal) (inferenceC
 				continue
 			}
 			return inferenceCredential{}, downstreamError(resp.StatusCode, b)
-		}
-		if p.Anonymous && resp.Header.Get(clientIPAcceptedHeader) != "true" {
-			return inferenceCredential{}, apiErr(503, "UPSTREAM_REFUSED", "Controlplane did not acknowledge the forwarded identity")
 		}
 		var in struct {
 			Key     secret `json:"key"`
