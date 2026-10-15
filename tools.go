@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 
 	"github.com/google/jsonschema-go/jsonschema"
+	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -123,19 +125,29 @@ type session struct {
 	fam     *family
 	mcp     *mcp.ClientSession
 	meta    mcp.Meta
+	usageID string // names this session to the enclave; never one a caller chose
 	remote  map[string]string
 	schemas map[string]*jsonschema.Schema // what each tool's arguments are coerced to
 	defs    []json.RawMessage
 }
 
-func openTools(ctx context.Context, req *request, progress func(string, string, float64)) (*toolset, error) {
+func openTools(ctx context.Context, req *request, model string, progress func(string, string, float64)) (*toolset, error) {
+	route := "/agui"
+	if req.managed {
+		route = "/v1/threads/turn"
+	}
 	set := &toolset{byName: map[string]*session{}}
 	for _, f := range families {
 		meta, on := req.families[f.name]
 		if !on {
 			continue
 		}
-		opened, err := f.dial(ctx, progress)
+		header := http.Header{"X-Tinfoil-Tool-Model": {model}, "X-Tinfoil-Tool-Route": {route}, "X-Tinfoil-Tool-Streaming": {"true"}}
+		// Absent leaves the enclave's default, which checks; false is never sent.
+		if req.piiCheck {
+			header.Set("X-Tinfoil-Tool-PII-Check", "true")
+		}
+		opened, err := f.dial(ctx, header, progress)
 		if err != nil {
 			set.close()
 			return nil, fmt.Errorf("%s: %w", f.name, err)
@@ -149,11 +161,15 @@ func openTools(ctx context.Context, req *request, progress func(string, string, 
 	return set, nil
 }
 
-func (f *family) dial(ctx context.Context, progress func(string, string, float64)) (*session, error) {
+func (f *family) dial(ctx context.Context, header http.Header, progress func(string, string, float64)) (*session, error) {
 	// Nil means unverified at startup; the default client would seal to nothing.
 	if f.client == nil {
 		return nil, errors.New("enclave did not verify at startup")
 	}
+	usageID := uuid.NewString()
+	header.Set("X-Tinfoil-Tool-Request-Id", usageID)
+	sealed := *f.client
+	sealed.Transport = &sessionHeaders{inner: cmp.Or(f.client.Transport, http.DefaultTransport), header: header}
 	client := mcp.NewClient(&mcp.Implementation{Name: "confidential-tinfoil-harness", Version: "2"}, &mcp.ClientOptions{
 		ProgressNotificationHandler: func(_ context.Context, req *mcp.ProgressNotificationClientRequest) {
 			call, _ := req.Params.ProgressToken.(string)
@@ -161,7 +177,7 @@ func (f *family) dial(ctx context.Context, progress func(string, string, float64
 		},
 	})
 	opened, err := client.Connect(ctx, &mcp.StreamableClientTransport{
-		Endpoint: "https://" + f.enclave + "/mcp", HTTPClient: f.client}, nil)
+		Endpoint: "https://" + f.enclave + "/mcp", HTTPClient: &sealed}, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -175,7 +191,7 @@ func (f *family) dial(ctx context.Context, progress func(string, string, float64
 		published[t.Name] = t
 	}
 	schemas := schemaLookup(found.Tools)
-	s := &session{fam: f, mcp: opened, remote: map[string]string{}, schemas: map[string]*jsonschema.Schema{}}
+	s := &session{fam: f, mcp: opened, usageID: usageID, remote: map[string]string{}, schemas: map[string]*jsonschema.Schema{}}
 	for _, t := range f.tools {
 		serves, ok := published[t.remote]
 		if !ok {
@@ -194,6 +210,21 @@ func (f *family) dial(ctx context.Context, progress func(string, string, float64
 		s.defs = append(s.defs, def)
 	}
 	return s, nil
+}
+
+// sessionHeaders tags every request of one tool session with what the enclave
+// meters and filters it by.
+type sessionHeaders struct {
+	inner  http.RoundTripper
+	header http.Header
+}
+
+func (t *sessionHeaders) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	for key, values := range t.header {
+		r.Header[key] = slices.Clone(values)
+	}
+	return t.inner.RoundTrip(r)
 }
 
 func (t *toolset) system() []json.RawMessage {
@@ -244,7 +275,8 @@ func (t *toolset) close() {
 }
 
 func output(result *mcp.CallToolResult) string {
-	if result.StructuredContent != nil {
+	// A failed search's structured content is a billing receipt; its text is the error.
+	if result.StructuredContent != nil && !result.IsError {
 		if encoded, err := json.Marshal(result.StructuredContent); err == nil {
 			return string(encoded)
 		}

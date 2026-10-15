@@ -39,7 +39,7 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 	ctx = context.WithValue(ctx, usageContextKey{}, inRun)
 	first := context.WithValue(ctx, usageContextKey{}, billing)
 
-	set, err := openTools(ctx, req, out.progress)
+	set, err := openTools(ctx, req, m.name, out.progress)
 	if err != nil {
 		return fmt.Errorf("tools: %w", err)
 	}
@@ -145,9 +145,6 @@ func body(req *request, m *model, conversation []json.RawMessage, defs json.RawM
 	}
 	if len(defs) > 0 {
 		payload["tools"] = defs
-	}
-	if req.piiCheck {
-		payload["pii_check_options"] = map[string]any{}
 	}
 	return json.Marshal(payload)
 }

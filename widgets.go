@@ -206,7 +206,11 @@ func normalizeToolResult(call toolCall, content string) any {
 			row := obj(r)
 			rows = append(rows, object{"url": row["url"], "title": row["title"], "snippet": firstString(row["snippet"], row["content"], row["text"])})
 		}
-		return object{"query": args["query"], "results": rows}
+		shown := object{"query": args["query"], "results": rows}
+		if boolean(value["pii_checked"], false) {
+			shown["pii"] = piiReport(value)
+		}
+		return shown
 	case "web_fetch":
 		pages := arr(value["pages"])
 		if len(pages) == 0 {
@@ -238,6 +242,30 @@ func normalizeToolResult(call toolCall, content string) any {
 		return object{"output": content}
 	}
 }
+
+// piiReport is what the privacy filter masked from a search's query, in the
+// model router's shape. Offsets are code points into the query the model
+// sent; the removed text itself never leaves the enclave.
+func piiReport(result object) object {
+	offset := func(v any) (int64, bool) {
+		f, ok := v.(float64)
+		if !ok {
+			return 0, false
+		}
+		return floatToBoundedInt64(f)
+	}
+	redactions := []object{}
+	for _, item := range arr(result["pii_redactions"]) {
+		span := obj(item)
+		start, startOK := offset(span["start"])
+		end, endOK := offset(span["end"])
+		if startOK && endOK {
+			redactions = append(redactions, object{"type": str(span["type"]), "start": start, "end": end})
+		}
+	}
+	return object{"masked": boolean(result["pii_masked"], false), "redacted_query": str(result["redacted_query"]), "redactions": redactions}
+}
+
 func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *model) error {
 	var declaration widget
 	for _, w := range widgetCatalog() {

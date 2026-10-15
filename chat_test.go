@@ -925,6 +925,111 @@ func TestWidgetRetryRepairsTheReplacement(t *testing.T) {
 	}
 }
 
+// toolTurns answers the first model turn with chunks and every later one with
+// a plain answer, sending each later turn's last message to replies.
+func toolTurns(chunks string, replies chan<- string) http.HandlerFunc {
+	var turns atomic.Int32
+	return func(w http.ResponseWriter, r *http.Request) {
+		if turns.Add(1) == 1 {
+			io.WriteString(w, chunks+"data: [DONE]\n\n")
+			return
+		}
+		if messages := lastRequest(r); replies != nil {
+			replies <- str(obj(messages[len(messages)-1])["content"])
+		}
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n")
+	}
+}
+
+// toolResult is the content the caller was sent for one call.
+func toolResult(events []event, id string) object {
+	for _, e := range events {
+		if e.Type == "TOOL_CALL_RESULT" && e.ToolCallID == id {
+			return obj(decodeValue(e.Content))
+		}
+	}
+	return nil
+}
+
+func TestToolSessionsCarryTheEnclaveHeaders(t *testing.T) {
+	sessions := map[string]bool{}
+	for _, tc := range []struct {
+		route string
+		pii   bool
+	}{{"/v1/threads/turn", false}, {"/v1/threads/turn", true}, {"/agui", true}} {
+		t.Run(tc.route+"/"+strconv.FormatBool(tc.pii), func(t *testing.T) {
+			enclave := serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) { return nil, object{"results": []object{}} })
+			bodies := make(chan object, 2)
+			answer := toolTurns(toolCallChunk(0, "one", "web_search", `{"query":"cats"}`)+toolCallChunk(1, "two", "web_search", `{"query":"dogs"}`), nil)
+			h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				bodies <- obj(decodeValue(body))
+				r.Body = io.NopCloser(bytes.NewReader(body))
+				answer(w, r)
+			})
+			in := searchInput(key)
+			obj(in["options"])["piiCheck"] = tc.pii
+			if tc.route == "/agui" {
+				in = object{"messages": []any{object{"role": "user", "content": "hi"}}, "forwardedProps": object{"piiCheck": tc.pii}}
+			}
+			events := eventsIn(t, postRoute(h, tc.route, in, "alice"))
+			if last := events[len(events)-1]; last.Type != "RUN_FINISHED" {
+				t.Fatalf("run failed: %+v", last)
+			}
+			calls := enclave.list()
+			if len(calls) != 2 {
+				t.Fatalf("the enclave saw %d calls", len(calls))
+			}
+			header := calls[0].header
+			id := header.Get("X-Tinfoil-Tool-Request-Id")
+			if _, err := uuid.Parse(id); err != nil || id == events[0].RunID || sessions[id] || calls[1].header.Get("X-Tinfoil-Tool-Request-Id") != id {
+				t.Fatalf("the session was named %q (run %q, seen %v)", id, events[0].RunID, sessions)
+			}
+			sessions[id] = true
+			if header.Get("X-Tinfoil-Tool-Model") != "kimi-k3" || header.Get("X-Tinfoil-Tool-Route") != tc.route || header.Get("X-Tinfoil-Tool-Streaming") != "true" {
+				t.Fatalf("wrong session headers: %v", header)
+			}
+			if got := header.Values("X-Tinfoil-Tool-PII-Check"); tc.pii && !reflect.DeepEqual(got, []string{"true"}) || !tc.pii && len(got) != 0 {
+				t.Fatalf("the PII check header was %q", got)
+			}
+			for range 2 {
+				if body := <-bodies; body["pii_check_options"] != nil {
+					t.Fatal("the model was sent pii_check_options")
+				}
+			}
+		})
+	}
+}
+
+func TestSearchResultsShowWhatThePrivacyFilterMasked(t *testing.T) {
+	for _, checked := range []bool{true, false} {
+		t.Run(strconv.FormatBool(checked), func(t *testing.T) {
+			serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
+				return nil, object{"results": []object{{"url": "https://a.test", "title": "A", "content": "alpha"}}, "pii_checked": checked, "pii_masked": checked, "redacted_query": "hiking trails",
+					"pii_redactions": []object{{"type": "private_email", "start": 0, "end": 16}}, "pii_filter_requests": 1}
+			})
+			h, _, key := testChatHarness(t, toolTurns(toolCallChunk(0, "s", "web_search", `{"query":"me@example.com hiking trails"}`), nil))
+			shown := toolResult(eventsIn(t, postRoute(h, "/v1/threads/turn", searchInput(key), "alice")), "s")
+			want := map[string]any{"masked": true, "redacted_query": "hiking trails", "redactions": []any{map[string]any{"type": "private_email", "start": float64(0), "end": float64(16)}}}
+			if pii, ok := shown["pii"]; checked && !reflect.DeepEqual(pii, any(want)) || !checked && ok {
+				t.Fatalf("the caller was shown %v", shown)
+			}
+		})
+	}
+}
+
+func TestFailedSearchReadsAsItsErrorNotItsReceipt(t *testing.T) {
+	serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
+		return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: "search provider unavailable; retry after a short delay"}}, StructuredContent: map[string]any{"pii_filter_requests": 1}}, nil
+	})
+	read := make(chan string, 1)
+	h, _, key := testChatHarness(t, toolTurns(toolCallChunk(0, "s", "web_search", `{"query":"cats"}`), read))
+	eventsIn(t, postRoute(h, "/v1/threads/turn", searchInput(key), "alice"))
+	if got := <-read; !strings.Contains(got, "search provider unavailable; retry after a short delay") || strings.Contains(got, "pii_filter_requests") {
+		t.Fatalf("the model read %s", got)
+	}
+}
+
 func TestCutModelStreamDoesNotCompleteItsToolCall(t *testing.T) {
 	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, toolCallChunk(0, "search-call", "web_search", `{"query":"ca`))
