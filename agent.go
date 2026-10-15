@@ -84,7 +84,7 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 		if turn == 1 {
 			turnCtx = first
 		}
-		calls, answer, err := h.turn(turnCtx, out, m, payload)
+		calls, answer, err := h.turn(turnCtx, out, m, payload, set.widgets)
 		if err != nil && req.refreshAuth != nil && !refreshed && asAPIError(err).HTTP == http.StatusUnauthorized {
 			// A 401 rejected this model request before processing. Replay its
 			// exact body once, retaining the run ID and request billing flag.
@@ -101,7 +101,7 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 				billing.APIKeyHash = inRun.APIKeyHash
 				turnCtx = context.WithValue(ctx, usageContextKey{}, billing)
 			}
-			calls, answer, err = h.turn(turnCtx, out, m, payload)
+			calls, answer, err = h.turn(turnCtx, out, m, payload, set.widgets)
 		}
 		if err != nil {
 			return err
@@ -242,10 +242,13 @@ func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) (mess
 			if !ok {
 				return answered(call.id, `{"error":"unknown tool"}`)
 			}
-			var args any
-			if json.Unmarshal([]byte(call.args), &args) != nil || validateSchema(w.Schema, args) != nil {
-				out.result(call.id, `{"error":"invalid widget arguments"}`, nil)
-				return answered(call.id, `{"error":"invalid widget arguments"}`)
+			// The caller never reports back, so only the model can be told the widget was not drawn.
+			if failure := widgetFailure(w, call.args); failure != nil {
+				out.emit(event{Type: "TOOL_CALL_RESULT", MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: failure})
+				if !set.retry(call.name) {
+					return answered(call.id, `{"status":"executed"}`)
+				}
+				return answered(call.id, string(failure))
 			}
 			content, err := set.local(ctx, call)
 			if err != nil {
@@ -283,7 +286,7 @@ func clip(out string, limit int) string {
 	return out
 }
 
-func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byte) ([]toolCall, string, error) {
+func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byte, widgets map[string]widget) ([]toolCall, string, error) {
 	endpoint := m.endpoint
 	if endpoint == "" {
 		endpoint = h.gateway + "/v1/chat/completions"
@@ -388,7 +391,7 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 			if called.Index < 0 || called.Index >= 128 {
 				return nil, answer.String(), apiErr(502, "UPSTREAM_REFUSED", "The model exceeded the tool call limit")
 			}
-			calls = announce(out, message, calls, called)
+			calls = announce(out, message, calls, called, widgets)
 		}
 	}
 	// A cut stream leaves its calls open: TOOL_CALL_END would mark truncated arguments complete.
@@ -399,14 +402,21 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 		return calls, answer.String(), apiErr(502, "UPSTREAM_REFUSED", "The model stream ended before completion")
 	}
 	for i := range calls {
-		if !calls[i].open {
-			out.callStart(calls[i].id, calls[i].name, parent(message, &answer))
+		c := &calls[i]
+		shown := c.open && !c.held
+		if !c.open {
+			out.callStart(c.id, c.name, parent(message, &answer))
+		}
+		if c.held {
+			c.args = widgetArguments(c.args)
 		}
 		// The enclave reads absent arguments as none; the caller should too.
-		if calls[i].args == "" {
-			out.callArgs(calls[i].id, "{}")
+		if c.args == "" {
+			out.callArgs(c.id, "{}")
+		} else if !shown {
+			out.callArgs(c.id, c.args)
 		}
-		out.callEnd(calls[i].id)
+		out.callEnd(c.id)
 	}
 	return calls, answer.String(), nil
 }
@@ -414,6 +424,7 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 type toolCall struct {
 	id, name, args string
 	open           bool
+	held           bool // a widget: its arguments reach the caller whole, once repaired
 }
 
 type toolCallDelta struct {
@@ -433,7 +444,8 @@ func parent(message string, answer *strings.Builder) string {
 	return message
 }
 
-func announce(out *stream, message string, calls []toolCall, delta toolCallDelta) []toolCall {
+// Arguments that arrive before the name are sent once the call opens.
+func announce(out *stream, message string, calls []toolCall, delta toolCallDelta, widgets map[string]widget) []toolCall {
 	for len(calls) <= delta.Index {
 		calls = append(calls, toolCall{id: "call_" + token()})
 	}
@@ -444,10 +456,13 @@ func announce(out *stream, message string, calls []toolCall, delta toolCallDelta
 	call.name += delta.Function.Name
 	call.args += delta.Function.Arguments
 	if !call.open && call.name != "" {
+		_, call.held = widgets[call.name]
 		call.open = true
 		out.callStart(call.id, call.name, message)
-	}
-	if delta.Function.Arguments != "" {
+		if !call.held && call.args != "" {
+			out.callArgs(call.id, call.args)
+		}
+	} else if call.open && !call.held && delta.Function.Arguments != "" {
 		out.callArgs(call.id, delta.Function.Arguments)
 	}
 	return calls

@@ -10,6 +10,7 @@ import (
 	"maps"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -98,6 +99,24 @@ type toolset struct {
 	local    func(context.Context, toolCall) (any, error)
 	sessions []*session
 	byName   map[string]*session
+
+	mu       sync.Mutex
+	rejected map[string]int // widget calls whose arguments failed validation, by name
+}
+
+// retry counts a widget call whose arguments failed validation, reporting
+// whether the model is still told so: past the cap it is told the call ran.
+func (t *toolset) retry(name string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.rejected[name] >= maxWidgetRetries {
+		return false
+	}
+	if t.rejected == nil {
+		t.rejected = map[string]int{}
+	}
+	t.rejected[name]++
+	return true
 }
 
 type session struct {

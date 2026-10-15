@@ -1,13 +1,122 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"path"
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 )
+
+// maxWidgetRetries bounds how often one run tells the model a widget's
+// arguments failed validation; two cover fixing one field surfacing another.
+const maxWidgetRetries = 2
+
+// widgetArguments is what a widget call is drawn and validated with: repaired,
+// then canonical.
+func widgetArguments(raw string) string {
+	if repaired, ok := sanitizeToolCallArgumentsJSON([]byte(raw)); ok && json.Valid(repaired) {
+		raw = string(repaired)
+	}
+	return canonicalizeWidgetArguments(raw)
+}
+
+// canonicalizeWidgetArguments unwraps nested arrays and objects sent as JSON
+// strings, such as DeepSeek's {"stats":"[{...}]"}, which widget schemas
+// reject. Arguments that need no unwrapping come back byte-for-byte, and
+// anything that does not parse comes back untouched.
+func canonicalizeWidgetArguments(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed[0] != '{' && trimmed[0] != '[' {
+		return raw
+	}
+	decoded, err := decodeJSONValue(trimmed)
+	if err != nil {
+		return raw
+	}
+	unwrapped, changed := deepUnwrapJSONStrings(decoded)
+	if !changed {
+		return raw
+	}
+	encoded, err := json.Marshal(unwrapped)
+	if err != nil {
+		return raw
+	}
+	return string(encoded)
+}
+
+// deepUnwrapJSONStrings replaces every string holding a JSON array or object
+// with its decoded value, reporting whether any was replaced.
+func deepUnwrapJSONStrings(value any) (any, bool) {
+	switch v := value.(type) {
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" || trimmed[0] != '{' && trimmed[0] != '[' {
+			return v, false
+		}
+		nested, err := decodeJSONValue(trimmed)
+		if err != nil {
+			return v, false
+		}
+		unwrapped, _ := deepUnwrapJSONStrings(nested)
+		return unwrapped, true
+	case []any:
+		out, changed := make([]any, len(v)), false
+		for i, item := range v {
+			var itemChanged bool
+			out[i], itemChanged = deepUnwrapJSONStrings(item)
+			changed = changed || itemChanged
+		}
+		return out, changed
+	case map[string]any:
+		out, changed := make(map[string]any, len(v)), false
+		for k, item := range v {
+			var itemChanged bool
+			out[k], itemChanged = deepUnwrapJSONStrings(item)
+			changed = changed || itemChanged
+		}
+		return out, changed
+	}
+	return value, false
+}
+
+// decodeJSONValue keeps numbers exact and refuses trailing data.
+func decodeJSONValue(raw string) (any, error) {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
+	var decoded any
+	if err := decoder.Decode(&decoded); err != nil {
+		return nil, err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return nil, errors.New("multiple JSON values")
+		}
+		return nil, err
+	}
+	return decoded, nil
+}
+
+// widgetFailure is what a widget call whose arguments cannot be drawn
+// returns, or nil when they can.
+func widgetFailure(w widget, args string) json.RawMessage {
+	var value any
+	problem := "arguments are not valid JSON"
+	if json.Unmarshal([]byte(cmp.Or(args, "{}")), &value) == nil {
+		err := validateSchema(w.Schema, value)
+		if err == nil {
+			return nil
+		}
+		problem = strings.TrimPrefix(err.Error(), "validating root: ")
+	}
+	return raw(object{"status": "error", "error": fmt.Sprintf("The arguments for %s did not match the tool's parameter schema and the component was not displayed: %s. Call %s again with corrected arguments that match the schema exactly.", w.Name, problem, w.Name)})
+}
 
 func validateSchema(raw json.RawMessage, value any) error {
 	var schema jsonschema.Schema
@@ -153,7 +262,7 @@ func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *
 	if err != nil {
 		return err
 	}
-	content = strings.TrimSpace(content)
+	content = widgetArguments(strings.TrimSpace(content))
 	var value any
 	if json.Unmarshal([]byte(content), &value) != nil || validateSchema(declaration.Schema, value) != nil {
 		return apiErr(502, "UPSTREAM_REFUSED", "The replacement widget arguments do not match the schema")

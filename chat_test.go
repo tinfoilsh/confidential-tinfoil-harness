@@ -753,6 +753,178 @@ func TestToolArgumentsAreCoercedAndRejectionsExplained(t *testing.T) {
 	}
 }
 
+// widgetTurn streams chunks as the first model turn, with render_artifact_preview offered.
+func widgetTurn(t *testing.T, chunks ...string) []event {
+	t.Helper()
+	var turns atomic.Int32
+	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if turns.Add(1) == 1 {
+			io.WriteString(w, strings.Join(chunks, "")+"data: [DONE]\n\n")
+			return
+		}
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	h.catalog.get().EnabledWidgets = []string{"render_artifact_preview"}
+	in := sendInput(key)
+	in["widgets"] = []any{"render_artifact_preview"}
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice"))
+	if last := events[len(events)-1]; last.Type != "RUN_FINISHED" {
+		t.Fatalf("run failed: %+v", last)
+	}
+	return events
+}
+
+// streamedArgs is every TOOL_CALL_ARGS delta one call was sent, in order.
+func streamedArgs(t *testing.T, events []event, id string) []string {
+	t.Helper()
+	var deltas []string
+	started := false
+	for _, e := range events {
+		switch {
+		case e.ToolCallID != id:
+		case e.Type == "TOOL_CALL_START":
+			started = true
+		case e.Type == "TOOL_CALL_ARGS":
+			if !started {
+				t.Fatalf("arguments for %s were sent before its TOOL_CALL_START", id)
+			}
+			deltas = append(deltas, str(e.Delta))
+		}
+	}
+	return deltas
+}
+
+func TestWidgetArgumentsReachTheCallerWhole(t *testing.T) {
+	large := `{"source":{"type":"markdown","markdown":"` + strings.Repeat("x", 5000) + `"}}`
+	for name, tc := range map[string]struct {
+		chunks []string
+		want   string
+	}{
+		"fragmented":     {[]string{toolCallChunk(0, "w", "render_artifact_preview", `{"title":"Demo","source":{"type":`), toolCallChunk(0, "", "", `"markdown","markdown":"# hi"}}`)}, `{"title":"Demo","source":{"type":"markdown","markdown":"# hi"}}`},
+		"trailing prose": {[]string{toolCallChunk(0, "w", "render_artifact_preview", `{"title":"Demo"}I will explain the artifact next.`)}, `{"title":"Demo"}`},
+		"irreparable":    {[]string{toolCallChunk(0, "w", "render_artifact_preview", `{"title":"Demo"`)}, `{"title":"Demo"`},
+		"large":          {[]string{toolCallChunk(0, "w", "render_artifact_preview", large)}, large},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := streamedArgs(t, widgetTurn(t, tc.chunks...), "w"); len(got) != 1 || got[0] != tc.want {
+				t.Fatalf("the caller was sent %q, want one delta %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestStringifiedWidgetArgumentsAreUnwrappedBeforeValidation(t *testing.T) {
+	events := widgetTurn(t, toolCallChunk(0, "w", "render_artifact_preview", `{"title":"Demo","source":"{\"type\":\"html\",\"html\":\"<p>hi</p>\"}"}`))
+	got := streamedArgs(t, events, "w")
+	want := map[string]any{"title": "Demo", "source": map[string]any{"type": "html", "html": "<p>hi</p>"}}
+	if len(got) != 1 || !reflect.DeepEqual(decodeValue([]byte(got[0])), any(want)) {
+		t.Fatalf("the caller was sent %q", got)
+	}
+	for _, e := range events {
+		if e.Type == "TOOL_CALL_RESULT" && e.ToolCallID == "w" && string(e.Content) != `"[rendered for the user]"` {
+			t.Fatalf("unwrapped arguments failed validation: %s", e.Content)
+		}
+	}
+}
+
+func TestOrdinaryToolCallsStreamLiveBesideAWidget(t *testing.T) {
+	events := widgetTurn(t,
+		toolCallChunk(0, "lookup", "lookup_order", `{"id":`),
+		toolCallChunk(1, "w", "render_artifact_preview", `{"title":"Demo"}extra prose`),
+		toolCallChunk(0, "", "", `1}leave this trailing text`))
+	if got := streamedArgs(t, events, "lookup"); !reflect.DeepEqual(got, []string{`{"id":`, `1}leave this trailing text`}) {
+		t.Fatalf("the ordinary call was sent %q", got)
+	}
+	if got := streamedArgs(t, events, "w"); !reflect.DeepEqual(got, []string{`{"title":"Demo"}`}) {
+		t.Fatalf("the widget was sent %q", got)
+	}
+	lastOrdinary, widgetArgs := -1, -1
+	for i, e := range events {
+		if e.Type == "TOOL_CALL_ARGS" && e.ToolCallID == "lookup" {
+			lastOrdinary = i
+		} else if e.Type == "TOOL_CALL_ARGS" && e.ToolCallID == "w" {
+			widgetArgs = i
+		}
+	}
+	if lastOrdinary > widgetArgs {
+		t.Fatal("the widget's arguments were sent before the turn ended")
+	}
+}
+
+func TestArgumentsBeforeTheNameAreSentWhenTheCallOpens(t *testing.T) {
+	events := widgetTurn(t,
+		toolCallChunk(0, "early", "", `{"query":`),
+		toolCallChunk(0, "", "lookup_order", ""),
+		toolCallChunk(0, "", "", `"cats"}`),
+		toolCallChunk(1, "nameless", "", `{"a":1}`))
+	if got := streamedArgs(t, events, "early"); !reflect.DeepEqual(got, []string{`{"query":`, `"cats"}`}) {
+		t.Fatalf("the call was sent %q", got)
+	}
+	if got := streamedArgs(t, events, "nameless"); !reflect.DeepEqual(got, []string{`{"a":1}`}) {
+		t.Fatalf("a call that never named its tool was sent %q", got)
+	}
+}
+
+func TestWidgetSchemaErrorsReachTheModelUntilTheRetryCap(t *testing.T) {
+	var turns atomic.Int32
+	read := make(chan string, maxWidgetRetries+1)
+	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		turn := int(turns.Add(1))
+		if turn > 1 {
+			messages := lastRequest(r)
+			read <- str(obj(messages[len(messages)-1])["content"])
+		}
+		if turn <= maxWidgetRetries+1 {
+			io.WriteString(w, toolCallChunk(0, "widget-"+strconv.Itoa(turn), "render_artifact_preview", `{"title":"Demo","source":"<p>hi</p>"}`)+"data: [DONE]\n\n")
+			return
+		}
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"I could not draw it.\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	h.catalog.get().EnabledWidgets = []string{"render_artifact_preview"}
+	in := sendInput(key)
+	in["widgets"] = []any{"render_artifact_preview"}
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice"))
+	if last := events[len(events)-1]; last.Type != "RUN_FINISHED" {
+		t.Fatalf("run failed: %+v", last)
+	}
+	for i := 1; i <= maxWidgetRetries+1; i++ {
+		got := <-read
+		if i <= maxWidgetRetries && !strings.Contains(got, "did not match the tool's parameter schema") || i > maxWidgetRetries && got != `{"status":"executed"}` {
+			t.Fatalf("after failure %d the model read %s", i, got)
+		}
+	}
+	failures := 0
+	for _, e := range events {
+		if e.Type == "TOOL_CALL_RESULT" && obj(decodeValue(e.Content))["status"] == "error" {
+			failures++
+		}
+	}
+	if failures != maxWidgetRetries+1 {
+		t.Fatalf("the caller saw %d failed renders", failures)
+	}
+}
+
+func TestWidgetRetryRepairsTheReplacement(t *testing.T) {
+	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(object{"choices": []object{{"message": object{"content": `{"stats":"[{\"label\":\"Count\",\"value\":2}]"} Here are the stats.`}}}})
+	})
+	h.catalog.get().EnabledWidgets = []string{"render_stat_cards"}
+	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat")] = storedRow{ID: "chat", ETag: "1", Data: object{"createdAt": timestamp(), "title": "Title", "titleState": "manual", "model": "kimi-k3", "messages": []any{
+		object{"id": "user", "role": "user", "content": "show a stat", "timestamp": timestamp()},
+		object{"id": "assistant", "role": "assistant", "content": "", "timestamp": timestamp(), "timeline": []any{object{"type": "tool_call", "id": "call", "toolCallId": "call", "name": "render_stat_cards", "arguments": `{"stats":"bad"}`}}},
+	}}}
+	in := sendInput(key)
+	in["threadId"], in["kind"], in["toolCallId"], in["widgets"] = "chat", "retryToolCall", "call", []any{"render_stat_cards"}
+	delete(in, "content")
+	if last := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice")); last[len(last)-1].Type != "RUN_FINISHED" {
+		t.Fatalf("retry failed: %+v", last[len(last)-1])
+	}
+	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", "chat")
+	if got := obj(arr(obj(arr(row.Data["messages"])[1])["timeline"])[0])["arguments"]; got != `{"stats":[{"label":"Count","value":2}]}` {
+		t.Fatalf("stored replacement %v", got)
+	}
+}
+
 func TestCutModelStreamDoesNotCompleteItsToolCall(t *testing.T) {
 	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, toolCallChunk(0, "search-call", "web_search", `{"query":"ca`))
