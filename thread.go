@@ -45,6 +45,7 @@ type chatRun struct {
 	retryTarget              object
 	replacement              string
 	profile                  object // a local thread's settings, sent by its client
+	screening                *screening
 }
 
 func (h *harness) threadState(p *principal, id string) *threadSession {
@@ -521,6 +522,7 @@ func (h *harness) beginChatRun(ctx context.Context, r *chatRun) error {
 	if err != nil {
 		return err
 	}
+	r.screening = h.screening(request, model)
 	if r.input["kind"] == "retryToolCall" {
 		for _, message := range arr(working["messages"]) {
 			for _, b := range arr(obj(message)["timeline"]) {
@@ -729,7 +731,7 @@ func (h *harness) finishChatRun(r *chatRun, runErr error) {
 		r.out.mu.Lock()
 		r.out.observe = nil
 		r.out.mu.Unlock()
-		r.input, r.retryTarget, r.assembler = nil, nil, nil
+		r.input, r.retryTarget, r.assembler, r.screening = nil, nil, nil, nil
 		r.replacement = ""
 		r.principal = &principal{ID: r.principal.ID, AnonymousID: r.principal.AnonymousID, Anonymous: r.principal.Anonymous}
 		r.credential.Key = ""
@@ -800,6 +802,7 @@ func (h *harness) finishChatRun(r *chatRun, runErr error) {
 			}
 		}
 	}
+	h.screen(r, messages, runErr)
 	limit := h.auth.currentLimit(r.principal)
 	if r.out.modelAccepted {
 		limit = h.auth.consumed(r.principal)

@@ -1261,6 +1261,142 @@ func TestToolFailuresReachTheCallerOpaquely(t *testing.T) {
 	}
 }
 
+// screenedBy points h at a sidecar; the returned func drains the submitter
+// and reports what the sidecar received.
+func screenedBy(t *testing.T, h *harness) func() []submission {
+	t.Helper()
+	var mu sync.Mutex
+	var got []submission
+	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var sub submission
+		json.NewDecoder(r.Body).Decode(&sub)
+		mu.Lock()
+		got = append(got, sub)
+		mu.Unlock()
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	t.Cleanup(sidecar.Close)
+	h.safeguards = newSubmitter(sidecar.URL)
+	h.auth.credentials["user:alice"] = inferenceCredential{Key: secret(accessJWT("tinfoil-chat", "chat")), Expires: nowUTC().Add(time.Hour)}
+	// As deployed, auto is the router, not one of the gateway's models.
+	h.autoModel = &model{name: "auto", client: h.models[0].client}
+	return func() []submission {
+		h.safeguards.close()
+		mu.Lock()
+		defer mu.Unlock()
+		return got
+	}
+}
+
+func TestACompletedFirstPartyChatIsScreenedOnce(t *testing.T) {
+	for _, kind := range []string{"send", "ask"} {
+		t.Run(kind, func(t *testing.T) {
+			conversationHeaders := make(chan string, 1)
+			h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+				conversationHeaders <- r.Header.Get("X-Tinfoil-Conversation-Id")
+				io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n")
+			})
+			drained := screenedBy(t, h)
+			in, history := sendInput(key), []safeguardMessage{{Role: "user", Content: "test message"}}
+			if kind == "ask" {
+				rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "source")] = storedRow{ID: "source", ETag: "1", Data: object{"title": "Source", "messages": []any{
+					object{"id": "q", "role": "user", "content": "earlier question"}, object{"id": "a", "role": "assistant", "content": "earlier answer"}}}}
+				in["kind"], in["threadId"], in["quote"] = "ask", "source", "what does this mean?"
+				delete(in, "content")
+				history = []safeguardMessage{{Role: "user", Content: "earlier question"}, {Role: "assistant", Content: "earlier answer"}, {Role: "user", Content: "what does this mean?"}}
+			}
+			events := finishedRun(t, h, "/v1/threads/turn", in)
+			if header := <-conversationHeaders; header != "" {
+				t.Fatalf("a gateway model was sent the conversation header %q", header)
+			}
+			got := drained()
+			conversation := events[0].ThreadID
+			if kind == "ask" {
+				conversation = "source"
+			}
+			if len(got) != 1 || got[0].Credential != accessJWT("tinfoil-chat", "chat") || got[0].ConversationID != conversation {
+				t.Fatalf("the sidecar received %+v", got)
+			}
+			messages := got[0].Messages
+			if len(messages) == 0 || messages[0].Role != "system" || !strings.Contains(messages[0].Content, "You are Kimi K3.") ||
+				!reflect.DeepEqual(messages[1:], append(history, safeguardMessage{Role: "assistant", Content: "hello"})) {
+				t.Fatalf("the sidecar received %+v", messages)
+			}
+		})
+	}
+}
+
+func TestAutoChatsAreLeftToTheRouter(t *testing.T) {
+	conversationHeaders := make(chan string, 1)
+	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		conversationHeaders <- r.Header.Get("X-Tinfoil-Conversation-Id")
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	drained := screenedBy(t, h)
+	in := sendInput(key)
+	obj(in["options"])["model"] = "auto"
+	events := finishedRun(t, h, "/v1/threads/turn", in)
+	if header := <-conversationHeaders; header != events[0].ThreadID {
+		t.Fatalf("the router was told the conversation is %q", header)
+	}
+	if got := drained(); len(got) != 0 {
+		t.Fatalf("an auto chat was screened twice: %+v", got)
+	}
+}
+
+func TestFailedAnonymousAndCancelledChatsAreNotScreened(t *testing.T) {
+	t.Run("failed", func(t *testing.T) {
+		h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+			io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
+		})
+		drained := screenedBy(t, h)
+		if last := eventsIn(t, postRoute(h, "/v1/threads/turn", sendInput(key), "alice")); last[len(last)-1].Type != "RUN_ERROR" {
+			t.Fatal("a cut stream finished the run")
+		}
+		if got := drained(); len(got) != 0 {
+			t.Fatalf("a failed chat was screened: %+v", got)
+		}
+	})
+	t.Run("anonymous", func(t *testing.T) {
+		h, _, key := testChatHarness(t, nil)
+		drained := screenedBy(t, h)
+		in := sendInput(key)
+		delete(in, "key")
+		in["ephemeral"] = true
+		eventsIn(t, postRoute(h, "/v1/threads/turn", in, ""))
+		if got := drained(); len(got) != 0 {
+			t.Fatalf("an anonymous chat was screened: %+v", got)
+		}
+	})
+	t.Run("cancelled", func(t *testing.T) {
+		started := make(chan struct{})
+		h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+			io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
+			w.(http.Flusher).Flush()
+			close(started)
+			<-r.Context().Done()
+		})
+		drained := screenedBy(t, h)
+		p := &principal{ID: "alice", JWT: "clerk-alice"}
+		run, err := h.acceptTurn(context.Background(), p, key, sendInput(key))
+		if err != nil {
+			t.Fatal(err)
+		}
+		<-started
+		if _, err := h.cancelThread(context.Background(), p, key, object{"key": key.base64(), "threadId": run.thread.id, "runId": run.log.id}); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-run.finished:
+		case <-time.After(3 * time.Second):
+			t.Fatal("cancel timed out")
+		}
+		if got := drained(); len(got) != 0 {
+			t.Fatalf("a cancelled chat was screened: %+v", got)
+		}
+	})
+}
+
 func TestCutModelStreamDoesNotCompleteItsToolCall(t *testing.T) {
 	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, toolCallChunk(0, "search-call", "web_search", `{"query":"ca`))

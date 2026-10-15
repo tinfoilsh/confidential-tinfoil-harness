@@ -60,6 +60,7 @@ type harness struct {
 	catalog       catalogCache
 	autoModel     *model
 	services      map[string]*downstreamService
+	safeguards    *submitter // nil unless SAFEGUARDS_URL names the sidecar
 	memoryEnabled bool
 	chatMu        sync.Mutex
 	closing       bool
@@ -91,6 +92,7 @@ func main() {
 	h := &harness{gateway: gw,
 		controlplane: strings.TrimRight(*controlplane, "/"),
 		cpClient:     &http.Client{Transport: &callerAuth{inner: http.DefaultTransport}},
+		safeguards:   newSubmitter(os.Getenv("SAFEGUARDS_URL")),
 		runs:         map[string]*run{}}
 
 	if err := h.bootChat(ctx, usageSecret); err != nil {
@@ -110,9 +112,10 @@ func main() {
 		defer cancel()
 		srv.Shutdown(ctx)
 		waitRuns(ctx, active)
+		h.safeguards.close()
 	}()
 
-	slog.Info("listening", "addr", *addr, "gateway", gw, "models", served(h.offer.get()))
+	slog.Info("listening", "addr", *addr, "gateway", gw, "models", served(h.offer.get()), "safeguards", h.safeguards != nil)
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		slog.Error("serve", "error", err)
 		os.Exit(1)

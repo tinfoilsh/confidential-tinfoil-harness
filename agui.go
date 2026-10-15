@@ -118,6 +118,7 @@ type request struct {
 	groups                     [][]json.RawMessage
 	reminder                   json.RawMessage
 	threadID                   string
+	conversation               string // the chat the run is classified under: an ask's source thread
 	runID                      string
 	model                      string
 	cacheScope                 string              // partitions the enclave's prompt cache per caller; a namespace, not a credential

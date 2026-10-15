@@ -136,6 +136,10 @@ func (h *harness) buildRequest(thread, profile, project object, documents []obje
 	}
 	name := normalizeModel(firstString(options["model"], thread["model"], profile["selectedModel"], "auto"))
 	req := &request{threadID: str(thread["id"]), runID: runID, model: name, managed: true, families: map[string]mcp.Meta{}}
+	req.conversation = req.threadID
+	if in["kind"] == "ask" {
+		req.conversation = str(in["threadId"])
+	}
 	def, display, policy, window := c.definition(name), "Auto", "none", 0
 	var picked *model
 	for _, m := range h.offer.get() {
