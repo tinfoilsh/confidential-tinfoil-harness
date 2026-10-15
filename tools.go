@@ -16,6 +16,7 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
 // A family's tools are named here rather than discovered, so an enclave that
@@ -250,6 +251,12 @@ func (t *toolset) call(ctx context.Context, name, progress string, args json.Raw
 	}
 	sanitizeToolCallArguments(arguments)
 	coerceArgumentsToSchema(name, arguments, s.schemas)
+	// The run signs its calls as already billed, but websearch bills its own
+	// requests, once per context id: this session's.
+	if usage, ok := ctx.Value(usageContextKey{}).(usagereporting.Context); ok {
+		usage.ContextID, usage.BillCustomerRequest = s.usageID, true
+		ctx = context.WithValue(ctx, usageContextKey{}, usage)
+	}
 	// Cloned because the progress token is written into metadata shared by every call.
 	params := &mcp.CallToolParams{Meta: maps.Clone(s.meta), Name: s.remote[name], Arguments: arguments}
 	params.SetProgressToken(progress)
