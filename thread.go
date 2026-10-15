@@ -671,6 +671,7 @@ func applyTurn(thread, in object, messageID string, attachments []any) error {
 		}
 	}
 	kind := str(in["kind"])
+	content, quote := str(in["content"]), in["quote"]
 	if kind == "edit" || kind == "regenerate" {
 		index := -1
 		for i, m := range messages {
@@ -693,11 +694,12 @@ func applyTurn(thread, in object, messageID string, attachments []any) error {
 			if _, present := in["attachments"]; !present {
 				attachments = arr(obj(messages[index])["attachments"])
 			}
+			if _, present := in["quote"]; !present {
+				quote = obj(messages[index])["quote"]
+			}
 		}
 		messages = messages[:index]
 	}
-	content := str(in["content"])
-	quote := in["quote"]
 	if kind == "resolve" {
 		found := false
 		for _, m := range messages {

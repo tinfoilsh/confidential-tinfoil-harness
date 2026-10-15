@@ -467,6 +467,46 @@ func TestEditingAReplyCollapsesItsText(t *testing.T) {
 	}
 }
 
+func TestAnEditKeepsTheQuoteItOmits(t *testing.T) {
+	questions := make(chan string, 1)
+	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		messages := lastRequest(r)
+		questions <- str(obj(messages[len(messages)-2])["content"])
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"New answer\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	p := &principal{ID: "alice"}
+	for _, tc := range []struct {
+		quote    any // nil leaves the quote out of the edit
+		stored   any
+		question string
+	}{
+		{nil, "First answer\nQuoted context", "In reply to:\n> First answer\n> Quoted context\n\nEdited question"},
+		{"", "", "Edited question"},
+	} {
+		rows.rows[rowMapKey(p, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: object{"title": "Old", "titleState": "manual", "model": "kimi-k3", "messages": []any{
+			object{"id": "u1", "role": "user", "content": "First question"},
+			object{"id": "a1", "role": "assistant", "content": "First answer"},
+			object{"id": "u2", "role": "user", "content": "Second question", "quote": "First answer\nQuoted context"},
+			object{"id": "a2", "role": "assistant", "content": "Second answer"},
+		}}}
+		in := continueInput(key, "chat-1")
+		in["kind"], in["messageId"], in["content"] = "edit", "u2", "Edited question"
+		if tc.quote != nil {
+			in["quote"] = tc.quote
+		}
+		finishedRun(t, h, "/v1/threads/turn", in)
+		row, _ := rows.load(context.Background(), p, key, "chat", "chat-1")
+		messages := arr(row.Data["messages"])
+		edited := obj(messages[2])
+		if len(messages) != 4 || edited["content"] != "Edited question" || edited["quote"] != tc.stored || obj(messages[3])["content"] != "New answer" {
+			t.Fatalf("an edit with quote %v stored %v", tc.quote, messages)
+		}
+		if question := <-questions; question != tc.question {
+			t.Fatalf("an edit with quote %v asked %q", tc.quote, question)
+		}
+	}
+}
+
 func TestAnonymousEphemeralNeverCallsStorage(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	in := sendInput(key)
