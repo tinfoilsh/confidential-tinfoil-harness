@@ -44,7 +44,8 @@ func modelCopy(name, content string) (string, []citationSource) {
 	return cmp.Or(formatted, content), sources
 }
 
-var markdownLinkPattern = regexp.MustCompile(`\[([^\]]+)\]\((https?://[^\s)]+)\)`)
+// A URL may hold one level of balanced parentheses, as Wikipedia's Mercury_(planet) does.
+var markdownLinkPattern = regexp.MustCompile(`\[([^\]]+)\]\((https?://(?:[^\s()]|\([^\s()]*\))+)\)`)
 
 // citationAnnotations marks each markdown link in text to a page the run's
 // tools showed the model, as chat completions url_citation annotations over

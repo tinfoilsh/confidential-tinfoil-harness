@@ -105,6 +105,19 @@ func TestCitationAnnotationsUseCodePointOffsets(t *testing.T) {
 	}
 }
 
+func TestCitationAnnotationsMatchURLsWithParentheses(t *testing.T) {
+	const planet = "https://en.wikipedia.org/wiki/Mercury_(planet)"
+	content := "Mercury is closest to the Sun [Wikipedia](" + planet + ") (see [A](https://a.test/x))."
+	got := citationsIn(t, content, citationSource{planet, "Mercury (planet)"}, citationSource{"https://a.test/x", "A"})
+	want := []map[string]any{
+		{"url": planet, "title": "Mercury (planet)", "start_index": strings.Index(content, "Wikipedia"), "end_index": strings.Index(content, "Wikipedia") + len("Wikipedia")},
+		{"url": "https://a.test/x", "title": "A", "start_index": strings.Index(content, "[A]") + 1, "end_index": strings.Index(content, "[A]") + 2},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("annotations %v, want %v", got, want)
+	}
+}
+
 func TestCitationAnnotationsKeepTheModelsURL(t *testing.T) {
 	const recorded = "https://apnews.com/article/ukraine-druzhba-pipeline-7dfc9574bf95a69eda13b1440171e402"
 	got := citationsIn(t, "Pipeline repairs are complete [Source: AP News]("+recorded+"/).", citationSource{recorded, "AP News"})
