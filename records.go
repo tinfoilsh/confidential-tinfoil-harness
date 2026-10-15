@@ -65,7 +65,7 @@ func (h *harness) session(ctx context.Context, p *principal, _ contentKey, _ obj
 		keyInfo["bundles"] = bundles
 		keyInfo["hasData"] = boolean(current["has_data"], false)
 	}
-	features := object{"webSearch": false, "codeExecution": false, "sandbox": h.serviceReady("sandbox"), "piiCheck": true, "genUI": len(c.EnabledWidgets) > 0, "transcription": h.serviceReady("router"), "speech": h.serviceReady("router"), "memory": h.memoryEnabled}
+	features := object{"webSearch": false, "codeExecution": false, "sandbox": h.serviceReady("sandbox"), "piiCheck": true, "genUI": len(c.EnabledWidgets) > 0, "transcription": h.serviceReady("router"), "speech": h.serviceReady("router"), "memory": h.memoryEnabled, "defaultPromptPreset": true}
 	for _, family := range families {
 		features[family.name] = family.client != nil
 	}
@@ -328,7 +328,7 @@ func (h *harness) getProfile(ctx context.Context, p *principal, key contentKey, 
 	return profileView(profile), nil
 }
 
-var profileFields = strings.Fields("themeMode chatFont language nickname profession traits additionalContext isUsingPersonalization isUsingCustomPrompt customSystemPrompt customPromptPresets favoritePromptPresetIds selectedModel autoIntelligence reasoningEffort thinkingEnabled webSearchEnabled codeExecutionEnabled sandboxEnabled piiCheckEnabled genUIEnabled pixelateSidebarChatTitlesEnabled browserTabChatTitleEnabled enterToNewlineEnabled hasSeenOnboarding hasSeenWebSearchIntro dismissed")
+var profileFields = strings.Fields("themeMode chatFont language nickname profession traits additionalContext isUsingPersonalization isUsingCustomPrompt customSystemPrompt customPromptPresets favoritePromptPresetIds defaultPromptPresetId selectedModel autoIntelligence reasoningEffort thinkingEnabled webSearchEnabled codeExecutionEnabled sandboxEnabled piiCheckEnabled genUIEnabled pixelateSidebarChatTitlesEnabled browserTabChatTitleEnabled enterToNewlineEnabled hasSeenOnboarding hasSeenWebSearchIntro dismissed")
 
 func (h *harness) updateProfile(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
 	if !validObject(in["patch"]) {
@@ -337,6 +337,11 @@ func (h *harness) updateProfile(ctx context.Context, p *principal, key contentKe
 	patch := obj(in["patch"])
 	if err := validateProfile(patch); err != nil {
 		return nil, err
+	}
+	// The web client stores a cleared default as an empty string and ignores
+	// a synced profile that holds null.
+	if value, ok := patch["defaultPromptPresetId"]; ok && value == nil {
+		patch["defaultPromptPresetId"] = ""
 	}
 	fields := []string{}
 	for f := range patch {

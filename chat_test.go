@@ -302,6 +302,69 @@ func TestFirstTurnUsesProjectAndPreset(t *testing.T) {
 	}
 }
 
+func TestNewChatsStartWithTheDefaultPromptPreset(t *testing.T) {
+	systems := make(chan string, 1)
+	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		systems <- str(obj(lastRequest(r)[0])["content"])
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	pirate := object{"id": "user:pirate", "name": "Pirate", "description": "", "systemPrompt": "Answer like a pirate.", "createdAt": 1, "updatedAt": 1, "model": "kimi-k3", "webSearchEnabled": false}
+	for _, patch := range []object{{"defaultPromptPresetId": 1}, {"customPromptPresets": []any{object{"id": "user:x", "name": "X", "model": 3}}}, {"customPromptPresets": []any{object{"id": "user:x", "name": "X", "webSearchEnabled": "no"}}}} {
+		if w := postRoute(h, "/v1/profile/update", object{"key": key.base64(), "patch": patch}, "alice"); w.Code != 400 {
+			t.Fatalf("profile accepted %v: %d", patch, w.Code)
+		}
+	}
+	update := func(patch object) object {
+		t.Helper()
+		w := postRoute(h, "/v1/profile/update", object{"key": key.base64(), "patch": patch}, "alice")
+		if w.Code != 200 {
+			t.Fatalf("profile update: %d %s", w.Code, w.Body.String())
+		}
+		var profile object
+		json.Unmarshal(w.Body.Bytes(), &profile)
+		return profile
+	}
+	if value, ok := update(object{"defaultPromptPresetId": nil})["defaultPromptPresetId"]; !ok || value != "" {
+		t.Fatalf("a cleared default was stored as %v", value)
+	}
+	profile := update(object{"customPromptPresets": []any{pirate}, "defaultPromptPresetId": "user:pirate"})
+	if profile["defaultPromptPresetId"] != "user:pirate" || !reflect.DeepEqual(arr(profile["customPromptPresets"])[0], decodeValue(raw(pirate))) {
+		t.Fatalf("profile update lost the default or the preset's settings: %v", profile)
+	}
+	turn := func(in object) (any, string) {
+		t.Helper()
+		events := finishedRun(t, h, "/v1/threads/turn", in)
+		row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
+		return row.Data["presetId"], <-systems
+	}
+	if preset, system := turn(sendInput(key)); preset != "user:pirate" || system != "Answer like a pirate." {
+		t.Fatalf("a new chat started with preset %v and system prompt %q", preset, system)
+	}
+	cleared := sendInput(key)
+	cleared["presetId"] = nil
+	events := finishedRun(t, h, "/v1/threads/turn", cleared)
+	if system := <-systems; system != "You are Kimi K3. " {
+		t.Fatalf("a chat cleared of its preset was prompted with %q", system)
+	}
+	// The default is stamped once, when the chat is created.
+	if preset, system := turn(continueInput(key, events[0].ThreadID)); preset != nil || system != "You are Kimi K3. " {
+		t.Fatalf("a later turn adopted preset %v and system prompt %q", preset, system)
+	}
+}
+
+func TestSessionAdvertisesThreadFeatures(t *testing.T) {
+	h, _, _ := testChatHarness(t, nil)
+	var session struct {
+		Features map[string]bool `json:"features"`
+	}
+	json.Unmarshal(postRoute(h, "/v1/session", object{}, "").Body.Bytes(), &session)
+	for _, name := range []string{"defaultPromptPreset"} {
+		if !session.Features[name] {
+			t.Errorf("the session does not advertise %s", name)
+		}
+	}
+}
+
 func TestAnonymousEphemeralNeverCallsStorage(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	in := sendInput(key)

@@ -474,6 +474,13 @@ func (h *harness) beginChatRun(ctx context.Context, r *chatRun) error {
 	if s.local {
 		profile = clone(r.profile)
 	}
+	// A new chat starts with the default prompt preset, as the web client
+	// stamps a blank chat. A first turn naming a preset, or null, overrides it.
+	if _, named := r.input["presetId"]; !named && !s.ephemeral && s.row.ETag == "" && len(arr(s.row.Data["messages"])) == 0 {
+		if preset := str(profile["defaultPromptPresetId"]); preset != "" {
+			s.row.Data["presetId"] = preset
+		}
+	}
 	working := clone(s.row.Data)
 	attachments, err := h.turnAttachments(ctx, r.principal, r.key, r.input, working, s.ephemeral, s.keyless)
 	if err != nil {
