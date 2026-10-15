@@ -74,7 +74,7 @@ func (h *harness) shareThread(ctx context.Context, p *principal, key contentKey,
 	if _, err := h.shareRequest(ctx, p, http.MethodPut, id, ciphertext); err != nil {
 		return nil, err
 	}
-	return object{"url": strings.TrimRight(env("TINFOIL_CHAT_URL", "https://chat.tinfoil.sh"), "/") + "/share/" + id + "#v2:" + str(sealed["share_key"])}, nil
+	return object{"url": strings.TrimRight(env("TINFOIL_CHAT_URL", "https://chat.tinfoil.sh"), "/") + "/share/" + url.PathEscape(id) + "#v2:" + str(sealed["share_key"])}, nil
 }
 
 // The share endpoints authenticate the owner's Clerk session.
@@ -455,7 +455,9 @@ func (h *harness) writeBackup(ctx context.Context, p *principal, key contentKey,
 					continue
 				}
 				if str(a["base64"]) == "" && attachmentKey(a) == "" {
-					continue // only its thumbnail was kept
+					// Only its thumbnail was kept, so the image itself is missing.
+					b.omit(row.ID, str(a["id"]))
+					continue
 				}
 				imageID, err := h.backupImage(ctx, p, b, relationships, row.ID, index, a, a, nil)
 				if unreachable(err) {

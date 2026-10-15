@@ -281,7 +281,12 @@ func (h *harness) deleteRow(ctx context.Context, p *principal, key contentKey, s
 	for i := 0; i < 3; i++ {
 		row, err := h.storeRows.load(ctx, p, key, scope, id)
 		if err != nil {
-			return nil, err
+			if asAPIError(err).HTTP == 404 {
+				return nil, err
+			}
+			// A row this key cannot open, such as one sealed to a retired key,
+			// is still the caller's to delete. Sync deletes it unconditionally.
+			return object{}, h.storeRows.remove(ctx, p, key, scope, &storedRow{ID: id})
 		}
 		err = h.storeRows.remove(ctx, p, key, scope, row)
 		if err == nil || asAPIError(err).Code != "REVISION_CONFLICT" {
@@ -369,21 +374,23 @@ func (h *harness) listProjects(ctx context.Context, p *principal, key contentKey
 	return object{"projects": list, "nextCursor": page.Next}, nil
 }
 func (h *harness) projectDocuments(ctx context.Context, p *principal, key contentKey, id string) ([]object, error) {
-	list, cursor, seen := []object{}, "", map[string]bool{}
+	list, cursor, index := []object{}, "", map[string]int{}
 	for {
 		page, err := h.storeRows.list(ctx, p, key, "project_document", cursor, id, 100)
 		if err != nil {
 			return nil, err
 		}
 		for _, row := range page.Rows {
-			// Unfiltered pages can repeat a row that changed while listing.
-			if seen[row.ID] {
-				continue
-			}
-			seen[row.ID] = true
 			doc := projectView(&row)
 			doc["id"] = strings.TrimPrefix(row.ID, id+"/")
 			doc["projectId"] = id
+			// Unfiltered pages can repeat a row that changed while listing;
+			// the later copy is the newer one.
+			if i, ok := index[row.ID]; ok {
+				list[i] = doc
+				continue
+			}
+			index[row.ID] = len(list)
 			list = append(list, doc)
 		}
 		if page.Next == "" {

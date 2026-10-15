@@ -72,7 +72,10 @@ func titleSource(thread object) string {
 		text := str(m["content"])
 		if text == "" {
 			for _, value := range arr(m["attachments"]) {
-				text += documentText(obj(value)) + " "
+				// A document whose blob is gone must not name the chat.
+				if a := obj(value); documentText(a) != unavailableDocument(a) {
+					text += documentText(a) + " "
+				}
 			}
 		}
 		return text

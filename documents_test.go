@@ -130,7 +130,7 @@ func TestStoredUploadIsOffloadedUnderItsThread(t *testing.T) {
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", thread)
 	stored := obj(arr(obj(arr(row.Data["messages"])[0])["attachments"])[0])
-	if !enclaveAttachmentID.MatchString(str(stored["id"])) || stored["encryptionKey"] == "" || stored["storageThreadId"] != thread {
+	if !enclaveAttachmentID.MatchString(str(stored["id"])) || str(stored["encryptionKey"]) == "" || stored["storageThreadId"] != thread {
 		t.Fatalf("row does not reference the stored blob: %v", stored)
 	}
 	for _, field := range []string{"textContent", "pages", "base64", "legacyId"} {
@@ -335,5 +335,50 @@ func TestShareIsKeyedByItsChatAndOwnerSession(t *testing.T) {
 	}
 	if !strings.HasSuffix(str(obj(result)["url"]), "/share/chat-1#v2:"+strings.Repeat("ab", 32)) {
 		t.Fatalf("share link: %v", result)
+	}
+}
+
+func TestDeleteAllIncludesRowsTheKeyCannotOpen(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	storedThread(rows, "alice", "readable")
+	storedThread(rows, "alice", "sealed-to-a-retired-key")
+	rows.unreadable = map[string]bool{"sealed-to-a-retired-key": true}
+	result, err := h.deleteAllThreads(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, key, object{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obj(result)["deleted"] != 2 || len(rows.rows) != 0 {
+		t.Fatalf("delete-all left %d rows: %v", len(rows.rows), result)
+	}
+}
+
+func TestPinsFollowTheProfileWhenMirroringFails(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	p := &principal{ID: "alice", JWT: "clerk-alice"}
+	storedThread(rows, "alice", "chat-1")
+	storedThread(rows, "alice", "chat-2")
+	rows.rows[rowMapKey(p, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: object{"pinnedChatIds": []any{"chat-1", "chat-2"}}}
+	pushes := 0
+	rows.refuse = func(row *storedRow) error {
+		pushes++
+		return apiErr(503, "UPSTREAM_REFUSED", "sync is down")
+	}
+	page := []storedRow{}
+	for _, id := range []string{"chat-1", "chat-2"} {
+		row, _ := rows.load(context.Background(), p, key, "chat", id)
+		page = append(page, *row)
+	}
+	if err := h.syncPins(context.Background(), p, key, page); err != nil {
+		t.Fatal(err)
+	}
+	// One failed write stops mirroring, and the read still shows the profile's pins.
+	if pushes != 1 || page[0].Data["pinned"] != true || page[1].Data["pinned"] != true {
+		t.Fatalf("pushes %d, pins %v %v", pushes, page[0].Data["pinned"], page[1].Data["pinned"])
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	page[0].Data["pinned"] = false
+	if err := h.syncPins(cancelled, p, key, page[:1]); err == nil {
+		t.Fatal("a cancelled read reported success")
 	}
 }

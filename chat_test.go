@@ -26,7 +26,9 @@ type memoryRows struct {
 	rows     map[string]storedRow
 	conflict func(*storedRow)
 	refuse   func(*storedRow) error
-	calls    int
+	// unreadable rows exist but cannot be opened with the caller's key.
+	unreadable map[string]bool
+	calls      int
 }
 
 func rowMapKey(p *principal, scope, id string) string { return p.scope() + "/" + scope + "/" + id }
@@ -38,6 +40,9 @@ func (s *memoryRows) load(_ context.Context, p *principal, _ contentKey, scope, 
 	if !ok {
 		return nil, apiErr(404, "THREAD_NOT_FOUND", "missing")
 	}
+	if s.unreadable[id] {
+		return nil, apiErr(409, "KEY_MISMATCH", "sealed to another key")
+	}
 	return &storedRow{ID: row.ID, ETag: row.ETag, Data: clone(row.Data)}, nil
 }
 func (s *memoryRows) list(_ context.Context, p *principal, _ contentKey, scope, cursor, project string, limit int) (rowPage, error) {
@@ -46,9 +51,14 @@ func (s *memoryRows) list(_ context.Context, p *principal, _ contentKey, scope, 
 	s.calls++
 	page := rowPage{Rows: []storedRow{}}
 	for name, row := range s.rows {
-		if strings.HasPrefix(name, p.scope()+"/"+scope+"/") && (project == "" || row.Data["projectId"] == project) {
-			page.Rows = append(page.Rows, storedRow{ID: row.ID, ETag: row.ETag, Data: clone(row.Data)})
+		if !strings.HasPrefix(name, p.scope()+"/"+scope+"/") || project != "" && row.Data["projectId"] != project {
+			continue
 		}
+		if s.unreadable[row.ID] {
+			page.Unreadable = append(page.Unreadable, row.ID)
+			continue
+		}
+		page.Rows = append(page.Rows, storedRow{ID: row.ID, ETag: row.ETag, Data: clone(row.Data)})
 	}
 	return page, nil
 }
@@ -83,7 +93,8 @@ func (s *memoryRows) remove(_ context.Context, p *principal, _ contentKey, scope
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	name := rowMapKey(p, scope, row.ID)
-	if s.rows[name].ETag != row.ETag {
+	// Like sync, an empty if-match deletes unconditionally.
+	if row.ETag != "" && s.rows[name].ETag != row.ETag {
 		return apiErr(409, "REVISION_CONFLICT", "changed")
 	}
 	delete(s.rows, name)
