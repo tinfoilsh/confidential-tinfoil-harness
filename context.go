@@ -155,6 +155,9 @@ func (h *harness) buildRequest(thread, profile, project object, documents []obje
 				policy = p
 			}
 		}
+		if window == 0 {
+			window = c.Fallback
+		}
 		level, err := intelligence(firstString(options["autoIntelligence"], thread["autoIntelligence"], profile["autoIntelligence"], "high"))
 		if err != nil {
 			return nil, nil, err
