@@ -150,6 +150,11 @@ func referenceCheck(t *testing.T, input object) {
 	if _, err := os.Stat(reference + "/node_modules/typescript"); err != nil {
 		t.Skip("reference webapp dependencies are not installed")
 	}
+	if _, ok := input["events"]; ok {
+		if _, err := os.Stat(reference + "/src/services/harness/reducer.ts"); err != nil {
+			t.Skip("reference webapp has no harness reducer")
+		}
+	}
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("Node is not installed")
