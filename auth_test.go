@@ -8,9 +8,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestAnonymousInferenceValidatesTheClientKey(t *testing.T) {
@@ -63,21 +65,24 @@ func TestAnonymousInferenceValidatesTheClientKey(t *testing.T) {
 
 func TestAnonymousKeyValidationRefusesWorkBeforeAllocatingThreads(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		status int
-		body   string
-		want   int
+		name, body, retryAfter string
+		status, want           int
+		code                   string
 	}{
-		{"invalid or expired", 401, `{"error":{"code":"invalid_api_key"}}`, 401},
-		{"disabled", 402, `{"error":{"code":"insufficient_quota"}}`, 403},
-		{"exhausted", 429, `{"error":{"code":"insufficient_quota"}}`, 429},
-		{"validation unavailable", 503, `{}`, 502},
-		{"unexpected success body", 200, `{}`, 502},
+		{"invalid or expired", `{"error":{"code":"invalid_api_key"}}`, "", 401, 401, "UNAUTHENTICATED"},
+		{"disabled", `{"error":{"code":"insufficient_quota"}}`, "", 402, 403, "UPSTREAM_REFUSED"},
+		{"exhausted", `{"error":{"code":"insufficient_quota"}}`, "", 429, 429, "QUOTA_EXHAUSTED"},
+		{"unregistered host", `{"error":"Client unauthorized"}`, "", 401, 503, "UPSTREAM_REFUSED"},
+		{"validation unavailable", `{"error":{"message":"Key validation is temporarily unavailable.","type":"server_error"}}`, "2", 503, 503, "UPSTREAM_REFUSED"},
+		{"unexpected success body", `{}`, "", 200, 502, "UPSTREAM_REFUSED"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var modelCalls atomic.Int32
 			h, rows, key := testChatHarness(t, func(http.ResponseWriter, *http.Request) { modelCalls.Add(1) })
 			cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if tc.retryAfter != "" {
+					w.Header().Set("Retry-After", tc.retryAfter)
+				}
 				w.WriteHeader(tc.status)
 				io.WriteString(w, tc.body)
 			}))
@@ -87,8 +92,12 @@ func TestAnonymousKeyValidationRefusesWorkBeforeAllocatingThreads(t *testing.T) 
 			delete(in, "key")
 			in["ephemeral"] = true
 			response := postRoute(h, "/v1/threads/turn", in, "")
-			if response.Code != tc.want || modelCalls.Load() != 0 || rows.calls != 0 || len(h.threads) != 0 {
-				t.Fatalf("validation did not refuse work: HTTP %d, models=%d, rows=%d, threads=%d", response.Code, modelCalls.Load(), rows.calls, len(h.threads))
+			var refused struct {
+				Error apiError `json:"error"`
+			}
+			json.Unmarshal(response.Body.Bytes(), &refused)
+			if response.Code != tc.want || refused.Error.Code != tc.code || response.Header().Get("Retry-After") != tc.retryAfter || modelCalls.Load() != 0 || rows.calls != 0 || len(h.threads) != 0 {
+				t.Fatalf("validation did not refuse work: HTTP %d %s, models=%d, rows=%d, threads=%d", response.Code, response.Body.String(), modelCalls.Load(), rows.calls, len(h.threads))
 			}
 			if tc.status == 429 {
 				session := postRoute(h, "/v1/session", object{}, "")
@@ -131,5 +140,161 @@ func TestAnonymousReconnectUsesKeyPossessionInsteadOfIP(t *testing.T) {
 		if strings.Contains(response.Body.String(), "free_anonymous-key") {
 			t.Fatal("credential leaked into run events")
 		}
+	}
+}
+
+func subscriberHarness(t *testing.T, controlplane http.HandlerFunc) (*harness, contentKey) {
+	t.Helper()
+	h, _, key := testChatHarness(t, nil)
+	cp := httptest.NewServer(controlplane)
+	t.Cleanup(cp.Close)
+	h.auth.client, h.auth.controlplane = cp.Client(), cp.URL
+	delete(h.auth.credentials, "user:alice")
+	h.syncAPI = &syncClient{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(*http.Request) (*http.Response, error) {
+		return syncTestResponse(404, object{"ok": false, "code": "NOT_FOUND"})
+	})}}
+	return h, key
+}
+
+func TestSubscribersHaveTokenBudgetsButNoRequestQuota(t *testing.T) {
+	resets := nowUTC().Add(30 * time.Minute).Format(time.RFC3339)
+	h, key := subscriberHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/chat/token" || r.Header.Get("Authorization") != "Bearer clerk-alice" {
+			t.Errorf("unexpected exchange %s", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(object{"key": "subscriber-jwt", "expires_at": nowUTC().Add(15 * time.Minute).Format(time.RFC3339), "is_free_tier": false,
+			"rate_limit": object{"max_input_tokens": 1000000, "input_tokens_used": 250000, "input_tokens_remaining": 750000, "max_output_tokens": 100000, "output_tokens_used": 100000, "output_tokens_remaining": 0, "resets_at": resets}})
+	})
+	var session struct {
+		RateLimit json.RawMessage `json:"rateLimit"`
+	}
+	response := postRoute(h, "/v1/session", object{}, "alice")
+	json.Unmarshal(response.Body.Bytes(), &session)
+	want := `{"kind":"hourly","inputTokens":{"max":1000000,"used":250000,"remaining":750000},"outputTokens":{"max":100000,"used":100000,"remaining":0},"resetsAt":"` + resets + `"}`
+	if response.Code != 200 || string(session.RateLimit) != want {
+		t.Fatalf("HTTP %d rateLimit %s, want %s", response.Code, session.RateLimit, want)
+	}
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", sendInput(key), "alice"))
+	if last := events[len(events)-1]; last.Type != "RUN_FINISHED" {
+		t.Fatalf("a subscriber without a request quota was refused: %+v", last)
+	}
+	if limit := h.auth.currentLimit(&principal{ID: "alice"}); limit.MaxRequests != nil || limit.Remaining != nil {
+		t.Fatal("a finished run invented a request quota")
+	}
+}
+
+func TestOnlyAMissingSubscriptionFallsBackToAFreeKey(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, retryAfter string
+		status, http, wait     int
+		code                   string
+	}{
+		{"suspended", `{"error":"account is suspended","code":"FORBIDDEN"}`, "", 403, 403, 0, "UPSTREAM_REFUSED"},
+		{"provisioning", `{"error":"account provisioning is in progress","code":"ACCOUNT_PROVISIONING"}`, "5", 503, 503, 5, "UPSTREAM_REFUSED"},
+		{"exchange rate limit", `{"error":"rate_limited","error_description":"too many requests, please slow down"}`, "30", 429, 429, 30, "RATE_LIMITED"},
+		{"server error", `{"error":"failed to verify subscription","code":"INTERNAL_ERROR"}`, "", 500, 502, 0, "UPSTREAM_REFUSED"},
+		{"malformed credential", `{"expires_at":"2099-01-01T00:00:00Z"}`, "", 200, 502, 0, "UPSTREAM_REFUSED"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var freeKeys atomic.Int32
+			h, _ := subscriberHarness(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/keys/chat" {
+					freeKeys.Add(1)
+				}
+				if tc.retryAfter != "" {
+					w.Header().Set("Retry-After", tc.retryAfter)
+				}
+				w.WriteHeader(tc.status)
+				io.WriteString(w, tc.body)
+			})
+			_, err := h.auth.inference(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"})
+			e := asAPIError(err)
+			if err == nil || e.HTTP != tc.http || e.Code != tc.code || e.RetryAfter != tc.wait || freeKeys.Load() != 0 {
+				t.Fatalf("got %v (HTTP %d %s retry %d), free key exchanges %d", err, e.HTTP, e.Code, e.RetryAfter, freeKeys.Load())
+			}
+		})
+	}
+	resets := nowUTC().Add(5 * time.Hour).Format(time.RFC3339)
+	h, _ := subscriberHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer clerk-alice" {
+			t.Error("exchanged without the Clerk session")
+		}
+		if r.URL.Path == "/api/chat/token" {
+			w.WriteHeader(http.StatusPaymentRequired)
+			io.WriteString(w, `{"error":"an active Tinfoil Chat subscription is required","code":"PAYMENT_REQUIRED"}`)
+			return
+		}
+		json.NewEncoder(w).Encode(object{"key": "free_key", "expires_at": resets, "is_free_tier": true,
+			"rate_limit": object{"max_requests": 10, "remaining": 7, "max_input_tokens": 500000, "input_tokens_used": 1000, "input_tokens_remaining": 499000, "max_output_tokens": 0, "output_tokens_used": 0, "output_tokens_remaining": 0, "resets_at": resets}})
+	})
+	p := &principal{ID: "alice", JWT: "clerk-alice"}
+	credential, err := h.auth.inference(context.Background(), p)
+	want := rateLimit{Kind: "free_daily", MaxRequests: new(10), Remaining: new(7), InputTokens: &tokenBudget{500000, 1000, 499000}, ResetsAt: resets}
+	if err != nil || credential.Key != "free_key" || !reflect.DeepEqual(credential.Limit, want) {
+		t.Fatalf("free key %q limit %+v, err %v", credential.Key, credential.Limit, err)
+	}
+	if limit := h.auth.consumed(p); *limit.Remaining != 6 || *credential.Limit.Remaining != 7 {
+		t.Fatal("a consumed request was not counted once")
+	}
+}
+
+func TestHourlyCapIsRememberedUntilItResets(t *testing.T) {
+	resets := nowUTC().Add(30 * time.Minute).Truncate(time.Second).Format(time.RFC3339)
+	var exchanges atomic.Int32
+	h, key := subscriberHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		exchanges.Add(1)
+		if r.URL.Path != "/api/chat/token" {
+			t.Errorf("a capped subscriber was downgraded to %s", r.URL.Path)
+		}
+		w.Header().Set("Retry-After", "1800")
+		w.WriteHeader(http.StatusTooManyRequests)
+		json.NewEncoder(w).Encode(object{"error": "You've reached your hourly usage limit. Please try again later.", "code": "HOURLY_LIMIT_REACHED", "limit": "output", "resets_at": resets,
+			"rate_limit": object{"max_input_tokens": 1000000, "input_tokens_used": 1000, "input_tokens_remaining": 999000, "max_output_tokens": 100000, "output_tokens_used": 100000, "output_tokens_remaining": 0, "resets_at": resets}})
+	})
+	p := &principal{ID: "alice", JWT: "clerk-alice"}
+	for range 2 {
+		_, err := h.auth.inference(context.Background(), p)
+		if e := asAPIError(err); e.HTTP != 429 || e.Code != "QUOTA_EXHAUSTED" || e.Kind != "hourly" || e.ResetsAt != resets || e.RetryAfter < 1790 || e.RetryAfter > 1800 || e.Message != "You've reached your hourly usage limit. Please try again later." {
+			t.Fatalf("hourly cap: %+v", e)
+		}
+	}
+	turn := postRoute(h, "/v1/threads/turn", sendInput(key), "alice")
+	var session struct {
+		RateLimit json.RawMessage `json:"rateLimit"`
+	}
+	response := postRoute(h, "/v1/session", object{}, "alice")
+	json.Unmarshal(response.Body.Bytes(), &session)
+	want := `{"kind":"hourly","maxRequests":0,"remaining":0,"inputTokens":{"max":1000000,"used":1000,"remaining":999000},"outputTokens":{"max":100000,"used":100000,"remaining":0},"resetsAt":"` + resets + `"}`
+	if turn.Code != 429 || turn.Header().Get("Retry-After") == "" || response.Code != 200 || string(session.RateLimit) != want || exchanges.Load() != 1 {
+		t.Fatalf("turn HTTP %d, session HTTP %d %s, exchanges %d", turn.Code, response.Code, session.RateLimit, exchanges.Load())
+	}
+	h.auth.mu.Lock()
+	capped := h.auth.capped[p.scope()]
+	capped.until = nowUTC().Add(-time.Second)
+	h.auth.capped[p.scope()] = capped
+	h.auth.mu.Unlock()
+	h.auth.inference(context.Background(), p)
+	if exchanges.Load() != 2 {
+		t.Fatal("the cap was remembered past its reset")
+	}
+}
+
+func TestAnonymousRunThatExhaustsItsQuotaReportsNoneLeft(t *testing.T) {
+	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		io.WriteString(w, `{"error":{"message":"Daily request limit reached.","type":"insufficient_quota","code":"insufficient_quota"}}`)
+	})
+	in := sendInput(key)
+	delete(in, "key")
+	in["ephemeral"] = true
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, ""))
+	var limit json.RawMessage
+	for _, e := range events {
+		if e.Type == "STATE_SNAPSHOT" {
+			limit = raw(obj(e.Snapshot)["rateLimit"])
+		}
+	}
+	if last := events[len(events)-1]; last.Code != "QUOTA_EXHAUSTED" || string(limit) != `{"kind":"free_daily","maxRequests":0,"remaining":0}` {
+		t.Fatalf("run ended %s with rateLimit %s", last.Code, limit)
 	}
 }

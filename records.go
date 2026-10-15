@@ -43,7 +43,11 @@ func (h *harness) session(ctx context.Context, p *principal, _ contentKey, _ obj
 	}
 	credential, err := h.auth.inference(ctx, p)
 	if err != nil {
-		return nil, err
+		// A subscriber at the hourly cap still opens the app and sees when it resets.
+		if e := asAPIError(err); e.Code != "QUOTA_EXHAUSTED" || e.Kind != "hourly" {
+			return nil, err
+		}
+		credential.Limit = h.auth.currentLimit(p)
 	}
 	keyInfo := object{"registered": false, "keyId": nil, "bundles": []any{}}
 	if !p.Anonymous {

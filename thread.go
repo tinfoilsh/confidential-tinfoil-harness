@@ -235,7 +235,7 @@ func (h *harness) acceptTurn(ctx context.Context, p *principal, key contentKey, 
 	if err != nil {
 		return nil, err
 	}
-	if p.Anonymous && credential.Limit.Kind != nil && credential.Limit.Remaining <= 0 {
+	if p.Anonymous && credential.Limit.exhausted() {
 		e := apiErr(429, "QUOTA_EXHAUSTED", "The daily quota is exhausted")
 		e.Kind = str(credential.Limit.Kind)
 		e.ResetsAt = credential.Limit.ResetsAt
@@ -382,7 +382,7 @@ func (h *harness) acceptTurn(ctx context.Context, p *principal, key contentKey, 
 		return recovered, nil
 	}
 	// Stored nonce recovery remains available after the last free request.
-	if credential.Limit.Kind != nil && credential.Limit.Remaining <= 0 {
+	if credential.Limit.exhausted() {
 		e := apiErr(429, "QUOTA_EXHAUSTED", "The daily quota is exhausted")
 		e.Kind = str(credential.Limit.Kind)
 		e.ResetsAt = credential.Limit.ResetsAt
@@ -805,7 +805,7 @@ func (h *harness) finishChatRun(r *chatRun, runErr error) {
 		limit = h.auth.consumed(r.principal)
 	}
 	if r.principal.Anonymous && runErr != nil && asAPIError(runErr).Code == "QUOTA_EXHAUSTED" {
-		limit = rateLimit{Kind: "free_daily"}
+		limit = exhaustedLimit("free_daily")
 	}
 	if runErr == nil && !s.ephemeral {
 		h.extractMemory(ctx, r, s.row)
