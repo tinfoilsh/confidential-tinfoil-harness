@@ -60,22 +60,29 @@ func (h *harness) completion(ctx context.Context, m *model, payload object) (str
 	return result.Choices[0].Message.Content, nil
 }
 
-func (h *harness) generateTitle(ctx context.Context, r *chatRun, row *storedRow) {
+// titleSource is the text a title summarizes: the first user message, or the
+// content of its documents. It is read from the prompt's copy of the thread,
+// since a stored row keeps no document content.
+func titleSource(thread object) string {
+	for _, item := range arr(thread["messages"]) {
+		m := obj(item)
+		if m["role"] != "user" {
+			continue
+		}
+		text := str(m["content"])
+		if text == "" {
+			for _, value := range arr(m["attachments"]) {
+				text += documentText(obj(value)) + " "
+			}
+		}
+		return text
+	}
+	return ""
+}
+
+func (h *harness) generateTitle(ctx context.Context, r *chatRun, row *storedRow, text string) {
 	if !h.serviceReady("summarizer") || row.Data["titleState"] != "placeholder" {
 		return
-	}
-	text := ""
-	for _, item := range arr(row.Data["messages"]) {
-		m := obj(item)
-		if m["role"] == "user" {
-			text = str(m["content"])
-			if text == "" {
-				for _, value := range arr(m["attachments"]) {
-					text += str(obj(value)["textContent"]) + " "
-				}
-			}
-			break
-		}
 	}
 	words := strings.Fields(text)
 	if len(words) == 0 {

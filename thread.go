@@ -492,6 +492,20 @@ func (h *harness) beginChatRun(ctx context.Context, r *chatRun) error {
 	if str(working["codeExecutionAccessToken"]) == "" {
 		working["codeExecutionAccessToken"] = hex.EncodeToString(randomBytes(32))
 	}
+	// Sync stores a chat only if every attachment it names is stored under the
+	// chat. Offloaded documents are read back before the budget counts them.
+	// An ask's stored source has attachments in sync; a local source carries them.
+	temporary := s.ephemeral && (r.input["kind"] != "ask" || s.local)
+	if !s.ephemeral {
+		if err := h.placeAttachments(ctx, r.principal, s.id, working); err != nil {
+			return err
+		}
+	}
+	if !temporary {
+		if err := h.hydrateDocuments(ctx, r.principal, working); err != nil {
+			return err
+		}
+	}
 	preview, _, err := h.buildRequest(working, profile, project, docs, r.input, r.key, r.log.id)
 	if err != nil {
 		return err
@@ -499,16 +513,10 @@ func (h *harness) beginChatRun(ctx context.Context, r *chatRun) error {
 	if err := preflightBudget(preview); err != nil {
 		return err
 	}
-	if !s.ephemeral {
-		if err := h.storeLegacyAttachments(ctx, r.principal, working); err != nil {
-			return err
-		}
-	}
-	// An ask's stored source has attachments in sync; a local source carries them.
-	temporary := s.ephemeral && (r.input["kind"] != "ask" || s.local)
 	if err := h.hydrateContext(ctx, r.principal, r.key, working, temporary, s.local); err != nil {
 		return err
 	}
+	titleText := titleSource(working)
 	request, model, err := h.buildRequest(working, profile, project, docs, r.input, r.key, r.log.id)
 	if err != nil {
 		return err
@@ -558,7 +566,13 @@ func (h *harness) beginChatRun(ctx context.Context, r *chatRun) error {
 					data[field] = value
 				}
 			}
-			if err := applyTurn(data, r.input, r.messageID, attachments); err != nil {
+			keepDerivedAttachments(s.id, data)
+			// The prompt's copy keeps attachment content; the stored row must not.
+			stored := []any{}
+			for _, a := range attachments {
+				stored = append(stored, clone(obj(a)))
+			}
+			if err := applyTurn(data, r.input, r.messageID, stored); err != nil {
 				return err
 			}
 			data["model"], data["webSearchEnabled"], data["codeExecutionAccessToken"] = working["model"], working["webSearchEnabled"], working["codeExecutionAccessToken"]
@@ -608,7 +622,7 @@ func (h *harness) beginChatRun(ctx context.Context, r *chatRun) error {
 	r.titleDone = make(chan struct{})
 	titlePrincipal := *r.principal
 	titleRun := &chatRun{thread: s, out: r.out, principal: &titlePrincipal, key: r.key}
-	titleRow := &storedRow{ID: s.row.ID, ETag: s.row.ETag, Data: clone(s.row.Data)}
+	titleRow := &storedRow{ID: s.row.ID, ETag: s.row.ETag, Data: object{"titleState": s.row.Data["titleState"]}}
 	go func() {
 		defer close(r.titleDone)
 		defer clear(titleRun.key[:])
@@ -616,7 +630,7 @@ func (h *harness) beginChatRun(ctx context.Context, r *chatRun) error {
 		if !s.ephemeral || s.local {
 			titleCtx, stop := context.WithTimeout(runCtx, 30*time.Second)
 			defer stop()
-			h.generateTitle(titleCtx, titleRun, titleRow)
+			h.generateTitle(titleCtx, titleRun, titleRow, titleText)
 		}
 	}()
 	go func() {

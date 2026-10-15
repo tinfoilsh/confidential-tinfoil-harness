@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"slices"
 )
 
@@ -22,9 +23,12 @@ func (h *harness) syncPins(ctx context.Context, p *principal, key contentKey, ro
 		if boolean(row.Data["pinned"], false) == pinned {
 			continue
 		}
+		// Mirroring a pin is a write during a read. A chat that cannot be
+		// stored now keeps its old flag rather than failing the listing.
 		updated, err := h.mutate(ctx, p, key, "chat", row.ID, false, nil, func(data object) error { data["pinned"] = pinned; return nil })
 		if err != nil {
-			return err
+			slog.Warn("pin not mirrored", "error", asAPIError(err).Code)
+			continue
 		}
 		*row = *updated
 	}

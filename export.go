@@ -12,6 +12,7 @@ import (
 	"image/png"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -68,25 +69,68 @@ func (h *harness) shareThread(ctx context.Context, p *principal, key contentKey,
 	if err != nil {
 		return nil, err
 	}
-	cred, err := h.auth.inference(ctx, p)
+	// A share is keyed by its chat, like the web client's: sync keeps a shared
+	// chat's blobs, and the owner can revoke the link by chat.
+	if _, err := h.shareRequest(ctx, p, http.MethodPut, id, ciphertext); err != nil {
+		return nil, err
+	}
+	return object{"url": strings.TrimRight(env("TINFOIL_CHAT_URL", "https://chat.tinfoil.sh"), "/") + "/share/" + id + "#v2:" + str(sealed["share_key"])}, nil
+}
+
+// The share endpoints authenticate the owner's Clerk session.
+func (h *harness) shareRequest(ctx context.Context, p *principal, method, id string, body []byte) ([]byte, error) {
+	ctx = context.WithValue(ctx, apiKeyKey{}, string(p.JWT))
+	path := h.controlplane + "/api/shares/" + url.PathEscape(id)
+	if method == http.MethodGet {
+		path += "/status"
+	}
+	req, err := http.NewRequestWithContext(ctx, method, path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
-	shareID := token()
-	ctx = context.WithValue(ctx, apiKeyKey{}, string(cred.Key))
-	req, _ := http.NewRequestWithContext(ctx, "PUT", h.controlplane+"/api/shares/"+shareID, bytes.NewReader(ciphertext))
-	req.Header.Set("Content-Type", "application/octet-stream")
-	req.Header.Set("X-Format-Version", "2")
+	if method == http.MethodPut {
+		req.Header.Set("Content-Type", "application/octet-stream")
+		req.Header.Set("X-Format-Version", "1")
+	}
 	resp, err := h.cpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 	if resp.StatusCode/100 != 2 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 		return nil, downstreamError(resp.StatusCode, b)
 	}
-	return object{"url": strings.TrimRight(env("TINFOIL_CHAT_URL", "https://chat.tinfoil.sh"), "/") + "/share/" + shareID + "#v2:" + str(sealed["share_key"])}, nil
+	return b, nil
+}
+
+func (h *harness) revokeShare(ctx context.Context, p *principal, _ contentKey, in object) (any, error) {
+	id, err := requiredID(in, "threadId")
+	if err != nil {
+		return nil, err
+	}
+	if _, err := h.shareRequest(ctx, p, http.MethodDelete, id, nil); err != nil && asAPIError(err).HTTP != 404 {
+		return nil, err
+	}
+	return object{}, nil
+}
+
+func (h *harness) shareStatus(ctx context.Context, p *principal, _ contentKey, in object) (any, error) {
+	id, err := requiredID(in, "threadId")
+	if err != nil {
+		return nil, err
+	}
+	b, err := h.shareRequest(ctx, p, http.MethodGet, id, nil)
+	if err != nil {
+		return nil, err
+	}
+	var status struct {
+		Shared *bool `json:"shared"`
+	}
+	if json.Unmarshal(b, &status) != nil || status.Shared == nil {
+		return nil, apiErr(502, "UPSTREAM_REFUSED", "Invalid share status")
+	}
+	return object{"shared": *status.Shared}, nil
 }
 func sharedThreadView(id string, payload object) object {
 	thread := normalizeThread(&storedRow{ID: id, Data: payload})
@@ -227,10 +271,21 @@ func backupPath(kind, id string) string {
 func hashHex(data []byte) string { d := sha256.Sum256(data); return hex.EncodeToString(d[:]) }
 
 type backupWriter struct {
-	zip    *zip.Writer
-	files  []object
-	counts object
-	total  int64
+	zip       *zip.Writer
+	files     []object
+	counts    object
+	total     int64
+	omissions []any
+}
+
+// An attachment whose blob sync no longer holds is listed as omitted instead
+// of failing the whole backup.
+func (b *backupWriter) omit(chatID, sourceID string) {
+	b.omissions = append(b.omissions, object{"kind": "attachment", "source_id": sourceID, "parent_source_id": chatID, "category": "unavailable", "reason": "attachment_not_found"})
+}
+
+func (b *backupWriter) omitRow(kind, id string) {
+	b.omissions = append(b.omissions, object{"kind": kind, "source_id": id, "category": "invalid", "reason": "row_unreadable"})
 }
 
 func (b *backupWriter) add(kind, path string, value any) error {
@@ -267,7 +322,7 @@ func (h *harness) writeBackup(ctx context.Context, p *principal, key contentKey,
 	relationships := object{"projectChats": []any{}, "projectDocuments": []any{}, "chatImages": []any{}}
 	selectedProjects := map[string]bool{}
 	projectID := str(in["projectId"])
-	err := h.eachRow(ctx, p, key, "project", "", func(row *storedRow) error {
+	err := h.eachRowOrUnreadable(ctx, p, key, "project", "", func(row *storedRow) error {
 		if projectID != "" && row.ID != projectID {
 			return nil
 		}
@@ -296,6 +351,10 @@ func (h *harness) writeBackup(ctx context.Context, p *principal, key contentKey,
 			relationships["projectDocuments"] = append(arr(relationships["projectDocuments"]), object{"projectId": row.ID, "documentId": d["id"]})
 		}
 		return nil
+	}, func(id string) {
+		if projectID == "" || id == projectID {
+			b.omitRow("project", id)
+		}
 	})
 	if err != nil {
 		return err
@@ -304,7 +363,7 @@ func (h *harness) writeBackup(ctx context.Context, p *principal, key contentKey,
 	for _, id := range arr(in["threadIds"]) {
 		ids[str(id)] = true
 	}
-	err = h.eachRow(ctx, p, key, "chat", projectID, func(row *storedRow) error {
+	err = h.eachRowOrUnreadable(ctx, p, key, "chat", projectID, func(row *storedRow) error {
 		if len(ids) > 0 && !ids[row.ID] {
 			return nil
 		}
@@ -355,7 +414,16 @@ func (h *harness) writeBackup(ctx context.Context, p *principal, key contentKey,
 			attachments := []any{}
 			for _, item := range arr(m["attachments"]) {
 				a := obj(item)
-				if a["type"] != "image" {
+				if !isImage(a) && !documentContent(a) && attachmentKey(a) != "" {
+					if err := h.inflateDocument(ctx, p, a); err != nil {
+						if !unreachable(err) {
+							return err
+						}
+						b.omit(row.ID, str(a["id"]))
+						continue
+					}
+				}
+				if !isImage(a) {
 					document := selectFields(a, "id fileName mimeType textContent description fileSize")
 					document["type"] = "document"
 					pages := []any{}
@@ -370,10 +438,13 @@ func (h *harness) writeBackup(ctx context.Context, p *principal, key contentKey,
 							imageRef = clone(imageRef)
 							imageRef["fileName"] = firstString(a["fileName"], "page") + ".png"
 							imageID, err := h.backupImage(ctx, p, b, relationships, row.ID, index, a, imageRef, page["page"])
-							if err != nil {
+							if unreachable(err) {
+								b.omit(row.ID, str(a["id"])+"#page-"+jsonNumber(integer(page["page"])))
+							} else if err != nil {
 								return err
+							} else {
+								portable["imageId"] = imageID
 							}
-							portable["imageId"] = imageID
 						}
 						pages = append(pages, portable)
 					}
@@ -383,7 +454,14 @@ func (h *harness) writeBackup(ctx context.Context, p *principal, key contentKey,
 					attachments = append(attachments, document)
 					continue
 				}
+				if str(a["base64"]) == "" && attachmentKey(a) == "" {
+					continue // only its thumbnail was kept
+				}
 				imageID, err := h.backupImage(ctx, p, b, relationships, row.ID, index, a, a, nil)
+				if unreachable(err) {
+					b.omit(row.ID, str(a["id"]))
+					continue
+				}
 				if err != nil {
 					return err
 				}
@@ -400,6 +478,10 @@ func (h *harness) writeBackup(ctx context.Context, p *principal, key contentKey,
 		}
 		b.counts["cloud_chats"] = integer(b.counts["cloud_chats"]) + 1
 		return nil
+	}, func(id string) {
+		if len(ids) == 0 || ids[id] {
+			b.omitRow("cloud_chat", id)
+		}
 	})
 	if err != nil {
 		return err
@@ -409,7 +491,13 @@ func (h *harness) writeBackup(ctx context.Context, p *principal, key contentKey,
 	}
 	b.counts["relationships"] = len(arr(relationships["projectChats"])) + len(arr(relationships["projectDocuments"])) + len(arr(relationships["chatImages"]))
 	b.counts["files"] = len(b.files)
-	manifest := object{"format": "tinfoil-native-backup", "version": 2, "backup_id": uuid.NewString(), "created_at": timestamp(), "complete": true, "counts": b.counts, "notices": object{"contains_plaintext": true, "documents_are_extracted_text_only": true}, "files": b.files, "omissions": []any{}, "warnings": []any{}}
+	warnings := []any{}
+	if len(b.omissions) > 0 {
+		warnings = append(warnings, object{"code": "source_items_omitted", "category": "source_coverage", "count": len(b.omissions)})
+	} else {
+		b.omissions = []any{}
+	}
+	manifest := object{"format": "tinfoil-native-backup", "version": 2, "backup_id": uuid.NewString(), "created_at": timestamp(), "complete": len(b.omissions) == 0, "counts": b.counts, "notices": object{"contains_plaintext": true, "documents_are_extracted_text_only": true}, "files": b.files, "omissions": b.omissions, "warnings": warnings}
 	writer, err := b.zip.Create("manifest.json")
 	if err != nil {
 		return err
