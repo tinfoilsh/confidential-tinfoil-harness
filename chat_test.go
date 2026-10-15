@@ -1124,6 +1124,143 @@ func TestWebSearchIsBilledOncePerSession(t *testing.T) {
 	}
 }
 
+func TestReasoningPrecedesTheAnswerItArrivesWith(t *testing.T) {
+	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"The answer\",\"reasoning_content\":\"last thought\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	events := finishedRun(t, h, "/v1/threads/turn", sendInput(key))
+	var order []string
+	for _, e := range events {
+		if e.Type == "REASONING_MESSAGE_CHUNK" || e.Type == "TEXT_MESSAGE_CHUNK" {
+			order = append(order, e.Type)
+		}
+	}
+	if !reflect.DeepEqual(order, []string{"REASONING_MESSAGE_CHUNK", "TEXT_MESSAGE_CHUNK"}) {
+		t.Fatalf("streamed %v", order)
+	}
+	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
+	timeline := arr(obj(arr(row.Data["messages"])[1])["timeline"])
+	if len(timeline) != 2 || obj(timeline[0])["type"] != "thinking" || obj(timeline[1])["type"] != "content" {
+		t.Fatalf("stored timeline %v", timeline)
+	}
+}
+
+func TestReasoningIsEchoedInTheFieldItArrivedIn(t *testing.T) {
+	for _, field := range []string{"reasoning", "reasoning_content"} {
+		t.Run(field, func(t *testing.T) {
+			sent := make(chan []any, 1)
+			h, _, key := testChatHarness(t, toolTurns("data: "+string(raw(object{"choices": []object{{"delta": object{field: "think first"}}}}))+"\n\n"+toolCallChunk(0, "c", "lookup_order", `{}`), sent))
+			obj(h.catalog.get().Models[0]["chatConfig"])["reasoningConfig"] = object{"reasoningHistoryPolicy": "tool-call-only"}
+			finishedRun(t, h, "/v1/threads/turn", sendInput(key))
+			messages := <-sent
+			assistant := obj(messages[len(messages)-2])
+			other := map[string]string{"reasoning": "reasoning_content", "reasoning_content": "reasoning"}[field]
+			if assistant["role"] != "assistant" || assistant[field] != "think first" || assistant[other] != nil {
+				t.Fatalf("the reasoning was echoed as %v", assistant)
+			}
+		})
+	}
+}
+
+func TestLegacyRunsRejectCutAndMalformedStreams(t *testing.T) {
+	for name, stream := range map[string]string{
+		"cut":       "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+		"malformed": "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\ndata: {not json\n\ndata: [DONE]\n\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, _, _ := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, stream) })
+			events := eventsIn(t, postRoute(h, "/agui", object{"messages": []any{object{"role": "user", "content": "hi"}}, "forwardedProps": object{"webSearch": false}}, "alice"))
+			if last := events[len(events)-1]; last.Type != "RUN_ERROR" {
+				t.Fatalf("a %s stream finished the run: %+v", name, last)
+			}
+		})
+	}
+}
+
+func TestAModelChunkOverAMebibyteIsRead(t *testing.T) {
+	answer := strings.Repeat("a", 3<<20/2)
+	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "data: "+string(raw(object{"choices": []object{{"delta": object{"content": answer}}}}))+"\n\ndata: [DONE]\n\n")
+	})
+	events := finishedRun(t, h, "/v1/threads/turn", sendInput(key))
+	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
+	if obj(arr(row.Data["messages"])[1])["content"] != answer {
+		t.Fatal("the large chunk was not read whole")
+	}
+}
+
+func TestToolCapEndsWithOneTurnWithoutTools(t *testing.T) {
+	for _, obeys := range []bool{true, false} {
+		t.Run(strconv.FormatBool(obeys), func(t *testing.T) {
+			var turns atomic.Int32
+			final := make(chan []any, 1)
+			h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+				turn := turns.Add(1)
+				var body object
+				json.NewDecoder(r.Body).Decode(&body)
+				if body["tools"] == nil {
+					final <- arr(body["messages"])
+					if obeys {
+						io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"best answer\"}}]}\n\ndata: [DONE]\n\n")
+						return
+					}
+				}
+				io.WriteString(w, toolCallChunk(0, "clock-"+strconv.Itoa(int(turn)), "render_clock", `{}`)+"data: [DONE]\n\n")
+			})
+			h.catalog.get().EnabledWidgets = []string{"render_clock"}
+			in := sendInput(key)
+			in["widgets"] = []any{"render_clock"}
+			events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice"))
+			if last := events[len(events)-1]; obeys && last.Type != "RUN_FINISHED" || !obeys && last.Code != "MAX_TURNS" {
+				t.Fatalf("the capped run ended with %+v", last)
+			}
+			if turns.Load() != maxTurns+1 {
+				t.Fatalf("the model was called %d times", turns.Load())
+			}
+			messages := <-final
+			last, previous := obj(messages[len(messages)-1]), obj(messages[len(messages)-2])
+			if last["role"] != "system" || last["content"] != finalAnswerInstruction || previous["role"] != "tool" || previous["tool_call_id"] != "clock-"+strconv.Itoa(maxTurns) {
+				t.Fatalf("the final turn ended with %v after %v", last, previous)
+			}
+		})
+	}
+}
+
+func TestToolFailuresReachTheCallerOpaquely(t *testing.T) {
+	for _, route := range []string{"/v1/threads/turn", "/agui"} {
+		t.Run(route, func(t *testing.T) {
+			serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
+				return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: "upstream secret detail"}}}, nil
+			})
+			sent := make(chan []any, 1)
+			h, _, key := testChatHarness(t, toolTurns(toolCallChunk(0, "s", "web_search", `{"query":"cats"}`), sent))
+			in := searchInput(key)
+			if route == "/agui" {
+				in = object{"messages": []any{object{"role": "user", "content": "hi"}}}
+			}
+			events := finishedRun(t, h, route, in)
+			for _, e := range events {
+				if e.Type != "TOOL_CALL_RESULT" || e.ToolCallID != "s" {
+					continue
+				}
+				shown := decodeValue(e.Content)
+				if text, ok := shown.(string); ok { // the AG-UI route sends results as text
+					shown = decodeValue([]byte(text))
+				}
+				if !reflect.DeepEqual(shown, any(map[string]any{"error": "tool_error"})) {
+					t.Fatalf("the caller was sent %s", e.Content)
+				}
+			}
+			if strings.Contains(string(raw(events)), "upstream secret detail") {
+				t.Fatal("the tool's error text reached the caller")
+			}
+			if got := toolMessage(<-sent, "s"); !strings.Contains(got, `Tool \"web_search\" rejected the arguments: upstream secret detail`) {
+				t.Fatalf("the model read %s", got)
+			}
+		})
+	}
+}
+
 func TestCutModelStreamDoesNotCompleteItsToolCall(t *testing.T) {
 	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, toolCallChunk(0, "search-call", "web_search", `{"query":"ca`))

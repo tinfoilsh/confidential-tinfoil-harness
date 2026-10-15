@@ -402,14 +402,15 @@ func terminal(frame []byte) bool {
 }
 
 type stream struct {
-	run           *run
-	managed       bool
-	concreteModel string
-	modelAccepted bool
-	replyID       string
-	turnReasoning string
-	threadID      string
-	runID         string
+	run            *run
+	managed        bool
+	concreteModel  string
+	modelAccepted  bool
+	replyID        string
+	turnReasoning  string
+	reasoningField string // which of reasoning_content and reasoning the last turn streamed
+	threadID       string
+	runID          string
 
 	// mu serializes writes against the tool goroutines.
 	mu      sync.Mutex

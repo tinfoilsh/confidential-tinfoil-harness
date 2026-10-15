@@ -22,7 +22,10 @@ const (
 	// A tool result is bounded twice: what the model reads back, what the caller sees.
 	maxToolOutput  = 30000
 	maxShownOutput = 1 << 20
-	maxSSEEvent    = 1 << 20
+	maxSSEEvent    = 1 << 22
+
+	finalAnswerInstruction = "You have reached the maximum number of tool iterations. Do not call any more tools. Provide the best answer you can."
+	toolError              = `{"error":"tool_error"}`
 )
 
 func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model) error {
@@ -70,13 +73,19 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 	}
 	refreshed := false
 	for turn := 1; ; turn++ {
+		// Past the cap the model answers from what it has, with no tools to call.
+		tools := defs
+		if turn > maxTurns {
+			tools = nil
+			conversation = append(conversation, raw(object{"role": "system", "content": finalAnswerInstruction}))
+		}
 		if req.managed {
-			conversation, err = trimToolHistory(req, conversation, defs)
+			conversation, err = trimToolHistory(req, conversation, tools)
 			if err != nil {
 				return err
 			}
 		}
-		payload, err := body(req, m, conversation, defs)
+		payload, err := body(req, m, conversation, tools)
 		if err != nil {
 			return err
 		}
@@ -109,17 +118,18 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 		if len(calls) == 0 {
 			return nil
 		}
-		if turn == maxTurns {
+		if turn > maxTurns {
 			return apiErr(502, "MAX_TURNS", fmt.Sprintf("The model called tools for %d turns without answering", maxTurns))
 		}
 		reply := requested(answer, calls)
 		if req.managed && (req.policy == "all" || req.policy == "tool-call-only") {
 			out.mu.Lock()
-			reasoning := out.turnReasoning
+			reasoning, field := out.turnReasoning, out.reasoningField
 			out.mu.Unlock()
 			if reasoning != "" {
+				// Echoed in the field the enclave streamed it in, since vLLM versions disagree on it.
 				value := obj(decodeValue(reply))
-				value["reasoning_content"] = reasoning
+				value[field] = reasoning
 				reply = raw(value)
 			}
 		}
@@ -262,9 +272,10 @@ func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) (mess
 	// The model reads search results as cited text, the caller as data.
 	read, shown := modelCopy(call.name, content), any(nil)
 	if err != nil {
-		// The model reads the failure and can retry rather than the turn dying.
+		// The model reads the failure and can retry rather than the turn dying;
+		// the caller learns only that the call failed, never the tool's own text.
 		failure, _ := json.Marshal(map[string]string{"error": err.Error()})
-		content, read, meta, shown = string(failure), string(failure), nil, json.RawMessage(failure)
+		content, read, meta, shown = toolError, string(failure), nil, json.RawMessage(toolError)
 	} else if set.widgets != nil {
 		shown = normalizeToolResult(call, content)
 	}
@@ -315,6 +326,7 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 	var calls []toolCall
 	ended := false
 	var answer, reasoningText strings.Builder
+	reasoningField := "reasoning_content"
 	message := "msg_" + token()
 	if out.managed {
 		out.mu.Lock()
@@ -324,7 +336,11 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 		message = out.replyID
 		out.mu.Unlock()
 	}
-	defer func() { out.mu.Lock(); out.turnReasoning = reasoningText.String(); out.mu.Unlock() }()
+	defer func() {
+		out.mu.Lock()
+		out.turnReasoning, out.reasoningField = reasoningText.String(), reasoningField
+		out.mu.Unlock()
+	}()
 	events := bufio.NewScanner(resp.Body)
 	events.Buffer(nil, maxSSEEvent)
 	for events.Scan() {
@@ -357,10 +373,7 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 			Usage json.RawMessage `json:"usage"`
 		}
 		if json.Unmarshal([]byte(data), &chunk) != nil {
-			if out.managed {
-				return nil, answer.String(), apiErr(502, "UPSTREAM_REFUSED", "The model stream contains invalid JSON")
-			}
-			continue
+			return nil, answer.String(), apiErr(502, "UPSTREAM_REFUSED", "The model stream contains invalid JSON")
 		}
 		if len(chunk.Error) > 0 && string(chunk.Error) != "null" || chunk.Object == "error" {
 			return nil, answer.String(), streamError([]byte(data))
@@ -380,13 +393,18 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 			ended = true
 		}
 		delta := chunk.Choices[0].Delta
+		// Reasoning first: at the think-close boundary one delta carries the last
+		// of the reasoning and the first of the answer.
+		if reasoning := cmp.Or(delta.Reasoning, delta.ReasoningAlt); reasoning != "" {
+			if delta.Reasoning == "" {
+				reasoningField = "reasoning"
+			}
+			reasoningText.WriteString(reasoning)
+			out.reasoning(message, reasoning)
+		}
 		if delta.Content != "" {
 			answer.WriteString(delta.Content)
 			out.text(message, delta.Content)
-		}
-		if reasoning := cmp.Or(delta.Reasoning, delta.ReasoningAlt); reasoning != "" {
-			reasoningText.WriteString(reasoning)
-			out.reasoning(message, reasoning)
 		}
 		for _, called := range delta.ToolCalls {
 			if called.Index < 0 || called.Index >= 128 {
@@ -399,7 +417,7 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 	if err := events.Err(); err != nil {
 		return calls, answer.String(), err
 	}
-	if out.managed && !ended {
+	if !ended {
 		return calls, answer.String(), apiErr(502, "UPSTREAM_REFUSED", "The model stream ended before completion")
 	}
 	for i := range calls {
