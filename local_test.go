@@ -212,3 +212,32 @@ func TestAnonymousLocalTranscriptMayOmitImageBytes(t *testing.T) {
 		t.Fatalf("anonymous local turn failed: %+v (storage calls %d)", events[len(events)-1], rows.calls)
 	}
 }
+
+func TestLocalAskHidesTheTranscriptItStartsFrom(t *testing.T) {
+	var prompt []any
+	h, rows, _ := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		var payload object
+		json.NewDecoder(r.Body).Decode(&payload)
+		prompt = arr(payload["messages"])
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"side answer\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	in := localInput("0000000000004_local", priorThread())
+	in["kind"], in["quote"] = "ask", "first answer"
+	delete(in, "content")
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice"))
+	if rows.calls != 0 || events[0].ThreadID == "0000000000004_local" {
+		t.Fatalf("a local ask must start a new temporary thread without storage: %v (storage calls %d)", events[0].ThreadID, rows.calls)
+	}
+	snapshot := eventOfType(events, "MESSAGES_SNAPSHOT")
+	if messages := arr(snapshot.Messages); len(messages) != 1 || obj(messages[0])["content"] != "first answer" {
+		t.Fatalf("the ask shows the conversation it was asked from: %v", snapshot.Messages)
+	}
+	summary := obj(obj(eventOfType(events, "STATE_SNAPSHOT").Snapshot)["thread"])
+	if integer(summary["messageCount"]) != 1 {
+		t.Fatalf("hidden messages are counted: %v", summary)
+	}
+	// The model still reads the conversation the question refers to.
+	if len(prompt) < 4 || str(obj(prompt[1])["content"]) != "first question" {
+		t.Fatalf("the model lost the asked-about conversation: %v", prompt)
+	}
+}

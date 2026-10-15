@@ -316,7 +316,8 @@ func (h *harness) acceptTurn(ctx context.Context, p *principal, key contentKey, 
 	h.chatMu.Unlock()
 	// An idle local thread starts from the client's copy, which may have been
 	// edited since the last turn. A queued turn continues the active run's row.
-	if state.local && state.active == nil {
+	// An ask is a new thread that hides the copy it starts from, below.
+	if state.local && state.active == nil && source == nil {
 		if thread, ok := in["thread"]; ok {
 			state.row = localThread(id, obj(thread))
 		} else if str(in["threadId"]) != "" && source == nil {
