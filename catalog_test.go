@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -21,6 +22,10 @@ func TestCatalogRefreshAcceptsControlplaneArray(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var response any
 		switch r.URL.Path {
+		case "/catalog":
+			io.WriteString(w, `{"glm-5-3": {"repo": "tinfoilsh/confidential-glm5-3-nvfp4", "hosts": ["glm.example"], "context": 1048576},
+				"gemma4-31b": {"repo": "tinfoilsh/confidential-gemma4-31b", "hosts": ["gemma.example"], "context": 262144, "vision": true}}`)
+			return
 		case "/api/config/models":
 			response = definitions
 			switch mode.Load() {
@@ -44,10 +49,7 @@ func TestCatalogRefreshAcceptsControlplaneArray(t *testing.T) {
 		json.NewEncoder(w).Encode(response)
 	}))
 	defer server.Close()
-	h := &harness{controlplane: server.URL, models: []*model{
-		{name: "glm-5-3", context: 1048576, client: server.Client()},
-		{name: "gemma4-31b", context: 262144, client: server.Client()},
-	}}
+	h := &harness{gateway: server.URL, controlplane: server.URL}
 	if err := h.refreshCatalog(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +58,7 @@ func TestCatalogRefreshAcceptsControlplaneArray(t *testing.T) {
 		t.Fatalf("wrong available models: %v", catalog.Models)
 	}
 	if catalog.definition("deepseek-v4-1-flash") != nil || catalog.definition("glm-5-3-flash") != nil {
-		t.Fatal("advertised a model without an attested replica")
+		t.Fatal("advertised a model the gateway does not offer")
 	}
 	if integer(catalog.definition("glm-5-3")["budgetWindow"]) != 1048576 || len(catalog.Deprecated) != 1 {
 		t.Fatal("lost replica budget or deprecated model metadata")
@@ -74,5 +76,45 @@ func TestCatalogRefreshAcceptsControlplaneArray(t *testing.T) {
 				t.Fatal("failed refresh replaced the last valid catalog")
 			}
 		})
+	}
+}
+
+func TestHarnessStartsBeforeTheGatewayOffersAModel(t *testing.T) {
+	var offered atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/catalog":
+			if !offered.Load() {
+				io.WriteString(w, `{}`)
+				return
+			}
+			io.WriteString(w, `{"kimi-k3": {"repo": "tinfoilsh/confidential-kimi-k3", "hosts": ["kimi.example"], "context": 262144}}`)
+		case "/api/config/models":
+			json.NewEncoder(w).Encode([]object{{"modelName": "kimi-k3", "name": "Kimi K3", "repo": "tinfoilsh/confidential-kimi-k3", "type": "chat", "chat": true}})
+		case "/api/config/system-prompt":
+			json.NewEncoder(w).Encode(object{"systemPrompt": "Test prompt"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	h, _, _ := testChatHarness(t, nil)
+	h.gateway, h.controlplane = server.URL, server.URL
+	h.offer.models = nil
+	h.catalog.set(nil)
+	if err := h.refreshCatalog(context.Background()); err != nil {
+		t.Fatalf("an empty gateway catalog stopped startup: %v", err)
+	}
+	var session struct {
+		DefaultModel string   `json:"defaultModel"`
+		Models       []object `json:"models"`
+	}
+	response := postRoute(h, "/v1/session", object{}, "")
+	if err := json.Unmarshal(response.Body.Bytes(), &session); err != nil || response.Code != 200 || session.DefaultModel != "auto" || len(session.Models) != 0 {
+		t.Fatalf("session without offered models: HTTP %d %s", response.Code, response.Body.String())
+	}
+	offered.Store(true)
+	if err := h.refreshCatalog(context.Background()); err != nil || h.catalog.get().definition("kimi-k3") == nil {
+		t.Fatalf("a model the gateway now offers was not advertised: %v", err)
 	}
 }

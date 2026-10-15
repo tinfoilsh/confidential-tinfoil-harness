@@ -19,7 +19,7 @@ The API is `POST /v1/*`, with `GET /healthz` public. The full route table lives 
 
 ## Development
 
-Go 1.26.6 or later is required.
+Go 1.27.2 or later is required.
 
 ```sh
 GOWORK=off go test -race -timeout 60s ./...
@@ -31,7 +31,7 @@ Tests have no live service dependency. When `../tinfoil-webapp/node_modules` is 
 
 ## Deployment
 
-`tinfoil-config.yml` is the measured configuration. It requires `USAGE_CONTEXT_SECRET` (shared with the gateway for usage accounting) and `CLERK_ISSUER`. Downstream enclave hosts and gateway URLs are set with the `TINFOIL_*` variables shown there; sync and the model router are required at boot, other services are advertised once their attestation succeeds. Chat models are advertised only when the control plane lists them, their repository is pinned in [main.go](main.go), and a gateway replica attests. Deprecated models stay listed so older chats can show their names, but cannot be chosen.
+`tinfoil-config.yml` is the measured configuration. It requires `USAGE_CONTEXT_SECRET` (shared with the gateway for usage accounting) and `CLERK_ISSUER`. Downstream enclave hosts and gateway URLs are set with the `TINFOIL_*` variables shown there; sync and the model router are required at boot, other services are advertised once their attestation succeeds. Chat models are advertised only when the control plane lists them, their repository is pinned in [main.go](main.go), and the gateway's catalog offers them; each request is sealed to a replica attested against that pin on first use. Deprecated models stay listed so older chats can show their names, but cannot be chosen.
 
 The control plane accepts `/api/shim/validate-key` calls only from registered Tinfoil hosts, so anonymous chat works only from a deployed harness.
 

@@ -7,7 +7,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -28,13 +27,13 @@ import (
 
 // repo is the trust anchor; the gateway's catalog supplies the rest.
 type model struct {
-	endpoint, enclave, verifiedAt string
-	name                          string
-	repo                          string
-	vision                        bool
-	context                       int // usable prompt budget, in tokens
+	endpoint string
+	name     string
+	repo     string
+	vision   bool
+	context  int // usable prompt budget, in tokens
 
-	client *http.Client // sealing client, set once a replica verifies
+	client *http.Client // seals each request to a verified replica
 }
 
 var pinned = []struct{ name, repo string }{
@@ -50,7 +49,9 @@ var pinned = []struct{ name, repo string }{
 
 type harness struct {
 	gateway       string
-	models        []*model
+	offer         offerCache
+	modelClient   *http.Client
+	verified      func() []tinfoil.GatewayVerification
 	controlplane  string
 	cpClient      *http.Client
 	storeRows     rowStore
@@ -83,19 +84,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	// The pinned SDK uses http.DefaultClient for attestation metadata, while
-	// streamed inference has its own client and remains governed by run context.
-	http.DefaultClient.Timeout = verificationHTTPTimeout
 	ctx, shutdown := context.WithCancel(context.Background())
 	defer shutdown()
 	gw := strings.TrimRight(*gateway, "/")
 	attestFamilies(ctx, usageSecret)
-	models, err := attestCatalog(ctx, gw, usageSecret)
-	if err != nil {
-		slog.Error("verify model enclaves", "gateway", gw, "error", err)
-		os.Exit(1)
-	}
-	h := &harness{gateway: gw, models: models,
+	h := &harness{gateway: gw,
 		controlplane: strings.TrimRight(*controlplane, "/"),
 		cpClient:     &http.Client{Transport: &callerAuth{inner: http.DefaultTransport}},
 		runs:         map[string]*run{}}
@@ -119,7 +112,7 @@ func main() {
 		waitRuns(ctx, active)
 	}()
 
-	slog.Info("listening", "addr", *addr, "gateway", gw, "models", served(models))
+	slog.Info("listening", "addr", *addr, "gateway", gw, "models", served(h.offer.get()))
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		slog.Error("serve", "error", err)
 		os.Exit(1)
@@ -134,13 +127,14 @@ func env(key, fallback string) string {
 	return fallback
 }
 
-func attest(ctx context.Context, enclave, repo, baseURL, usageSecret string) (*http.Client, error) {
+// Requests without a caller's own cache secret fall back to this one, so the
+// SDK never tries to persist a secret under the read-only home directory.
+var cacheFallback = tinfoil.WithUserCacheSecret(token())
+
+// attest verifies an enclave the harness dials directly.
+func attest(ctx context.Context, enclave, repo, usageSecret string) (*http.Client, error) {
 	return startupAttestation.run(ctx, func() (*http.Client, error) {
-		opts := []tinfoil.ClientOption{tinfoil.WithEnclave(enclave), tinfoil.WithRepo(repo)}
-		if baseURL != "" { // the tools enclave is dialled directly, not via the gateway
-			opts = append(opts, tinfoil.WithBaseURL(baseURL))
-		}
-		verified, err := tinfoil.NewClientWithOptions(opts...)
+		verified, err := tinfoil.NewClientWithOptions(tinfoil.WithEnclave(enclave), tinfoil.WithRepo(repo), cacheFallback)
 		if err != nil {
 			return nil, err
 		}
@@ -150,11 +144,21 @@ func attest(ctx context.Context, enclave, repo, baseURL, usageSecret string) (*h
 	})
 }
 
+// newGateway seals each model request to a replica of the model it names,
+// verified on first use against the pinned repository.
+func newGateway(gateway string, catalog func() tinfoil.Catalog) (*tinfoil.Gateway, error) {
+	pins := map[string]tinfoil.ModelPin{}
+	for _, p := range pinned {
+		pins[p.name] = tinfoil.ModelPin{Repo: p.repo}
+	}
+	return tinfoil.NewGateway(gateway+"/v1/", catalog, tinfoil.GatewayOptions{ClientOptions: []tinfoil.ClientOption{cacheFallback}, ModelPins: pins, PinnedModelsOnly: true})
+}
+
 // A family is opt-in per run, so one that does not verify is skipped, not fatal.
 func attestFamilies(ctx context.Context, usageSecret string) {
 	for _, f := range families {
 		f.enclave = env(f.env, f.enclave)
-		client, err := attest(ctx, f.enclave, f.repo, "", usageSecret)
+		client, err := attest(ctx, f.enclave, f.repo, usageSecret)
 		if err != nil {
 			slog.Warn("tool enclave did not verify", "family", f.name, "enclave", f.enclave, "error", err)
 			continue
@@ -165,60 +169,65 @@ func attestFamilies(ctx context.Context, usageSecret string) {
 	}
 }
 
-// attestCatalog serves the models the gateway offers and this harness pins,
-// attesting one replica of each to start from.
+// offerCache holds the pinned models the gateway last offered. The SDK reads
+// the catalog on every request, so a stored catalog is never mutated.
+type offerCache struct {
+	mu      sync.RWMutex
+	models  []*model
+	catalog tinfoil.Catalog
+}
+
+func (c *offerCache) get() []*model        { c.mu.RLock(); defer c.mu.RUnlock(); return c.models }
+func (c *offerCache) sdk() tinfoil.Catalog { c.mu.RLock(); defer c.mu.RUnlock(); return c.catalog }
+func (c *offerCache) set(models []*model, catalog tinfoil.Catalog) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.models, c.catalog = models, catalog
+}
+
+// refreshOffer serves the models the gateway offers and this harness pins.
 //
 // The catalog is plaintext config, not a trust input. It can name any host, but
 // a host that does not attest against the pinned repo is never sealed to, and
 // the context and vision flags it reports only decide which runs are offered
 // which model -- a wrong one costs a refusal or a gateway error, never
 // confidentiality. That is what lets the enclave list live in one place, on the
-// side that already owns replica placement.
-func attestCatalog(ctx context.Context, gateway, usageSecret string) ([]*model, error) {
-	offered, err := fetchCatalog(ctx, gateway)
+// side that already owns replica placement. The gateway omits pools without a
+// healthy replica, so a catalog that offers no pinned model keeps the last one.
+func (h *harness) refreshOffer(ctx context.Context) {
+	offered, err := fetchCatalog(ctx, h.gateway)
 	if err != nil {
-		return nil, err
+		slog.Warn("gateway catalog unavailable", "error", err)
+		return
 	}
-	return attestModels(ctx, offered, gateway, usageSecret, attest)
+	models, catalog := offerModels(offered, h.modelClient)
+	if len(models) == 0 {
+		slog.Warn("gateway offers no pinned model; keeping the last catalog")
+		return
+	}
+	h.offer.set(models, catalog)
 }
 
-func attestModels(ctx context.Context, offered map[string]catalogEntry, gateway, usageSecret string, verify enclaveVerifier) ([]*model, error) {
-	models := make([]*model, len(pinned))
-	var wg sync.WaitGroup
-	for i, p := range pinned {
+func offerModels(offered map[string]catalogEntry, client *http.Client) ([]*model, tinfoil.Catalog) {
+	models, catalog := []*model{}, tinfoil.Catalog{}
+	for _, p := range pinned {
 		entry, ok := offered[p.name]
-		if !ok {
-			slog.Warn("gateway offers no pool for a pinned model", "model", p.name)
+		if !ok || len(entry.Hosts) == 0 {
 			continue
 		}
-		m := &model{name: p.name, repo: p.repo, vision: entry.Vision, context: entry.Context}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			// Any replica that verifies will do as the starting point: the
-			// gateway answers a 421 naming the one it routed to, and the SDK
-			// attests that host against the same repo before re-sealing there.
-			host, client, err := attestReplicas(ctx, entry.Hosts, m.repo, gateway+"/v1/", usageSecret, verify)
-			if err != nil {
-				slog.Warn("model unavailable", "model", m.name, "error", err)
-				return
-			}
-			m.client = client
-			m.enclave, m.verifiedAt = host, timestamp()
-			models[i] = m
-		}()
+		if entry.Repo != p.repo {
+			slog.Warn("gateway offers a pinned model from another repository", "model", p.name, "repo", entry.Repo)
+			continue
+		}
+		models = append(models, &model{name: p.name, repo: p.repo, vision: entry.Vision, context: entry.Context, client: client})
+		catalog[p.name] = tinfoil.CatalogEntry{Repo: entry.Repo, Hosts: slices.Clone(entry.Hosts)}
 	}
-	wg.Wait()
-
-	live := slices.DeleteFunc(models, func(m *model) bool { return m == nil })
-	if len(live) == 0 {
-		return nil, errors.New("no replica of any pinned model verified")
-	}
-	return live, nil
+	return models, catalog
 }
 
 // catalogEntry is the gateway's description of one model pool.
 type catalogEntry struct {
+	Repo    string   `json:"repo"`
 	Hosts   []string `json:"hosts"`
 	Vision  bool     `json:"vision"`
 	Context int      `json:"context"`
@@ -256,7 +265,7 @@ func served(models []*model) string {
 
 func (h *harness) pick(req *request) *model {
 	named := req.model != "" && req.model != "auto"
-	for _, m := range h.models {
+	for _, m := range h.offer.get() {
 		if named {
 			if m.name == req.model {
 				return m
@@ -273,7 +282,7 @@ func (h *harness) pick(req *request) *model {
 
 func (h *harness) unserved(req *request) string {
 	if req.model != "" && req.model != "auto" {
-		return fmt.Sprintf("unknown model %q: this agent serves %s and \"auto\"", req.model, served(h.models))
+		return fmt.Sprintf("unknown model %q: this agent serves %s and \"auto\"", req.model, served(h.offer.get()))
 	}
 	return fmt.Sprintf("no pinned model fits this run (about %d tokens, images: %t)", req.tokens, req.images)
 }

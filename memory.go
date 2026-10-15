@@ -34,7 +34,7 @@ func (h *harness) extractMemory(ctx context.Context, run *chatRun, thread *store
 		return
 	}
 	var model *model
-	for _, candidate := range h.models {
+	for _, candidate := range h.offer.get() {
 		if model == nil || candidate.name == "gpt-oss-120b" {
 			model = candidate
 		}

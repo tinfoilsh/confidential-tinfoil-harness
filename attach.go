@@ -338,9 +338,6 @@ func multipartCall(ctx context.Context, service *downstreamService, path, fileFi
 	if key := callerKey(ctx); key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
-	if service.Role == "audio" {
-		req.Header.Set("X-Tinfoil-Model", "voxtral-small-24b")
-	}
 	resp, err := service.Client.Do(req)
 	if err != nil {
 		return nil, err
@@ -365,11 +362,12 @@ func (h *harness) transcribe(ctx context.Context, filename string, data []byte) 
 	if !slices.Contains(audioExtensions, strings.ToLower(filepath.Ext(filename))) {
 		return "", apiErr(415, "ATTACHMENT_UNSUPPORTED", "Unsupported recording type")
 	}
-	service := h.services["audio"]
-	if service == nil {
+	// The router reads the model from the form, as the web client's SDK sends it.
+	router := h.services["router"]
+	if router == nil {
 		return "", apiErr(503, "TOOL_UNAVAILABLE", "Transcription is unavailable")
 	}
-	b, err := multipartCall(ctx, service, "/v1/audio/transcriptions", "file", filename, data, object{"model": "voxtral-small-24b", "response_format": "text"})
+	b, err := multipartCall(ctx, router, "/v1/audio/transcriptions", "file", filename, data, object{"model": "voxtral-small-24b", "response_format": "text"})
 	if err != nil {
 		return "", err
 	}
@@ -702,7 +700,7 @@ func (h *harness) hydrateContext(ctx context.Context, p *principal, key contentK
 				continue
 			}
 			var model *model
-			for _, m := range h.models {
+			for _, m := range h.offer.get() {
 				if m.vision {
 					model = m
 					break
