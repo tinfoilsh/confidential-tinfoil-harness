@@ -1279,7 +1279,7 @@ func screenedBy(t *testing.T, h *harness) func() []submission {
 	h.safeguards = newSubmitter(sidecar.URL)
 	h.auth.credentials["user:alice"] = inferenceCredential{Key: secret(accessJWT("tinfoil-chat", "chat")), Expires: nowUTC().Add(time.Hour)}
 	// As deployed, auto is the router, not one of the gateway's models.
-	h.autoModel = &model{name: "auto", client: h.models[0].client}
+	h.autoModel = &model{name: "auto", client: h.offer.get()[0].client}
 	return func() []submission {
 		h.safeguards.close()
 		mu.Lock()
