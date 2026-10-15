@@ -61,7 +61,7 @@ func (h *harness) session(ctx context.Context, p *principal, _ contentKey, _ obj
 		keyInfo["bundles"] = bundles
 		keyInfo["hasData"] = boolean(current["has_data"], false)
 	}
-	features := object{"webSearch": false, "codeExecution": false, "sandbox": h.serviceReady("sandbox"), "piiCheck": true, "genUI": len(c.EnabledWidgets) > 0, "transcription": h.serviceReady("router"), "memory": h.memoryEnabled}
+	features := object{"webSearch": false, "codeExecution": false, "sandbox": h.serviceReady("sandbox"), "piiCheck": true, "genUI": len(c.EnabledWidgets) > 0, "transcription": h.serviceReady("router"), "speech": h.serviceReady("router"), "memory": h.memoryEnabled}
 	for _, family := range families {
 		features[family.name] = family.client != nil
 	}

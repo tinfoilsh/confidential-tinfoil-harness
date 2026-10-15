@@ -191,6 +191,7 @@ func (h *harness) routes() http.Handler {
 	}
 	mux.HandleFunc("POST /v1/threads/turn", h.handleTurn)
 	mux.HandleFunc("POST /v1/threads/follow", h.handleFollow)
+	mux.HandleFunc("POST /v1/speech", h.handleSpeech)
 	for _, path := range []string{"/v1/attachments/upload", "/v1/projects/documents/upload", "/v1/transcriptions", "/v1/import"} {
 		mux.HandleFunc("POST "+path, boundedHandler(uploadSlots, h.handleUpload))
 	}
