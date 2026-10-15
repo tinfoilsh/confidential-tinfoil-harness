@@ -138,6 +138,18 @@ func TestWidgetRetriesAreCountedPerRunAndName(t *testing.T) {
 	}
 }
 
+func TestCallersCopyReadsRepairedArguments(t *testing.T) {
+	for _, tc := range []struct{ name, args, content, want string }{
+		{"web_search", `{"query":"cats"} Now searching...`, `{"results":[]}`, `{"query":"cats","results":[]}`},
+		{"web_fetch", `{"urls":["https://a.test"]} Now fetching...`, `{"results":[{"url":"https://a.test","status":"failed","error":"timeout"}]}`,
+			`{"failed":[{"error":"timeout","url":"https://a.test"}],"pages":[],"text":"","title":"Fetched page","url":"https://a.test"}`},
+	} {
+		if got := string(raw(normalizeToolResult(toolCall{id: "c1", name: tc.name, args: tc.args}, tc.content))); got != tc.want {
+			t.Errorf("%s with arguments %q was shown as %s, want %s", tc.name, tc.args, got, tc.want)
+		}
+	}
+}
+
 func TestValidWidgetArgumentsAreAcknowledged(t *testing.T) {
 	set := widgetToolset()
 	model, shown := invokeWidget(t, set, toolCall{id: "c1", name: "render_artifact_preview", args: `{"title":"Demo","source":{"type":"html","html":"<p>hi</p>"}}`})

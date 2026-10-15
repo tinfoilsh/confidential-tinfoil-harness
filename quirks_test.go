@@ -197,7 +197,7 @@ func TestSanitizeToolCallArgumentsJSON_EmptyInput(t *testing.T) {
 // harness builds history: requested, renderMessage and convert.
 func TestHistoryArgs(t *testing.T) {
 	for in, want := range map[string]string{
-		"":                     "",
+		"":                     "{}",
 		`{"query":"cats"}`:     `{"query":"cats"}`,
 		`{"cmd":"unterminated`: "{}",
 		`{"cmd":"`:             "{}",
@@ -209,6 +209,13 @@ func TestHistoryArgs(t *testing.T) {
 		if got != want || historyArgs(got) != got {
 			t.Errorf("historyArgs(%q) = %q, want %q (idempotently)", in, got, want)
 		}
+	}
+}
+
+func TestContinuationReplaysRepairedArguments(t *testing.T) {
+	got := string(requested("", []toolCall{{id: "c1", name: "render_clock"}, {id: "c2", name: "web_search", args: `{"query":"cats"} Now searching...`}}))
+	if want := `{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"render_clock","arguments":"{}"}},{"id":"c2","type":"function","function":{"name":"web_search","arguments":"{\"query\":\"cats\"}"}}]}`; got != want {
+		t.Fatalf("the continuation carried %s", got)
 	}
 }
 

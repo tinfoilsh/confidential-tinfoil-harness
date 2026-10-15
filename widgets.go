@@ -198,7 +198,7 @@ func normalizeToolResult(call toolCall, content string) any {
 		result = object{"output": content}
 	}
 	value := obj(result)
-	args := obj(decodeValue([]byte(call.args)))
+	args := obj(decodeValue([]byte(historyArgs(call.args))))
 	if strings.HasPrefix(call.name, "render_") {
 		return result
 	}
