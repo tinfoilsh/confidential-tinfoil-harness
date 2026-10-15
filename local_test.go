@@ -1,10 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"io"
-	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -153,23 +151,6 @@ func TestLocalTitleIsGeneratedWithoutStorage(t *testing.T) {
 	}
 }
 
-func uploadRoute(h *harness, user string, fields map[string]string, name, content string) *httptest.ResponseRecorder {
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	for key, value := range fields {
-		writer.WriteField(key, value)
-	}
-	part, _ := writer.CreateFormFile("file", name)
-	part.Write([]byte(content))
-	writer.Close()
-	r := httptest.NewRequest("POST", "/v1/attachments/upload", &body)
-	r.Header.Set("Content-Type", writer.FormDataContentType())
-	r.Header.Set("Authorization", "Bearer clerk-"+user)
-	w := httptest.NewRecorder()
-	h.routes().ServeHTTP(w, r)
-	return w
-}
-
 func TestLocalUploadReturnsItsDescriptorWithoutAKey(t *testing.T) {
 	var prompt string
 	h, rows, _ := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
@@ -177,10 +158,10 @@ func TestLocalUploadReturnsItsDescriptorWithoutAKey(t *testing.T) {
 		prompt = string(b)
 		io.WriteString(w, "data: [DONE]\n\n")
 	})
-	if w := uploadRoute(h, "alice", map[string]string{}, "notes.txt", "remember the blue door"); w.Code != 401 {
+	if w := uploadRoute(h, "/v1/attachments/upload", "notes.txt", []byte("remember the blue door"), nil, "alice"); w.Code != 401 {
 		t.Fatalf("stored upload accepted without a key: %d", w.Code)
 	}
-	w := uploadRoute(h, "alice", map[string]string{"local": "true"}, "notes.txt", "remember the blue door")
+	w := uploadRoute(h, "/v1/attachments/upload", "notes.txt", []byte("remember the blue door"), map[string]string{"local": "true"}, "alice")
 	if w.Code != 200 {
 		t.Fatalf("local upload failed: %d %s", w.Code, w.Body.String())
 	}
