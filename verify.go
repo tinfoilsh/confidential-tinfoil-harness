@@ -36,7 +36,6 @@ func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
 	}{
 		{"sync", "tinfoilsh/confidential-sync", "sync.tinfoil.sh", "TINFOIL_SYNC_ENCLAVE", true},
 		{"summarizer", "tinfoilsh/confidential-summarizer", "summarizer.tinfoil.sh", "TINFOIL_SUMMARIZER_ENCLAVE", false},
-		{"document", "tinfoilsh/confidential-doc-upload", "docling.tinfoil.sh", "TINFOIL_DOCUMENT_ENCLAVE", false},
 		{"metadata", "tinfoilsh/confidential-website-metadata-fetcher", "opengraph-metadata.tinfoil.sh", "TINFOIL_METADATA_ENCLAVE", false},
 		{"router", "tinfoilsh/confidential-model-router", "inference.tinfoil.sh", "TINFOIL_ROUTER_ENCLAVE", true},
 	} {
@@ -100,7 +99,7 @@ func (h *harness) verification(ctx context.Context, _ *principal, _ contentKey, 
 			verified = append(verified, object{"role": "tool", "name": family.name, "repo": family.repo, "enclave": family.enclave, "at": family.verifiedAt})
 		}
 	}
-	for _, role := range []string{"sync", "router", "summarizer", "document", "metadata"} {
+	for _, role := range []string{"sync", "router", "summarizer", "metadata"} {
 		if service := h.services[role]; service != nil {
 			verified = append(verified, object{"role": role, "repo": service.Repo, "enclave": service.Enclave, "at": service.At})
 		}

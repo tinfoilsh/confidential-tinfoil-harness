@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"image"
 	_ "image/gif"
 	"image/jpeg"
@@ -246,13 +247,7 @@ func (h *harness) preprocess(ctx context.Context, filename string, data []byte) 
 		if ext == ".pdf" && !bytes.HasPrefix(data, []byte("%PDF-")) || ext != ".pdf" && !bytes.HasPrefix(data, []byte("PK\x03\x04")) {
 			return nil, apiErr(415, "ATTACHMENT_UNSUPPORTED", "The file contents do not match the document type")
 		}
-		service := h.services["document"]
-		if service == nil {
-			return nil, apiErr(503, "TOOL_UNAVAILABLE", "Document conversion is unavailable")
-		}
-		ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-		defer cancel()
-		result, err := multipartCall(ctx, service, "/v1/convert/file?mode=images", "files", filename, data, nil)
+		result, err := h.convert(ctx, filename, data)
 		if err != nil {
 			return nil, err
 		}
@@ -266,7 +261,12 @@ func (h *harness) preprocess(ctx context.Context, filename string, data []byte) 
 		if document := obj(converted["document"]); len(document) > 0 {
 			converted = document
 		}
-		descriptor["textContent"], descriptor["pages"] = converted["md_content"], converted["pages"]
+		if text := str(converted["md_content"]); text != "" {
+			descriptor["textContent"] = text
+		}
+		if pages := arr(converted["pages"]); len(pages) > 0 {
+			descriptor["pages"] = pages
+		}
 	case slices.Contains(audioExtensions, ext):
 		text, err := h.transcribe(ctx, filename, data)
 		if err != nil {
@@ -312,6 +312,53 @@ func resizeImage(data []byte) ([]byte, []byte, error) {
 	thumb, err := encode(256)
 	return resized, thumb, err
 }
+
+// The document service converts four files at once and queues sixteen for
+// every user, so conversions take two slots and wait out capacity rejections
+// while the retry still fits a deadline that starts once a slot is free.
+var conversionSlots = make(chan struct{}, 2)
+var conversionDeadline = 10 * time.Minute
+
+func (h *harness) convert(ctx context.Context, filename string, data []byte) ([]byte, error) {
+	router := h.services["router"]
+	if router == nil {
+		return nil, apiErr(503, "TOOL_UNAVAILABLE", "Document conversion is unavailable")
+	}
+	select {
+	case conversionSlots <- struct{}{}:
+		defer func() { <-conversionSlots }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	ctx, cancel := context.WithTimeout(ctx, conversionDeadline)
+	defer cancel()
+	deadline, _ := ctx.Deadline()
+	for {
+		result, err := multipartCall(ctx, router, "/v1/convert/file?mode=images", "files", filename, data, nil)
+		delay := capacityDelay(err)
+		if delay == 0 || !time.Now().Add(delay).Before(deadline) {
+			return result, err
+		}
+		wait := time.NewTimer(delay)
+		select {
+		case <-wait.C:
+		case <-ctx.Done():
+			wait.Stop()
+			return nil, err
+		}
+	}
+}
+
+// capacityDelay is how long a capacity rejection asks to wait, or zero when the
+// refusal is final. An exhausted quota needs the user rather than a retry.
+func capacityDelay(err error) time.Duration {
+	var e *apiError
+	if !errors.As(err, &e) || e.Code == "QUOTA_EXHAUSTED" || e.Status != http.StatusTooManyRequests && e.Status != http.StatusServiceUnavailable {
+		return 0
+	}
+	return time.Duration(e.RetryAfter) * time.Second
+}
+
 func multipartCall(ctx context.Context, service *downstreamService, path, fileField, name string, data []byte, fields object) ([]byte, error) {
 	var buffer bytes.Buffer
 	writer := multipart.NewWriter(&buffer)
