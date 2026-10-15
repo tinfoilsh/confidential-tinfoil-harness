@@ -17,6 +17,9 @@ import (
 type storedRow struct {
 	ID, ETag string
 	Data     object
+	// restore lets a create reuse the id of a chat deleted from sync, as a
+	// chat moved to the device and back does.
+	restore bool
 }
 type rowPage struct {
 	Rows []storedRow
@@ -197,6 +200,9 @@ func (s *syncClient) push(ctx context.Context, p *principal, key contentKey, sco
 	metadata := object{}
 	if scope == "chat" {
 		metadata["projectId"] = row.Data["projectId"]
+		if row.restore {
+			metadata["restoreDeleted"] = true
+		}
 	}
 	if scope == "profile" {
 		metadata["profile_sync_protocol"] = 2
