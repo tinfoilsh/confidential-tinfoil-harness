@@ -78,6 +78,11 @@ func TestLocalTurnUsesClientTranscriptWithoutStorage(t *testing.T) {
 	if len(ids) != 3 || ids[0] != "m1" || ids[1] != "m2" || ids[2] == "" {
 		t.Fatalf("snapshot does not keep the client's message ids: %q", ids)
 	}
+	finished := obj(decodeValue(events[len(events)-1].Metadata))
+	replies := arr(finished["messages"])
+	if len(replies) != 1 || obj(replies[0])["model"] != "kimi-k3" || obj(replies[0])["modelDisplayName"] != "Kimi K3" || obj(replies[0])["isError"] != false || str(obj(replies[0])["id"]) == "" {
+		t.Fatalf("finish does not describe the committed reply: %v", finished)
+	}
 	state := eventOfType(events, "STATE_SNAPSHOT")
 	summary := obj(obj(state.Snapshot)["thread"])
 	if summary["id"] != "0000000000001_local" || summary["title"] != "Kept title" || integer(summary["messageCount"]) != 3 || summary["activeRun"] == nil || str(obj(summary["activeRun"])["runId"]) != events[0].RunID {

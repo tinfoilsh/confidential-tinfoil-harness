@@ -741,6 +741,12 @@ func (h *harness) finishChatRun(r *chatRun, runErr error) {
 		}
 		m["usage"] = object{"promptTokens": spend.Prompt, "completionTokens": spend.Completion}
 	}
+	// What the run commits to each reply beyond its streamed content, so a
+	// client that stores the thread itself stores the same messages.
+	committed := []object{}
+	for _, m := range messages {
+		committed = append(committed, selectFields(m, "id model modelDisplayName usage isError isInterrupted"))
+	}
 	commit := func(data object) error {
 		if r.retryTarget != nil && r.replacement != "" {
 			if err := replaceWidget(data, str(r.retryTarget["parentId"]), str(r.input["toolCallId"]), str(r.retryTarget["arguments"]), r.replacement); err != nil {
@@ -792,9 +798,9 @@ func (h *harness) finishChatRun(r *chatRun, runErr error) {
 	r.out.emit(event{Type: "STATE_SNAPSHOT", Snapshot: object{"thread": threadSummary(normalizeThread(s.row)), "queue": queueItems(s), "rateLimit": limit}})
 	if runErr != nil && !r.cancelled {
 		e := asAPIError(runErr)
-		r.out.emit(event{Type: "RUN_ERROR", ThreadID: s.id, RunID: r.log.id, Message: e.Message, Code: e.Code, Kind: e.Kind, ResetsAt: e.ResetsAt, RetryAfter: e.RetryAfter})
+		r.out.emit(event{Type: "RUN_ERROR", ThreadID: s.id, RunID: r.log.id, Message: e.Message, Code: e.Code, Kind: e.Kind, ResetsAt: e.ResetsAt, RetryAfter: e.RetryAfter, Metadata: raw(object{"messages": committed})})
 	} else {
-		r.out.emit(event{Type: "RUN_FINISHED", ThreadID: s.id, RunID: r.log.id, Metadata: raw(object{"usage": spend, "rateLimit": limit, "cancelled": r.cancelled})})
+		r.out.emit(event{Type: "RUN_FINISHED", ThreadID: s.id, RunID: r.log.id, Metadata: raw(object{"usage": spend, "rateLimit": limit, "cancelled": r.cancelled, "messages": committed})})
 	}
 	r.log.log.close(errDone)
 	s.active = nil
