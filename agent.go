@@ -391,6 +391,13 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 			calls = announce(out, message, calls, called)
 		}
 	}
+	// A cut stream leaves its calls open: TOOL_CALL_END would mark truncated arguments complete.
+	if err := events.Err(); err != nil {
+		return calls, answer.String(), err
+	}
+	if out.managed && !ended {
+		return calls, answer.String(), apiErr(502, "UPSTREAM_REFUSED", "The model stream ended before completion")
+	}
 	for i := range calls {
 		if !calls[i].open {
 			out.callStart(calls[i].id, calls[i].name, parent(message, &answer))
@@ -400,12 +407,6 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 			out.callArgs(calls[i].id, "{}")
 		}
 		out.callEnd(calls[i].id)
-	}
-	if events.Err() != nil {
-		return calls, answer.String(), events.Err()
-	}
-	if out.managed && !ended {
-		return calls, answer.String(), apiErr(502, "UPSTREAM_REFUSED", "The model stream ended before completion")
 	}
 	return calls, answer.String(), nil
 }
@@ -456,7 +457,7 @@ func requested(answer string, calls []toolCall) json.RawMessage {
 	made := make([]toolCallJSON, len(calls))
 	for i, call := range calls {
 		made[i].ID, made[i].Type = call.id, "function"
-		made[i].Function.Name, made[i].Function.Arguments = call.name, call.args
+		made[i].Function.Name, made[i].Function.Arguments = call.name, historyArgs(call.args)
 	}
 	message, _ := json.Marshal(outMessage{Role: "assistant", Content: quote(answer), ToolCalls: made})
 	return message

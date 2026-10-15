@@ -248,7 +248,7 @@ func renderMessage(message object, vision bool, policy string) []json.RawMessage
 			reasoning += str(block["content"])
 		case "tool_call":
 			id := firstString(block["toolCallId"], block["id"])
-			calls = append(calls, object{"id": id, "type": "function", "function": object{"name": block["name"], "arguments": firstString(block["arguments"], "{}")}})
+			calls = append(calls, object{"id": id, "type": "function", "function": object{"name": block["name"], "arguments": historyArgs(firstString(block["arguments"], "{}"))}})
 			result := "executed"
 			if value, ok := block["result"]; ok && !strings.HasPrefix(str(block["name"]), "render_") {
 				if text, ok := value.(string); ok {

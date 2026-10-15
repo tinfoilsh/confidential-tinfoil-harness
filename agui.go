@@ -266,6 +266,9 @@ func convert(messages []inMessage) (prompt, error) {
 		}
 		for i := range msg.ToolCalls {
 			msg.ToolCalls[i].Type = "function"
+			if msg.Role == "assistant" {
+				msg.ToolCalls[i].Function.Arguments = historyArgs(msg.ToolCalls[i].Function.Arguments)
+			}
 			p.tokens += len(msg.ToolCalls[i].Function.Arguments) / 4
 		}
 		encoded, err := json.Marshal(outMessage{Role: msg.Role, Content: content,

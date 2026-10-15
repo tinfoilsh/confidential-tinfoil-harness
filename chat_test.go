@@ -12,13 +12,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 type memoryRows struct {
@@ -604,6 +607,148 @@ func TestTypedErrors(t *testing.T) {
 		t.Fatal(e)
 	}
 }
+
+type recordedCall struct {
+	name   string
+	args   map[string]any
+	header http.Header
+}
+
+type recordedCalls struct {
+	mu    sync.Mutex
+	calls []recordedCall
+}
+
+func (r *recordedCalls) list() []recordedCall {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]recordedCall(nil), r.calls...)
+}
+
+// serveWebsearch points the webSearch family at a stateless MCP server that
+// publishes confidential-websearch's tools, validates arguments against their
+// schemas as it does, and answers every call with respond.
+func serveWebsearch(t *testing.T, respond func(name string, args map[string]any) (*mcp.CallToolResult, any)) *recordedCalls {
+	t.Helper()
+	type searchArgs struct {
+		Query      string `json:"query"`
+		MaxResults int    `json:"max_results,omitempty"`
+	}
+	type fetchArgs struct {
+		URLs []string `json:"urls"`
+	}
+	recorded := &recordedCalls{}
+	record := func(req *mcp.CallToolRequest) (*mcp.CallToolResult, any, error) {
+		var args map[string]any
+		json.Unmarshal(req.Params.Arguments, &args)
+		recorded.mu.Lock()
+		recorded.calls = append(recorded.calls, recordedCall{req.Params.Name, args, req.Extra.Header.Clone()})
+		recorded.mu.Unlock()
+		result, structured := respond(req.Params.Name, args)
+		return result, structured, nil
+	}
+	server := httptest.NewTLSServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+		s := mcp.NewServer(&mcp.Implementation{Name: "confidential-websearch", Version: "test"}, nil)
+		mcp.AddTool(s, &mcp.Tool{Name: "search", Description: "Search the web."}, func(_ context.Context, req *mcp.CallToolRequest, _ searchArgs) (*mcp.CallToolResult, any, error) {
+			return record(req)
+		})
+		mcp.AddTool(s, &mcp.Tool{Name: "fetch", Description: "Fetch pages."}, func(_ context.Context, req *mcp.CallToolRequest, _ fetchArgs) (*mcp.CallToolResult, any, error) {
+			return record(req)
+		})
+		return s
+	}, &mcp.StreamableHTTPOptions{Stateless: true}))
+	t.Cleanup(server.Close)
+	f := families[0]
+	saved := *f
+	t.Cleanup(func() { *f = saved })
+	f.enclave = strings.TrimPrefix(server.URL, "https://")
+	f.client = &http.Client{Transport: &callerAuth{inner: server.Client().Transport, usageSecret: "test-usage-secret"}}
+	return recorded
+}
+
+func searchInput(key contentKey) object {
+	in := sendInput(key)
+	obj(in["options"])["webSearch"] = true
+	return in
+}
+
+// toolCallChunk is one streamed chunk opening a tool call with all of its arguments.
+func toolCallChunk(index int, id, name, args string) string {
+	return "data: " + string(raw(object{"choices": []object{{"delta": object{"tool_calls": []object{{"index": index, "id": id, "function": object{"name": name, "arguments": args}}}}}}})) + "\n\n"
+}
+
+// lastRequest decodes the messages a model turn was sent.
+func lastRequest(r *http.Request) []any {
+	var body object
+	json.NewDecoder(r.Body).Decode(&body)
+	return arr(body["messages"])
+}
+
+func TestTrailingProseIsCutFromReplayedToolArguments(t *testing.T) {
+	var turns atomic.Int32
+	replayed := make(chan string, 1)
+	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if turns.Add(1) == 1 {
+			io.WriteString(w, toolCallChunk(0, "search-call", "web_search", `{"query":"cats"}Now searching...`)+"data: [DONE]\n\n")
+			return
+		}
+		messages := lastRequest(r)
+		replayed <- str(obj(obj(arr(obj(messages[len(messages)-2])["tool_calls"])[0])["function"])["arguments"])
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", sendInput(key), "alice"))
+	if last := events[len(events)-1]; last.Type != "RUN_FINISHED" {
+		t.Fatalf("run failed: %+v", last)
+	}
+	if got := <-replayed; got != `{"query":"cats"}` {
+		t.Fatalf("the next turn replayed %q", got)
+	}
+}
+
+func TestToolArgumentsAreRepairedBeforeTheCall(t *testing.T) {
+	enclave := serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
+		return nil, object{"pages": []object{{"url": "https://a.test/x", "content": "page"}}, "results": []object{{"url": "https://a.test/x", "status": "completed"}}}
+	})
+	var turns atomic.Int32
+	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if turns.Add(1) == 1 {
+			io.WriteString(w, toolCallChunk(0, "fetch-call", "web_fetch", `{"urls":["<|\"|https://a.test/x<|\"|>"]} Let me read it.`)+"data: [DONE]\n\n")
+			return
+		}
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"read\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", searchInput(key), "alice"))
+	if last := events[len(events)-1]; last.Type != "RUN_FINISHED" {
+		t.Fatalf("run failed: %+v", last)
+	}
+	calls := enclave.list()
+	if len(calls) != 1 || calls[0].name != "fetch" || !reflect.DeepEqual(calls[0].args, map[string]any{"urls": []any{"https://a.test/x"}}) {
+		t.Fatalf("the enclave was called with %+v", calls)
+	}
+}
+
+func TestCutModelStreamDoesNotCompleteItsToolCall(t *testing.T) {
+	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, toolCallChunk(0, "search-call", "web_search", `{"query":"ca`))
+		w.(http.Flusher).Flush()
+		panic(http.ErrAbortHandler)
+	})
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", sendInput(key), "alice"))
+	if last := events[len(events)-1]; last.Type != "RUN_ERROR" {
+		t.Fatalf("a cut stream finished the run: %+v", last)
+	}
+	for _, e := range events {
+		if e.Type == "TOOL_CALL_END" {
+			t.Fatal("a cut stream closed its truncated tool call")
+		}
+	}
+	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
+	block := obj(arr(obj(arr(row.Data["messages"])[1])["timeline"])[0])
+	if block["arguments"] != `{"query":"ca` || block["complete"] == true {
+		t.Fatalf("truncated arguments stored as complete: %v", block)
+	}
+}
+
 func TestRehydrationChecksEveryFrame(t *testing.T) {
 	key := randomKey()
 	original, _ := newContentRun("run", key)

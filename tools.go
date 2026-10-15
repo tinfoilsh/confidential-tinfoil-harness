@@ -189,10 +189,12 @@ func (t *toolset) call(ctx context.Context, name, progress string, args json.Raw
 	}
 	arguments := map[string]any{}
 	if len(bytes.TrimSpace(args)) > 0 {
+		args, _ = sanitizeToolCallArgumentsJSON(args)
 		if err := json.Unmarshal(args, &arguments); err != nil {
 			return "", nil, fmt.Errorf("arguments are not a JSON object: %w", err)
 		}
 	}
+	sanitizeToolCallArguments(arguments)
 	// Cloned because the progress token is written into metadata shared by every call.
 	params := &mcp.CallToolParams{Meta: maps.Clone(s.meta), Name: s.remote[name], Arguments: arguments}
 	params.SetProgressToken(progress)
