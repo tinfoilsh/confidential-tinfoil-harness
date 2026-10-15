@@ -189,6 +189,9 @@ func (h *harness) widgetResult(ctx context.Context, call toolCall) (any, error) 
 	}
 	return object{"url": args["url"], "title": result["title"], "description": result["description"], "siteName": firstString(result["siteName"], result["site_name"]), "image": result["image"]}, nil
 }
+
+// normalizeToolResult is the caller's copy of a tool result. Its text shares
+// one budget, spent after parsing so that a large result still parses.
 func normalizeToolResult(call toolCall, content string) any {
 	var result any
 	if json.Unmarshal([]byte(content), &result) != nil {
@@ -199,12 +202,32 @@ func normalizeToolResult(call toolCall, content string) any {
 	if strings.HasPrefix(call.name, "render_") {
 		return result
 	}
+	budget := maxShownOutput
+	take := func(s string) string {
+		if len(s) > budget {
+			s = s[:budget] + "\n[truncated]"
+		}
+		budget -= min(budget, len(s))
+		return s
+	}
 	switch call.name {
 	case "web_search":
-		rows := []object{}
+		rows, seen := []object{}, map[string]bool{}
 		for _, r := range arr(value["results"]) {
 			row := obj(r)
-			rows = append(rows, object{"url": row["url"], "title": row["title"], "snippet": firstString(row["snippet"], row["content"], row["text"])})
+			url := strings.TrimSpace(str(row["url"]))
+			if url == "" || seen[url] {
+				continue
+			}
+			seen[url] = true
+			source := object{"url": url, "title": strings.TrimSpace(str(row["title"])), "snippet": take(firstString(row["snippet"], row["content"], row["text"]))}
+			if published := strings.TrimSpace(str(row["published_date"])); published != "" {
+				source["publishedDate"] = published
+			}
+			if author := strings.TrimSpace(str(row["author"])); author != "" {
+				source["author"] = author
+			}
+			rows = append(rows, source)
 		}
 		shown := object{"query": args["query"], "results": rows}
 		if boolean(value["pii_checked"], false) {
@@ -212,15 +235,28 @@ func normalizeToolResult(call toolCall, content string) any {
 		}
 		return shown
 	case "web_fetch":
-		pages := arr(value["pages"])
-		if len(pages) == 0 {
-			pages = arr(value["results"])
+		shown := object{"url": firstString(arr(args["urls"])...), "title": "Fetched page", "text": ""}
+		pages, failed := []object{}, []object{}
+		for _, p := range arr(value["pages"]) {
+			page := obj(p)
+			url := strings.TrimSpace(str(page["url"]))
+			if url == "" {
+				continue
+			}
+			text := take(firstString(page["content"], page["text"]))
+			if len(pages) == 0 {
+				// Shown twice, as the result and as its first page, so spent twice.
+				shown["url"], shown["text"] = url, take(text)
+			}
+			pages = append(pages, object{"url": url, "title": "Fetched page", "text": text})
 		}
-		if len(pages) > 0 {
-			page := obj(pages[0])
-			return object{"url": page["url"], "title": page["title"], "text": clip(firstString(page["text"], page["content"]), maxShownOutput)}
+		for _, r := range arr(value["results"]) {
+			if result := obj(r); str(result["status"]) != "completed" {
+				failed = append(failed, object{"url": result["url"], "error": result["error"]})
+			}
 		}
-		return value
+		shown["pages"], shown["failed"] = pages, failed
+		return shown
 	case "present":
 		if _, ok := value["filename"]; ok {
 			return value
@@ -234,12 +270,9 @@ func normalizeToolResult(call toolCall, content string) any {
 				body = strings.TrimSuffix(rest, "\n"+fence)
 			}
 		}
-		return object{"filename": name, "language": language, "content": body}
+		return object{"filename": name, "language": language, "content": take(body)}
 	default:
-		if output := firstString(value["output"], value["stdout"]); output != "" {
-			return object{"output": output}
-		}
-		return object{"output": content}
+		return object{"output": take(cmp.Or(firstString(value["output"], value["stdout"]), content))}
 	}
 }
 

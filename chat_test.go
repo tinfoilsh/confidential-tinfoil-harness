@@ -609,6 +609,16 @@ func TestTypedErrors(t *testing.T) {
 	}
 }
 
+// finishedRun posts one turn as alice and fails unless it finished.
+func finishedRun(t *testing.T, h *harness, path string, in object) []event {
+	t.Helper()
+	events := eventsIn(t, postRoute(h, path, in, "alice"))
+	if last := events[len(events)-1]; last.Type != "RUN_FINISHED" {
+		t.Fatalf("run failed: %+v", last)
+	}
+	return events
+}
+
 type recordedCall struct {
 	name   string
 	args   map[string]any
@@ -697,10 +707,7 @@ func TestTrailingProseIsCutFromReplayedToolArguments(t *testing.T) {
 		replayed <- str(obj(obj(arr(obj(messages[len(messages)-2])["tool_calls"])[0])["function"])["arguments"])
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n")
 	})
-	events := eventsIn(t, postRoute(h, "/v1/threads/turn", sendInput(key), "alice"))
-	if last := events[len(events)-1]; last.Type != "RUN_FINISHED" {
-		t.Fatalf("run failed: %+v", last)
-	}
+	finishedRun(t, h, "/v1/threads/turn", sendInput(key))
 	if got := <-replayed; got != `{"query":"cats"}` {
 		t.Fatalf("the next turn replayed %q", got)
 	}
@@ -718,10 +725,7 @@ func TestToolArgumentsAreRepairedBeforeTheCall(t *testing.T) {
 		}
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"read\"}}]}\n\ndata: [DONE]\n\n")
 	})
-	events := eventsIn(t, postRoute(h, "/v1/threads/turn", searchInput(key), "alice"))
-	if last := events[len(events)-1]; last.Type != "RUN_FINISHED" {
-		t.Fatalf("run failed: %+v", last)
-	}
+	finishedRun(t, h, "/v1/threads/turn", searchInput(key))
 	calls := enclave.list()
 	if len(calls) != 1 || calls[0].name != "fetch" || !reflect.DeepEqual(calls[0].args, map[string]any{"urls": []any{"https://a.test/x"}}) {
 		t.Fatalf("the enclave was called with %+v", calls)
@@ -743,7 +747,7 @@ func TestToolArgumentsAreCoercedAndRejectionsExplained(t *testing.T) {
 		rejected <- str(obj(messages[len(messages)-1])["content"])
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n")
 	})
-	eventsIn(t, postRoute(h, "/v1/threads/turn", searchInput(key), "alice"))
+	finishedRun(t, h, "/v1/threads/turn", searchInput(key))
 	calls := enclave.list()
 	if len(calls) != 1 || calls[0].args["max_results"] != float64(3) || calls[0].args["query"] != "cats" {
 		t.Fatalf("the enclave accepted %+v", calls)
@@ -768,11 +772,7 @@ func widgetTurn(t *testing.T, chunks ...string) []event {
 	h.catalog.get().EnabledWidgets = []string{"render_artifact_preview"}
 	in := sendInput(key)
 	in["widgets"] = []any{"render_artifact_preview"}
-	events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice"))
-	if last := events[len(events)-1]; last.Type != "RUN_FINISHED" {
-		t.Fatalf("run failed: %+v", last)
-	}
-	return events
+	return finishedRun(t, h, "/v1/threads/turn", in)
 }
 
 // streamedArgs is every TOOL_CALL_ARGS delta one call was sent, in order.
@@ -884,10 +884,7 @@ func TestWidgetSchemaErrorsReachTheModelUntilTheRetryCap(t *testing.T) {
 	h.catalog.get().EnabledWidgets = []string{"render_artifact_preview"}
 	in := sendInput(key)
 	in["widgets"] = []any{"render_artifact_preview"}
-	events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice"))
-	if last := events[len(events)-1]; last.Type != "RUN_FINISHED" {
-		t.Fatalf("run failed: %+v", last)
-	}
+	events := finishedRun(t, h, "/v1/threads/turn", in)
 	for i := 1; i <= maxWidgetRetries+1; i++ {
 		got := <-read
 		if i <= maxWidgetRetries && !strings.Contains(got, "did not match the tool's parameter schema") || i > maxWidgetRetries && got != `{"status":"executed"}` {
@@ -917,9 +914,7 @@ func TestWidgetRetryRepairsTheReplacement(t *testing.T) {
 	in := sendInput(key)
 	in["threadId"], in["kind"], in["toolCallId"], in["widgets"] = "chat", "retryToolCall", "call", []any{"render_stat_cards"}
 	delete(in, "content")
-	if last := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice")); last[len(last)-1].Type != "RUN_FINISHED" {
-		t.Fatalf("retry failed: %+v", last[len(last)-1])
-	}
+	finishedRun(t, h, "/v1/threads/turn", in)
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", "chat")
 	if got := obj(arr(obj(arr(row.Data["messages"])[1])["timeline"])[0])["arguments"]; got != `{"stats":[{"label":"Count","value":2}]}` {
 		t.Fatalf("stored replacement %v", got)
@@ -927,19 +922,29 @@ func TestWidgetRetryRepairsTheReplacement(t *testing.T) {
 }
 
 // toolTurns answers the first model turn with chunks and every later one with
-// a plain answer, sending each later turn's last message to replies.
-func toolTurns(chunks string, replies chan<- string) http.HandlerFunc {
+// a plain answer, sending each later turn's messages to sent.
+func toolTurns(chunks string, sent chan<- []any) http.HandlerFunc {
 	var turns atomic.Int32
 	return func(w http.ResponseWriter, r *http.Request) {
 		if turns.Add(1) == 1 {
 			io.WriteString(w, chunks+"data: [DONE]\n\n")
 			return
 		}
-		if messages := lastRequest(r); replies != nil {
-			replies <- str(obj(messages[len(messages)-1])["content"])
+		if messages := lastRequest(r); sent != nil {
+			sent <- messages
 		}
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n")
 	}
+}
+
+// toolMessage is what the model read back from one call.
+func toolMessage(messages []any, id string) string {
+	for _, m := range messages {
+		if obj(m)["role"] == "tool" && obj(m)["tool_call_id"] == id {
+			return str(obj(m)["content"])
+		}
+	}
+	return ""
 }
 
 // toolResult is the content the caller was sent for one call.
@@ -973,10 +978,7 @@ func TestToolSessionsCarryTheEnclaveHeaders(t *testing.T) {
 			if tc.route == "/agui" {
 				in = object{"messages": []any{object{"role": "user", "content": "hi"}}, "forwardedProps": object{"piiCheck": tc.pii}}
 			}
-			events := eventsIn(t, postRoute(h, tc.route, in, "alice"))
-			if last := events[len(events)-1]; last.Type != "RUN_FINISHED" {
-				t.Fatalf("run failed: %+v", last)
-			}
+			events := finishedRun(t, h, tc.route, in)
 			calls := enclave.list()
 			if len(calls) != 2 {
 				t.Fatalf("the enclave saw %d calls", len(calls))
@@ -1010,7 +1012,7 @@ func TestSearchResultsShowWhatThePrivacyFilterMasked(t *testing.T) {
 					"pii_redactions": []object{{"type": "private_email", "start": 0, "end": 16}}, "pii_filter_requests": 1}
 			})
 			h, _, key := testChatHarness(t, toolTurns(toolCallChunk(0, "s", "web_search", `{"query":"me@example.com hiking trails"}`), nil))
-			shown := toolResult(eventsIn(t, postRoute(h, "/v1/threads/turn", searchInput(key), "alice")), "s")
+			shown := toolResult(finishedRun(t, h, "/v1/threads/turn", searchInput(key)), "s")
 			want := map[string]any{"masked": true, "redacted_query": "hiking trails", "redactions": []any{map[string]any{"type": "private_email", "start": float64(0), "end": float64(16)}}}
 			if pii, ok := shown["pii"]; checked && !reflect.DeepEqual(pii, any(want)) || !checked && ok {
 				t.Fatalf("the caller was shown %v", shown)
@@ -1023,11 +1025,66 @@ func TestFailedSearchReadsAsItsErrorNotItsReceipt(t *testing.T) {
 	serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
 		return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: "search provider unavailable; retry after a short delay"}}, StructuredContent: map[string]any{"pii_filter_requests": 1}}, nil
 	})
-	read := make(chan string, 1)
-	h, _, key := testChatHarness(t, toolTurns(toolCallChunk(0, "s", "web_search", `{"query":"cats"}`), read))
-	eventsIn(t, postRoute(h, "/v1/threads/turn", searchInput(key), "alice"))
-	if got := <-read; !strings.Contains(got, "search provider unavailable; retry after a short delay") || strings.Contains(got, "pii_filter_requests") {
+	sent := make(chan []any, 1)
+	h, _, key := testChatHarness(t, toolTurns(toolCallChunk(0, "s", "web_search", `{"query":"cats"}`), sent))
+	finishedRun(t, h, "/v1/threads/turn", searchInput(key))
+	if got := toolMessage(<-sent, "s"); !strings.Contains(got, "search provider unavailable; retry after a short delay") || strings.Contains(got, "pii_filter_requests") {
 		t.Fatalf("the model read %s", got)
+	}
+}
+
+func TestSearchResultsReachTheModelAsTextAndTheCallerAsData(t *testing.T) {
+	serveWebsearch(t, func(name string, _ map[string]any) (*mcp.CallToolResult, any) {
+		if name == "fetch" {
+			return nil, object{"pages": []object{{"url": "https://a.test/1", "content": "first page"}, {"url": "https://b.test", "content": "second page"}},
+				"results": []object{{"url": "https://a.test/1", "status": "completed"}, {"url": "https://b.test", "status": "completed"}, {"url": "https://c.test", "status": "failed", "error": "timeout"}}}
+		}
+		return nil, object{"pii_checked": false, "results": []object{
+			{"title": "A", "url": "https://a.test/1", "content": "alpha", "published_date": "2026-04-17", "author": "Ann"},
+			{"title": "A again", "url": "https://a.test/1", "content": "duplicate"},
+			{"title": "No URL", "url": "", "content": "dropped"},
+			{"title": "B", "url": "https://b.test", "content": "beta"},
+		}}
+	})
+	sent := make(chan []any, 1)
+	h, _, key := testChatHarness(t, toolTurns(toolCallChunk(0, "s", "web_search", `{"query":"cats"}`)+toolCallChunk(1, "f", "web_fetch", `{"urls":["https://a.test/1","https://b.test","https://c.test"]}`), sent))
+	events := finishedRun(t, h, "/v1/threads/turn", searchInput(key))
+	messages := <-sent
+	if got := toolMessage(messages, "s"); got != "Source: A\nURL: https://a.test/1\nPublished: 2026-04-17\nalpha\n\nSource: A again\nURL: https://a.test/1\nduplicate\n\nSource: No URL\ndropped\n\nSource: B\nURL: https://b.test\nbeta" {
+		t.Fatalf("the model read the search as %q", got)
+	}
+	if got := toolMessage(messages, "f"); got != "Source: Fetched page\nURL: https://a.test/1\nfirst page\n\nSource: Fetched page\nURL: https://b.test\nsecond page" {
+		t.Fatalf("the model read the fetch as %q", got)
+	}
+	search := map[string]any{"query": "cats", "results": []any{
+		map[string]any{"url": "https://a.test/1", "title": "A", "snippet": "alpha", "publishedDate": "2026-04-17", "author": "Ann"},
+		map[string]any{"url": "https://b.test", "title": "B", "snippet": "beta"},
+	}}
+	if got := toolResult(events, "s"); !reflect.DeepEqual(map[string]any(got), search) {
+		t.Fatalf("the caller was shown the search as %v", got)
+	}
+	fetch := map[string]any{"url": "https://a.test/1", "title": "Fetched page", "text": "first page",
+		"pages":  []any{map[string]any{"url": "https://a.test/1", "title": "Fetched page", "text": "first page"}, map[string]any{"url": "https://b.test", "title": "Fetched page", "text": "second page"}},
+		"failed": []any{map[string]any{"url": "https://c.test", "error": "timeout"}}}
+	if got := toolResult(events, "f"); !reflect.DeepEqual(map[string]any(got), fetch) {
+		t.Fatalf("the caller was shown the fetch as %v", got)
+	}
+}
+
+func TestALargeSearchResultIsClippedNotFlattened(t *testing.T) {
+	serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
+		return nil, object{"results": []object{{"title": "Huge", "url": "https://huge.test", "content": strings.Repeat("word ", maxShownOutput/5+200)}, {"title": "Next", "url": "https://next.test", "content": "small"}}}
+	})
+	sent := make(chan []any, 1)
+	h, _, key := testChatHarness(t, toolTurns(toolCallChunk(0, "s", "web_search", `{"query":"cats"}`), sent))
+	h.catalog.get().Models[0]["budgetWindow"] = 1 << 16
+	events := finishedRun(t, h, "/v1/threads/turn", searchInput(key))
+	results := arr(toolResult(events, "s")["results"])
+	if len(results) != 2 || obj(results[0])["title"] != "Huge" || len(str(obj(results[0])["snippet"])) != maxShownOutput+len("\n[truncated]") || obj(results[1])["url"] != "https://next.test" || obj(results[1])["snippet"] != "\n[truncated]" {
+		t.Fatalf("the caller's copy was not clipped field by field: %d results", len(results))
+	}
+	if read := toolMessage(<-sent, "s"); len(read) != maxToolOutput+len("\n[truncated]") || !strings.HasPrefix(read, "Source: Huge\nURL: https://huge.test\nword word") {
+		t.Fatalf("the model read %d bytes", len(read))
 	}
 }
 
@@ -1041,7 +1098,7 @@ func TestWebSearchIsBilledOncePerSession(t *testing.T) {
 				// A caller names its own run, so its id must not be what websearch dedupes on.
 				in, apiKey = object{"runId": "client-chosen", "messages": []any{object{"role": "user", "content": "hi"}}}, "clerk-alice"
 			}
-			events := eventsIn(t, postRoute(h, route, in, "alice"))
+			events := finishedRun(t, h, route, in)
 			calls := enclave.list()
 			if len(calls) != 2 {
 				t.Fatalf("the enclave saw %d calls", len(calls))

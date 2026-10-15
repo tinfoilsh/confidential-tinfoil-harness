@@ -259,18 +259,22 @@ func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) (mess
 	}
 	out.activity(call)
 	content, meta, err := set.call(ctx, call.name, call.id, json.RawMessage(call.args))
+	// The model reads search results as cited text, the caller as data.
+	read, shown := modelCopy(call.name, content), any(nil)
 	if err != nil {
 		// The model reads the failure and can retry rather than the turn dying.
 		failure, _ := json.Marshal(map[string]string{"error": err.Error()})
-		content, meta = string(failure), nil
+		content, read, meta, shown = string(failure), string(failure), nil, json.RawMessage(failure)
+	} else if set.widgets != nil {
+		shown = normalizeToolResult(call, content)
 	}
 	// The caller's copy is clipped far later than the model's: present renders whole files.
 	if set.widgets != nil {
-		out.emit(event{Type: "TOOL_CALL_RESULT", MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: raw(normalizeToolResult(call, clip(content, maxShownOutput))), Metadata: meta})
+		out.emit(event{Type: "TOOL_CALL_RESULT", MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: raw(shown), Metadata: meta})
 	} else {
 		out.result(call.id, clip(content, maxShownOutput), meta)
 	}
-	return answered(call.id, clip(content, maxToolOutput))
+	return answered(call.id, clip(read, maxToolOutput))
 }
 
 func clip(out string, limit int) string {
