@@ -31,9 +31,9 @@ Tests have no live service dependency. When `../tinfoil-webapp/node_modules` is 
 
 ## Deployment
 
-`tinfoil-config.yml` is the measured configuration. It requires `USAGE_CONTEXT_SECRET` (shared with the gateway for usage accounting) and `CLERK_ISSUER`. Downstream enclave hosts and gateway URLs are set with the `TINFOIL_*` variables shown there; sync and the model router are required at boot, other services are advertised once their attestation succeeds. Chat models are advertised only when the control plane lists them, their repository is pinned in [main.go](main.go), and the gateway's catalog offers them; each request is sealed to a replica attested against that pin on first use. Deprecated models stay listed so older chats can show their names, but cannot be chosen.
+`tinfoil-config.yml` is the measured configuration. It requires `USAGE_CONTEXT_SECRET` (shared with the gateway for usage accounting), `CLERK_ISSUER`, and `TINFOIL_API_KEY` for the safeguards sidecar. Downstream enclave hosts and gateway URLs are set with the `TINFOIL_*` variables shown there; sync and the model router are required at boot, other services are advertised once their attestation succeeds. Chat models are advertised only when the control plane lists them, their repository is pinned in [main.go](main.go), and the gateway's catalog offers them; each request is sealed to a replica attested against that pin on first use. Deprecated models stay listed so older chats can show their names, but cannot be chosen.
 
-Setting `SAFEGUARDS_URL` to a [safeguards](https://github.com/tinfoilsh/confidential-safeguards) sidecar in the same enclave submits completed first-party chats for acceptable-use classification, as the model router does for the chats it serves.
+The harness submits completed first-party chats on gateway models to the [safeguards](https://github.com/tinfoilsh/confidential-safeguards) sidecar named by `SAFEGUARDS_URL` for acceptable-use classification, as the model router does for the chats it serves. The sidecar's image digest is pinned by hand.
 
 The control plane accepts `/api/shim/validate-key` calls only from registered Tinfoil hosts, so anonymous chat works only from a deployed harness.
 
