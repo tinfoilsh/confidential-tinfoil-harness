@@ -1,5 +1,5 @@
 // Regenerate the server declarations from a checked-out webapp.
-// Usage: node scripts/port-widgets.cjs ../tinfoil-webapp
+// Usage: node scripts/check-widgets.cjs ../tinfoil-webapp
 const fs = require('node:fs')
 const path = require('node:path')
 const vm = require('node:vm')

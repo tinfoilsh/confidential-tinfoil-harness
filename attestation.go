@@ -38,6 +38,11 @@ func (r *attestationRunner) run(ctx context.Context, verify func() (*http.Client
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+	// With both cases ready, select may take the slot after the deadline.
+	if err := ctx.Err(); err != nil {
+		<-r.slots
+		return nil, err
+	}
 	type result struct {
 		client *http.Client
 		err    error

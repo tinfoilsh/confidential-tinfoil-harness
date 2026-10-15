@@ -15,7 +15,9 @@ function load(file) {
   const module = { exports: {} }
   cache.set(file, module)
   const js = ts.transpileModule(fs.readFileSync(file, 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText
-  const localRequire = name => name.startsWith('.') ? load(path.resolve(path.dirname(file), name)) : name.startsWith('@/') ? load(path.join(legacyRoot, name.slice(2))) : refRequire(name)
+  // The frozen fixtures resolve @/ among themselves; the webapp's own files resolve it in its src.
+  const aliasRoot = file.startsWith(legacyRoot + path.sep) ? legacyRoot : path.join(root, 'src')
+  const localRequire = name => name.startsWith('.') ? load(path.resolve(path.dirname(file), name)) : name.startsWith('@/') ? load(path.join(aliasRoot, name.slice(2))) : refRequire(name)
   vm.runInThisContext('(function(require,module,exports){' + js + '\n})', { filename: file })(localRequire, module, module.exports)
   return module.exports
 }
@@ -25,7 +27,10 @@ if (input.backup) {
   const files = unzipSync(Buffer.from(input.backup, 'base64'))
   const { assertValidNativeBackupV2 } = load(path.join(legacyRoot, 'services/native-backup/format.ts'))
   const manifest = JSON.parse(Buffer.from(files['manifest.json']).toString('utf8'))
-  assertValidNativeBackupV2(files['manifest.json'], manifest.files.map(entry => ({ path: entry.path, kind: entry.kind, bytes: files[entry.path] })))
+  // Every archive entry is checked, so a file the manifest omits is rejected too.
+  const kinds = new Map(manifest.files.map(entry => [entry.path, entry.kind]))
+  const entries = Object.entries(files).filter(([name]) => name !== 'manifest.json' && !name.endsWith('/'))
+  assertValidNativeBackupV2(files['manifest.json'], entries.map(([name, bytes]) => ({ path: name, kind: kinds.get(name) ?? name.split('/')[0], bytes })))
 }
 if (input.chat || input.profile) {
   const schemas = load(path.join(legacyRoot, 'services/cloud/schemas.ts'))
@@ -38,7 +43,7 @@ if (input.events) {
   let state = initialChat()
   input.events.forEach((event, id) => { state = reduceEvent(state, { event, id }) })
   const fields = ['id', 'type', 'content', 'toolCallId', 'name', 'arguments', 'result', 'progress', 'resolution', 'resolvedAt', 'complete']
-  const messages = value => value.map(m => ({ id: m.id, role: m.role, timeline: (m.timeline ?? []).map(b => Object.fromEntries(fields.filter(f => b[f] !== undefined).map(f => [f, b[f]]))) }))
+  const messages = value => value.map(m => ({ id: m.id, role: m.role, ...(m.role === 'user' ? { content: m.content } : {}), timeline: (m.timeline ?? []).map(b => Object.fromEntries(fields.filter(f => b[f] !== undefined).map(f => [f, b[f]]))) }))
   assert.deepEqual(messages(state.messages), messages(input.expectedMessages))
 }
 process.stdout.write('Reference compatibility checks passed.\n')

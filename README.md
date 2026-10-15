@@ -8,7 +8,7 @@ For each chat turn the harness:
 
 1. Authenticates the caller's Clerk session and exchanges it for an inference credential
 2. Assembles the prompt from the stored thread, project documents, memory, and attachments
-3. Streams the model turn as server-sent events, running tools (web search, document processing) as the model requests them
+3. Streams the model turn as server-sent events, running web search as the model requests it; uploaded documents are converted to text when they are attached
 4. Encrypts the result with the client's content encryption key and stores it through the [sync enclave](https://github.com/tinfoilsh/confidential-sync)
 
 The client keeps custody of its content encryption key and sends it inside the encrypted request body. The harness never logs or persists that key; completed runs discard it along with the plaintext transcript.
@@ -31,7 +31,7 @@ Tests have no live service dependency. When `../tinfoil-webapp/node_modules` is 
 
 ## Deployment
 
-`tinfoil-config.yml` is the measured configuration. It requires `USAGE_CONTEXT_SECRET` (shared with the gateway for usage accounting) and `CLERK_ISSUER`. Downstream enclave hosts and gateway URLs are set with the `TINFOIL_*` variables shown there; sync and the model router are required at boot, other services are advertised once their attestation succeeds. Chat models are advertised only when the control plane lists them, their repository is pinned in [main.go](main.go), and a gateway replica attests.
+`tinfoil-config.yml` is the measured configuration. It requires `USAGE_CONTEXT_SECRET` (shared with the gateway for usage accounting) and `CLERK_ISSUER`. Downstream enclave hosts and gateway URLs are set with the `TINFOIL_*` variables shown there; sync and the model router are required at boot, other services are advertised once their attestation succeeds. Chat models are advertised only when the control plane lists them, their repository is pinned in [main.go](main.go), and a gateway replica attests. Deprecated models stay listed so older chats can show their names, but cannot be chosen.
 
 The control plane accepts `/api/shim/validate-key` calls only from registered Tinfoil hosts, so anonymous chat works only from a deployed harness.
 

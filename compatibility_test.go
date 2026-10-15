@@ -152,7 +152,14 @@ func referenceCheck(t *testing.T, input object) {
 	}
 	if _, ok := input["events"]; ok {
 		if _, err := os.Stat(reference + "/src/services/harness/reducer.ts"); err != nil {
-			t.Skip("reference webapp has no harness reducer")
+			// Event parity needs the webapp's harness reducer; the backup and
+			// stored-row checks in the same input do not.
+			input = clone(input)
+			delete(input, "events")
+			delete(input, "expectedMessages")
+			if len(input) == 0 {
+				t.Skip("reference webapp has no harness reducer")
+			}
 		}
 	}
 	node, err := exec.LookPath("node")
