@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -95,6 +96,36 @@ func (a *messageAssembler) apply(e event) {
 		}
 	}
 }
+
+// replaceReplyText rewrites a reply's text as the web client does: its
+// content blocks collapse into one holding the text, where the first was.
+func replaceReplyText(message object, text string) {
+	legacyTimeline(message)
+	timeline := arr(message["timeline"])
+	first := slices.IndexFunc(timeline, func(block any) bool { return obj(block)["type"] == "content" })
+	edited := object{"type": "content", "id": "edited-content", "content": text}
+	if first < 0 {
+		first = len(timeline)
+	} else {
+		edited["id"] = obj(timeline[first])["id"]
+	}
+	blocks := []any{}
+	for i := range len(timeline) + 1 {
+		if i == first && text != "" {
+			blocks = append(blocks, edited)
+		}
+		if i < len(timeline) && obj(timeline[i])["type"] != "content" {
+			blocks = append(blocks, timeline[i])
+		}
+	}
+	message["content"] = text
+	if len(blocks) > 0 {
+		message["timeline"] = blocks
+	} else {
+		delete(message, "timeline")
+	}
+}
+
 func (a *messageAssembler) messages() []object {
 	out := []object{}
 	for _, m := range a.ordered {

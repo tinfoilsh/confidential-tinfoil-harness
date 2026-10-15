@@ -358,10 +358,112 @@ func TestSessionAdvertisesThreadFeatures(t *testing.T) {
 		Features map[string]bool `json:"features"`
 	}
 	json.Unmarshal(postRoute(h, "/v1/session", object{}, "").Body.Bytes(), &session)
-	for _, name := range []string{"defaultPromptPreset", "fork"} {
+	for _, name := range []string{"defaultPromptPreset", "fork", "messageActions"} {
 		if !session.Features[name] {
 			t.Errorf("the session does not advertise %s", name)
 		}
+	}
+}
+
+// windowIDs are the message ids of a thread window a route returned.
+func windowIDs(t *testing.T, w *httptest.ResponseRecorder) []string {
+	t.Helper()
+	if w.Code != 200 {
+		t.Fatalf("HTTP %d: %s", w.Code, w.Body.String())
+	}
+	var window object
+	json.Unmarshal(w.Body.Bytes(), &window)
+	ids := []string{}
+	for _, m := range arr(window["messages"]) {
+		ids = append(ids, str(obj(m)["id"]))
+	}
+	return ids
+}
+
+func TestDeletingAMessageRemovesOnlyThatMessage(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	p := &principal{ID: "alice"}
+	// A row written before messages had ids is shown with ids from their positions.
+	rows.rows[rowMapKey(p, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: object{"title": "Old", "messages": []any{
+		object{"role": "user", "content": "one", "imageData": []any{object{"base64": "aW1hZ2U=", "mimeType": "image/png"}}}, object{"role": "assistant", "content": "two"}, object{"role": "user", "content": "three"}, object{"role": "assistant", "content": "four"},
+	}}}
+	rows.rows[rowMapKey(p, "chat", "solo")] = storedRow{ID: "solo", ETag: "1", Data: object{"messages": []any{object{"id": "only", "role": "user", "content": "hi"}}}}
+	rows.rows[rowMapKey(p, "chat", "busy")] = storedRow{ID: "busy", ETag: "1", Data: object{"activeRun": object{"runId": "run"}, "messages": []any{object{"id": "a", "role": "user", "content": "hi"}, object{"id": "b", "role": "assistant", "content": "hey"}}}}
+	remove := func(thread, message string) *httptest.ResponseRecorder {
+		return postRoute(h, "/v1/threads/messages/delete", object{"key": key.base64(), "threadId": thread, "messageId": message}, "alice")
+	}
+	for _, tc := range []struct {
+		thread, message string
+		code            int
+	}{{"solo", "only", 400}, {"busy", "b", 409}, {"chat-1", "chat-1-message-9", 404}} {
+		if w := remove(tc.thread, tc.message); w.Code != tc.code {
+			t.Fatalf("deleting %s from %s: HTTP %d, want %d", tc.message, tc.thread, w.Code, tc.code)
+		}
+	}
+	if got := windowIDs(t, remove("chat-1", "chat-1-message-1")); !reflect.DeepEqual(got, []string{"chat-1-message-0", "chat-1-message-2", "chat-1-message-3"}) {
+		t.Fatalf("after deleting the first reply the chat holds %q", got)
+	}
+	// The ids stayed with their messages, so the next deletion names the same one.
+	if got := windowIDs(t, remove("chat-1", "chat-1-message-2")); !reflect.DeepEqual(got, []string{"chat-1-message-0", "chat-1-message-3"}) {
+		t.Fatalf("after deleting the second question the chat holds %q", got)
+	}
+	row, _ := rows.load(context.Background(), p, key, "chat", "chat-1")
+	messages := arr(row.Data["messages"])
+	if len(messages) != 2 || obj(messages[0])["content"] != "one" || obj(messages[1])["content"] != "four" {
+		t.Fatalf("stored messages: %v", messages)
+	}
+	// The legacy image stays where it was stored, rather than copied inline.
+	if _, ok := obj(messages[0])["attachments"]; ok {
+		t.Fatalf("a deletion rewrote a message's legacy fields: %v", messages[0])
+	}
+	for _, id := range []string{"solo", "busy"} {
+		if row, _ := rows.load(context.Background(), p, key, "chat", id); row.ETag != "1" {
+			t.Fatalf("a refused deletion changed %s", id)
+		}
+	}
+}
+
+func TestEditingAReplyCollapsesItsText(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	p := &principal{ID: "alice"}
+	call := object{"id": "call", "type": "tool_call", "toolCallId": "call", "name": "render_clock", "arguments": "{}"}
+	search := object{"query": "weather", "status": "completed"}
+	rows.rows[rowMapKey(p, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: object{"messages": []any{
+		object{"id": "u1", "role": "user", "content": "what time is it?"},
+		object{"id": "a1", "role": "assistant", "content": "It is noon.", "timeline": []any{object{"id": "t", "type": "thinking", "content": "check"}, object{"id": "c1", "type": "content", "content": "It is "}, call, object{"id": "c2", "type": "content", "content": "noon."}}},
+		object{"id": "u2", "role": "user", "content": "and the weather?"},
+		object{"id": "a2", "role": "assistant", "content": "Sunny.", "thoughts": "look it up", "thinkingDuration": 3, "webSearch": search},
+	}}}
+	update := func(message string, content any) *httptest.ResponseRecorder {
+		return postRoute(h, "/v1/threads/messages/update", object{"key": key.base64(), "threadId": "chat-1", "messageId": message, "content": content}, "alice")
+	}
+	if w := update("u1", "edited question"); w.Code != 400 {
+		t.Fatalf("a question was edited in place: %d", w.Code)
+	}
+	if w := update("a1", 5); w.Code != 400 {
+		t.Fatalf("non-text content was accepted: %d", w.Code)
+	}
+	reply := func(index int) object {
+		row, _ := rows.load(context.Background(), p, key, "chat", "chat-1")
+		return obj(arr(row.Data["messages"])[index])
+	}
+	if got := windowIDs(t, update("a1", "It is half past twelve.")); !reflect.DeepEqual(got, []string{"u1", "a1", "u2", "a2"}) {
+		t.Fatalf("the edit changed the conversation: %q", got)
+	}
+	want := decodeValue(raw([]any{object{"id": "t", "type": "thinking", "content": "check"}, object{"id": "c1", "type": "content", "content": "It is half past twelve."}, call}))
+	if a1 := reply(1); a1["content"] != "It is half past twelve." || !reflect.DeepEqual(a1["timeline"], want) {
+		t.Fatalf("edited reply: %v", a1)
+	}
+	// A reply stored with flat fields keeps its thinking and search.
+	windowIDs(t, update("a2", "Rain."))
+	want = decodeValue(raw([]any{object{"type": "thinking", "id": "legacy-thinking", "content": "look it up", "isThinking": false, "duration": 3}, object{"type": "web_search", "id": "legacy-web-search-post", "state": search}, object{"type": "content", "id": "legacy-content", "content": "Rain."}}))
+	if a2 := reply(3); a2["content"] != "Rain." || !reflect.DeepEqual(a2["timeline"], want) {
+		t.Fatalf("edited legacy reply: %v", a2)
+	}
+	windowIDs(t, update("a1", ""))
+	want = decodeValue(raw([]any{object{"id": "t", "type": "thinking", "content": "check"}, call}))
+	if a1 := reply(1); a1["content"] != "" || !reflect.DeepEqual(a1["timeline"], want) {
+		t.Fatalf("a reply edited to nothing: %v", a1)
 	}
 }
 

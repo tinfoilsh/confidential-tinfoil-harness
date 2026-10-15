@@ -15,6 +15,7 @@ func (h *harness) apiRoutes() []routeSpec {
 		{"/v1/session", true, false, h.session}, {"/v1/verify", true, false, h.verification},
 		{"/v1/threads/list", false, true, h.listThreads}, {"/v1/threads/get", false, true, h.getThread},
 		{"/v1/threads/update", false, true, h.updateThread}, {"/v1/threads/delete", false, true, h.deleteThread}, {"/v1/threads/fork", false, true, h.forkThread},
+		{"/v1/threads/messages/delete", false, true, h.deleteMessage}, {"/v1/threads/messages/update", false, true, h.updateMessage},
 		{"/v1/threads/search", false, true, h.searchThreads}, {"/v1/threads/cancel", true, false, h.cancelThread},
 		{"/v1/threads/queue/send", true, false, h.sendQueued}, {"/v1/threads/queue/remove", true, false, h.removeQueued}, {"/v1/threads/share", false, true, h.shareThread},
 		{"/v1/threads/share/revoke", false, false, h.revokeShare}, {"/v1/threads/share/status", false, false, h.shareStatus},
@@ -68,7 +69,7 @@ func (h *harness) session(ctx context.Context, p *principal, _ contentKey, _ obj
 		keyInfo["bundles"] = bundles
 		keyInfo["hasData"] = boolean(current["has_data"], false)
 	}
-	features := object{"webSearch": false, "codeExecution": false, "sandbox": h.serviceReady("sandbox"), "piiCheck": true, "genUI": len(c.EnabledWidgets) > 0, "transcription": h.serviceReady("router"), "speech": h.serviceReady("router"), "memory": h.memoryEnabled, "defaultPromptPreset": true, "fork": true}
+	features := object{"webSearch": false, "codeExecution": false, "sandbox": h.serviceReady("sandbox"), "piiCheck": true, "genUI": len(c.EnabledWidgets) > 0, "transcription": h.serviceReady("router"), "speech": h.serviceReady("router"), "memory": h.memoryEnabled, "defaultPromptPreset": true, "fork": true, "messageActions": true}
 	for _, family := range families {
 		features[family.name] = family.client != nil
 	}
@@ -318,6 +319,68 @@ func (h *harness) forkThread(ctx context.Context, p *principal, key contentKey, 
 		return nil, err
 	}
 	return threadSummary(normalizeThread(forked)), nil
+}
+
+// Message actions change a stored chat's transcript. A local thread's client
+// changes its own copy, which its next turn sends.
+func (h *harness) deleteMessage(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
+	return h.changeMessages(ctx, p, key, in, func(messages []any, index int) ([]any, error) {
+		// As on the web client, a chat keeps its last message.
+		if len(messages) == 1 {
+			return nil, apiErr(400, "BAD_REQUEST", "A chat keeps its last message")
+		}
+		return slices.Delete(messages, index, index+1), nil
+	})
+}
+func (h *harness) updateMessage(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
+	text, ok := in["content"].(string)
+	if !ok {
+		return nil, apiErr(400, "BAD_REQUEST", "content must be a string")
+	}
+	return h.changeMessages(ctx, p, key, in, func(messages []any, index int) ([]any, error) {
+		if obj(messages[index])["role"] != "assistant" {
+			return nil, apiErr(400, "BAD_REQUEST", "Only a reply is edited in place")
+		}
+		replaceReplyText(obj(messages[index]), text)
+		return messages, nil
+	})
+}
+func (h *harness) changeMessages(ctx context.Context, p *principal, key contentKey, in object, change func([]any, int) ([]any, error)) (any, error) {
+	id, err := requiredID(in, "threadId")
+	if err != nil {
+		return nil, err
+	}
+	messageID, err := requiredID(in, "messageId")
+	if err != nil {
+		return nil, err
+	}
+	row, err := h.mutate(ctx, p, key, "chat", id, false, nil, func(data object) error {
+		if str(obj(data["activeRun"])["runId"]) != "" {
+			return apiErr(409, "RUN_IN_FLIGHT", "The chat has a reply in progress")
+		}
+		// Ids derived from a message's position are stored, so removing one
+		// message does not rename the messages after it.
+		messages := arr(data["messages"])
+		for i, item := range messages {
+			if m := obj(item); str(m["id"]) == "" {
+				m["id"] = id + "-message-" + jsonNumber(i)
+			}
+		}
+		index := slices.IndexFunc(messages, func(m any) bool { return obj(m)["id"] == messageID })
+		if index < 0 {
+			return apiErr(404, "THREAD_NOT_FOUND", "The message was not found")
+		}
+		changed, err := change(messages, index)
+		if err != nil {
+			return err
+		}
+		data["messages"] = changed
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return publicThread(row, "", 50), nil
 }
 func (h *harness) deleteAllThreads(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
 	if err := validateFields(in, "", "", "projectId"); err != nil {
