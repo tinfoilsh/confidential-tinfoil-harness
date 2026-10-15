@@ -153,3 +153,10 @@ func uploadRoute(h *harness, path, filename string, data []byte, fields map[stri
 	h.routes().ServeHTTP(w, r)
 	return w
 }
+
+func TestARefusalWithoutAHeaderKeepsItsBodyDelay(t *testing.T) {
+	e := downstreamError(429, []byte(`{"error":{"message":"Slow down.","type":"rate_limit_error","code":"rate_limit_exceeded","retryAfter":9}}`))
+	if e.Code != "RATE_LIMITED" || e.RetryAfter != 9 {
+		t.Fatalf("got %s retry %d", e.Code, e.RetryAfter)
+	}
+}

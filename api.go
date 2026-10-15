@@ -236,6 +236,9 @@ func downstreamError(status int, body []byte) *apiError {
 		e = apiErr(422, "PII_BLOCKED", "The privacy screen refused the request")
 	default:
 		if refused := openAIRefusal(status, body); refused != nil {
+			if refused.RetryAfter == 0 {
+				refused.RetryAfter = integer(in["retryAfter"])
+			}
 			return refused
 		}
 		switch status {
