@@ -18,12 +18,15 @@ type threadSession struct {
 	mu                 sync.Mutex
 	id, owner, keyHash string
 	ephemeral, deleted bool
-	row                *storedRow
-	active             *chatRun
-	queue              []*chatRun
-	runs               map[string]*chatRun
-	expires            time.Time
-	key                contentKey // retained only for an ephemeral thread's lifetime
+	// A local thread is stored by the client, which sends its transcript with
+	// each turn. Like an anonymous thread, it never uses the content key.
+	local, keyless bool
+	row            *storedRow
+	active         *chatRun
+	queue          []*chatRun
+	runs           map[string]*chatRun
+	expires        time.Time
+	key            contentKey // retained only for an ephemeral thread's lifetime
 }
 type chatRun struct {
 	thread                   *threadSession
@@ -41,6 +44,7 @@ type chatRun struct {
 	assembler                *messageAssembler
 	retryTarget              object
 	replacement              string
+	profile                  object // a local thread's settings, sent by its client
 }
 
 func (h *harness) threadState(p *principal, id string) *threadSession {
@@ -53,7 +57,7 @@ func (h *harness) threadState(p *principal, id string) *threadSession {
 	return h.threads[p.scope()+"/"+id]
 }
 func (h *harness) handleTurn(w http.ResponseWriter, r *http.Request) {
-	in, err := decodeJSON(w, r)
+	in, err := decodeJSONWithin(w, r, maxTurnBody)
 	if err != nil {
 		respond(w, nil, err)
 		return
@@ -73,7 +77,8 @@ func (h *harness) handleTurn(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, apiErr(400, "BAD_REQUEST", "Unknown turn kind"))
 		return
 	}
-	if kind == "ask" {
+	local := boolean(in["local"], false)
+	if kind == "ask" || local {
 		in["ephemeral"] = true
 	}
 	ephemeral := boolean(in["ephemeral"], false)
@@ -82,7 +87,7 @@ func (h *harness) handleTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var key contentKey
-	if !p.Anonymous || str(in["key"]) != "" {
+	if !p.Anonymous && !local || str(in["key"]) != "" {
 		key, err = decodeContentKey(str(in["key"]))
 		if err != nil {
 			respond(w, nil, err)
@@ -90,7 +95,7 @@ func (h *harness) handleTurn(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	defer clear(key[:])
-	if kind == "ask" && p.Anonymous {
+	if kind == "ask" && p.Anonymous && !local {
 		respond(w, nil, apiErr(401, "UNAUTHENTICATED", "Ask requires access to a stored thread"))
 		return
 	}
@@ -112,7 +117,29 @@ func (h *harness) handleTurn(w http.ResponseWriter, r *http.Request) {
 	follow(w, r, accepted.log, resumeFrom(r.Header.Get("Last-Event-ID")))
 }
 func validateTurn(in object) error {
-	if err := validateFields(in, "kind clientRequestId content quote messageId toolCallId", "ephemeral", "threadId projectId presetId"); err != nil {
+	if err := validateFields(in, "kind clientRequestId content quote messageId toolCallId", "ephemeral local", "threadId projectId presetId"); err != nil {
+		return err
+	}
+	local := boolean(in["local"], false)
+	if local && in["projectId"] != nil {
+		return apiErr(400, "BAD_REQUEST", "Projects require cloud storage")
+	}
+	for _, field := range []string{"thread", "profile"} {
+		value, ok := in[field]
+		if !ok {
+			continue
+		}
+		if !local {
+			return apiErr(400, "BAD_REQUEST", field+" is only accepted for local threads")
+		}
+		if !validObject(value) {
+			return apiErr(400, "BAD_REQUEST", field+" must be an object")
+		}
+	}
+	if err := validateLocalThread(obj(in["thread"])); err != nil {
+		return err
+	}
+	if err := validateProfile(localProfile(obj(in["profile"]))); err != nil {
 		return err
 	}
 	if value, ok := in["options"]; ok {
@@ -198,7 +225,7 @@ func (h *harness) acceptTurn(ctx context.Context, p *principal, key contentKey, 
 	}
 	if previous := h.requests[requestID]; previous != nil {
 		h.chatMu.Unlock()
-		if previous.digest != digest || !p.Anonymous && previous.thread.keyHash != key.fingerprint() {
+		if previous.digest != digest || !previous.thread.keyless && previous.thread.keyHash != key.fingerprint() {
 			return nil, apiErr(409, "REVISION_CONFLICT", "The request nonce was already used")
 		}
 		return previous, nil
@@ -215,13 +242,19 @@ func (h *harness) acceptTurn(ctx context.Context, p *principal, key contentKey, 
 		return nil, e
 	}
 	ephemeral, id := boolean(in["ephemeral"], false), str(in["threadId"])
+	local := boolean(in["local"], false)
+	keyless := p.Anonymous || local
 	var source object
 	if in["kind"] == "ask" {
-		row, err := h.storeRows.load(ctx, p, key, "chat", id)
-		if err != nil {
-			return nil, err
+		if local {
+			source = localThread(id, obj(in["thread"])).Data
+		} else {
+			row, err := h.storeRows.load(ctx, p, key, "chat", id)
+			if err != nil {
+				return nil, err
+			}
+			source = clone(normalizeThread(row))
 		}
-		source = clone(normalizeThread(row))
 		id = ""
 	}
 	if id == "" && str(in["projectId"]) != "" {
@@ -254,10 +287,10 @@ func (h *harness) acceptTurn(ctx context.Context, p *principal, key contentKey, 
 			h.chatMu.Unlock()
 			return nil, apiErr(503, "UPSTREAM_REFUSED", "The thread registry is at capacity")
 		}
-		if p.Anonymous {
+		if keyless {
 			key = randomKey()
 		}
-		state = &threadSession{id: id, owner: p.scope(), keyHash: key.fingerprint(), ephemeral: ephemeral, runs: map[string]*chatRun{}, expires: nowUTC().Add(runTimeout)}
+		state = &threadSession{id: id, owner: p.scope(), keyHash: key.fingerprint(), ephemeral: ephemeral, local: local, keyless: keyless, runs: map[string]*chatRun{}, expires: nowUTC().Add(runTimeout)}
 		if ephemeral {
 			state.key = key
 		}
@@ -266,10 +299,10 @@ func (h *harness) acceptTurn(ctx context.Context, p *principal, key contentKey, 
 	h.chatMu.Unlock()
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if state.deleted || state.ephemeral != ephemeral || !p.Anonymous && state.keyHash != key.fingerprint() {
+	if state.deleted || state.ephemeral != ephemeral || state.local != local || !state.keyless && state.keyHash != key.fingerprint() {
 		return nil, apiErr(404, "THREAD_NOT_FOUND", "The thread is unavailable")
 	}
-	if p.Anonymous {
+	if state.keyless {
 		key = state.key
 	}
 	h.chatMu.Lock()
@@ -281,6 +314,15 @@ func (h *harness) acceptTurn(ctx context.Context, p *principal, key contentKey, 
 		return previous, nil
 	}
 	h.chatMu.Unlock()
+	// An idle local thread starts from the client's copy, which may have been
+	// edited since the last turn. A queued turn continues the active run's row.
+	if state.local && state.active == nil {
+		if thread, ok := in["thread"]; ok {
+			state.row = localThread(id, obj(thread))
+		} else if str(in["threadId"]) != "" && source == nil {
+			return nil, apiErr(400, "BAD_REQUEST", "A local thread requires its transcript")
+		}
+	}
 	if state.row == nil {
 		if !ephemeral {
 			row, err := h.storeRows.load(ctx, p, key, "chat", id)
@@ -352,8 +394,15 @@ func (h *harness) acceptTurn(ctx context.Context, p *principal, key contentKey, 
 	}
 	clean := clone(in)
 	delete(clean, "key")
+	// The transcript has already seeded the row; holding it again per run would
+	// double a local thread's memory while it waits in the queue.
+	delete(clean, "thread")
+	delete(clean, "profile")
 	clean["createdAt"] = timestamp()
 	accepted := &chatRun{thread: state, log: log, input: clean, principal: p, key: key, nonce: nonce, digest: digest, messageID: "msg_" + token(), credential: credential, finished: make(chan struct{}), assembler: newMessageAssembler()}
+	if state.local {
+		accepted.profile = localProfile(obj(in["profile"]))
+	}
 	accepted.queued = state.active != nil
 	accepted.out = &stream{run: log, threadID: id, runID: runID, managed: true}
 	if accepted.queued {
@@ -364,7 +413,7 @@ func (h *harness) acceptTurn(ctx context.Context, p *principal, key contentKey, 
 		if err := h.beginChatRun(ctx, accepted); err != nil {
 			clear(accepted.key[:])
 			accepted.input = nil
-			if !state.ephemeral {
+			if !state.ephemeral || state.local {
 				state.row = nil
 			}
 			return nil, err
@@ -420,8 +469,11 @@ func (h *harness) beginChatRun(ctx context.Context, r *chatRun) error {
 			}
 		}
 	}
+	if s.local {
+		profile = clone(r.profile)
+	}
 	working := clone(s.row.Data)
-	attachments, err := h.turnAttachments(ctx, r.principal, r.key, r.input, working, s.ephemeral)
+	attachments, err := h.turnAttachments(ctx, r.principal, r.key, r.input, working, s.ephemeral, s.keyless)
 	if err != nil {
 		return err
 	}
@@ -451,7 +503,9 @@ func (h *harness) beginChatRun(ctx context.Context, r *chatRun) error {
 			return err
 		}
 	}
-	if err := h.hydrateContext(ctx, r.principal, r.key, working, s.ephemeral && r.input["kind"] != "ask"); err != nil {
+	// An ask's stored source has attachments in sync; a local source carries them.
+	temporary := s.ephemeral && (r.input["kind"] != "ask" || s.local)
+	if err := h.hydrateContext(ctx, r.principal, r.key, working, temporary, s.local); err != nil {
 		return err
 	}
 	request, model, err := h.buildRequest(working, profile, project, docs, r.input, r.key, r.log.id)
@@ -558,7 +612,7 @@ func (h *harness) beginChatRun(ctx context.Context, r *chatRun) error {
 		defer close(r.titleDone)
 		defer clear(titleRun.key[:])
 		defer func() { rescued("title", recover()) }()
-		if !s.ephemeral {
+		if !s.ephemeral || s.local {
 			titleCtx, stop := context.WithTimeout(runCtx, 30*time.Second)
 			defer stop()
 			h.generateTitle(titleCtx, titleRun, titleRow)
@@ -664,7 +718,9 @@ func (h *harness) finishChatRun(r *chatRun, runErr error) {
 		r.replacement = ""
 		r.principal = &principal{ID: r.principal.ID, AnonymousID: r.principal.AnonymousID, Anonymous: r.principal.Anonymous}
 		r.credential.Key = ""
-		if !s.ephemeral && s.active == nil {
+		r.profile = nil
+		// The client keeps a local thread, so only a queued turn needs its row.
+		if (!s.ephemeral || s.local) && s.active == nil {
 			s.row = nil
 		}
 	}()
@@ -771,7 +827,7 @@ func (h *harness) authorizedRun(p *principal, key contentKey, in object) (*threa
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !p.Anonymous && s.keyHash != key.fingerprint() {
+	if !s.keyless && s.keyHash != key.fingerprint() {
 		return nil, nil, apiErr(409, "KEY_MISMATCH", "The run uses another key")
 	}
 	r := s.runs[runID]
@@ -780,14 +836,17 @@ func (h *harness) authorizedRun(p *principal, key contentKey, in object) (*threa
 	}
 	return s, r, nil
 }
-func requestKey(p *principal, in object) (contentKey, error) {
-	if p.Anonymous && str(in["key"]) == "" {
+
+// A missing key is checked against the run: keyless threads accept it, and
+// every other thread compares the key's fingerprint.
+func requestKey(in object) (contentKey, error) {
+	if str(in["key"]) == "" {
 		return contentKey{}, nil
 	}
 	return decodeContentKey(str(in["key"]))
 }
 func (h *harness) cancelThread(ctx context.Context, p *principal, _ contentKey, in object) (any, error) {
-	key, err := requestKey(p, in)
+	key, err := requestKey(in)
 	if err != nil {
 		return nil, err
 	}
@@ -808,7 +867,7 @@ func (h *harness) cancelThread(ctx context.Context, p *principal, _ contentKey, 
 
 // Move the selected queued turn first, then finish the active run normally.
 func (h *harness) sendQueued(ctx context.Context, p *principal, _ contentKey, in object) (any, error) {
-	key, err := requestKey(p, in)
+	key, err := requestKey(in)
 	if err != nil {
 		return nil, err
 	}
@@ -835,7 +894,7 @@ func (h *harness) sendQueued(ctx context.Context, p *principal, _ contentKey, in
 }
 
 func (h *harness) removeQueued(ctx context.Context, p *principal, _ contentKey, in object) (any, error) {
-	key, err := requestKey(p, in)
+	key, err := requestKey(in)
 	if err != nil {
 		return nil, err
 	}
@@ -894,7 +953,7 @@ func (h *harness) handleFollow(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, err)
 		return
 	}
-	key, err := requestKey(p, in)
+	key, err := requestKey(in)
 	if err != nil {
 		respond(w, nil, err)
 		return
@@ -925,6 +984,10 @@ func (h *harness) handleFollow(w http.ResponseWriter, r *http.Request) {
 	}
 	if asAPIError(err).HTTP != 404 || p.Anonymous {
 		respond(w, nil, err)
+		return
+	}
+	if key == (contentKey{}) {
+		respond(w, nil, apiErr(401, "KEY_REQUIRED", "A content key is required"))
 		return
 	}
 	id, err := requiredID(in, "threadId")

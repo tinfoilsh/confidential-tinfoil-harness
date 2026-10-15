@@ -90,17 +90,34 @@ func (h *harness) generateTitle(ctx context.Context, r *chatRun, row *storedRow)
 	if title == "" {
 		return
 	}
-	updated, err := h.mutate(ctx, r.principal, r.key, "chat", row.ID, false, nil, func(data object) error {
+	name := func(data object) error {
 		if data["titleState"] == "placeholder" {
 			data["title"], data["titleState"] = title, "generated"
 		}
 		return nil
-	})
+	}
+	// A local thread's row lives only in this run, and its client stores the
+	// title it reads from the event below.
+	if r.thread.local {
+		r.thread.mu.Lock()
+		defer r.thread.mu.Unlock()
+		if r.thread.row == nil {
+			return
+		}
+		name(r.thread.row.Data)
+		r.out.emit(event{Type: "STATE_DELTA", Delta: titleDelta(r.thread.row.Data)})
+		return
+	}
+	updated, err := h.mutate(ctx, r.principal, r.key, "chat", row.ID, false, nil, name)
 	if err != nil {
 		return
 	}
 	r.thread.mu.Lock()
 	defer r.thread.mu.Unlock()
 	r.thread.row = updated
-	r.out.emit(event{Type: "STATE_DELTA", Delta: []object{{"op": "replace", "path": "/thread/title", "value": updated.Data["title"]}, {"op": "replace", "path": "/thread/titleState", "value": updated.Data["titleState"]}}})
+	r.out.emit(event{Type: "STATE_DELTA", Delta: titleDelta(updated.Data)})
+}
+
+func titleDelta(data object) []object {
+	return []object{{"op": "replace", "path": "/thread/title", "value": data["title"]}, {"op": "replace", "path": "/thread/titleState", "value": data["titleState"]}}
 }
