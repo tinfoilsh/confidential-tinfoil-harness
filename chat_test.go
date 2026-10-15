@@ -358,11 +358,19 @@ func TestSessionAdvertisesThreadFeatures(t *testing.T) {
 		Features map[string]bool `json:"features"`
 	}
 	json.Unmarshal(postRoute(h, "/v1/session", object{}, "").Body.Bytes(), &session)
-	for _, name := range []string{"defaultPromptPreset", "fork", "messageActions"} {
+	for _, name := range []string{"defaultPromptPreset", "fork", "messageActions", "continue"} {
 		if !session.Features[name] {
 			t.Errorf("the session does not advertise %s", name)
 		}
 	}
+}
+
+func messageIDs(messages any) []string {
+	ids := []string{}
+	for _, m := range arr(messages) {
+		ids = append(ids, str(obj(m)["id"]))
+	}
+	return ids
 }
 
 // windowIDs are the message ids of a thread window a route returned.
@@ -373,11 +381,7 @@ func windowIDs(t *testing.T, w *httptest.ResponseRecorder) []string {
 	}
 	var window object
 	json.Unmarshal(w.Body.Bytes(), &window)
-	ids := []string{}
-	for _, m := range arr(window["messages"]) {
-		ids = append(ids, str(obj(m)["id"]))
-	}
-	return ids
+	return messageIDs(window["messages"])
 }
 
 func TestDeletingAMessageRemovesOnlyThatMessage(t *testing.T) {
@@ -504,6 +508,231 @@ func TestAnEditKeepsTheQuoteItOmits(t *testing.T) {
 		if question := <-questions; question != tc.question {
 			t.Fatalf("an edit with quote %v asked %q", tc.quote, question)
 		}
+	}
+}
+
+func continueTurn(key contentKey, thread, message string) object {
+	in := sendInput(key)
+	in["threadId"], in["kind"] = thread, "continue"
+	delete(in, "content")
+	if message != "" {
+		in["messageId"] = message
+	}
+	return in
+}
+
+// poemThread stores a chat whose first reply was cut short.
+func poemThread(rows *memoryRows, id string, more ...any) {
+	messages := append([]any{
+		object{"id": "u1", "role": "user", "content": "Write a poem"},
+		object{"id": "a1", "role": "assistant", "content": "Roses are red,", "createdAt": "2026-01-01T00:00:01Z", "isInterrupted": true, "thoughts": "rhyme",
+			"timeline": []any{object{"id": "t1", "type": "thinking", "content": "rhyme"}, object{"id": "c1", "type": "content", "content": "Roses are red,"}}},
+	}, more...)
+	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", id)] = storedRow{ID: id, ETag: "1", Data: object{"title": "Poem", "titleState": "manual", "model": "kimi-k3", "createdAt": "2026-01-01T00:00:00Z", "messages": messages}}
+}
+
+func TestContinueExtendsTheStoredReplyItNames(t *testing.T) {
+	prompts := make(chan []any, 1)
+	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		prompts <- lastRequest(r)
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\" violets\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\" are blue.\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	poemThread(rows, "chat-1", object{"id": "u2", "role": "user", "content": "Thanks"}, object{"id": "a2", "role": "assistant", "content": "You're welcome"})
+	poemThread(rows, "asked", object{"id": "u2", "role": "user", "content": "Another?"})
+	for _, tc := range []struct {
+		thread, message string
+		code            int
+	}{{"chat-1", "u1", 400}, {"asked", "", 400}, {"chat-1", "a9", 404}} {
+		if w := postRoute(h, "/v1/threads/turn", continueTurn(key, tc.thread, tc.message), "alice"); w.Code != tc.code {
+			t.Fatalf("continuing %q in %s: HTTP %d, want %d", tc.message, tc.thread, w.Code, tc.code)
+		}
+	}
+	events := finishedRun(t, h, "/v1/threads/turn", continueTurn(key, "chat-1", "a1"))
+	prompt := <-prompts
+	reminder := str(obj(prompt[len(prompt)-1])["content"])
+	if len(prompt) != 4 || !reflect.DeepEqual(prompt[1:3], []any{map[string]any{"role": "user", "content": "Write a poem"}, map[string]any{"role": "assistant", "content": "Roses are red,"}}) ||
+		!strings.HasPrefix(reminder, "<system-reminder>Current time: ") || !strings.HasSuffix(reminder, "</system-reminder>\n\n"+continueInstruction) {
+		t.Fatalf("the model was asked %v", prompt)
+	}
+	if events[0].Type != "RUN_STARTED" || events[0].MessageID != "a1" {
+		t.Fatalf("the run did not name the reply it continues: %+v", events[0])
+	}
+	if got := messageIDs(eventOfType(events, "MESSAGES_SNAPSHOT").Messages); !reflect.DeepEqual(got, []string{"u1", "a1"}) {
+		t.Fatalf("the run started from %q", got)
+	}
+	last := -1
+	for i, e := range events {
+		if e.Type == "TEXT_MESSAGE_CHUNK" {
+			if last = i; e.MessageID != "a1" {
+				t.Fatalf("the continuation streamed into %q", e.MessageID)
+			}
+		}
+	}
+	if replies := arr(obj(decodeValue(events[len(events)-1].Metadata))["messages"]); len(replies) != 1 || obj(replies[0])["id"] != "a1" || obj(replies[0])["isInterrupted"] != false {
+		t.Fatalf("the run committed %v", replies)
+	}
+	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", "chat-1")
+	messages := arr(row.Data["messages"])
+	reply := obj(messages[len(messages)-1])
+	want := decodeValue(raw([]any{object{"id": "t1", "type": "thinking", "content": "rhyme"}, object{"id": "c1", "type": "content", "content": "Roses are red, violets are blue."}}))
+	if len(messages) != 2 || reply["id"] != "a1" || reply["content"] != "Roses are red, violets are blue." || !reflect.DeepEqual(reply["timeline"], want) ||
+		reply["createdAt"] != "2026-01-01T00:00:01Z" || reply["thoughts"] != "rhyme" || reply["isInterrupted"] != false {
+		t.Fatalf("stored continuation: %v", messages)
+	}
+	// A client reconnecting mid-continuation sees the reply as far as it got.
+	follow := httptest.NewRequest("POST", "/v1/threads/follow", bytes.NewReader(raw(object{"key": key.base64(), "threadId": "chat-1", "runId": events[0].RunID})))
+	follow.Header.Set("Authorization", "Bearer clerk-alice")
+	follow.Header.Set("Last-Event-ID", strconv.Itoa(last))
+	resumed := httptest.NewRecorder()
+	h.routes().ServeHTTP(resumed, follow)
+	snapshot := arr(eventsIn(t, resumed)[0].Messages)
+	if len(snapshot) != 2 || !reflect.DeepEqual(obj(snapshot[1])["timeline"], want) {
+		t.Fatalf("a reconnecting client was shown %v", snapshot)
+	}
+}
+
+func TestContinueExtendsTemporaryAndLocalReplies(t *testing.T) {
+	prompts := make(chan []any, 1)
+	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if messages := lastRequest(r); strings.HasSuffix(str(obj(messages[len(messages)-1])["content"]), continueInstruction) {
+			prompts <- messages
+		}
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\" more\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	asked := func(prompt []any) []string {
+		roles := []string{}
+		for _, m := range prompt[1 : len(prompt)-1] {
+			roles = append(roles, str(obj(m)["role"])+":"+str(obj(m)["content"]))
+		}
+		return roles
+	}
+	// A temporary thread is held by the harness; continuing names no message.
+	first := sendInput(key)
+	delete(first, "key")
+	first["ephemeral"] = true
+	thread := eventsIn(t, postRoute(h, "/v1/threads/turn", first, ""))[0].ThreadID
+	temporary := continueTurn(key, thread, "")
+	delete(temporary, "key")
+	temporary["ephemeral"] = true
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", temporary, ""))
+	if got := asked(<-prompts); events[len(events)-1].Type != "RUN_FINISHED" || !reflect.DeepEqual(got, []string{"user:test message", "assistant: more"}) {
+		t.Fatalf("a temporary continuation asked %q", got)
+	}
+	state := h.threadState(&principal{Anonymous: true, AnonymousID: hashHex([]byte("free_anonymous-key"))}, thread)
+	state.mu.Lock()
+	messages := arr(state.row.Data["messages"])
+	state.mu.Unlock()
+	if reply := obj(messages[len(messages)-1]); len(messages) != 2 || reply["id"] != events[0].MessageID || reply["content"] != " more more" || len(arr(reply["timeline"])) != 1 {
+		t.Fatalf("the temporary thread holds %v", messages)
+	}
+	// A local thread's client sends the reply it continues and stores the result.
+	local := localInput("0000000000004_local", priorThread())
+	local["kind"], local["messageId"] = "continue", "m2"
+	delete(local, "content")
+	events = eventsIn(t, postRoute(h, "/v1/threads/turn", local, "alice"))
+	if got := asked(<-prompts); !reflect.DeepEqual(got, []string{"user:first question", "assistant:first answer"}) {
+		t.Fatalf("a local continuation asked %q", got)
+	}
+	replies := arr(obj(decodeValue(events[len(events)-1].Metadata))["messages"])
+	if events[0].MessageID != "m2" || eventOfType(events, "TEXT_MESSAGE_CHUNK").MessageID != "m2" || len(replies) != 1 || obj(replies[0])["id"] != "m2" || rows.calls != 0 {
+		t.Fatalf("a local continuation streamed %+v and committed %v (storage calls %d)", events, replies, rows.calls)
+	}
+}
+
+func TestAContinuationExtendsOnlyATrailingContentBlock(t *testing.T) {
+	thinking, content := object{"id": "t", "type": "thinking", "content": "plan"}, object{"id": "c", "type": "content", "content": "Partial"}
+	for name, tc := range map[string]struct {
+		reply object
+		event event
+		want  []any
+	}{
+		"trailing content": {object{"id": "r", "role": "assistant", "timeline": []any{thinking, content}}, event{Type: "TEXT_MESSAGE_CHUNK", MessageID: "r", Delta: " answer"},
+			[]any{thinking, object{"id": "c", "type": "content", "content": "Partial answer"}}},
+		"trailing thinking": {object{"id": "r", "role": "assistant", "timeline": []any{content, thinking}}, event{Type: "REASONING_MESSAGE_CHUNK", MessageID: "r-reasoning", Delta: "again"},
+			[]any{content, thinking, object{"id": "r_thinking_2", "type": "thinking", "content": "again"}}},
+		"flat fields": {object{"id": "r", "role": "assistant", "content": "Partial", "thoughts": "plan"}, event{Type: "TEXT_MESSAGE_CHUNK", MessageID: "r", Delta: " answer"},
+			[]any{object{"id": "legacy-thinking", "type": "thinking", "content": "plan", "isThinking": false}, object{"id": "legacy-content", "type": "content", "content": "Partial answer"}}},
+		"empty": {object{"id": "r", "role": "assistant", "timeline": []any{}}, event{Type: "TEXT_MESSAGE_CHUNK", MessageID: "r", Delta: " answer"},
+			[]any{object{"id": "r_content_0", "type": "content", "content": " answer"}}},
+	} {
+		tc.reply["createdAt"], tc.event.Timestamp = "2026-01-01T00:00:00Z", "2026-10-01T00:00:00Z"
+		assembler := newMessageAssembler()
+		assembler.seed(tc.reply)
+		assembler.apply(tc.event)
+		if got := assembler.messages(); len(got) != 1 || !reflect.DeepEqual(got[0]["timeline"], decodeValue(raw(tc.want))) || got[0]["createdAt"] != "2026-01-01T00:00:00Z" {
+			t.Errorf("%s: continued into %v", name, got)
+		}
+	}
+}
+
+func TestARecoveredContinuationExtendsItsReply(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	p := &principal{ID: "alice"}
+	log, err := newContentRun(token(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := &stream{run: log, threadID: "chat-1", runID: log.id, managed: true}
+	out.emit(event{Type: "RUN_STARTED", ThreadID: "chat-1", RunID: log.id, MessageID: "a1"})
+	out.emit(event{Type: "MESSAGES_SNAPSHOT", Messages: []any{}})
+	out.text("a1", " violets are blue.")
+	out.emit(event{Type: "RUN_FINISHED", ThreadID: "chat-1", RunID: log.id})
+	log.log.close(errDone)
+	poemThread(rows, "chat-1")
+	row := rows.rows[rowMapKey(p, "chat", "chat-1")]
+	row.Data["activeRun"] = object{"runId": log.id}
+	if err := h.settleRecovered(context.Background(), p, key, &row, log); err != nil {
+		t.Fatal(err)
+	}
+	stored, _ := rows.load(context.Background(), p, key, "chat", "chat-1")
+	messages := arr(stored.Data["messages"])
+	reply := obj(messages[len(messages)-1])
+	want := decodeValue(raw([]any{object{"id": "t1", "type": "thinking", "content": "rhyme"}, object{"id": "c1", "type": "content", "content": "Roses are red, violets are blue."}}))
+	if len(messages) != 2 || reply["content"] != "Roses are red, violets are blue." || !reflect.DeepEqual(reply["timeline"], want) || reply["isInterrupted"] != false || stored.Data["activeRun"] != nil {
+		t.Fatalf("recovered continuation: %v", stored.Data)
+	}
+}
+
+func TestAContinuedReplyKeepsItsCitations(t *testing.T) {
+	serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
+		return nil, object{"results": []object{{"title": "A", "url": "https://a.test/1", "content": "alpha"}, {"title": "B", "url": "https://b.test", "content": "beta"}}}
+	})
+	var turns atomic.Int32
+	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if turns.Add(1) == 1 {
+			io.WriteString(w, toolCallChunk(0, "s", "web_search", `{"query":"more"}`)+"data: [DONE]\n\n")
+			return
+		}
+		io.WriteString(w, "data: "+string(raw(object{"choices": []object{{"delta": object{"content": " Also [B](https://b.test)."}}}}))+"\n\ndata: [DONE]\n\n")
+	})
+	cited := object{"type": "url_citation", "url_citation": object{"url": "https://a.test/1", "title": "Earlier title", "start_index": 5, "end_index": 6}}
+	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: object{"title": "Sources", "titleState": "manual", "model": "kimi-k3", "messages": []any{
+		object{"id": "u1", "role": "user", "content": "Sources?"},
+		object{"id": "a1", "role": "assistant", "content": "See [A](https://a.test/1).", "timeline": []any{object{"id": "c1", "type": "content", "content": "See [A](https://a.test/1)."}}, "annotations": []any{cited}},
+	}}}
+	in := continueTurn(key, "chat-1", "a1")
+	obj(in["options"])["webSearch"] = true
+	finishedRun(t, h, "/v1/threads/turn", in)
+	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", "chat-1")
+	reply := obj(arr(row.Data["messages"])[1])
+	text := "See [A](https://a.test/1). Also [B](https://b.test)."
+	start := strings.Index(text, "[B]") + 1
+	want := decodeValue(raw([]any{cited, object{"type": "url_citation", "url_citation": object{"url": "https://b.test", "title": "B", "start_index": start, "end_index": start + 1}}}))
+	if reply["content"] != text || !reflect.DeepEqual(reply["annotations"], want) {
+		t.Fatalf("continued reply %q annotated %v", reply["content"], reply["annotations"])
+	}
+}
+
+func TestAContinuedReplyIsScreenedWhole(t *testing.T) {
+	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\" violets are blue.\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	drained := screenedBy(t, h)
+	poemThread(rows, "chat-1")
+	finishedRun(t, h, "/v1/threads/turn", continueTurn(key, "chat-1", ""))
+	got := drained()
+	if len(got) != 1 || len(got[0].Messages) != 3 || !reflect.DeepEqual(got[0].Messages[1:], []safeguardMessage{{Role: "user", Content: "Write a poem"}, {Role: "assistant", Content: "Roses are red, violets are blue."}}) {
+		t.Fatalf("the sidecar received %+v", got)
 	}
 }
 

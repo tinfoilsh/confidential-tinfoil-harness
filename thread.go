@@ -74,7 +74,7 @@ func (h *harness) handleTurn(w http.ResponseWriter, r *http.Request) {
 	}
 	kind := firstString(in["kind"], "send")
 	in["kind"] = kind
-	if !slices.Contains([]string{"send", "edit", "regenerate", "resolve", "retryToolCall", "ask"}, kind) {
+	if !slices.Contains([]string{"send", "edit", "regenerate", "continue", "resolve", "retryToolCall", "ask"}, kind) {
 		respond(w, nil, apiErr(400, "BAD_REQUEST", "Unknown turn kind"))
 		return
 	}
@@ -606,12 +606,19 @@ func (h *harness) beginChatRun(ctx context.Context, r *chatRun) error {
 		s.row.Data = working
 		s.row.Data["activeRun"] = object{"runId": r.log.id, "lastEventId": 0, "expiresAt": nowUTC().Add(runTimeout).Format(time.RFC3339Nano)}
 	}
+	// A continuation streams into the reply it extends, which RUN_STARTED names.
+	if r.input["kind"] == "continue" {
+		messages := arr(s.row.Data["messages"])
+		reply := obj(messages[len(messages)-1])
+		r.assembler.seed(reply)
+		r.out.replyID = str(reply["id"])
+	}
 	s.active, s.expires = r, nowUTC().Add(runTimeout)
 	runCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), runTimeout)
 	runCtx = context.WithValue(runCtx, apiKeyKey{}, string(r.credential.Key))
 	runCtx = context.WithValue(runCtx, usageContextKey{}, usageForRun(r))
 	r.log.stop = cancel
-	r.out.emit(event{Type: "RUN_STARTED", ThreadID: s.id, RunID: r.log.id, Queued: r.queued})
+	r.out.emit(event{Type: "RUN_STARTED", ThreadID: s.id, RunID: r.log.id, Queued: r.queued, MessageID: r.out.replyID})
 	window := publicThread(s.row, "", 50)
 	hasOlder := boolean(window["hasOlder"], false)
 	r.out.emit(event{Type: "MESSAGES_SNAPSHOT", Messages: window["messages"], HasOlder: &hasOlder})
@@ -672,7 +679,7 @@ func applyTurn(thread, in object, messageID string, attachments []any) error {
 	}
 	kind := str(in["kind"])
 	content, quote := str(in["content"]), in["quote"]
-	if kind == "edit" || kind == "regenerate" {
+	if kind == "edit" || kind == "regenerate" || kind == "continue" {
 		index := -1
 		for i, m := range messages {
 			if obj(m)["id"] == in["messageId"] {
@@ -680,11 +687,15 @@ func applyTurn(thread, in object, messageID string, attachments []any) error {
 				break
 			}
 		}
+		// A continuation names its reply or extends the last message.
+		if kind == "continue" && str(in["messageId"]) == "" {
+			index = len(messages) - 1
+		}
 		if index < 0 {
 			return apiErr(404, "THREAD_NOT_FOUND", "The message was not found")
 		}
 		role := "user"
-		if kind == "regenerate" {
+		if kind != "edit" {
 			role = "assistant"
 		}
 		if obj(messages[index])["role"] != role {
@@ -697,6 +708,10 @@ func applyTurn(thread, in object, messageID string, attachments []any) error {
 			if _, present := in["quote"]; !present {
 				quote = obj(messages[index])["quote"]
 			}
+		}
+		// As on the web client, the continued reply becomes the last message.
+		if kind == "continue" {
+			index++
 		}
 		messages = messages[:index]
 	}
@@ -720,7 +735,7 @@ func applyTurn(thread, in object, messageID string, attachments []any) error {
 		content = str(in["quote"])
 		quote = nil
 	}
-	if kind != "regenerate" && kind != "retryToolCall" {
+	if kind != "regenerate" && kind != "retryToolCall" && kind != "continue" {
 		messages = append(messages, object{"id": messageID, "role": "user", "content": content, "quote": quote, "attachments": attachments, "createdAt": timestamp(), "timestamp": timestamp()})
 	}
 	thread["messages"] = messages
@@ -757,8 +772,10 @@ func (h *harness) finishChatRun(r *chatRun, runErr error) {
 	ctx = context.WithValue(ctx, usageSinkKey{}, r.out)
 	r.out.mu.Lock()
 	messages := r.assembler.messages()
-	spend, sources := r.out.spend, r.out.sources
+	spend, sources, reply := r.out.spend, r.out.sources, r.out.replyID
 	r.out.mu.Unlock()
+	continued := r.input["kind"] == "continue"
+	start := func(annotation any) int { return integer(obj(obj(annotation)["url_citation"])["start_index"]) }
 	for _, m := range messages {
 		m["isInterrupted"], m["isError"] = r.cancelled, runErr != nil && !r.cancelled
 		m["model"] = firstString(r.out.concreteModel, s.row.Data["model"])
@@ -766,7 +783,14 @@ func (h *harness) finishChatRun(r *chatRun, runErr error) {
 			m["modelDisplayName"] = definition["name"]
 		}
 		m["usage"] = object{"promptTokens": spend.Prompt, "completionTokens": spend.Completion}
-		if annotations := citationAnnotations(str(m["content"]), sources); annotations != nil {
+		// A continued reply keeps the citations it already had.
+		annotations := arr(m["annotations"])
+		for _, annotation := range citationAnnotations(str(m["content"]), sources) {
+			if !slices.ContainsFunc(annotations, func(kept any) bool { return start(kept) == start(annotation) }) {
+				annotations = append(annotations, annotation)
+			}
+		}
+		if len(annotations) > 0 {
 			m["annotations"] = annotations
 		}
 	}
@@ -789,8 +813,11 @@ func (h *harness) finishChatRun(r *chatRun, runErr error) {
 		}
 		all := arr(data["messages"])
 		for _, m := range messages {
-			if !slices.ContainsFunc(all, func(v any) bool { return obj(v)["id"] == m["id"] }) {
+			index := slices.IndexFunc(all, func(v any) bool { return obj(v)["id"] == m["id"] })
+			if index < 0 {
 				all = append(all, m)
+			} else if continued && m["id"] == reply {
+				all[index] = m
 			}
 		}
 		data["messages"] = all

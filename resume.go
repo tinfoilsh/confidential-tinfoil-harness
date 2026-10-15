@@ -38,6 +38,7 @@ func messagesAt(log *run, through int) ([]any, bool, error) {
 	base := []any{}
 	hasOlder := false
 	assembler := newMessageAssembler()
+	continued := ""
 	for index, frame := range frames {
 		if index > through {
 			break
@@ -50,13 +51,21 @@ func messagesAt(log *run, through int) ([]any, bool, error) {
 		if err := json.Unmarshal(plain, &e); err != nil {
 			return nil, false, err
 		}
-		if e.Type == "MESSAGES_SNAPSHOT" {
+		switch e.Type {
+		case "RUN_STARTED":
+			continued = e.MessageID
+		case "MESSAGES_SNAPSHOT":
 			base = arr(e.Messages)
 			if e.HasOlder != nil {
 				hasOlder = *e.HasOlder
 			}
 			assembler = newMessageAssembler()
-		} else {
+			for _, m := range base {
+				if continued != "" && obj(m)["id"] == continued {
+					assembler.seed(obj(m))
+				}
+			}
+		default:
 			assembler.apply(e)
 		}
 	}
@@ -65,7 +74,11 @@ func messagesAt(log *run, through int) ([]any, bool, error) {
 		found := false
 		for i, existing := range base {
 			if obj(existing)["id"] == id {
-				base[i] = mergeReplayedMessage(obj(existing), m)
+				if id == continued {
+					obj(existing)["timeline"] = m["timeline"]
+				} else {
+					base[i] = mergeReplayedMessage(obj(existing), m)
+				}
 				found = true
 				break
 			}
@@ -187,6 +200,7 @@ func (h *harness) settleRecovered(ctx context.Context, p *principal, key content
 	}
 	assembler := newMessageAssembler()
 	interrupted, failed := closed == errAbandoned, false
+	continued, events := "", []event{}
 	for index, frame := range frames {
 		plain, err := log.open(index, frame)
 		if err != nil {
@@ -195,6 +209,12 @@ func (h *harness) settleRecovered(ctx context.Context, p *principal, key content
 		var e event
 		if err := json.Unmarshal(plain, &e); err != nil {
 			return err
+		}
+		if e.Type == "RUN_STARTED" {
+			continued = e.MessageID
+		}
+		if continued != "" {
+			events = append(events, e)
 		}
 		if e.Type == "RUN_ERROR" {
 			failed = true
@@ -209,6 +229,18 @@ func (h *harness) settleRecovered(ctx context.Context, p *principal, key content
 			return nil
 		}
 		messages := arr(data["messages"])
+		// A continuation's output extends the stored reply it continued.
+		if index := slices.IndexFunc(messages, func(value any) bool { return continued != "" && obj(value)["id"] == continued }); index >= 0 {
+			replay := newMessageAssembler()
+			replay.seed(obj(messages[index]))
+			for _, e := range events {
+				replay.apply(e)
+			}
+			m := replay.messages()[0]
+			m["isInterrupted"], m["isError"] = interrupted, failed && !interrupted
+			m["model"] = data["model"]
+			messages[index] = m
+		}
 		retry := obj(data["harnessRetry"])
 		for _, m := range assembler.messages() {
 			if retry["runId"] == log.id && retry["messageId"] == m["id"] {

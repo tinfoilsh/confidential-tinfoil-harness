@@ -350,5 +350,10 @@ func (h *harness) screen(r *chatRun, reply []object, runErr error) {
 			text = append(text, content)
 		}
 	}
-	h.safeguards.submit(string(r.credential.Key), r.screening.conversation, append(r.screening.messages, safeguardMessage{Role: "assistant", Content: strings.Join(text, "\n")}))
+	history := r.screening.messages
+	// A continued reply, whole, takes the place of its earlier text.
+	if r.input["kind"] == "continue" && len(history) > 0 && history[len(history)-1].Role == "assistant" {
+		history = history[:len(history)-1]
+	}
+	h.safeguards.submit(string(r.credential.Key), r.screening.conversation, append(history, safeguardMessage{Role: "assistant", Content: strings.Join(text, "\n")}))
 }
