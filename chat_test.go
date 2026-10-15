@@ -1898,3 +1898,17 @@ func TestRehydrationChecksEveryFrame(t *testing.T) {
 		t.Fatal("corrupt interior frame accepted")
 	}
 }
+
+func TestBusySlotTellsTheClientWhenToRetry(t *testing.T) {
+	slots := make(chan struct{}, 1)
+	slots <- struct{}{}
+	w := httptest.NewRecorder()
+	boundedHandler(slots, func(http.ResponseWriter, *http.Request) { t.Error("ran without a free slot") })(w, httptest.NewRequest("POST", "/v1/import", nil))
+	var body struct {
+		Error apiError `json:"error"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &body)
+	if w.Code != 503 || w.Header().Get("Retry-After") != "5" || body.Error.RetryAfter != 5 {
+		t.Fatalf("HTTP %d Retry-After %q: %s", w.Code, w.Header().Get("Retry-After"), w.Body.String())
+	}
+}

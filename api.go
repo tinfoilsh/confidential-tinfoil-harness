@@ -310,7 +310,9 @@ func boundedHandler(slots chan struct{}, handler http.HandlerFunc) http.HandlerF
 		case <-r.Context().Done():
 			return
 		default:
-			respond(w, nil, apiErr(503, "UPSTREAM_REFUSED", "The service is at capacity; retry shortly"))
+			e := apiErr(503, "UPSTREAM_REFUSED", "The service is at capacity; retry shortly")
+			e.RetryAfter = 5
+			respond(w, nil, e)
 			return
 		}
 		handler(w, r)
