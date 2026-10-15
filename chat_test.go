@@ -695,6 +695,60 @@ func TestARecoveredContinuationExtendsItsReply(t *testing.T) {
 	}
 }
 
+func TestARecoveredReplyTakesWhatItsRunCommitted(t *testing.T) {
+	committed := object{"model": "deepseek-v4", "modelDisplayName": "DeepSeek V4", "usage": object{"promptTokens": 9, "completionTokens": 4}, "isError": false, "isInterrupted": false}
+	earlier := object{"model": "gpt-oss-120b", "modelDisplayName": "GPT-OSS 120B", "usage": object{"promptTokens": 5, "completionTokens": 2}}
+	for name, tc := range map[string]struct {
+		reply, end string // the reply the run streamed into, and its terminal event
+		want       object
+	}{
+		// The final commit failed after the run finished, as when the Clerk token expired.
+		"continued": {"a1", "RUN_FINISHED", committed},
+		"new":       {"a2", "RUN_ERROR", committed},
+		// A restart cut the run off before it committed anything.
+		"continued and cut off": {"a1", "", object{"model": "gpt-oss-120b", "modelDisplayName": "GPT-OSS 120B", "usage": earlier["usage"], "isError": false, "isInterrupted": true}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, rows, key := testChatHarness(t, nil)
+			p := &principal{ID: "alice"}
+			log, err := newContentRun(token(), key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out := &stream{run: log, threadID: "chat-1", runID: log.id, managed: true}
+			started := event{Type: "RUN_STARTED", ThreadID: "chat-1", RunID: log.id}
+			if tc.reply == "a1" {
+				started.MessageID = "a1"
+			}
+			out.emit(started)
+			out.emit(event{Type: "MESSAGES_SNAPSHOT", Messages: []any{}})
+			out.text(tc.reply, " violets are blue.")
+			if tc.end != "" {
+				out.emit(event{Type: tc.end, ThreadID: "chat-1", RunID: log.id, Metadata: raw(object{"messages": []any{object{"id": tc.reply, "model": committed["model"], "modelDisplayName": committed["modelDisplayName"],
+					"usage": committed["usage"], "isError": false, "isInterrupted": false}}})})
+				log.log.close(errDone)
+			} else {
+				log.log.close(errAbandoned)
+			}
+			poemThread(rows, "chat-1")
+			row := rows.rows[rowMapKey(p, "chat", "chat-1")]
+			for field, value := range earlier {
+				obj(arr(row.Data["messages"])[1])[field] = value
+			}
+			row.Data["activeRun"] = object{"runId": log.id}
+			if err := h.settleRecovered(context.Background(), p, key, &row, log); err != nil {
+				t.Fatal(err)
+			}
+			stored, _ := rows.load(context.Background(), p, key, "chat", "chat-1")
+			messages := arr(stored.Data["messages"])
+			reply := obj(messages[len(messages)-1])
+			if got := selectFields(reply, "model modelDisplayName usage isError isInterrupted"); reply["id"] != tc.reply || !reflect.DeepEqual(decodeValue(raw(got)), decodeValue(raw(tc.want))) {
+				t.Fatalf("recovered %s as %v, want %v", reply["id"], got, tc.want)
+			}
+		})
+	}
+}
+
 func TestAContinuedReplyKeepsItsCitations(t *testing.T) {
 	serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
 		return nil, object{"results": []object{{"title": "A", "url": "https://a.test/1", "content": "alpha"}, {"title": "B", "url": "https://b.test", "content": "beta"}}}

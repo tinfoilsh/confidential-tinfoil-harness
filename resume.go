@@ -200,7 +200,7 @@ func (h *harness) settleRecovered(ctx context.Context, p *principal, key content
 	}
 	assembler := newMessageAssembler()
 	interrupted, failed := closed == errAbandoned, false
-	continued, events := "", []event{}
+	continued, events, committed := "", []event{}, map[string]object{}
 	for index, frame := range frames {
 		plain, err := log.open(index, frame)
 		if err != nil {
@@ -222,11 +222,28 @@ func (h *harness) settleRecovered(ctx context.Context, p *principal, key content
 		if e.Type == "RUN_FINISHED" {
 			interrupted = interrupted || boolean(obj(decodeValue(e.Metadata))["cancelled"], false)
 		}
+		if e.Type == "RUN_FINISHED" || e.Type == "RUN_ERROR" {
+			for _, item := range arr(obj(decodeValue(e.Metadata))["messages"]) {
+				committed[str(obj(item)["id"])] = obj(item)
+			}
+		}
 		assembler.apply(e)
 	}
 	_, err := h.mutate(ctx, p, key, "chat", row.ID, false, nil, func(data object) error {
 		if obj(data["activeRun"])["runId"] != log.id {
 			return nil
+		}
+		// A reply takes the metadata its run's last event committed, as the run
+		// would have stored it. A run cut off before then leaves a new reply the
+		// thread's model and a continued reply its own.
+		settle := func(m object) {
+			m["isInterrupted"], m["isError"] = interrupted, failed && !interrupted
+			if m["model"] == nil {
+				m["model"] = data["model"]
+			}
+			for field, value := range committed[str(m["id"])] {
+				m[field] = value
+			}
 		}
 		messages := arr(data["messages"])
 		// A continuation's output extends the stored reply it continued.
@@ -237,8 +254,7 @@ func (h *harness) settleRecovered(ctx context.Context, p *principal, key content
 				replay.apply(e)
 			}
 			m := replay.messages()[0]
-			m["isInterrupted"], m["isError"] = interrupted, failed && !interrupted
-			m["model"] = data["model"]
+			settle(m)
 			messages[index] = m
 		}
 		retry := obj(data["harnessRetry"])
@@ -259,8 +275,7 @@ func (h *harness) settleRecovered(ctx context.Context, p *principal, key content
 				// a retry baseline there is no safe way to replace its arguments.
 				continue
 			}
-			m["isInterrupted"], m["isError"] = interrupted, failed && !interrupted
-			m["model"] = data["model"]
+			settle(m)
 			messages = append(messages, m)
 		}
 		data["messages"], data["activeRun"] = messages, nil
