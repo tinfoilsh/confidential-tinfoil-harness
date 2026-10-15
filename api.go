@@ -87,6 +87,7 @@ type apiError struct {
 	RetryAfter int    `json:"retryAfter,omitempty"`
 	Status     int    `json:"status,omitempty"`
 	KeyID      string `json:"keyId,omitempty"`
+	Upstream   string `json:"upstreamCode,omitempty"`
 
 	missing []string // attachment ids sync did not find under the pushed chat
 }
@@ -105,7 +106,11 @@ func asAPIError(err error) *apiError {
 	}
 	var refusal *refusal
 	if errors.As(err, &refusal) {
-		return downstreamError(refusal.status, []byte(refusal.detail))
+		e := downstreamError(refusal.status, []byte(refusal.detail))
+		if refusal.retryAfter > 0 {
+			e.RetryAfter = refusal.retryAfter
+		}
+		return e
 	}
 	return apiErr(502, "UPSTREAM_REFUSED", "A downstream request failed")
 }
@@ -229,6 +234,9 @@ func downstreamError(status int, body []byte) *apiError {
 	case "PII_BLOCKED", "PII_DETECTED":
 		e = apiErr(422, "PII_BLOCKED", "The privacy screen refused the request")
 	default:
+		if refused := openAIRefusal(status, body); refused != nil {
+			return refused
+		}
 		switch status {
 		case 401:
 			e = apiErr(401, "UNAUTHENTICATED", "Authentication is required")
@@ -270,7 +278,7 @@ func postJSONWithHeaders(ctx context.Context, client *http.Client, url, auth str
 	if resp.StatusCode/100 != 2 {
 		// A missing-attachment error lists every missing id.
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		return downstreamError(resp.StatusCode, b)
+		return withRetryAfter(downstreamError(resp.StatusCode, b), resp.Header)
 	}
 	if out == nil {
 		_, err = io.Copy(io.Discard, io.LimitReader(resp.Body, maxRequestBody))

@@ -351,7 +351,7 @@ func multipartCall(ctx context.Context, service *downstreamService, path, fileFi
 		return nil, apiErr(413, "ATTACHMENT_TOO_LARGE", "The converted document exceeds the text limit")
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, downstreamError(resp.StatusCode, b)
+		return nil, withRetryAfter(downstreamError(resp.StatusCode, b), resp.Header)
 	}
 	return b, nil
 }

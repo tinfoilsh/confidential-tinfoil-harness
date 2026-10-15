@@ -31,7 +31,7 @@ func (h *harness) completion(ctx context.Context, m *model, payload object) (str
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-		return "", downstreamError(resp.StatusCode, b)
+		return "", withRetryAfter(downstreamError(resp.StatusCode, b), resp.Header)
 	}
 	if sink, ok := ctx.Value(usageSinkKey{}).(*stream); ok {
 		if usage, ok := ctx.Value(usageContextKey{}).(usagereporting.Context); ok && usage.BillCustomerRequest {

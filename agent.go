@@ -302,7 +302,7 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return nil, "", &refusal{status: resp.StatusCode, detail: string(bytes.TrimSpace(detail))}
+		return nil, "", &refusal{status: resp.StatusCode, detail: string(bytes.TrimSpace(detail)), retryAfter: retryAfter(resp.Header)}
 	}
 
 	out.mu.Lock()
@@ -338,6 +338,7 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 		}
 		var chunk struct {
 			Model   string          `json:"model"`
+			Object  string          `json:"object"`
 			Error   json.RawMessage `json:"error"`
 			Choices []struct {
 				FinishReason string `json:"finish_reason"`
@@ -357,8 +358,8 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 			}
 			continue
 		}
-		if len(chunk.Error) > 0 && string(chunk.Error) != "null" {
-			return nil, answer.String(), downstreamError(502, chunk.Error)
+		if len(chunk.Error) > 0 && string(chunk.Error) != "null" || chunk.Object == "error" {
+			return nil, answer.String(), streamError([]byte(data))
 		}
 		if chunk.Model != "" && chunk.Model != "auto" {
 			out.mu.Lock()
@@ -492,8 +493,9 @@ func quote(s string) json.RawMessage {
 }
 
 type refusal struct {
-	status int
-	detail string
+	status     int
+	detail     string
+	retryAfter int
 }
 
 func (r *refusal) Error() string { return fmt.Sprintf("gateway returned %d: %s", r.status, r.detail) }
