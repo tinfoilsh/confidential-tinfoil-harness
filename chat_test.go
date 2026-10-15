@@ -432,11 +432,12 @@ func TestEditingAReplyCollapsesItsText(t *testing.T) {
 	p := &principal{ID: "alice"}
 	call := object{"id": "call", "type": "tool_call", "toolCallId": "call", "name": "render_clock", "arguments": "{}"}
 	search := object{"query": "weather", "status": "completed"}
+	code, widget := object{"id": "x1", "toolName": "bash", "arguments": object{"command": "date"}, "output": "Mon", "status": "completed"}, object{"id": "w1", "name": "render_clock", "arguments": "{}"}
 	rows.rows[rowMapKey(p, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: object{"messages": []any{
 		object{"id": "u1", "role": "user", "content": "what time is it?"},
 		object{"id": "a1", "role": "assistant", "content": "It is noon.", "timeline": []any{object{"id": "t", "type": "thinking", "content": "check"}, object{"id": "c1", "type": "content", "content": "It is "}, call, object{"id": "c2", "type": "content", "content": "noon."}}},
 		object{"id": "u2", "role": "user", "content": "and the weather?"},
-		object{"id": "a2", "role": "assistant", "content": "Sunny.", "thoughts": "look it up", "thinkingDuration": 3, "webSearch": search},
+		object{"id": "a2", "role": "assistant", "content": "Sunny.", "thoughts": "look it up", "thinkingDuration": 3, "webSearch": search, "codeExecCalls": []any{code}, "toolCalls": []any{widget}},
 	}}}
 	update := func(message string, content any) *httptest.ResponseRecorder {
 		return postRoute(h, "/v1/threads/messages/update", object{"key": key.base64(), "threadId": "chat-1", "messageId": message, "content": content}, "alice")
@@ -458,9 +459,10 @@ func TestEditingAReplyCollapsesItsText(t *testing.T) {
 	if a1 := reply(1); a1["content"] != "It is half past twelve." || !reflect.DeepEqual(a1["timeline"], want) {
 		t.Fatalf("edited reply: %v", a1)
 	}
-	// A reply stored with flat fields keeps its thinking and search.
+	// A reply stored with flat fields keeps its thinking, search, code and widgets.
 	windowIDs(t, update("a2", "Rain."))
-	want = decodeValue(raw([]any{object{"type": "thinking", "id": "legacy-thinking", "content": "look it up", "isThinking": false, "duration": 3}, object{"type": "web_search", "id": "legacy-web-search-post", "state": search}, object{"type": "content", "id": "legacy-content", "content": "Rain."}}))
+	want = decodeValue(raw([]any{object{"type": "thinking", "id": "legacy-thinking", "content": "look it up", "isThinking": false, "duration": 3}, object{"type": "web_search", "id": "legacy-web-search-post", "state": search},
+		object{"type": "code_exec", "id": "legacy-code-exec", "calls": []any{code}}, object{"id": "w1", "type": "tool_call", "toolCallId": "w1", "name": "render_clock", "arguments": "{}"}, object{"type": "content", "id": "legacy-content", "content": "Rain."}}))
 	if a2 := reply(3); a2["content"] != "Rain." || !reflect.DeepEqual(a2["timeline"], want) {
 		t.Fatalf("edited legacy reply: %v", a2)
 	}

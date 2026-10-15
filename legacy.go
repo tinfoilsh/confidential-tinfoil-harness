@@ -97,7 +97,8 @@ func upgradeTimeline(message object) {
 }
 
 // legacyTimeline gives a reply stored with only flat fields the timeline the
-// web client renders it with, so that changing its text keeps those blocks.
+// web client renders it with, plus the code and widget calls upgradeTimeline
+// shows from them, so that changing its text keeps those blocks.
 func legacyTimeline(message object) {
 	if message["timeline"] != nil || message["role"] != "assistant" {
 		return
@@ -119,6 +120,14 @@ func legacyTimeline(message object) {
 	}
 	if search != nil && !before {
 		blocks = append(blocks, object{"type": "web_search", "id": "legacy-web-search-post", "state": search})
+	}
+	if calls := arr(message["codeExecCalls"]); len(calls) > 0 {
+		blocks = append(blocks, object{"type": "code_exec", "id": "legacy-code-exec", "calls": calls})
+	}
+	for _, item := range arr(message["toolCalls"]) {
+		call := clone(obj(item))
+		call["type"], call["toolCallId"] = "tool_call", call["id"]
+		blocks = append(blocks, call)
 	}
 	if content := str(message["content"]); content != "" {
 		blocks = append(blocks, object{"type": "content", "id": "legacy-content", "content": content})
