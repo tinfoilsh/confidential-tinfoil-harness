@@ -270,7 +270,9 @@ func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) (mess
 	out.activity(call)
 	content, meta, err := set.call(ctx, call.name, call.id, json.RawMessage(call.args))
 	// The model reads search results as cited text, the caller as data.
-	read, shown := modelCopy(call.name, content), any(nil)
+	read, sources := modelCopy(call.name, content)
+	out.cite(sources)
+	var shown any
 	if err != nil {
 		// The model reads the failure and can retry rather than the turn dying;
 		// the caller learns only that the call failed, never the tool's own text.

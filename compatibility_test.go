@@ -126,7 +126,8 @@ func TestReferenceBackupWithProjectImagesAndPages(t *testing.T) {
 			object{"id": "image", "type": "image", "fileName": "image.png", "mimeType": "image/png", "base64": encoded},
 			object{"id": "doc", "type": "document", "fileName": "doc.pdf", "textContent": "Text", "pages": []any{object{"page": 1, "text": "Text", "is_scanned": true, "image": encoded}}},
 		}},
-		object{"id": "assistant", "role": "assistant", "content": "Answer", "createdAt": now, "thoughts": "Reasoning", "webSearch": object{"query": "test", "status": "completed", "sources": []any{object{"title": "Source", "url": "https://example.com"}}}},
+		object{"id": "assistant", "role": "assistant", "content": "Answer", "createdAt": now, "thoughts": "Reasoning", "webSearch": object{"query": "test", "status": "completed", "sources": []any{object{"title": "Source", "url": "https://example.com"}}},
+			"annotations": citationAnnotations("[Answer](https://example.com)", []citationSource{{"https://example.com", "Source"}})},
 	}}}
 	var archive bytes.Buffer
 	if err := h.writeBackup(context.Background(), p, key, object{}, &archive); err != nil {

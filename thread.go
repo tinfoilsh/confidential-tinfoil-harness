@@ -729,7 +729,7 @@ func (h *harness) finishChatRun(r *chatRun, runErr error) {
 	defer func() {
 		clear(r.key[:])
 		r.out.mu.Lock()
-		r.out.observe = nil
+		r.out.observe, r.out.sources = nil, nil
 		r.out.mu.Unlock()
 		r.input, r.retryTarget, r.assembler, r.screening = nil, nil, nil, nil
 		r.replacement = ""
@@ -748,7 +748,7 @@ func (h *harness) finishChatRun(r *chatRun, runErr error) {
 	ctx = context.WithValue(ctx, usageSinkKey{}, r.out)
 	r.out.mu.Lock()
 	messages := r.assembler.messages()
-	spend := r.out.spend
+	spend, sources := r.out.spend, r.out.sources
 	r.out.mu.Unlock()
 	for _, m := range messages {
 		m["isInterrupted"], m["isError"] = r.cancelled, runErr != nil && !r.cancelled
@@ -757,6 +757,9 @@ func (h *harness) finishChatRun(r *chatRun, runErr error) {
 			m["modelDisplayName"] = definition["name"]
 		}
 		m["usage"] = object{"promptTokens": spend.Prompt, "completionTokens": spend.Completion}
+		if annotations := citationAnnotations(str(m["content"]), sources); annotations != nil {
+			m["annotations"] = annotations
+		}
 	}
 	// What the run commits to each reply beyond its streamed content, so a
 	// client that stores the thread itself stores the same messages.

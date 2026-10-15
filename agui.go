@@ -417,6 +417,13 @@ type stream struct {
 	mu      sync.Mutex
 	spend   usage
 	observe func(event)
+	sources []citationSource // pages the run's tools showed the model
+}
+
+func (s *stream) cite(sources []citationSource) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sources = append(s.sources, sources...)
 }
 
 // A run has started the moment it is accepted, not when the first upstream

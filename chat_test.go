@@ -1397,6 +1397,40 @@ func TestFailedAnonymousAndCancelledChatsAreNotScreened(t *testing.T) {
 	})
 }
 
+func TestAnswersAnnotateTheSourcesTheyCite(t *testing.T) {
+	serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
+		return nil, object{"results": []object{{"title": "A", "url": "https://a.test/1", "content": "alpha"}, {"title": "", "url": "https://b.test", "content": "beta"}}}
+	})
+	answer := "Cats sleep [A](https://a.test/1/) and purr [b](https://b.test). See also [x](https://unknown.test)."
+	var turns atomic.Int32
+	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if turns.Add(1) == 1 {
+			io.WriteString(w, toolCallChunk(0, "s", "web_search", `{"query":"cats"}`)+"data: [DONE]\n\n")
+			return
+		}
+		io.WriteString(w, "data: "+string(raw(object{"choices": []object{{"delta": object{"content": answer}}}}))+"\n\ndata: [DONE]\n\n")
+	})
+	events := finishedRun(t, h, "/v1/threads/turn", searchInput(key))
+	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
+	cite := func(url, title, label string) any {
+		start := strings.Index(answer, "["+label+"]") + 1
+		return map[string]any{"type": "url_citation", "url_citation": map[string]any{"url": url, "title": title, "start_index": float64(start), "end_index": float64(start + len(label))}}
+	}
+	want := []any{cite("https://a.test/1/", "A", "A"), cite("https://b.test", "https://b.test", "b")}
+	if got := obj(arr(row.Data["messages"])[1])["annotations"]; !reflect.DeepEqual(got, any(want)) {
+		t.Fatalf("stored annotations %v", got)
+	}
+	state := h.threadState(&principal{ID: "alice"}, events[0].ThreadID)
+	state.mu.Lock()
+	run := state.runs[events[0].RunID]
+	state.mu.Unlock()
+	run.out.mu.Lock()
+	defer run.out.mu.Unlock()
+	if run.out.sources != nil {
+		t.Fatal("the run kept the pages its tools found")
+	}
+}
+
 func TestCutModelStreamDoesNotCompleteItsToolCall(t *testing.T) {
 	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, toolCallChunk(0, "search-call", "web_search", `{"query":"ca`))
