@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -99,11 +101,12 @@ type toolset struct {
 }
 
 type session struct {
-	fam    *family
-	mcp    *mcp.ClientSession
-	meta   mcp.Meta
-	remote map[string]string
-	defs   []json.RawMessage
+	fam     *family
+	mcp     *mcp.ClientSession
+	meta    mcp.Meta
+	remote  map[string]string
+	schemas map[string]*jsonschema.Schema // what each tool's arguments are coerced to
+	defs    []json.RawMessage
 }
 
 func openTools(ctx context.Context, req *request, progress func(string, string, float64)) (*toolset, error) {
@@ -152,7 +155,8 @@ func (f *family) dial(ctx context.Context, progress func(string, string, float64
 	for _, t := range found.Tools {
 		published[t.Name] = t
 	}
-	s := &session{fam: f, mcp: opened, remote: map[string]string{}}
+	schemas := schemaLookup(found.Tools)
+	s := &session{fam: f, mcp: opened, remote: map[string]string{}, schemas: map[string]*jsonschema.Schema{}}
 	for _, t := range f.tools {
 		serves, ok := published[t.remote]
 		if !ok {
@@ -167,7 +171,7 @@ func (f *family) dial(ctx context.Context, progress func(string, string, float64
 		// json.RawMessage, since a []byte in a map would marshal as base64.
 		def, _ := json.Marshal(map[string]any{"type": "function", "function": map[string]any{
 			"name": t.as, "description": serves.Description, "parameters": json.RawMessage(schema)}})
-		s.remote[t.as] = t.remote
+		s.remote[t.as], s.schemas[t.as] = t.remote, schemas[t.remote]
 		s.defs = append(s.defs, def)
 	}
 	return s, nil
@@ -195,19 +199,17 @@ func (t *toolset) call(ctx context.Context, name, progress string, args json.Raw
 		}
 	}
 	sanitizeToolCallArguments(arguments)
+	coerceArgumentsToSchema(name, arguments, s.schemas)
 	// Cloned because the progress token is written into metadata shared by every call.
 	params := &mcp.CallToolParams{Meta: maps.Clone(s.meta), Name: s.remote[name], Arguments: arguments}
 	params.SetProgressToken(progress)
 	result, err := s.mcp.CallTool(ctx, params)
 	if err != nil {
-		return "", nil, err
+		return "", nil, errors.New(humanizeToolArgError(name, err, arguments))
 	}
 	out := output(result)
 	if result.IsError {
-		if out == "" {
-			out = "tool call failed"
-		}
-		return "", nil, errors.New(out)
+		return "", nil, errors.New(humanizeToolArgError(name, errors.New(cmp.Or(out, "tool call failed")), arguments))
 	}
 	var meta json.RawMessage
 	if len(result.Meta) > 0 {

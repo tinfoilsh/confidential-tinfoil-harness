@@ -727,6 +727,32 @@ func TestToolArgumentsAreRepairedBeforeTheCall(t *testing.T) {
 	}
 }
 
+func TestToolArgumentsAreCoercedAndRejectionsExplained(t *testing.T) {
+	enclave := serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
+		return nil, object{"results": []object{}}
+	})
+	var turns atomic.Int32
+	rejected := make(chan string, 1)
+	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if turns.Add(1) == 1 {
+			io.WriteString(w, toolCallChunk(0, "coerced", "web_search", `{"query":"cats","max_results":"3"}`)+toolCallChunk(1, "rejected", "web_search", `{"query":"dogs","max_results":"lots"}`)+"data: [DONE]\n\n")
+			return
+		}
+		messages := lastRequest(r)
+		rejected <- str(obj(messages[len(messages)-1])["content"])
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	eventsIn(t, postRoute(h, "/v1/threads/turn", searchInput(key), "alice"))
+	calls := enclave.list()
+	if len(calls) != 1 || calls[0].args["max_results"] != float64(3) || calls[0].args["query"] != "cats" {
+		t.Fatalf("the enclave accepted %+v", calls)
+	}
+	failure := str(obj(decodeValue([]byte(<-rejected)))["error"])
+	if !strings.Contains(failure, `Tool "web_search" rejected the arguments. Field "max_results" must be integer (received "string")`) {
+		t.Fatalf("the model read %q", failure)
+	}
+}
+
 func TestCutModelStreamDoesNotCompleteItsToolCall(t *testing.T) {
 	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, toolCallChunk(0, "search-call", "web_search", `{"query":"ca`))
