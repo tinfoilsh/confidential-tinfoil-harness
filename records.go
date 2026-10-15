@@ -1,17 +1,20 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"slices"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 func (h *harness) apiRoutes() []routeSpec {
 	routes := []routeSpec{
 		{"/v1/session", true, false, h.session}, {"/v1/verify", true, false, h.verification},
 		{"/v1/threads/list", false, true, h.listThreads}, {"/v1/threads/get", false, true, h.getThread},
-		{"/v1/threads/update", false, true, h.updateThread}, {"/v1/threads/delete", false, true, h.deleteThread},
+		{"/v1/threads/update", false, true, h.updateThread}, {"/v1/threads/delete", false, true, h.deleteThread}, {"/v1/threads/fork", false, true, h.forkThread},
 		{"/v1/threads/search", false, true, h.searchThreads}, {"/v1/threads/cancel", true, false, h.cancelThread},
 		{"/v1/threads/queue/send", true, false, h.sendQueued}, {"/v1/threads/queue/remove", true, false, h.removeQueued}, {"/v1/threads/share", false, true, h.shareThread},
 		{"/v1/threads/share/revoke", false, false, h.revokeShare}, {"/v1/threads/share/status", false, false, h.shareStatus},
@@ -65,7 +68,7 @@ func (h *harness) session(ctx context.Context, p *principal, _ contentKey, _ obj
 		keyInfo["bundles"] = bundles
 		keyInfo["hasData"] = boolean(current["has_data"], false)
 	}
-	features := object{"webSearch": false, "codeExecution": false, "sandbox": h.serviceReady("sandbox"), "piiCheck": true, "genUI": len(c.EnabledWidgets) > 0, "transcription": h.serviceReady("router"), "speech": h.serviceReady("router"), "memory": h.memoryEnabled, "defaultPromptPreset": true}
+	features := object{"webSearch": false, "codeExecution": false, "sandbox": h.serviceReady("sandbox"), "piiCheck": true, "genUI": len(c.EnabledWidgets) > 0, "transcription": h.serviceReady("router"), "speech": h.serviceReady("router"), "memory": h.memoryEnabled, "defaultPromptPreset": true, "fork": true}
 	for _, family := range families {
 		features[family.name] = family.client != nil
 	}
@@ -267,6 +270,54 @@ func (h *harness) deleteThread(ctx context.Context, p *principal, key contentKey
 	}
 	h.stopThread(p, id)
 	return h.deleteRow(ctx, p, key, "chat", id)
+}
+func forkTitle(title string) string {
+	title = cmp.Or(title, "Untitled")
+	if strings.HasSuffix(title, " (fork)") {
+		return title
+	}
+	return title + " (fork)"
+}
+
+// forkThread starts a new stored chat from a chat's messages through the
+// given one. Sync makes the copy, with its own copies of the attachments.
+func (h *harness) forkThread(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
+	id, err := requiredID(in, "threadId")
+	if err != nil {
+		return nil, err
+	}
+	messageID, err := requiredID(in, "messageId")
+	if err != nil {
+		return nil, err
+	}
+	row, err := h.storeRows.load(ctx, p, key, "chat", id)
+	if err != nil {
+		return nil, err
+	}
+	title := forkTitle(str(row.Data["title"]))
+	t := normalizeThread(row)
+	if str(obj(t["activeRun"])["runId"]) != "" {
+		return nil, apiErr(409, "RUN_IN_FLIGHT", "The chat has a reply in progress")
+	}
+	count := 1 + slices.IndexFunc(arr(t["messages"]), func(m any) bool { return obj(m)["id"] == messageID })
+	if count == 0 {
+		return nil, apiErr(404, "THREAD_NOT_FOUND", "The message was not found")
+	}
+	target := rowID()
+	if err := h.syncAPI.call(ctx, p, "/v1/sync/fork", object{"source_id": id, "target_id": target, "key": key.base64(), "message_count": count, "title": title, "created_at": timestamp(), "idempotency_key": uuid.NewString()}, nil); err != nil {
+		return nil, err
+	}
+	// Sync leaves out the web client's bookkeeping, not the harness's.
+	forked, err := h.mutate(ctx, p, key, "chat", target, false, nil, func(data object) error {
+		for _, field := range []string{"activeRun", "harnessRequests", "harnessRetry", "contextUsage", "pinned"} {
+			delete(data, field)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return threadSummary(normalizeThread(forked)), nil
 }
 func (h *harness) deleteAllThreads(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
 	if err := validateFields(in, "", "", "projectId"); err != nil {
