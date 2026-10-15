@@ -121,11 +121,10 @@ func TestCoerce_EnumViolationLeftUntouched(t *testing.T) {
 }
 
 func TestCoerce_NestedObjectFieldsCoerced(t *testing.T) {
-	args := map[string]any{"user_location": map[string]any{"approximate": map[string]any{"city": "London", "country": "GB"}}}
+	args := map[string]any{"user_location": map[string]any{"approximate": map[string]any{"city": "London", "country": 44.0}}}
 	coerceArgumentsToSchema("search", args, searchSchemas(t))
-	approx := args["user_location"].(map[string]any)["approximate"].(map[string]any)
-	if approx["city"] != "London" || approx["country"] != "GB" {
-		t.Fatalf("nested object unexpectedly mutated: %v", approx)
+	if want := map[string]any{"user_location": map[string]any{"approximate": map[string]any{"city": "London", "country": "44"}}}; !reflect.DeepEqual(args, want) {
+		t.Fatalf("nested fields: got %#v, want %#v", args, want)
 	}
 }
 

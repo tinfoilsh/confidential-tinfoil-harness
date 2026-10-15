@@ -79,7 +79,7 @@ func TestSubmitter_TrimsOversizedHistory(t *testing.T) {
 					t.Fatalf("message %d role = %q, want %q", i, m.Role, want.Role)
 				}
 				if i == 0 {
-					if !utf8.ValidString(m.Content) || !strings.HasSuffix(want.Content, m.Content) {
+					if !utf8.ValidString(m.Content) || m.Content == "" && want.Content != "" || !strings.HasSuffix(want.Content, m.Content) {
 						t.Fatal("the oldest kept message must be a valid trailing part of the original")
 					}
 				} else if m.Content != want.Content {
@@ -145,8 +145,13 @@ func TestSubmitter_DropsOversizedConversationID(t *testing.T) {
 	s := newSubmitter(sidecar.URL)
 	s.submit("tok", string(make([]byte, maxConversationIDLen+1)), []safeguardMessage{{Role: "assistant", Content: "x"}})
 	s.close()
-	if sub := <-got; sub.ConversationID != "" {
-		t.Fatal("oversized conversation id must be dropped, not forwarded")
+	select {
+	case sub := <-got:
+		if sub.ConversationID != "" {
+			t.Fatal("oversized conversation id must be dropped, not forwarded")
+		}
+	default:
+		t.Fatal("the conversation was not delivered")
 	}
 }
 

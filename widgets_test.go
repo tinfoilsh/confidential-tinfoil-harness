@@ -112,7 +112,7 @@ func TestWidgetSchemaViolationIsReportedToTheModel(t *testing.T) {
 	}
 }
 
-func TestWidgetRetriesAreCountedPerRunAndName(t *testing.T) {
+func TestWidgetRetriesAreCountedPerNameWithinRun(t *testing.T) {
 	set := widgetToolset()
 	set.widgets = catalogWidgets("render_artifact_preview", "render_stat_cards")
 	var wg sync.WaitGroup
