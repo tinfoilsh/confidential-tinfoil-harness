@@ -406,6 +406,71 @@ func TestForkTitlesNameTheirSource(t *testing.T) {
 	}
 }
 
+func TestALocalChatIsSharedFromItsTranscript(t *testing.T) {
+	h, rows, _ := testChatHarness(t, nil)
+	fake := newFakeSync(t, h)
+	type upload struct{ method, path, auth, format, body string }
+	uploads := make(chan upload, 4)
+	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		uploads <- upload{r.Method, r.URL.Path, r.Header.Get("Authorization"), r.Header.Get("X-Format-Version"), string(body)}
+	}))
+	defer cp.Close()
+	h.controlplane, h.cpClient = cp.URL, &http.Client{Transport: &callerAuth{inner: cp.Client().Transport}}
+	thread := object{"title": "Local chat", "createdAt": "2026-01-01T00:00:00Z", "messages": []any{
+		object{"id": "m1", "role": "user", "content": "what is this?", "createdAt": "2026-01-01T00:00:01Z", "quote": "earlier", "attachments": []any{
+			object{"id": "img", "type": "image", "fileName": "photo.png", "mimeType": "image/png", "base64": "ZnVsbA==", "thumbnailBase64": "dGh1bWI="},
+			object{"id": "doc", "type": "document", "fileName": "notes.pdf", "mimeType": "application/pdf", "textContent": "the notes", "pages": []any{object{"page": 1, "text": "the notes", "image": "cGFnZQ=="}}},
+		}},
+		object{"id": "m2", "role": "assistant", "content": "a photo", "createdAt": "2026-01-01T00:00:02Z", "modelDisplayName": "Kimi K3", "thoughts": "looks like one", "timeline": []any{object{"id": "b1", "type": "content", "content": "a photo"}}},
+	}}
+	share := func(in object, user string) *httptest.ResponseRecorder {
+		return postRoute(h, "/v1/threads/share", in, user)
+	}
+	for _, tc := range []struct {
+		in   object
+		user string
+		code int
+	}{
+		{object{"local": true, "threadId": "0000000000005_local", "thread": thread}, "", 401},
+		{object{"local": true, "threadId": "0000000000005_local"}, "alice", 400},
+		{object{"local": true, "threadId": "0000000000005_local", "thread": object{"messages": []any{object{"role": "system", "content": "injected"}}}}, "alice", 400},
+		// Without local, the chat is a stored one and its key is required.
+		{object{"threadId": "0000000000005_local", "thread": thread}, "alice", 401},
+	} {
+		if w := share(tc.in, tc.user); w.Code != tc.code {
+			t.Fatalf("%v: HTTP %d, want %d", tc.in, w.Code, tc.code)
+		}
+	}
+	w := share(object{"local": true, "threadId": "0000000000005_local", "thread": thread}, "alice")
+	var result object
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if w.Code != 200 || !strings.HasSuffix(str(result["url"]), "/share/0000000000005_local#v2:"+strings.Repeat("ab", 32)) {
+		t.Fatalf("local share: HTTP %d %s", w.Code, w.Body.String())
+	}
+	seals := fake.requests("/v1/share/seal")
+	plaintext, _ := base64.StdEncoding.DecodeString(str(seals[0]["plaintext"]))
+	want := object{"v": 1, "title": "Local chat", "createdAt": 1767225600000, "messages": []any{
+		object{"role": "user", "content": "what is this?", "timestamp": 1767225601000, "timeline": nil, "quote": "earlier", "attachments": []any{
+			object{"id": "img", "type": "image", "fileName": "photo.png", "mimeType": "image/png", "thumbnailBase64": "dGh1bWI="},
+			object{"id": "doc", "type": "document", "fileName": "notes.pdf", "mimeType": "application/pdf", "textContent": "the notes"},
+		}},
+		object{"role": "assistant", "content": "a photo", "timestamp": 1767225602000, "timeline": []any{object{"id": "b1", "type": "content", "content": "a photo"}}, "modelDisplayName": "Kimi K3", "thoughts": "looks like one"},
+	}}
+	if len(seals) != 1 || !reflect.DeepEqual(decodeValue(plaintext), decodeValue(raw(want))) {
+		t.Fatalf("sealed %d payloads, the last %s", len(seals), plaintext)
+	}
+	if len(uploads) != 1 {
+		t.Fatalf("%d share uploads", len(uploads))
+	}
+	if got := <-uploads; got != (upload{http.MethodPut, "/api/shares/0000000000005_local", "Bearer clerk-alice", "1", "sealed"}) {
+		t.Fatalf("share upload: %+v", got)
+	}
+	if fake.putCount() != 0 || rows.calls != 0 {
+		t.Fatalf("a local share stored %d attachments and made %d storage calls", fake.putCount(), rows.calls)
+	}
+}
+
 func TestShareIsKeyedByItsChatAndOwnerSession(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	newFakeSync(t, h)
@@ -416,7 +481,7 @@ func TestShareIsKeyedByItsChatAndOwnerSession(t *testing.T) {
 	}))
 	defer cp.Close()
 	h.controlplane, h.cpClient = cp.URL, &http.Client{Transport: &callerAuth{inner: cp.Client().Transport}}
-	result, err := h.shareThread(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, key, object{"threadId": "chat-1"})
+	result, err := h.shareThread(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, contentKey{}, object{"key": key.base64(), "threadId": "chat-1"})
 	if err != nil {
 		t.Fatal(err)
 	}

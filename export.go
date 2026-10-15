@@ -25,16 +25,37 @@ func millis(value any) int64 {
 	}
 	return int64(integer(value))
 }
-func (h *harness) shareThread(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
+
+// A signed-in client can also share a chat it keeps itself by sending the
+// transcript, with no content key. As from the web client, that share holds
+// image thumbnails and document text, so the transcript may omit image bytes.
+// No attachment is uploaded for it: sync holds no chat to keep one under.
+func (h *harness) shareThread(ctx context.Context, p *principal, _ contentKey, in object) (any, error) {
 	id, err := requiredID(in, "threadId")
 	if err != nil {
 		return nil, err
 	}
-	row, err := h.storeRows.load(ctx, p, key, "chat", id)
-	if err != nil {
-		return nil, err
+	var t object
+	if boolean(in["local"], false) {
+		if !validObject(in["thread"]) {
+			return nil, apiErr(400, "BAD_REQUEST", "A local thread requires its transcript")
+		}
+		if err := validateLocalThread(obj(in["thread"])); err != nil {
+			return nil, err
+		}
+		t = localThread(id, obj(in["thread"])).Data
+	} else {
+		key, err := decodeContentKey(str(in["key"]))
+		if err != nil {
+			return nil, err
+		}
+		defer clear(key[:])
+		row, err := h.storeRows.load(ctx, p, key, "chat", id)
+		if err != nil {
+			return nil, err
+		}
+		t = normalizeThread(row)
 	}
-	t := normalizeThread(row)
 	messages := []any{}
 	for _, item := range arr(t["messages"]) {
 		m := obj(item)

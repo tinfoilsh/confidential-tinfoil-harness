@@ -358,7 +358,7 @@ func TestSessionAdvertisesThreadFeatures(t *testing.T) {
 		Features map[string]bool `json:"features"`
 	}
 	json.Unmarshal(postRoute(h, "/v1/session", object{}, "").Body.Bytes(), &session)
-	for _, name := range []string{"defaultPromptPreset", "fork", "messageActions", "continue"} {
+	for _, name := range []string{"defaultPromptPreset", "fork", "messageActions", "continue", "localShare"} {
 		if !session.Features[name] {
 			t.Errorf("the session does not advertise %s", name)
 		}
