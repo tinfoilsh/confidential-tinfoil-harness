@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
@@ -51,6 +52,7 @@ type chatCatalog struct {
 	Prompt, Rules, WidgetHeader, MemoryPrompt string
 	EnabledWidgets                            []string
 	Presets                                   []object
+	Fallback                                  int // smallest configured window, for Auto while no model is offered
 }
 type catalogCache struct {
 	mu    sync.RWMutex
@@ -73,6 +75,7 @@ func fetchConfig(ctx context.Context, client *http.Client, base, path string, ou
 	return json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(out)
 }
 func (h *harness) refreshCatalog(ctx context.Context) error {
+	h.refreshOffer(ctx)
 	client := &http.Client{Timeout: 15 * time.Second}
 	var models []object
 	var prompt object
@@ -82,9 +85,10 @@ func (h *harness) refreshCatalog(ctx context.Context) error {
 	if err := fetchConfig(ctx, client, h.controlplane, "/api/config/system-prompt", &prompt); err != nil {
 		return err
 	}
-	c, err := buildCatalog(models, prompt, h.models)
-	if err != nil {
-		return err
+	c := buildCatalog(models, prompt, h.offer.get())
+	// The first catalog may offer only Auto; a later one without models keeps the last.
+	if len(c.Models) == 0 && h.catalog.get() != nil {
+		return errors.New("no configured chat model is offered by the gateway")
 	}
 	var memory object
 	if err := fetchConfig(ctx, client, h.controlplane, "/api/config/memory-prompt", &memory); err == nil {
@@ -93,7 +97,7 @@ func (h *harness) refreshCatalog(ctx context.Context) error {
 	h.catalog.set(c)
 	return nil
 }
-func buildCatalog(config []object, prompt object, models []*model) (*chatCatalog, error) {
+func buildCatalog(config []object, prompt object, models []*model) *chatCatalog {
 	c := &chatCatalog{Prompt: str(prompt["systemPrompt"]), Rules: str(prompt["rules"]), WidgetHeader: str(obj(prompt["genUI"])["header"]), Models: []object{}, Presets: builtInPresets()}
 	for _, name := range arr(obj(prompt["genUI"])["enabledWidgets"]) {
 		c.EnabledWidgets = append(c.EnabledWidgets, str(name))
@@ -108,6 +112,10 @@ func buildCatalog(config []object, prompt object, models []*model) (*chatCatalog
 			c.Deprecated = append(c.Deprecated, clone(definition))
 			continue
 		}
+		configured := integer(obj(definition["chatConfig"])["contextWindowTokens"])
+		if configured > 0 && (c.Fallback == 0 || configured < c.Fallback) {
+			c.Fallback = configured
+		}
 		if !slices.ContainsFunc(pinned, func(p struct{ name, repo string }) bool { return p.name == name && p.repo == repo }) {
 			unpinned = append(unpinned, name)
 			continue
@@ -115,19 +123,21 @@ func buildCatalog(config []object, prompt object, models []*model) (*chatCatalog
 		for _, model := range models {
 			if model.name == name {
 				def := clone(definition)
-				def["budgetWindow"] = model.context
+				// A prompt must fit both the replica and the window the product configures.
+				window := model.context
+				if configured > 0 && (window <= 0 || configured < window) {
+					window = configured
+				}
+				def["budgetWindow"] = window
 				c.Models = append(c.Models, def)
 				break
 			}
 		}
 	}
 	if len(unpinned) > 0 {
-		return nil, fmt.Errorf("controlplane chat models have no pinned repository: %s", strings.Join(unpinned, ", "))
+		slog.Warn("skipping controlplane chat models without a pinned repository", "models", strings.Join(unpinned, ", "))
 	}
-	if len(c.Models) == 0 {
-		return nil, errors.New("no configured chat model has an attested gateway replica")
-	}
-	return c, nil
+	return c
 }
 func (c *chatCatalog) definition(name string) object {
 	for _, m := range c.Models {

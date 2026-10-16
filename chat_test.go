@@ -148,7 +148,7 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 		h.auth.credentials["user:"+subject] = inferenceCredential{Key: "inference-" + secret(subject), Expires: nowUTC().Add(time.Hour)}
 	}
 	m := &model{name: "kimi-k3", repo: "tinfoilsh/confidential-kimi-k3", context: 8192, client: &http.Client{Transport: &callerAuth{inner: server.Client().Transport, usageSecret: "test-usage-secret"}}}
-	h.models = []*model{m}
+	h.offer.models = []*model{m}
 	h.autoModel = m
 	h.catalog.set(&chatCatalog{Models: []object{{"modelName": "kimi-k3", "name": "Kimi K3", "budgetWindow": 8192, "multimodal": false, "chatConfig": object{}}}, Prompt: "You are {MODEL_NAME}. {USER_PREFERENCES}", Presets: builtInPresets()})
 

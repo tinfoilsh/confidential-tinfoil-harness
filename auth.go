@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -30,16 +32,68 @@ func (p *principal) scope() string {
 	return "anonymous:" + p.AnonymousID
 }
 
-type rateLimit struct {
-	Kind        any    `json:"kind"`
-	MaxRequests int    `json:"maxRequests"`
-	Remaining   int    `json:"remaining"`
-	ResetsAt    string `json:"resetsAt,omitempty"`
+type tokenBudget struct {
+	Max       int `json:"max"`
+	Used      int `json:"used"`
+	Remaining int `json:"remaining"`
 }
+
+// Only free keys count requests; a subscriber's hourly cap is in tokens.
+type rateLimit struct {
+	Kind         any          `json:"kind"`
+	MaxRequests  *int         `json:"maxRequests,omitempty"`
+	Remaining    *int         `json:"remaining,omitempty"`
+	InputTokens  *tokenBudget `json:"inputTokens,omitempty"`
+	OutputTokens *tokenBudget `json:"outputTokens,omitempty"`
+	ResetsAt     string       `json:"resetsAt,omitempty"`
+}
+
+func (l rateLimit) exhausted() bool { return l.Remaining != nil && *l.Remaining <= 0 }
+
+func exhaustedLimit(kind string) rateLimit {
+	return rateLimit{Kind: kind, MaxRequests: new(0), Remaining: new(0)}
+}
+
+// quota is the rate_limit object both credential exchanges answer with. A
+// missing or zero maximum leaves that dimension unlimited.
+type quota struct {
+	MaxRequests     *int   `json:"max_requests"`
+	Remaining       *int   `json:"remaining"`
+	MaxInput        *int   `json:"max_input_tokens"`
+	InputUsed       *int   `json:"input_tokens_used"`
+	InputRemaining  *int   `json:"input_tokens_remaining"`
+	MaxOutput       *int   `json:"max_output_tokens"`
+	OutputUsed      *int   `json:"output_tokens_used"`
+	OutputRemaining *int   `json:"output_tokens_remaining"`
+	ResetsAt        string `json:"resets_at"`
+}
+
+func (q quota) limit(kind string) rateLimit {
+	l := rateLimit{Kind: kind, InputTokens: budget(q.MaxInput, q.InputUsed, q.InputRemaining), OutputTokens: budget(q.MaxOutput, q.OutputUsed, q.OutputRemaining), ResetsAt: q.ResetsAt}
+	if q.MaxRequests != nil && *q.MaxRequests > 0 && q.Remaining != nil {
+		l.MaxRequests, l.Remaining = q.MaxRequests, q.Remaining
+	}
+	return l
+}
+
+func budget(limit, used, remaining *int) *tokenBudget {
+	if limit == nil || used == nil || remaining == nil || *limit <= 0 {
+		return nil
+	}
+	return &tokenBudget{*limit, *used, *remaining}
+}
+
 type inferenceCredential struct {
 	Key     secret
 	Expires time.Time
 	Limit   rateLimit
+}
+
+// hourlyCap is a subscriber's refused exchange, remembered until the cap resets.
+type hourlyCap struct {
+	refusal apiError
+	limit   rateLimit
+	until   time.Time
 }
 type authenticator struct {
 	verify       func(context.Context, string) (string, error)
@@ -47,6 +101,7 @@ type authenticator struct {
 	controlplane string
 	mu           sync.Mutex
 	credentials  map[string]inferenceCredential
+	capped       map[string]hourlyCap
 	refreshing   map[string]chan struct{}
 }
 
@@ -131,18 +186,28 @@ func (a *authenticator) anonymousInference(ctx context.Context, p *principal) (i
 		return inferenceCredential{Key: p.InferenceKey}, nil
 	}
 	var detail object
-	if resp.StatusCode == http.StatusTooManyRequests && json.Unmarshal(body, &detail) == nil && str(obj(detail["error"])["code"]) == "insufficient_quota" {
+	json.Unmarshal(body, &detail)
+	if resp.StatusCode == http.StatusTooManyRequests && str(obj(detail["error"])["code"]) == "insufficient_quota" {
 		// An exhausted key may still open the session and show the quota
 		// banner. acceptTurn refuses to start work with this zero balance.
-		return inferenceCredential{Key: p.InferenceKey, Limit: rateLimit{Kind: "free_daily"}}, nil
+		return inferenceCredential{Key: p.InferenceKey, Limit: exhaustedLimit("free_daily")}, nil
 	}
-	if resp.StatusCode/100 == 2 {
+	switch {
+	case resp.StatusCode/100 == 2:
 		return inferenceCredential{}, errors.New("invalid key validation response")
-	}
-	if resp.StatusCode == http.StatusPaymentRequired {
+	case resp.StatusCode == http.StatusPaymentRequired:
 		return inferenceCredential{}, apiErr(403, "UPSTREAM_REFUSED", "This chat key is disabled")
+	case resp.StatusCode == http.StatusUnauthorized && str(detail["error"]) != "":
+		// A refused caller address, not a refused key: the controlplane
+		// answers only Tinfoil hosts registered for key validation.
+		slog.Error("controlplane refused key validation from this host", "status", resp.StatusCode)
+		return inferenceCredential{}, apiErr(503, "UPSTREAM_REFUSED", "Anonymous chat is unavailable on this deployment")
+	case resp.StatusCode == http.StatusServiceUnavailable:
+		e := apiErr(503, "UPSTREAM_REFUSED", "Key validation is temporarily unavailable")
+		e.RetryAfter = retryAfter(resp.Header)
+		return inferenceCredential{}, e
 	}
-	return inferenceCredential{}, downstreamError(resp.StatusCode, body)
+	return inferenceCredential{}, withRetryAfter(downstreamError(resp.StatusCode, body), resp.Header)
 }
 
 func (a *authenticator) inference(ctx context.Context, p *principal) (inferenceCredential, error) {
@@ -153,6 +218,12 @@ func (a *authenticator) inference(ctx context.Context, p *principal) (inferenceC
 	if cached, ok := a.credentials[p.scope()]; ok && nowUTC().Add(time.Minute).Before(cached.Expires) {
 		a.mu.Unlock()
 		return cached, nil
+	}
+	if capped, ok := a.capped[p.scope()]; ok && nowUTC().Before(capped.until) {
+		a.mu.Unlock()
+		refusal := capped.refusal
+		refusal.RetryAfter = max(1, int(math.Ceil(time.Until(capped.until).Seconds())))
+		return inferenceCredential{}, &refusal
 	}
 	if a.refreshing == nil {
 		a.refreshing = map[string]chan struct{}{}
@@ -185,20 +256,18 @@ func (a *authenticator) inference(ctx context.Context, p *principal) (inferenceC
 			return inferenceCredential{}, err
 		}
 		if resp.StatusCode/100 != 2 {
-			if i+1 < len(paths) && (resp.StatusCode == 402 || resp.StatusCode == 403) {
+			// Only a missing subscription falls back to a free key: a suspended
+			// account or a failed exchange must never downgrade a subscriber.
+			if i == 0 && resp.StatusCode == http.StatusPaymentRequired {
 				continue
 			}
-			return inferenceCredential{}, downstreamError(resp.StatusCode, b)
+			return inferenceCredential{}, a.refused(p, resp.StatusCode, resp.Header, b)
 		}
 		var in struct {
 			Key     secret `json:"key"`
 			Expires string `json:"expires_at"`
 			Free    bool   `json:"is_free_tier"`
-			Rate    struct {
-				Max       int    `json:"max_requests"`
-				Remaining int    `json:"remaining"`
-				Resets    string `json:"resets_at"`
-			} `json:"rate_limit"`
+			Rate    *quota `json:"rate_limit"`
 		}
 		if json.Unmarshal(b, &in) != nil || in.Key == "" {
 			return inferenceCredential{}, errors.New("invalid inference credential response")
@@ -207,9 +276,12 @@ func (a *authenticator) inference(ctx context.Context, p *principal) (inferenceC
 		if err != nil || !exp.After(nowUTC()) {
 			return inferenceCredential{}, errors.New("invalid inference credential expiry")
 		}
-		cred := inferenceCredential{Key: in.Key, Expires: exp, Limit: rateLimit{MaxRequests: in.Rate.Max, Remaining: in.Rate.Remaining, ResetsAt: in.Rate.Resets}}
-		if in.Free {
-			cred.Limit.Kind = "free_daily"
+		cred := inferenceCredential{Key: in.Key, Expires: exp}
+		switch {
+		case in.Rate != nil && i == 0:
+			cred.Limit = in.Rate.limit("hourly")
+		case in.Rate != nil && in.Free:
+			cred.Limit = in.Rate.limit("free_daily")
 		}
 		a.mu.Lock()
 		if a.credentials == nil {
@@ -225,17 +297,74 @@ func (a *authenticator) inference(ctx context.Context, p *principal) (inferenceC
 			return inferenceCredential{}, apiErr(503, "UPSTREAM_REFUSED", "The session cache is at capacity")
 		}
 		a.credentials[p.scope()] = cred
+		delete(a.capped, p.scope())
 		a.mu.Unlock()
 		return cred, nil
 	}
 	return inferenceCredential{}, errors.New("no inference credential")
 }
+
+// refused maps a declined credential exchange. Every harness user shares one
+// egress address, which the controlplane rate-limits, so an hourly cap is
+// remembered until it resets instead of being asked about again.
+func (a *authenticator) refused(p *principal, status int, header http.Header, body []byte) error {
+	var detail object
+	json.Unmarshal(body, &detail)
+	switch {
+	case status == http.StatusTooManyRequests && str(detail["code"]) == "HOURLY_LIMIT_REACHED":
+		var budgets quota
+		json.Unmarshal(raw(detail["rate_limit"]), &budgets)
+		limit := budgets.limit("hourly")
+		limit.MaxRequests, limit.Remaining = new(0), new(0)
+		limit.ResetsAt = firstString(detail["resets_at"], limit.ResetsAt)
+		e := apiErr(429, "QUOTA_EXHAUSTED", firstString(detail["error"], "The hourly usage limit is reached"))
+		e.Kind, e.ResetsAt, e.RetryAfter = "hourly", limit.ResetsAt, retryAfter(header)
+		until := nowUTC().Add(time.Minute)
+		if at, err := time.Parse(time.RFC3339, limit.ResetsAt); err == nil && at.After(nowUTC()) {
+			until = at
+		} else if e.RetryAfter > 0 {
+			until = nowUTC().Add(time.Duration(e.RetryAfter) * time.Second)
+		}
+		if latest := nowUTC().Add(time.Hour); until.After(latest) {
+			until = latest
+		}
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		if a.capped == nil {
+			a.capped = map[string]hourlyCap{}
+		}
+		for id, entry := range a.capped {
+			if !entry.until.After(nowUTC()) {
+				delete(a.capped, id)
+			}
+		}
+		if len(a.capped) < 10000 {
+			a.capped[p.scope()] = hourlyCap{refusal: *e, limit: limit, until: until}
+		}
+		return e
+	case status == http.StatusTooManyRequests:
+		e := apiErr(429, "RATE_LIMITED", "Chat access is busy; retry shortly")
+		e.RetryAfter = retryAfter(header)
+		return e
+	case status == http.StatusForbidden:
+		return apiErr(403, "UPSTREAM_REFUSED", "This account is suspended")
+	case status == http.StatusServiceUnavailable:
+		e := apiErr(503, "UPSTREAM_REFUSED", "Chat access is temporarily unavailable")
+		if str(detail["code"]) == "ACCOUNT_PROVISIONING" {
+			e.Message = "The account is still being set up"
+		}
+		e.RetryAfter = retryAfter(header)
+		return e
+	}
+	return withRetryAfter(downstreamError(status, body), header)
+}
+
 func (a *authenticator) consumed(p *principal) rateLimit {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	cred := a.credentials[p.scope()]
-	if cred.Limit.Kind != nil && cred.Limit.Remaining > 0 {
-		cred.Limit.Remaining--
+	if cred.Limit.Remaining != nil && *cred.Limit.Remaining > 0 {
+		cred.Limit.Remaining = new(*cred.Limit.Remaining - 1)
 		a.credentials[p.scope()] = cred
 	}
 	return cred.Limit
@@ -244,6 +373,9 @@ func (a *authenticator) consumed(p *principal) rateLimit {
 func (a *authenticator) currentLimit(p *principal) rateLimit {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if capped, ok := a.capped[p.scope()]; ok && nowUTC().Before(capped.until) {
+		return capped.limit
+	}
 	return a.credentials[p.scope()].Limit
 }
 

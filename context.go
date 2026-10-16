@@ -138,7 +138,7 @@ func (h *harness) buildRequest(thread, profile, project object, documents []obje
 	req := &request{threadID: str(thread["id"]), runID: runID, model: name, managed: true, families: map[string]mcp.Meta{}}
 	def, display, policy, window := c.definition(name), "Auto", "none", 0
 	var picked *model
-	for _, m := range h.models {
+	for _, m := range h.offer.get() {
 		if m.name == name {
 			picked = m
 		}
@@ -154,6 +154,9 @@ func (h *harness) buildRequest(thread, profile, project object, documents []obje
 			if p == "all" || p == "tool-call-only" && policy != "all" {
 				policy = p
 			}
+		}
+		if window == 0 {
+			window = c.Fallback
 		}
 		level, err := intelligence(firstString(options["autoIntelligence"], thread["autoIntelligence"], profile["autoIntelligence"], "high"))
 		if err != nil {

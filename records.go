@@ -43,7 +43,11 @@ func (h *harness) session(ctx context.Context, p *principal, _ contentKey, _ obj
 	}
 	credential, err := h.auth.inference(ctx, p)
 	if err != nil {
-		return nil, err
+		// A subscriber at the hourly cap still opens the app and sees when it resets.
+		if e := asAPIError(err); e.Code != "QUOTA_EXHAUSTED" || e.Kind != "hourly" {
+			return nil, err
+		}
+		credential.Limit = h.auth.currentLimit(p)
 	}
 	keyInfo := object{"registered": false, "keyId": nil, "bundles": []any{}}
 	if !p.Anonymous {
@@ -61,7 +65,7 @@ func (h *harness) session(ctx context.Context, p *principal, _ contentKey, _ obj
 		keyInfo["bundles"] = bundles
 		keyInfo["hasData"] = boolean(current["has_data"], false)
 	}
-	features := object{"webSearch": false, "codeExecution": false, "sandbox": h.serviceReady("sandbox"), "piiCheck": true, "genUI": len(c.EnabledWidgets) > 0, "transcription": h.serviceReady("audio"), "memory": h.memoryEnabled}
+	features := object{"webSearch": false, "codeExecution": false, "sandbox": h.serviceReady("sandbox"), "piiCheck": true, "genUI": len(c.EnabledWidgets) > 0, "transcription": h.serviceReady("router"), "speech": h.serviceReady("router"), "memory": h.memoryEnabled}
 	for _, family := range families {
 		features[family.name] = family.client != nil
 	}
@@ -71,7 +75,10 @@ func (h *harness) session(ctx context.Context, p *principal, _ contentKey, _ obj
 		presets = append(presets, d)
 	}
 	var auto any
-	defaultModel := str(c.Models[0]["modelName"])
+	defaultModel := ""
+	if len(c.Models) > 0 {
+		defaultModel = str(c.Models[0]["modelName"])
+	}
 	if h.autoModel != nil {
 		auto = object{"multimodal": false, "default": "high", "levels": intelligenceLevels}
 		defaultModel = "auto"

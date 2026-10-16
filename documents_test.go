@@ -104,7 +104,7 @@ func TestStoredUploadIsOffloadedUnderItsThread(t *testing.T) {
 	var prompt string
 	h, rows, key := testChatHarness(t, capturePrompt(&prompt))
 	fake := newFakeSync(t, h)
-	upload := uploadRoute(h, "alice", map[string]string{"key": key.base64()}, "notes.txt", "remember the blue door")
+	upload := uploadRoute(h, "/v1/attachments/upload", "notes.txt", []byte("remember the blue door"), map[string]string{"key": key.base64()}, "alice")
 	if upload.Code != 200 {
 		t.Fatalf("upload failed: %d %s", upload.Code, upload.Body.String())
 	}

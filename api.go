@@ -87,6 +87,7 @@ type apiError struct {
 	RetryAfter int    `json:"retryAfter,omitempty"`
 	Status     int    `json:"status,omitempty"`
 	KeyID      string `json:"keyId,omitempty"`
+	Upstream   string `json:"upstreamCode,omitempty"`
 
 	missing []string // attachment ids sync did not find under the pushed chat
 }
@@ -105,7 +106,11 @@ func asAPIError(err error) *apiError {
 	}
 	var refusal *refusal
 	if errors.As(err, &refusal) {
-		return downstreamError(refusal.status, []byte(refusal.detail))
+		e := downstreamError(refusal.status, []byte(refusal.detail))
+		if refusal.retryAfter > 0 {
+			e.RetryAfter = refusal.retryAfter
+		}
+		return e
 	}
 	return apiErr(502, "UPSTREAM_REFUSED", "A downstream request failed")
 }
@@ -186,6 +191,7 @@ func (h *harness) routes() http.Handler {
 	}
 	mux.HandleFunc("POST /v1/threads/turn", h.handleTurn)
 	mux.HandleFunc("POST /v1/threads/follow", h.handleFollow)
+	mux.HandleFunc("POST /v1/speech", h.handleSpeech)
 	for _, path := range []string{"/v1/attachments/upload", "/v1/projects/documents/upload", "/v1/transcriptions", "/v1/import"} {
 		mux.HandleFunc("POST "+path, boundedHandler(uploadSlots, h.handleUpload))
 	}
@@ -229,6 +235,12 @@ func downstreamError(status int, body []byte) *apiError {
 	case "PII_BLOCKED", "PII_DETECTED":
 		e = apiErr(422, "PII_BLOCKED", "The privacy screen refused the request")
 	default:
+		if refused := openAIRefusal(status, body); refused != nil {
+			if refused.RetryAfter == 0 {
+				refused.RetryAfter = integer(in["retryAfter"])
+			}
+			return refused
+		}
 		switch status {
 		case 401:
 			e = apiErr(401, "UNAUTHENTICATED", "Authentication is required")
@@ -270,7 +282,7 @@ func postJSONWithHeaders(ctx context.Context, client *http.Client, url, auth str
 	if resp.StatusCode/100 != 2 {
 		// A missing-attachment error lists every missing id.
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		return downstreamError(resp.StatusCode, b)
+		return withRetryAfter(downstreamError(resp.StatusCode, b), resp.Header)
 	}
 	if out == nil {
 		_, err = io.Copy(io.Discard, io.LimitReader(resp.Body, maxRequestBody))

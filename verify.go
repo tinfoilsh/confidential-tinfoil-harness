@@ -22,6 +22,13 @@ func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
 		return err
 	}
 	h.auth = auth
+	gw, err := newGateway(h.gateway, h.offer.sdk)
+	if err != nil {
+		return fmt.Errorf("configure gateway %s: %w", h.gateway, err)
+	}
+	h.verified = gw.Verifications
+	// Outermost: the SDK salts each caller's prompt cache with the key set here.
+	h.modelClient = &http.Client{Transport: &callerAuth{inner: gw.HTTPClient().Transport, usageSecret: usageSecret}}
 	h.services = map[string]*downstreamService{}
 	for _, config := range []struct {
 		role, repo, host, variable string
@@ -29,12 +36,11 @@ func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
 	}{
 		{"sync", "tinfoilsh/confidential-sync", "sync.tinfoil.sh", "TINFOIL_SYNC_ENCLAVE", true},
 		{"summarizer", "tinfoilsh/confidential-summarizer", "summarizer.tinfoil.sh", "TINFOIL_SUMMARIZER_ENCLAVE", false},
-		{"document", "tinfoilsh/confidential-doc-upload", "docling.tinfoil.sh", "TINFOIL_DOCUMENT_ENCLAVE", false},
 		{"metadata", "tinfoilsh/confidential-website-metadata-fetcher", "opengraph-metadata.tinfoil.sh", "TINFOIL_METADATA_ENCLAVE", false},
 		{"router", "tinfoilsh/confidential-model-router", "inference.tinfoil.sh", "TINFOIL_ROUTER_ENCLAVE", true},
 	} {
 		host := env(config.variable, config.host)
-		client, err := attest(ctx, host, config.repo, "", usageSecret)
+		client, err := attest(ctx, host, config.repo, usageSecret)
 		if err != nil {
 			if config.required {
 				return fmt.Errorf("verify required %s enclave %s: %w", config.role, host, err)
@@ -49,16 +55,6 @@ func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
 	h.storeRows = h.syncAPI
 	router := h.services["router"]
 	h.autoModel = &model{name: "auto", repo: router.Repo, client: router.Client, endpoint: router.URL + "/v1/chat/completions"}
-	if catalog, err := fetchCatalog(ctx, h.gateway); err == nil {
-		if audio, ok := catalog["voxtral-small-24b"]; ok {
-			host, client, err := attestReplicas(ctx, audio.Hosts, "tinfoilsh/confidential-voxtral-small-24b", h.gateway+"/v1/", usageSecret, attest)
-			if err != nil {
-				slog.Warn("transcription unavailable", "error", err)
-			} else {
-				h.services["audio"] = &downstreamService{Role: "audio", Repo: "tinfoilsh/confidential-voxtral-small-24b", Enclave: host, URL: h.gateway, Client: client, At: timestamp()}
-			}
-		}
-	}
 	if err := h.refreshCatalog(ctx); err != nil {
 		return err
 	}
@@ -75,7 +71,8 @@ func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
 				h.expireThreads()
 				h.expireAttachments()
 				refresh++
-				if refresh%5 == 0 {
+				// Every minute until the gateway first offers a model, then every five.
+				if refresh%5 == 0 || len(h.offer.get()) == 0 {
 					if err := h.refreshCatalog(ctx); err != nil {
 						slog.Warn("catalog refresh refused", "error", err)
 					}
@@ -91,9 +88,10 @@ func (h *harness) serviceReady(role string) bool {
 }
 func (h *harness) verification(ctx context.Context, _ *principal, _ contentKey, _ object) (any, error) {
 	verified := []object{}
-	for _, model := range h.models {
-		if model.client != nil {
-			verified = append(verified, object{"role": "model", "name": model.name, "repo": model.repo, "enclave": model.enclave, "at": model.verifiedAt})
+	if h.verified != nil {
+		// Model replicas verify on first use, so only those already used appear.
+		for _, replica := range h.verified() {
+			verified = append(verified, object{"role": "model", "name": replica.PinnedModel, "repo": replica.Reference, "enclave": replica.Verification.EnclaveHost, "at": replica.Verification.VerifiedAt})
 		}
 	}
 	for _, family := range families {
@@ -101,7 +99,7 @@ func (h *harness) verification(ctx context.Context, _ *principal, _ contentKey, 
 			verified = append(verified, object{"role": "tool", "name": family.name, "repo": family.repo, "enclave": family.enclave, "at": family.verifiedAt})
 		}
 	}
-	for _, role := range []string{"sync", "router", "summarizer", "document", "metadata", "audio"} {
+	for _, role := range []string{"sync", "router", "summarizer", "metadata"} {
 		if service := h.services[role]; service != nil {
 			verified = append(verified, object{"role": role, "repo": service.Repo, "enclave": service.Enclave, "at": service.At})
 		}

@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"image"
 	_ "image/gif"
 	"image/jpeg"
@@ -246,13 +247,7 @@ func (h *harness) preprocess(ctx context.Context, filename string, data []byte) 
 		if ext == ".pdf" && !bytes.HasPrefix(data, []byte("%PDF-")) || ext != ".pdf" && !bytes.HasPrefix(data, []byte("PK\x03\x04")) {
 			return nil, apiErr(415, "ATTACHMENT_UNSUPPORTED", "The file contents do not match the document type")
 		}
-		service := h.services["document"]
-		if service == nil {
-			return nil, apiErr(503, "TOOL_UNAVAILABLE", "Document conversion is unavailable")
-		}
-		ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-		defer cancel()
-		result, err := multipartCall(ctx, service, "/v1/convert/file?mode=images", "files", filename, data, nil)
+		result, err := h.convert(ctx, filename, data)
 		if err != nil {
 			return nil, err
 		}
@@ -266,7 +261,12 @@ func (h *harness) preprocess(ctx context.Context, filename string, data []byte) 
 		if document := obj(converted["document"]); len(document) > 0 {
 			converted = document
 		}
-		descriptor["textContent"], descriptor["pages"] = converted["md_content"], converted["pages"]
+		if text := str(converted["md_content"]); text != "" {
+			descriptor["textContent"] = text
+		}
+		if pages := arr(converted["pages"]); len(pages) > 0 {
+			descriptor["pages"] = pages
+		}
 	case slices.Contains(audioExtensions, ext):
 		text, err := h.transcribe(ctx, filename, data)
 		if err != nil {
@@ -312,6 +312,53 @@ func resizeImage(data []byte) ([]byte, []byte, error) {
 	thumb, err := encode(256)
 	return resized, thumb, err
 }
+
+// The document service converts four files at once and queues sixteen for
+// every user, so conversions take two slots and wait out capacity rejections
+// while the retry still fits a deadline that starts once a slot is free.
+var conversionSlots = make(chan struct{}, 2)
+var conversionDeadline = 10 * time.Minute
+
+func (h *harness) convert(ctx context.Context, filename string, data []byte) ([]byte, error) {
+	router := h.services["router"]
+	if router == nil {
+		return nil, apiErr(503, "TOOL_UNAVAILABLE", "Document conversion is unavailable")
+	}
+	select {
+	case conversionSlots <- struct{}{}:
+		defer func() { <-conversionSlots }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	ctx, cancel := context.WithTimeout(ctx, conversionDeadline)
+	defer cancel()
+	deadline, _ := ctx.Deadline()
+	for {
+		result, err := multipartCall(ctx, router, "/v1/convert/file?mode=images", "files", filename, data, nil)
+		delay := capacityDelay(err)
+		if delay == 0 || !time.Now().Add(delay).Before(deadline) {
+			return result, err
+		}
+		wait := time.NewTimer(delay)
+		select {
+		case <-wait.C:
+		case <-ctx.Done():
+			wait.Stop()
+			return nil, err
+		}
+	}
+}
+
+// capacityDelay is how long a capacity rejection asks to wait, or zero when the
+// refusal is final. An exhausted quota needs the user rather than a retry.
+func capacityDelay(err error) time.Duration {
+	var e *apiError
+	if !errors.As(err, &e) || e.Code == "QUOTA_EXHAUSTED" || e.Status != http.StatusTooManyRequests && e.Status != http.StatusServiceUnavailable {
+		return 0
+	}
+	return time.Duration(e.RetryAfter) * time.Second
+}
+
 func multipartCall(ctx context.Context, service *downstreamService, path, fileField, name string, data []byte, fields object) ([]byte, error) {
 	var buffer bytes.Buffer
 	writer := multipart.NewWriter(&buffer)
@@ -338,9 +385,6 @@ func multipartCall(ctx context.Context, service *downstreamService, path, fileFi
 	if key := callerKey(ctx); key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
-	if service.Role == "audio" {
-		req.Header.Set("X-Tinfoil-Model", "voxtral-small-24b")
-	}
 	resp, err := service.Client.Do(req)
 	if err != nil {
 		return nil, err
@@ -354,7 +398,7 @@ func multipartCall(ctx context.Context, service *downstreamService, path, fileFi
 		return nil, apiErr(413, "ATTACHMENT_TOO_LARGE", "The converted document exceeds the text limit")
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, downstreamError(resp.StatusCode, b)
+		return nil, withRetryAfter(downstreamError(resp.StatusCode, b), resp.Header)
 	}
 	return b, nil
 }
@@ -365,11 +409,12 @@ func (h *harness) transcribe(ctx context.Context, filename string, data []byte) 
 	if !slices.Contains(audioExtensions, strings.ToLower(filepath.Ext(filename))) {
 		return "", apiErr(415, "ATTACHMENT_UNSUPPORTED", "Unsupported recording type")
 	}
-	service := h.services["audio"]
-	if service == nil {
+	// The router reads the model from the form, as the web client's SDK sends it.
+	router := h.services["router"]
+	if router == nil {
 		return "", apiErr(503, "TOOL_UNAVAILABLE", "Transcription is unavailable")
 	}
-	b, err := multipartCall(ctx, service, "/v1/audio/transcriptions", "file", filename, data, object{"model": "voxtral-small-24b", "response_format": "text"})
+	b, err := multipartCall(ctx, router, "/v1/audio/transcriptions", "file", filename, data, object{"model": "voxtral-small-24b", "response_format": "text"})
 	if err != nil {
 		return "", err
 	}
@@ -702,7 +747,7 @@ func (h *harness) hydrateContext(ctx context.Context, p *principal, key contentK
 				continue
 			}
 			var model *model
-			for _, m := range h.models {
+			for _, m := range h.offer.get() {
 				if m.vision {
 					model = m
 					break

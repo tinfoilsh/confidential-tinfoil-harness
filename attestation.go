@@ -2,20 +2,11 @@ package main
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"log/slog"
 	"net/http"
 	"time"
 )
 
-const (
-	verificationHTTPTimeout = 15 * time.Second
-	attestationTimeout      = 20 * time.Second
-	replicaPoolTimeout      = 45 * time.Second
-)
-
-type enclaveVerifier func(context.Context, string, string, string, string) (*http.Client, error)
+const attestationTimeout = 20 * time.Second
 
 type attestationRunner struct {
 	slots   chan struct{}
@@ -24,9 +15,10 @@ type attestationRunner struct {
 
 var startupAttestation = attestationRunner{slots: make(chan struct{}, 8), timeout: attestationTimeout}
 
-// The pinned SDK has no context parameter for verification. Bound how long
-// startup waits, discard late results, and retain the slot until the SDK exits
-// so an unresponsive dependency cannot accumulate unlimited verification work.
+// The SDK verifies a direct enclave at construction without a context, and may
+// retry a 30-second attestation fetch once. Bound how long startup waits,
+// discard late results, and retain the slot until the SDK exits so an
+// unresponsive dependency cannot accumulate unlimited verification work.
 func (r *attestationRunner) run(ctx context.Context, verify func() (*http.Client, error)) (*http.Client, error) {
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
@@ -71,25 +63,4 @@ func (r *attestationRunner) run(ctx context.Context, verify func() (*http.Client
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-}
-
-func attestReplicas(ctx context.Context, hosts []string, repo, baseURL, usageSecret string, verify enclaveVerifier) (string, *http.Client, error) {
-	ctx, cancel := context.WithTimeout(ctx, replicaPoolTimeout)
-	defer cancel()
-	var last error
-	for _, host := range hosts {
-		if err := ctx.Err(); err != nil {
-			return "", nil, err
-		}
-		client, err := verify(ctx, host, repo, baseURL, usageSecret)
-		if err == nil {
-			return host, client, nil
-		}
-		last = err
-		slog.Warn("replica did not verify", "repo", repo, "enclave", host, "error", err)
-	}
-	if last == nil {
-		last = errors.New("gateway advertised no replicas")
-	}
-	return "", nil, fmt.Errorf("no replica verified for %s: %w", repo, last)
 }
