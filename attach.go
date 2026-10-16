@@ -380,8 +380,8 @@ func (h *harness) transcribe(ctx context.Context, filename string, data []byte) 
 	return string(b), nil
 }
 
-// attachment finds an attachment a client may download: one it uploaded, one
-// in the named thread, or one in the index older harness releases kept.
+// attachment finds an attachment a client may download: one it uploaded or
+// one in the named thread.
 func (h *harness) attachment(ctx context.Context, p *principal, key contentKey, id, threadID string) (object, []byte, error) {
 	h.chatMu.Lock()
 	cached := h.attachments[p.scope()+"/"+id]
@@ -408,12 +408,6 @@ func (h *harness) attachment(ctx context.Context, p *principal, key contentKey, 
 			return nil, nil, err
 		}
 		descriptor = threadAttachment(normalizeThread(row), id)
-	} else {
-		profile, err := h.profile(ctx, p, key)
-		if err != nil {
-			return nil, nil, err
-		}
-		descriptor = clone(obj(obj(profile["harnessAttachments"])[id]))
 	}
 	if len(descriptor) == 0 {
 		return nil, nil, apiErr(404, "THREAD_NOT_FOUND", "The attachment was not found")
@@ -425,7 +419,7 @@ func (h *harness) attachment(ctx context.Context, p *principal, key contentKey, 
 func threadAttachment(thread object, id string) object {
 	for _, message := range arr(thread["messages"]) {
 		for _, item := range arr(obj(message)["attachments"]) {
-			if a := obj(item); a["id"] == id || a["legacyId"] == id {
+			if a := obj(item); a["id"] == id {
 				return clone(a)
 			}
 		}
@@ -437,7 +431,7 @@ func (h *harness) attachmentBytes(ctx context.Context, p *principal, descriptor 
 	if value := str(descriptor["base64"]); value != "" {
 		return base64.StdEncoding.DecodeString(value)
 	}
-	id := firstString(descriptor["storageId"], descriptor["id"])
+	id := str(descriptor["id"])
 	if !public && str(descriptor["encryptionKey"]) == "" && str(descriptor["key"]) != "" {
 		return h.legacyAttachmentBytes(ctx, id, str(descriptor["key"]))
 	}
@@ -658,11 +652,6 @@ func (h *harness) hydrateContext(ctx context.Context, p *principal, key contentK
 		for _, value := range arr(obj(message)["attachments"]) {
 			a := obj(value)
 			if !isImage(a) {
-				if vision && !ephemeral {
-					if err := h.inlinePageImages(ctx, p, a); err != nil {
-						return err
-					}
-				}
 				continue
 			}
 			if !vision && str(a["description"]) != "" {

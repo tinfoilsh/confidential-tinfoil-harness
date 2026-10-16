@@ -430,21 +430,13 @@ func (h *harness) writeBackup(ctx context.Context, p *principal, key contentKey,
 					for _, value := range arr(a["pages"]) {
 						page := obj(value)
 						portable := object{"page": integer(page["page"]), "text": str(page["text"]), "is_scanned": boolean(page["is_scanned"], false)}
-						imageRef := obj(page["imageAttachment"])
-						if str(imageRef["id"]) != "" || str(page["image"]) != "" {
-							if str(page["image"]) != "" {
-								imageRef = object{"base64": page["image"], "mimeType": "image/png"}
-							}
-							imageRef = clone(imageRef)
-							imageRef["fileName"] = firstString(a["fileName"], "page") + ".png"
+						if image := str(page["image"]); image != "" {
+							imageRef := object{"base64": image, "mimeType": "image/png", "fileName": firstString(a["fileName"], "page") + ".png"}
 							imageID, err := h.backupImage(ctx, p, b, relationships, row.ID, index, a, imageRef, page["page"])
-							if unreachable(err) {
-								b.omit(row.ID, str(a["id"])+"#page-"+jsonNumber(integer(page["page"])))
-							} else if err != nil {
+							if err != nil {
 								return err
-							} else {
-								portable["imageId"] = imageID
 							}
+							portable["imageId"] = imageID
 						}
 						pages = append(pages, portable)
 					}

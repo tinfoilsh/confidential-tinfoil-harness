@@ -10,7 +10,6 @@ import (
 	"regexp"
 	"strings"
 	"time"
-	"unicode/utf8"
 )
 
 // Since sync protocol 3 a stored document's blob holds its extracted content
@@ -54,8 +53,6 @@ func encodeDocument(a object) ([]byte, error) {
 	return encoded, nil
 }
 
-// Blobs the harness stored before protocol 3 hold the uploaded file, so their
-// text is still readable when it is UTF-8.
 func decodeDocument(data []byte) (object, error) {
 	if trimmed := bytes.TrimSpace(data); len(trimmed) > 0 && trimmed[0] == '{' {
 		var payload struct {
@@ -81,9 +78,6 @@ func decodeDocument(data []byte) (object, error) {
 			}
 			return out, nil
 		}
-	}
-	if utf8.Valid(data) && !bytes.ContainsRune(data, 0) {
-		return object{"textContent": string(data)}, nil
 	}
 	return nil, apiErr(422, "ATTACHMENT_UNSUPPORTED", "The stored document cannot be read")
 }
@@ -163,11 +157,8 @@ func (h *harness) placeAttachment(ctx context.Context, p *principal, threadID st
 	var data []byte
 	switch {
 	case !isImage(a) && documentContent(a):
-		// Before protocol 3 the harness kept a document's text in the row and
-		// its file in the blob. Store the content as the blob it now must be.
-		if err := h.inlinePageImages(ctx, p, a); err != nil {
-			return err
-		}
+		// A new upload, or a row the web or iOS app wrote before it stored
+		// documents as blobs, keeps the content inline.
 		payload, err := encodeDocument(a)
 		if err != nil {
 			return err
@@ -217,29 +208,6 @@ func (h *harness) placeAttachment(ctx context.Context, p *principal, threadID st
 	delete(a, "key")
 	if pages := arr(a["pages"]); len(pages) > 0 {
 		a["pageCount"] = len(pages)
-	}
-	return nil
-}
-
-// Page images the harness stored as separate blobs are never referenced by a
-// chat, so sync deletes them. Read them back while they still exist.
-func (h *harness) inlinePageImages(ctx context.Context, p *principal, a object) error {
-	for _, item := range arr(a["pages"]) {
-		page := obj(item)
-		ref := obj(page["imageAttachment"])
-		if str(page["image"]) != "" || str(ref["id"]) == "" {
-			delete(page, "imageAttachment")
-			continue
-		}
-		data, err := h.attachmentBytes(ctx, p, ref, false)
-		if err != nil && !unreachable(err) {
-			return err
-		}
-		if err == nil {
-			page["image"] = base64.StdEncoding.EncodeToString(data)
-			clear(data)
-		}
-		delete(page, "imageAttachment")
 	}
 	return nil
 }

@@ -188,16 +188,16 @@ func TestMissingDocumentIsDescribedInsteadOfFailingTheTurn(t *testing.T) {
 	}
 }
 
-func TestHarnessProtocolTwoDocumentIsStoredAgain(t *testing.T) {
+func TestInlineDocumentIsOffloadedUnderItsThread(t *testing.T) {
 	var prompt string
 	h, rows, key := testChatHarness(t, capturePrompt(&prompt))
 	fake := newFakeSync(t, h)
-	// Before protocol 3 the harness kept the text inline and the file in the blob.
-	oldID, oldKey := fake.seed("pending_x", []byte("%PDF-1.7 binary"))
-	storedThread(rows, "alice", "chat-1", object{"id": oldID, "type": "document", "fileName": "deck.pdf", "encryptionKey": oldKey, "storageThreadId": "pending_x", "textContent": "slide text", "pages": nil})
+	// The web and iOS apps kept a document's content in the row before storing it as a blob.
+	clientID := "3f2b8c1e-5d4a-4e6b-9c7d-1a2b3c4d5e6f"
+	storedThread(rows, "alice", "chat-1", object{"id": clientID, "type": "document", "fileName": "deck.pdf", "textContent": "slide text", "pages": nil})
 	eventsIn(t, postRoute(h, "/v1/threads/turn", continueInput(key, "chat-1"), "alice"))
 	if fake.putCount() != 1 {
-		t.Fatalf("expected the document to be stored again once, got %d", fake.putCount())
+		t.Fatalf("expected the document to be stored once, got %d", fake.putCount())
 	}
 	payload, _ := base64.StdEncoding.DecodeString(str(fake.puts[0]["plaintext"]))
 	if fake.puts[0]["chat_id"] != "chat-1" || string(payload) != `{"textContent":"slide text"}` {
@@ -205,8 +205,8 @@ func TestHarnessProtocolTwoDocumentIsStoredAgain(t *testing.T) {
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", "chat-1")
 	stored := obj(arr(obj(arr(row.Data["messages"])[0])["attachments"])[0])
-	if stored["id"] == oldID || stored["storageThreadId"] != "chat-1" || stored["textContent"] != nil {
-		t.Fatalf("row still references the old blob: %v", stored)
+	if !enclaveAttachmentID.MatchString(str(stored["id"])) || str(stored["encryptionKey"]) == "" || stored["storageThreadId"] != "chat-1" || stored["textContent"] != nil {
+		t.Fatalf("row does not reference the stored blob: %v", stored)
 	}
 	if _, ok := stored["pages"]; ok {
 		t.Fatal("a null field was stored")
@@ -252,14 +252,13 @@ func TestMissingAttachmentsAreRepairedBeforeRetrying(t *testing.T) {
 }
 
 func TestLegacyKeyedAttachmentIsReadFromTheControlPlane(t *testing.T) {
-	var prompt string
-	h, rows, key := testChatHarness(t, capturePrompt(&prompt))
+	h, rows, key := testChatHarness(t, nil)
 	fake := newFakeSync(t, h)
 	legacyKey := bytes.Repeat([]byte{7}, 32)
 	block, _ := aes.NewCipher(legacyKey)
 	gcm, _ := cipher.NewGCM(block)
 	nonce := bytes.Repeat([]byte{1}, gcm.NonceSize())
-	sealed := append(nonce, gcm.Seal(nil, nonce, []byte("old notes"), nil)...)
+	sealed := append(nonce, gcm.Seal(nil, nonce, []byte("old photo"), nil)...)
 	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/storage/attachment/legacy-1" {
 			w.WriteHeader(404)
@@ -269,10 +268,14 @@ func TestLegacyKeyedAttachmentIsReadFromTheControlPlane(t *testing.T) {
 	}))
 	defer cp.Close()
 	h.controlplane = cp.URL
-	storedThread(rows, "alice", "chat-1", object{"id": "legacy-1", "type": "document", "fileName": "notes.txt", "key": base64.StdEncoding.EncodeToString(legacyKey)})
+	// The web and iOS apps stored images at the control plane before the sync enclave.
+	storedThread(rows, "alice", "chat-1", object{"id": "legacy-1", "type": "image", "fileName": "photo.png", "description": "a photo", "key": base64.StdEncoding.EncodeToString(legacyKey)})
 	eventsIn(t, postRoute(h, "/v1/threads/turn", continueInput(key, "chat-1"), "alice"))
-	if fake.putCount() != 1 || !strings.Contains(prompt, "old notes") {
+	if fake.putCount() != 1 {
 		t.Fatalf("legacy attachment was not moved under its thread: puts=%d", fake.putCount())
+	}
+	if payload, _ := base64.StdEncoding.DecodeString(str(fake.puts[0]["plaintext"])); fake.puts[0]["chat_id"] != "chat-1" || string(payload) != "old photo" {
+		t.Fatalf("stored %q under %v", payload, fake.puts[0]["chat_id"])
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", "chat-1")
 	stored := obj(arr(obj(arr(row.Data["messages"])[0])["attachments"])[0])
