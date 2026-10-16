@@ -19,9 +19,9 @@ var controlTokenPattern = regexp.MustCompile(`<\|[^|<>]{0,64}\|>?`)
 var urlFields = map[string]bool{"url": true, "urls": true, "fetch_url": true, "page_url": true, "href": true, "link": true}
 
 // sanitizeToolCallArguments strips leaked control tokens from URL arguments in
-// place and reports whether anything changed.
-func sanitizeToolCallArguments(args map[string]any) bool {
-	return len(args) > 0 && deepStripURLTokens(args)
+// place.
+func sanitizeToolCallArguments(args map[string]any) {
+	deepStripURLTokens(args)
 }
 
 func stripModelControlTokens(s string) string {
