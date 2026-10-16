@@ -1088,14 +1088,13 @@ func TestALargeSearchResultIsClippedNotFlattened(t *testing.T) {
 	}
 }
 
-func TestWebSearchIsBilledOncePerSession(t *testing.T) {
+func TestWebSearchIsNeverBilled(t *testing.T) {
 	for _, route := range []string{"/v1/threads/turn", "/agui"} {
 		t.Run(route, func(t *testing.T) {
 			enclave := serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) { return nil, object{"results": []object{}} })
 			h, _, key := testChatHarness(t, toolTurns(toolCallChunk(0, "one", "web_search", `{"query":"cats"}`)+toolCallChunk(1, "two", "web_search", `{"query":"dogs"}`), nil))
 			in, apiKey := searchInput(key), "inference-alice"
 			if route == "/agui" {
-				// A caller names its own run, so its id must not be what websearch dedupes on.
 				in, apiKey = object{"runId": "client-chosen", "messages": []any{object{"role": "user", "content": "hi"}}}, "clerk-alice"
 			}
 			events := finishedRun(t, h, route, in)
@@ -1103,22 +1102,18 @@ func TestWebSearchIsBilledOncePerSession(t *testing.T) {
 			if len(calls) != 2 {
 				t.Fatalf("the enclave saw %d calls", len(calls))
 			}
-			var contexts []string
 			for _, call := range calls {
 				usage, ok, err := usagereporting.FromHeaders(call.header, "test-usage-secret", time.Now(), time.Minute)
 				if err != nil || !ok {
 					t.Fatalf("no signed usage context: %v", err)
 				}
-				if !usage.BillCustomerRequest || usage.ContextID != call.header.Get("X-Tinfoil-Tool-Request-Id") || usage.ContextID == events[0].RunID {
-					t.Fatalf("search was not billed per session: %+v", usage)
+				// The run's model turns are billed; a search within it is not.
+				if usage.BillCustomerRequest {
+					t.Fatalf("search was marked billable: %+v", usage)
 				}
-				if usage.RootRequestID != events[0].RunID || usage.ParentService != "harness" || usage.Depth != 1 || !usagereporting.VerifyAPIKeyHash(apiKey, usage.APIKeyHash) {
+				if usage.ContextID != events[0].RunID || usage.RootRequestID != events[0].RunID || usage.ParentService != "harness" || usage.Depth != 1 || !usagereporting.VerifyAPIKeyHash(apiKey, usage.APIKeyHash) {
 					t.Fatalf("search lost the run's identity: %+v", usage)
 				}
-				contexts = append(contexts, usage.ContextID)
-			}
-			if contexts[0] != contexts[1] {
-				t.Fatal("one session billed twice")
 			}
 		})
 	}

@@ -16,7 +16,6 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
 // A family's tools are named here rather than discovered, so an enclave that
@@ -129,7 +128,6 @@ type session struct {
 	fam     *family
 	mcp     *mcp.ClientSession
 	meta    mcp.Meta
-	usageID string // names this session to the enclave; never one a caller chose
 	remote  map[string]string
 	schemas map[string]*jsonschema.Schema // what each tool's arguments are coerced to
 	defs    []json.RawMessage
@@ -170,8 +168,7 @@ func (f *family) dial(ctx context.Context, header http.Header, progress func(str
 	if f.client == nil {
 		return nil, errors.New("enclave did not verify at startup")
 	}
-	usageID := uuid.NewString()
-	header.Set("X-Tinfoil-Tool-Request-Id", usageID)
+	header.Set("X-Tinfoil-Tool-Request-Id", uuid.NewString())
 	sealed := *f.client
 	sealed.Transport = &sessionHeaders{inner: cmp.Or(f.client.Transport, http.DefaultTransport), header: header}
 	client := mcp.NewClient(&mcp.Implementation{Name: "confidential-tinfoil-harness", Version: "2"}, &mcp.ClientOptions{
@@ -195,7 +192,7 @@ func (f *family) dial(ctx context.Context, header http.Header, progress func(str
 		published[t.Name] = t
 	}
 	schemas := schemaLookup(found.Tools)
-	s := &session{fam: f, mcp: opened, usageID: usageID, remote: map[string]string{}, schemas: map[string]*jsonschema.Schema{}}
+	s := &session{fam: f, mcp: opened, remote: map[string]string{}, schemas: map[string]*jsonschema.Schema{}}
 	for _, t := range f.tools {
 		serves, ok := published[t.remote]
 		if !ok {
@@ -254,12 +251,6 @@ func (t *toolset) call(ctx context.Context, name, progress string, args json.Raw
 	}
 	sanitizeToolCallArguments(arguments)
 	coerceArgumentsToSchema(name, arguments, s.schemas)
-	// The run signs its calls as already billed, but websearch bills its own
-	// requests, once per context id: this session's.
-	if usage, ok := ctx.Value(usageContextKey{}).(usagereporting.Context); ok {
-		usage.ContextID, usage.BillCustomerRequest = s.usageID, true
-		ctx = context.WithValue(ctx, usageContextKey{}, usage)
-	}
 	// Cloned because the progress token is written into metadata shared by every call.
 	params := &mcp.CallToolParams{Meta: maps.Clone(s.meta), Name: s.remote[name], Arguments: arguments}
 	params.SetProgressToken(progress)
