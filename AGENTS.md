@@ -1,6 +1,6 @@
 # Testing
 
-A test earns its place by failing on a plausible wrong implementation that no other test catches. Before adding or keeping one, name that bug. If replacing the production code with a no-op, or with the obvious wrong branch, still passes, the test is weight.
+A test earns its place by failing on a plausible wrong implementation that no other test catches. Before adding or keeping one, name that bug. If the test still passes when the production code is replaced with a no-op or the obvious wrong branch, delete it.
 
 Run what CI runs: `GOWORK=off go test -race -count=1 -shuffle=on ./...`, plus `gofmt -l .` and `go vet ./...`. Timing-sensitive tests should also pass with `-cpu=1`.
 

@@ -48,7 +48,7 @@ func TestImagePreprocessingBoundsAndTransparency(t *testing.T) {
 	binary.BigEndian.PutUint32(oversized[16:20], 10000)
 	binary.BigEndian.PutUint32(oversized[20:24], 10000)
 	binary.BigEndian.PutUint32(oversized[29:33], crc32.ChecksumIEEE(oversized[12:29]))
-	if _, _, err := resizeImage(oversized); err == nil || !strings.Contains(asAPIError(err).Message, "pixel limit") {
+	if _, _, err := resizeImage(oversized); err == nil || asAPIError(err).Code != "ATTACHMENT_UNSUPPORTED" || !strings.Contains(asAPIError(err).Message, "pixel limit") {
 		t.Fatal("pixel limit was not checked before decoding", err)
 	}
 	source.Reset()
