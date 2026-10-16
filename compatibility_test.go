@@ -282,9 +282,13 @@ func TestTruncatedModelStreamPreservesPartialAnswer(t *testing.T) {
 	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
 	})
+	drained := screenedBy(t, h)
 	events := eventsIn(t, postRoute(h, "/v1/threads/turn", sendInput(key), "alice"))
 	if events[len(events)-1].Code != "UPSTREAM_REFUSED" {
 		t.Fatal("truncated stream reported success")
+	}
+	if got := drained(); len(got) != 0 {
+		t.Fatalf("a failed chat was screened: %+v", got)
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
 	last := obj(arr(row.Data["messages"])[1])

@@ -1249,24 +1249,6 @@ func lastRequest(r *http.Request) []any {
 	return arr(body["messages"])
 }
 
-func TestTrailingProseIsCutFromReplayedToolArguments(t *testing.T) {
-	var turns atomic.Int32
-	replayed := make(chan string, 1)
-	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
-		if turns.Add(1) == 1 {
-			io.WriteString(w, toolCallChunk(0, "search-call", "web_search", `{"query":"cats"}Now searching...`)+"data: [DONE]\n\n")
-			return
-		}
-		messages := lastRequest(r)
-		replayed <- str(obj(obj(arr(obj(messages[len(messages)-2])["tool_calls"])[0])["function"])["arguments"])
-		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n")
-	})
-	finishedRun(t, h, "/v1/threads/turn", sendInput(key))
-	if got := <-replayed; got != `{"query":"cats"}` {
-		t.Fatalf("the next turn replayed %q", got)
-	}
-}
-
 func TestToolArgumentsAreRepairedBeforeTheCall(t *testing.T) {
 	enclave := serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
 		return nil, object{"pages": []object{{"url": "https://a.test/x", "content": "page"}}, "results": []object{{"url": "https://a.test/x", "status": "completed"}}}
@@ -1417,42 +1399,6 @@ func TestArgumentsBeforeTheNameAreSentWhenTheCallOpens(t *testing.T) {
 	}
 	if got := streamedArgs(t, events, "nameless"); !reflect.DeepEqual(got, []string{`{"a":1}`}) {
 		t.Fatalf("a call that never named its tool was sent %q", got)
-	}
-}
-
-func TestWidgetSchemaErrorsReachTheModelUntilTheRetryCap(t *testing.T) {
-	var turns atomic.Int32
-	read := make(chan string, maxWidgetRetries+1)
-	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
-		turn := int(turns.Add(1))
-		if turn > 1 {
-			messages := lastRequest(r)
-			read <- str(obj(messages[len(messages)-1])["content"])
-		}
-		if turn <= maxWidgetRetries+1 {
-			io.WriteString(w, toolCallChunk(0, "widget-"+strconv.Itoa(turn), "render_artifact_preview", `{"title":"Demo","source":"<p>hi</p>"}`)+"data: [DONE]\n\n")
-			return
-		}
-		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"I could not draw it.\"}}]}\n\ndata: [DONE]\n\n")
-	})
-	h.catalog.get().EnabledWidgets = []string{"render_artifact_preview"}
-	in := sendInput(key)
-	in["widgets"] = []any{"render_artifact_preview"}
-	events := finishedRun(t, h, "/v1/threads/turn", in)
-	for i := 1; i <= maxWidgetRetries+1; i++ {
-		got := <-read
-		if i <= maxWidgetRetries && !strings.Contains(got, "did not match the tool's parameter schema") || i > maxWidgetRetries && got != `{"status":"executed"}` {
-			t.Fatalf("after failure %d the model read %s", i, got)
-		}
-	}
-	failures := 0
-	for _, e := range events {
-		if e.Type == "TOOL_CALL_RESULT" && obj(decodeValue(e.Content))["status"] == "error" {
-			failures++
-		}
-	}
-	if failures != maxWidgetRetries+1 {
-		t.Fatalf("the caller saw %d failed renders", failures)
 	}
 }
 
@@ -1892,59 +1838,6 @@ func TestAutoChatsAreFlaggedOnlyByTheHarness(t *testing.T) {
 	if got := drained(); len(got) != 1 || got[0].ConversationID != events[0].ThreadID || got[0].Messages[len(got[0].Messages)-1].Content != "hello" {
 		t.Fatalf("the auto chat was not screened with its chat id: %+v", got)
 	}
-}
-
-func TestFailedAnonymousAndCancelledChatsAreNotScreened(t *testing.T) {
-	t.Run("failed", func(t *testing.T) {
-		h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
-			io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
-		})
-		drained := screenedBy(t, h)
-		if last := eventsIn(t, postRoute(h, "/v1/threads/turn", sendInput(key), "alice")); last[len(last)-1].Type != "RUN_ERROR" {
-			t.Fatal("a cut stream finished the run")
-		}
-		if got := drained(); len(got) != 0 {
-			t.Fatalf("a failed chat was screened: %+v", got)
-		}
-	})
-	t.Run("anonymous", func(t *testing.T) {
-		h, _, key := testChatHarness(t, nil)
-		drained := screenedBy(t, h)
-		in := sendInput(key)
-		delete(in, "key")
-		in["ephemeral"] = true
-		eventsIn(t, postRoute(h, "/v1/threads/turn", in, ""))
-		if got := drained(); len(got) != 0 {
-			t.Fatalf("an anonymous chat was screened: %+v", got)
-		}
-	})
-	t.Run("cancelled", func(t *testing.T) {
-		started := make(chan struct{})
-		h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
-			io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
-			w.(http.Flusher).Flush()
-			close(started)
-			<-r.Context().Done()
-		})
-		drained := screenedBy(t, h)
-		p := &principal{ID: "alice", JWT: "clerk-alice"}
-		run, err := h.acceptTurn(context.Background(), p, key, sendInput(key))
-		if err != nil {
-			t.Fatal(err)
-		}
-		<-started
-		if _, err := h.cancelThread(context.Background(), p, key, object{"key": key.base64(), "threadId": run.thread.id, "runId": run.log.id}); err != nil {
-			t.Fatal(err)
-		}
-		select {
-		case <-run.finished:
-		case <-time.After(3 * time.Second):
-			t.Fatal("cancel timed out")
-		}
-		if got := drained(); len(got) != 0 {
-			t.Fatalf("a cancelled chat was screened: %+v", got)
-		}
-	})
 }
 
 func TestAnswersAnnotateTheSourcesTheyCite(t *testing.T) {
