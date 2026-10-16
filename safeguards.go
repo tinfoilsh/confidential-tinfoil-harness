@@ -311,9 +311,10 @@ type screening struct {
 }
 
 // screening captures the prompt and history a run was asked, without tool
-// results. Turns through auto are left to the router, which classifies them.
-func (h *harness) screening(req *request, m *model) *screening {
-	if h.safeguards == nil || m == h.autoModel {
+// results. Turns through auto are screened here too: the router is not told
+// their chat, so the control plane ignores the router's report of them.
+func (h *harness) screening(req *request) *screening {
+	if h.safeguards == nil {
 		return nil
 	}
 	var messages []safeguardMessage

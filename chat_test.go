@@ -1321,7 +1321,7 @@ func TestACompletedFirstPartyChatIsScreenedOnce(t *testing.T) {
 	}
 }
 
-func TestAutoChatsAreLeftToTheRouter(t *testing.T) {
+func TestAutoChatsAreFlaggedOnlyByTheHarness(t *testing.T) {
 	conversationHeaders := make(chan string, 1)
 	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		conversationHeaders <- r.Header.Get("X-Tinfoil-Conversation-Id")
@@ -1331,11 +1331,12 @@ func TestAutoChatsAreLeftToTheRouter(t *testing.T) {
 	in := sendInput(key)
 	obj(in["options"])["model"] = "auto"
 	events := finishedRun(t, h, "/v1/threads/turn", in)
-	if header := <-conversationHeaders; header != events[0].ThreadID {
+	// Without the chat id the control plane ignores the router's own report.
+	if header := <-conversationHeaders; header != "" {
 		t.Fatalf("the router was told the conversation is %q", header)
 	}
-	if got := drained(); len(got) != 0 {
-		t.Fatalf("an auto chat was screened twice: %+v", got)
+	if got := drained(); len(got) != 1 || got[0].ConversationID != events[0].ThreadID || got[0].Messages[len(got[0].Messages)-1].Content != "hello" {
+		t.Fatalf("the auto chat was not screened with its chat id: %+v", got)
 	}
 }
 

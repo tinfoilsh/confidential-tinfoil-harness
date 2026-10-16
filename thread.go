@@ -522,7 +522,7 @@ func (h *harness) beginChatRun(ctx context.Context, r *chatRun) error {
 	if err != nil {
 		return err
 	}
-	r.screening = h.screening(request, model)
+	r.screening = h.screening(request)
 	if r.input["kind"] == "retryToolCall" {
 		for _, message := range arr(working["messages"]) {
 			for _, b := range arr(obj(message)["timeline"]) {

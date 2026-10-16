@@ -195,21 +195,17 @@ func TestIsFirstPartyChatAccessJWT(t *testing.T) {
 }
 
 func TestScreeningIsThePromptAndHistoryWithoutToolResults(t *testing.T) {
-	auto := &model{name: "auto"}
-	h := &harness{safeguards: &submitter{}, autoModel: auto}
+	h := &harness{safeguards: &submitter{}}
 	req := &request{system: "be helpful", conversation: "chat-1", groups: [][]json.RawMessage{
 		{raw(object{"role": "user", "content": []any{object{"type": "text", "text": "look"}, object{"type": "image_url", "image_url": object{"url": "data:..."}}}})},
 		{raw(object{"role": "assistant", "content": "", "reasoning_content": "hidden", "tool_calls": []any{object{"id": "c1"}}}), raw(object{"role": "tool", "tool_call_id": "c1", "content": "42"})},
 		{raw(object{"role": "user", "content": "thanks"})},
 	}}
 	want := &screening{conversation: "chat-1", messages: []safeguardMessage{{Role: "system", Content: "be helpful"}, {Role: "user", Content: "look\n[image_url]"}, {Role: "assistant", Content: ""}, {Role: "user", Content: "thanks"}}}
-	if got := h.screening(req, &model{name: "kimi-k3"}); !reflect.DeepEqual(got, want) {
+	if got := h.screening(req); !reflect.DeepEqual(got, want) {
 		t.Fatalf("captured %+v\nwant %+v", got, want)
 	}
-	if h.screening(req, auto) != nil {
-		t.Fatal("a turn through the router was captured for a second classification")
-	}
-	if (&harness{}).screening(req, &model{name: "kimi-k3"}) != nil {
+	if (&harness{}).screening(req) != nil {
 		t.Fatal("a conversation was captured with no sidecar configured")
 	}
 }
@@ -229,7 +225,7 @@ func TestOnlyCompletedFirstPartyChatsAreScreened(t *testing.T) {
 		"widget retry": {func(r *chatRun) { r.retryTarget = object{"name": "render_chart"} }, reply, nil, false},
 		"anonymous":    {func(r *chatRun) { r.principal.Anonymous = true }, reply, nil, false},
 		"api key":      {func(r *chatRun) { r.credential.Key = "tk_api_key" }, reply, nil, false},
-		"through auto": {func(r *chatRun) { r.screening = nil }, reply, nil, false},
+		"not captured": {func(r *chatRun) { r.screening = nil }, reply, nil, false},
 		"no reply":     {func(*chatRun) {}, []object{{"content": ""}}, nil, false},
 	} {
 		t.Run(name, func(t *testing.T) {

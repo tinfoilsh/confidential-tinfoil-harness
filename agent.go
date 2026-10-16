@@ -93,7 +93,7 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 		if turn == 1 {
 			turnCtx = first
 		}
-		calls, answer, err := h.turn(turnCtx, out, m, payload, set.widgets, req.conversation)
+		calls, answer, err := h.turn(turnCtx, out, m, payload, set.widgets)
 		if err != nil && req.refreshAuth != nil && !refreshed && asAPIError(err).HTTP == http.StatusUnauthorized {
 			// A 401 rejected this model request before processing. Replay its
 			// exact body once, retaining the run ID and request billing flag.
@@ -110,7 +110,7 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 				billing.APIKeyHash = inRun.APIKeyHash
 				turnCtx = context.WithValue(ctx, usageContextKey{}, billing)
 			}
-			calls, answer, err = h.turn(turnCtx, out, m, payload, set.widgets, req.conversation)
+			calls, answer, err = h.turn(turnCtx, out, m, payload, set.widgets)
 		}
 		if err != nil {
 			return err
@@ -300,7 +300,7 @@ func clip(out string, limit int) string {
 	return out
 }
 
-func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byte, widgets map[string]widget, conversation string) ([]toolCall, string, error) {
+func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byte, widgets map[string]widget) ([]toolCall, string, error) {
 	endpoint := m.endpoint
 	if endpoint == "" {
 		endpoint = h.gateway + "/v1/chat/completions"
@@ -311,10 +311,6 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
-	// The router classifies the turns it serves for the safeguards, by chat.
-	if m == h.autoModel && conversation != "" {
-		req.Header.Set("X-Tinfoil-Conversation-Id", conversation)
-	}
 
 	resp, err := m.client.Do(req)
 	if err != nil {
