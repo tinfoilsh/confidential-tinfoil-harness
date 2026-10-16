@@ -154,3 +154,58 @@ func TestSyncListPreservesChatProjectFilter(t *testing.T) {
 		t.Fatalf("list project chats: page=%+v err=%v", page, err)
 	}
 }
+
+func TestListPullsInBatchesAndListsUnreadableRows(t *testing.T) {
+	ids := []string{}
+	for i := range 25 {
+		ids = append(ids, "row-"+jsonNumber(i))
+	}
+	batches, retried := []int{}, 0
+	client := &syncClient{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
+		if r.Header.Get("X-Sync-Protocol") != "3" {
+			return syncTestResponse(426, object{"code": "SYNC_PROTOCOL_UPGRADE_REQUIRED"})
+		}
+		var in object
+		json.NewDecoder(r.Body).Decode(&in)
+		if r.URL.Path == "/v1/sync/list-status" {
+			updates := []object{}
+			for _, id := range ids {
+				updates = append(updates, object{"id": id})
+			}
+			return syncTestResponse(200, object{"updates": updates})
+		}
+		requested := arr(in["ids"])
+		batches = append(batches, len(requested))
+		items := []object{}
+		for _, value := range requested {
+			id := str(value)
+			switch {
+			case id == "row-3":
+				items = append(items, object{"id": id, "ok": false, "code": "UNKNOWN_KEY", "key_id": "retired"})
+			case id == "row-7" && retried == 0:
+				retried++
+				items = append(items, object{"id": id, "ok": false, "code": "NETWORK"})
+			default:
+				items = append(items, object{"id": id, "ok": true, "etag": "1", "plaintext": base64.StdEncoding.EncodeToString(raw(object{"title": id}))})
+			}
+		}
+		return syncTestResponse(200, object{"items": items})
+	})}}
+	page, err := client.list(context.Background(), &principal{ID: "alice", JWT: "jwt"}, randomKey(), "chat", "", "", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(batches, []int{20, 1, 5}) {
+		t.Fatalf("pull batches: %v", batches)
+	}
+	titles := []string{}
+	for _, row := range page.Rows {
+		titles = append(titles, str(row.Data["title"]))
+	}
+	if len(page.Rows) != 24 || !slices.Contains(titles, "row-7") || slices.Contains(titles, "row-3") || !slices.Equal(page.Unreadable, []string{"row-3"}) {
+		t.Fatalf("rows %v, unreadable %v", titles, page.Unreadable)
+	}
+	if _, err := client.load(context.Background(), &principal{ID: "alice", JWT: "jwt"}, randomKey(), "chat", "row-3"); asAPIError(err).Code != "KEY_MISMATCH" {
+		t.Fatalf("loading an unreadable row: %v", err)
+	}
+}

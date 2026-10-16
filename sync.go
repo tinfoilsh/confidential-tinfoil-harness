@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -19,6 +21,9 @@ type storedRow struct {
 type rowPage struct {
 	Rows []storedRow
 	Next string
+	// Rows sync holds but cannot open, such as one sealed to a retired key.
+	// A page lists them rather than failing, so one row cannot hide the rest.
+	Unreadable []string
 }
 type rowStore interface {
 	load(context.Context, *principal, contentKey, string, string) (*storedRow, error)
@@ -31,13 +36,37 @@ type syncClient struct {
 	Client *http.Client
 }
 
+const (
+	// Sync refuses clients that do not store documents as attachment blobs.
+	syncProtocol = "3"
+	// Sync's own per-route budgets, which also cover reading the request.
+	syncStandardTimeout   = 30 * time.Second
+	syncPushTimeout       = 60 * time.Second
+	syncAttachmentTimeout = 5 * time.Minute
+	// Sync fetches a pull's rows within one 30-second budget.
+	pullBatch        = 20
+	maxSyncPlaintext = 32 << 20
+)
+
+func syncTimeout(path string) time.Duration {
+	switch {
+	case path == "/v1/sync/push":
+		return syncPushTimeout
+	case path == "/v1/sync/fork", path == "/v1/import/upload", strings.HasPrefix(path, "/v1/attachment/"):
+		return syncAttachmentTimeout
+	}
+	return syncStandardTimeout
+}
+
 func (s *syncClient) call(ctx context.Context, p *principal, path string, in, out any) error {
 	if s == nil || s.Client == nil {
 		return apiErr(503, "UPSTREAM_REFUSED", "The sync enclave is unavailable")
 	}
+	ctx, cancel := context.WithTimeout(ctx, syncTimeout(path))
+	defer cancel()
 	ctx = context.WithValue(ctx, apiKeyKey{}, "")
 	ctx = context.WithValue(ctx, usageContextKey{}, false)
-	return postJSON(ctx, s.Client, s.URL+path, string(p.JWT), in, out)
+	return postJSONWithHeaders(ctx, s.Client, s.URL+path, string(p.JWT), map[string]string{"X-Sync-Protocol": syncProtocol}, in, out)
 }
 
 type pullItem struct {
@@ -51,31 +80,48 @@ type pullItem struct {
 	ProjectID  *string `json:"project_id"`
 }
 
-func (s *syncClient) pull(ctx context.Context, p *principal, key contentKey, scope string, ids []string) ([]storedRow, error) {
+// pull returns the rows it could open and the error for each it could not.
+func (s *syncClient) pull(ctx context.Context, p *principal, key contentKey, scope string, ids []string) ([]storedRow, map[string]error, error) {
+	rows, failed := []storedRow{}, map[string]error{}
+	for start := 0; start < len(ids); start += pullBatch {
+		if err := s.pullBatch(ctx, p, key, scope, ids[start:min(len(ids), start+pullBatch)], true, &rows, failed); err != nil {
+			return nil, nil, err
+		}
+	}
+	return rows, failed, nil
+}
+
+func (s *syncClient) pullBatch(ctx context.Context, p *principal, key contentKey, scope string, ids []string, retry bool, rows *[]storedRow, failed map[string]error) error {
 	var result struct {
 		Items []pullItem `json:"items"`
 	}
 	err := s.call(ctx, p, "/v1/sync/pull", object{"scope": scope, "ids": ids, "keys": []object{{"key": key.base64()}}}, &result)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	rows := []storedRow{}
+	again := []string{}
 	for _, item := range result.Items {
 		if !item.OK {
-			if item.Code == "NOT_FOUND" {
-				continue
+			switch {
+			case item.Code == "NOT_FOUND":
+			case item.Code == "NETWORK" && retry: // sync could not fetch it within its deadline
+				again = append(again, item.ID)
+			default:
+				failed[item.ID] = downstreamError(409, raw(object{"code": item.Code, "key_id": item.KeyID}))
 			}
-			return nil, downstreamError(409, raw(object{"code": item.Code, "key_id": item.KeyID}))
+			continue
 		}
 		plain, err := base64.StdEncoding.DecodeString(item.Plaintext)
 		if err != nil {
-			return nil, errors.New("invalid sync plaintext encoding")
+			failed[item.ID] = errors.New("invalid sync plaintext encoding")
+			continue
 		}
 		var data object
 		err = json.Unmarshal(plain, &data)
 		clear(plain)
 		if err != nil || data == nil {
-			return nil, errors.New("invalid sync row")
+			failed[item.ID] = errors.New("invalid sync row")
+			continue
 		}
 		if item.ProjectSet {
 			data["projectId"] = item.ProjectID
@@ -83,13 +129,19 @@ func (s *syncClient) pull(ctx context.Context, p *principal, key contentKey, sco
 				data["projectId"] = *item.ProjectID
 			}
 		}
-		rows = append(rows, storedRow{ID: item.ID, ETag: item.ETag, Data: data})
+		*rows = append(*rows, storedRow{ID: item.ID, ETag: item.ETag, Data: data})
 	}
-	return rows, nil
+	if len(again) > 0 {
+		return s.pullBatch(ctx, p, key, scope, again, false, rows, failed)
+	}
+	return nil
 }
 func (s *syncClient) load(ctx context.Context, p *principal, key contentKey, scope, id string) (*storedRow, error) {
-	rows, err := s.pull(ctx, p, key, scope, []string{id})
+	rows, failed, err := s.pull(ctx, p, key, scope, []string{id})
 	if err != nil {
+		return nil, err
+	}
+	if err := failed[id]; err != nil {
 		return nil, err
 	}
 	for _, r := range rows {
@@ -128,7 +180,12 @@ func (s *syncClient) list(ctx context.Context, p *principal, key contentKey, sco
 		ids = append(ids, item.ID)
 	}
 	if len(ids) != 0 {
-		page.Rows, err = s.pull(ctx, p, key, scope, ids)
+		var failed map[string]error
+		page.Rows, failed, err = s.pull(ctx, p, key, scope, ids)
+		for id := range failed {
+			page.Unreadable = append(page.Unreadable, id)
+		}
+		slices.Sort(page.Unreadable)
 	}
 	return page, err
 }
@@ -147,10 +204,14 @@ func (s *syncClient) push(ctx context.Context, p *principal, key contentKey, sco
 	if scope == "project_document" {
 		metadata["projectId"] = row.Data["projectId"]
 	}
+	plaintext := raw(row.Data)
+	if len(plaintext) > maxSyncPlaintext {
+		return "", apiErr(413, "THREAD_TOO_LARGE", "The chat is too large to store")
+	}
 	var result struct {
 		ETag string `json:"etag"`
 	}
-	err := s.call(ctx, p, "/v1/sync/push", object{"scope": scope, "id": row.ID, "key": key.base64(), "plaintext": base64.StdEncoding.EncodeToString(raw(row.Data)), "if_match": match, "idempotency_key": nonce, "metadata": metadata}, &result)
+	err := s.call(ctx, p, "/v1/sync/push", object{"scope": scope, "id": row.ID, "key": key.base64(), "plaintext": base64.StdEncoding.EncodeToString(plaintext), "if_match": match, "idempotency_key": nonce, "metadata": metadata}, &result)
 	return result.ETag, err
 }
 func (s *syncClient) remove(ctx context.Context, p *principal, key contentKey, scope string, row *storedRow) error {
@@ -180,11 +241,18 @@ func stampRow(row *storedRow, scope string, fields []string) {
 // mutate always re-applies the operation to the freshly pulled row. A conflict
 // never causes an old whole-row image to overwrite another writer's fields.
 func (h *harness) eachRow(ctx context.Context, p *principal, key contentKey, scope, project string, visit func(*storedRow) error) error {
+	return h.eachRowOrUnreadable(ctx, p, key, scope, project, visit, func(string) {})
+}
+
+func (h *harness) eachRowOrUnreadable(ctx context.Context, p *principal, key contentKey, scope, project string, visit func(*storedRow) error, unreadable func(string)) error {
 	cursor := ""
 	for {
 		page, err := h.storeRows.list(ctx, p, key, scope, cursor, project, 100)
 		if err != nil {
 			return err
+		}
+		for _, id := range page.Unreadable {
+			unreadable(id)
 		}
 		for _, row := range page.Rows {
 			if err := visit(&row); err != nil {
@@ -202,9 +270,10 @@ func (h *harness) eachRow(ctx context.Context, p *principal, key contentKey, sco
 }
 
 // Collect identifiers before deleting so changing the list cannot skip a page.
+// Deleting everything includes rows that cannot be opened.
 func (h *harness) rowIDs(ctx context.Context, p *principal, key contentKey, scope, project string) ([]string, error) {
 	ids := []string{}
-	err := h.eachRow(ctx, p, key, scope, project, func(row *storedRow) error { ids = append(ids, row.ID); return nil })
+	err := h.eachRowOrUnreadable(ctx, p, key, scope, project, func(row *storedRow) error { ids = append(ids, row.ID); return nil }, func(id string) { ids = append(ids, id) })
 	return ids, err
 }
 
@@ -222,11 +291,17 @@ func (h *harness) mutate(ctx context.Context, p *principal, key contentKey, scop
 		}
 		stampRow(row, scope, fields)
 		etag, err := h.storeRows.push(ctx, p, key, scope, row, uuid.NewString())
+		if e := asAPIError(err); scope == "chat" && e.Code == "MISSING_ATTACHMENT" {
+			if err := h.repairAttachments(ctx, p, row, e.missing); err != nil {
+				return nil, err
+			}
+			etag, err = h.storeRows.push(ctx, p, key, scope, row, uuid.NewString())
+		}
 		if err == nil {
 			row.ETag = etag
 			return row, nil
 		}
-		if asAPIError(err).Code != "REVISION_CONFLICT" {
+		if code := asAPIError(err).Code; code != "REVISION_CONFLICT" && code != "SYNC_OUTCOME_UNKNOWN" {
 			return nil, err
 		}
 	}

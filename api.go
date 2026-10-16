@@ -87,6 +87,8 @@ type apiError struct {
 	RetryAfter int    `json:"retryAfter,omitempty"`
 	Status     int    `json:"status,omitempty"`
 	KeyID      string `json:"keyId,omitempty"`
+
+	missing []string // attachment ids sync did not find under the pushed chat
 }
 
 func (e *apiError) Error() string { return e.Message }
@@ -209,6 +211,21 @@ func downstreamError(status int, body []byte) *apiError {
 		e.KeyID = firstString(in["current_key_id"], in["key_id"])
 	case "STALE_BLOB", "SYNC_CONFLICT":
 		e = apiErr(409, "REVISION_CONFLICT", "The stored row changed")
+	case "MISSING_ATTACHMENT":
+		e = apiErr(409, "MISSING_ATTACHMENT", "The chat references attachments that are not stored with it")
+		for _, id := range arr(in["missing_attachments"]) {
+			e.missing = append(e.missing, str(id))
+		}
+	case "PAYLOAD_TOO_LARGE":
+		e = apiErr(413, "THREAD_TOO_LARGE", "The chat is too large to store")
+	case "SYNC_PROTOCOL_UPGRADE_REQUIRED":
+		e.Message = "The sync service requires a newer protocol"
+	case "UPSTREAM":
+		if str(in["reason"]) == "outcome_unknown" {
+			// The write may have been stored. Retrying reapplies the change
+			// to a freshly pulled row, so retrying is safe.
+			e = apiErr(503, "SYNC_OUTCOME_UNKNOWN", "The sync service may not have stored the change")
+		}
 	case "PII_BLOCKED", "PII_DETECTED":
 		e = apiErr(422, "PII_BLOCKED", "The privacy screen refused the request")
 	default:
@@ -230,12 +247,18 @@ func downstreamError(status int, body []byte) *apiError {
 }
 
 func postJSON(ctx context.Context, client *http.Client, url, auth string, in, out any) error {
+	return postJSONWithHeaders(ctx, client, url, auth, nil, in, out)
+}
+
+func postJSONWithHeaders(ctx context.Context, client *http.Client, url, auth string, headers map[string]string, in, out any) error {
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(raw(in)))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Sync-Protocol", "2")
+	for name, value := range headers {
+		req.Header.Set(name, value)
+	}
 	if auth != "" {
 		req.Header.Set("Authorization", "Bearer "+auth)
 	}
@@ -245,7 +268,8 @@ func postJSON(ctx context.Context, client *http.Client, url, auth string, in, ou
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+		// A missing-attachment error lists every missing id.
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		return downstreamError(resp.StatusCode, b)
 	}
 	if out == nil {

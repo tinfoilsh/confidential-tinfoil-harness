@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"slices"
 )
 
@@ -16,17 +17,28 @@ func (h *harness) syncPins(ctx context.Context, p *principal, key contentKey, ro
 	if !exists {
 		return nil
 	}
+	mirror := true
 	for i := range rows {
 		row := &rows[i]
 		pinned := slices.ContainsFunc(arr(values), func(value any) bool { return value == row.ID })
 		if boolean(row.Data["pinned"], false) == pinned {
 			continue
 		}
-		updated, err := h.mutate(ctx, p, key, "chat", row.ID, false, nil, func(data object) error { data["pinned"] = pinned; return nil })
-		if err != nil {
-			return err
+		if mirror {
+			updated, err := h.mutate(ctx, p, key, "chat", row.ID, false, nil, func(data object) error { data["pinned"] = pinned; return nil })
+			if err == nil {
+				*row = *updated
+				continue
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			// Mirroring is a write during a read. After one failure the rest
+			// of this read shows the profile's pins without writing them back.
+			slog.Warn("pin not mirrored", "error", asAPIError(err).Code)
+			mirror = false
 		}
-		*row = *updated
+		row.Data["pinned"] = pinned
 	}
 	return nil
 }

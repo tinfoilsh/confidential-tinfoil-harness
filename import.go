@@ -242,6 +242,9 @@ func (h *harness) importStatus(ctx context.Context, p *principal, _ contentKey, 
 	if value, ok := result["failure_reason"]; ok {
 		result["failureReason"] = value
 	}
+	if value, ok := result["failure_detail"]; ok {
+		result["failureDetail"] = value
+	}
 	result["jobId"] = result["job_id"]
 	return result, nil
 }

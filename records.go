@@ -14,6 +14,7 @@ func (h *harness) apiRoutes() []routeSpec {
 		{"/v1/threads/update", false, true, h.updateThread}, {"/v1/threads/delete", false, true, h.deleteThread},
 		{"/v1/threads/search", false, true, h.searchThreads}, {"/v1/threads/cancel", true, false, h.cancelThread},
 		{"/v1/threads/queue/send", true, false, h.sendQueued}, {"/v1/threads/queue/remove", true, false, h.removeQueued}, {"/v1/threads/share", false, true, h.shareThread},
+		{"/v1/threads/share/revoke", false, false, h.revokeShare}, {"/v1/threads/share/status", false, false, h.shareStatus},
 		{"/v1/profile/get", false, true, h.getProfile}, {"/v1/profile/update", false, true, h.updateProfile},
 		{"/v1/projects/list", false, true, h.listProjects}, {"/v1/projects/get", false, true, h.getProject},
 		{"/v1/projects/create", false, true, h.createProject}, {"/v1/projects/update", false, true, h.updateProject},
@@ -192,7 +193,7 @@ func (h *harness) listThreads(ctx context.Context, p *principal, key contentKey,
 		}
 		list = append(list, threadSummary(t))
 	}
-	return object{"threads": list, "nextCursor": page.Next}, nil
+	return object{"threads": list, "nextCursor": page.Next, "unreadable": len(page.Unreadable)}, nil
 }
 func (h *harness) getThread(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
 	id, err := requiredID(in, "id")
@@ -280,7 +281,12 @@ func (h *harness) deleteRow(ctx context.Context, p *principal, key contentKey, s
 	for i := 0; i < 3; i++ {
 		row, err := h.storeRows.load(ctx, p, key, scope, id)
 		if err != nil {
-			return nil, err
+			if asAPIError(err).HTTP == 404 {
+				return nil, err
+			}
+			// A row this key cannot open, such as one sealed to a retired key,
+			// is still the caller's to delete. Sync deletes it unconditionally.
+			return object{}, h.storeRows.remove(ctx, p, key, scope, &storedRow{ID: id})
 		}
 		err = h.storeRows.remove(ctx, p, key, scope, row)
 		if err == nil || asAPIError(err).Code != "REVISION_CONFLICT" {
@@ -368,7 +374,7 @@ func (h *harness) listProjects(ctx context.Context, p *principal, key contentKey
 	return object{"projects": list, "nextCursor": page.Next}, nil
 }
 func (h *harness) projectDocuments(ctx context.Context, p *principal, key contentKey, id string) ([]object, error) {
-	list, cursor := []object{}, ""
+	list, cursor, index := []object{}, "", map[string]int{}
 	for {
 		page, err := h.storeRows.list(ctx, p, key, "project_document", cursor, id, 100)
 		if err != nil {
@@ -378,6 +384,13 @@ func (h *harness) projectDocuments(ctx context.Context, p *principal, key conten
 			doc := projectView(&row)
 			doc["id"] = strings.TrimPrefix(row.ID, id+"/")
 			doc["projectId"] = id
+			// Unfiltered pages can repeat a row that changed while listing;
+			// the later copy is the newer one.
+			if i, ok := index[row.ID]; ok {
+				list[i] = doc
+				continue
+			}
+			index[row.ID] = len(list)
 			list = append(list, doc)
 		}
 		if page.Next == "" {
@@ -543,7 +556,8 @@ func (h *harness) searchThreads(ctx context.Context, p *principal, key contentKe
 		match := obj(v)
 		row, err := h.storeRows.load(ctx, p, key, "chat", str(match["id"]))
 		if err != nil {
-			if asAPIError(err).HTTP == 404 {
+			// A deleted or unreadable chat leaves the other results intact.
+			if code := asAPIError(err).HTTP; code == 404 || code == 409 {
 				continue
 			}
 			return nil, err
