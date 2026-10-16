@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -357,7 +358,7 @@ func TestWidgetRetryReplacesOnlyTheArguments(t *testing.T) {
 		if obj(body["response_format"])["type"] != "json_schema" {
 			t.Error("retry did not request a schema")
 		}
-		json.NewEncoder(w).Encode(object{"choices": []object{{"message": object{"content": replacement}}}})
+		json.NewEncoder(w).Encode(object{"choices": []object{{"message": object{"content": `{"stats":"[{\"label\":\"Count\",\"value\":2}]"} Here are the stats.`}}}})
 	})
 	catalog := h.catalog.get()
 	catalog.EnabledWidgets = []string{"render_stat_cards"}
@@ -379,10 +380,16 @@ func TestWidgetRetryReplacesOnlyTheArguments(t *testing.T) {
 	if len(messages) != 2 || len(blocks) != 2 || obj(blocks[1])["arguments"] != replacement {
 		t.Fatal("retry changed message structure")
 	}
-	r := postRoute(h, "/v1/threads/follow", object{"key": key.base64(), "threadId": "chat", "runId": events[0].RunID}, "alice")
-	replay := eventsIn(t, r)
-	if !strings.Contains(string(raw(replay)), "keep this text") {
-		t.Fatal("retry follow lost the message's other blocks")
+	// A client reconnecting after the retry sees the new arguments beside the message's other blocks.
+	follow := httptest.NewRequest("POST", "/v1/threads/follow", bytes.NewReader(raw(object{"key": key.base64(), "threadId": "chat", "runId": events[0].RunID})))
+	follow.Header.Set("Authorization", "Bearer clerk-alice")
+	follow.Header.Set("Last-Event-ID", strconv.Itoa(slices.IndexFunc(events, func(e event) bool { return e.Type == "TOOL_CALL_END" })))
+	resumed := httptest.NewRecorder()
+	h.routes().ServeHTTP(resumed, follow)
+	snapshot := arr(eventsIn(t, resumed)[0].Messages)
+	shown := arr(obj(snapshot[len(snapshot)-1])["timeline"])
+	if len(shown) != 2 || obj(shown[0])["content"] != "keep this text" || obj(shown[1])["arguments"] != replacement {
+		t.Fatalf("a reconnecting client was shown %v", shown)
 	}
 }
 

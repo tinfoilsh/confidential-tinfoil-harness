@@ -671,34 +671,6 @@ func TestAContinuationExtendsOnlyATrailingContentBlock(t *testing.T) {
 	}
 }
 
-func TestARecoveredContinuationExtendsItsReply(t *testing.T) {
-	h, rows, key := testChatHarness(t, nil)
-	p := &principal{ID: "alice"}
-	log, err := newContentRun(token(), key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	out := &stream{run: log, threadID: "chat-1", runID: log.id, managed: true}
-	out.emit(event{Type: "RUN_STARTED", ThreadID: "chat-1", RunID: log.id, MessageID: "a1"})
-	out.emit(event{Type: "MESSAGES_SNAPSHOT", Messages: []any{}})
-	out.text("a1", " violets are blue.")
-	out.emit(event{Type: "RUN_FINISHED", ThreadID: "chat-1", RunID: log.id})
-	log.log.close(errDone)
-	poemThread(rows, "chat-1")
-	row := rows.rows[rowMapKey(p, "chat", "chat-1")]
-	row.Data["activeRun"] = object{"runId": log.id}
-	if err := h.settleRecovered(context.Background(), p, key, &row, log); err != nil {
-		t.Fatal(err)
-	}
-	stored, _ := rows.load(context.Background(), p, key, "chat", "chat-1")
-	messages := arr(stored.Data["messages"])
-	reply := obj(messages[len(messages)-1])
-	want := decodeValue(raw([]any{object{"id": "t1", "type": "thinking", "content": "rhyme"}, object{"id": "c1", "type": "content", "content": "Roses are red, violets are blue."}}))
-	if len(messages) != 2 || reply["content"] != "Roses are red, violets are blue." || !reflect.DeepEqual(reply["timeline"], want) || reply["isInterrupted"] != false || stored.Data["activeRun"] != nil {
-		t.Fatalf("recovered continuation: %v", stored.Data)
-	}
-}
-
 func TestARecoveredReplyTakesWhatItsRunCommitted(t *testing.T) {
 	committed := object{"model": "deepseek-v4", "modelDisplayName": "DeepSeek V4", "usage": object{"promptTokens": 9, "completionTokens": 4}, "isError": false, "isInterrupted": false}
 	earlier := object{"model": "gpt-oss-120b", "modelDisplayName": "GPT-OSS 120B", "usage": object{"promptTokens": 5, "completionTokens": 2}}
@@ -748,6 +720,11 @@ func TestARecoveredReplyTakesWhatItsRunCommitted(t *testing.T) {
 			reply := obj(messages[len(messages)-1])
 			if got := selectFields(reply, "model modelDisplayName usage isError isInterrupted"); reply["id"] != tc.reply || !reflect.DeepEqual(decodeValue(raw(got)), decodeValue(raw(tc.want))) {
 				t.Fatalf("recovered %s as %v, want %v", reply["id"], got, tc.want)
+			}
+			// A continuation's output extends the reply it continued.
+			want := decodeValue(raw([]any{object{"id": "t1", "type": "thinking", "content": "rhyme"}, object{"id": "c1", "type": "content", "content": "Roses are red, violets are blue."}}))
+			if tc.reply == "a1" && (len(messages) != 2 || reply["content"] != "Roses are red, violets are blue." || !reflect.DeepEqual(reply["timeline"], want)) || stored.Data["activeRun"] != nil {
+				t.Fatalf("recovered continuation: %v", stored.Data)
 			}
 		})
 	}
@@ -1399,25 +1376,6 @@ func TestArgumentsBeforeTheNameAreSentWhenTheCallOpens(t *testing.T) {
 	}
 	if got := streamedArgs(t, events, "nameless"); !reflect.DeepEqual(got, []string{`{"a":1}`}) {
 		t.Fatalf("a call that never named its tool was sent %q", got)
-	}
-}
-
-func TestWidgetRetryRepairsTheReplacement(t *testing.T) {
-	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(object{"choices": []object{{"message": object{"content": `{"stats":"[{\"label\":\"Count\",\"value\":2}]"} Here are the stats.`}}}})
-	})
-	h.catalog.get().EnabledWidgets = []string{"render_stat_cards"}
-	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat")] = storedRow{ID: "chat", ETag: "1", Data: object{"createdAt": timestamp(), "title": "Title", "titleState": "manual", "model": "kimi-k3", "messages": []any{
-		object{"id": "user", "role": "user", "content": "show a stat", "timestamp": timestamp()},
-		object{"id": "assistant", "role": "assistant", "content": "", "timestamp": timestamp(), "timeline": []any{object{"type": "tool_call", "id": "call", "toolCallId": "call", "name": "render_stat_cards", "arguments": `{"stats":"bad"}`}}},
-	}}}
-	in := sendInput(key)
-	in["threadId"], in["kind"], in["toolCallId"], in["widgets"] = "chat", "retryToolCall", "call", []any{"render_stat_cards"}
-	delete(in, "content")
-	finishedRun(t, h, "/v1/threads/turn", in)
-	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", "chat")
-	if got := obj(arr(obj(arr(row.Data["messages"])[1])["timeline"])[0])["arguments"]; got != `{"stats":[{"label":"Count","value":2}]}` {
-		t.Fatalf("stored replacement %v", got)
 	}
 }
 
