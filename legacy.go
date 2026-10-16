@@ -1,6 +1,9 @@
 package main
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 func isoTime(value any) string {
 	if s := str(value); s != "" {
@@ -91,6 +94,47 @@ func upgradeTimeline(message object) {
 		}
 	}
 	message["timeline"] = blocks
+}
+
+// legacyTimeline gives a reply stored with only flat fields the timeline the
+// web client renders it with, plus the code and widget calls upgradeTimeline
+// shows from them, so that changing its text keeps those blocks.
+func legacyTimeline(message object) {
+	if message["timeline"] != nil || message["role"] != "assistant" {
+		return
+	}
+	blocks := []any{}
+	if fetches := arr(message["urlFetches"]); len(fetches) > 0 {
+		blocks = append(blocks, object{"type": "url_fetches", "id": "legacy-url-fetches", "fetches": fetches})
+	}
+	search, before := message["webSearch"], boolean(message["webSearchBeforeThinking"], false)
+	if search != nil && before {
+		blocks = append(blocks, object{"type": "web_search", "id": "legacy-web-search-pre", "state": search})
+	}
+	if thinking := boolean(message["isThinking"], false); thinking || strings.TrimSpace(str(message["thoughts"])) != "" {
+		block := object{"type": "thinking", "id": "legacy-thinking", "content": str(message["thoughts"]), "isThinking": thinking}
+		if duration, ok := message["thinkingDuration"]; ok {
+			block["duration"] = duration
+		}
+		blocks = append(blocks, block)
+	}
+	if search != nil && !before {
+		blocks = append(blocks, object{"type": "web_search", "id": "legacy-web-search-post", "state": search})
+	}
+	if calls := arr(message["codeExecCalls"]); len(calls) > 0 {
+		blocks = append(blocks, object{"type": "code_exec", "id": "legacy-code-exec", "calls": calls})
+	}
+	for _, item := range arr(message["toolCalls"]) {
+		call := clone(obj(item))
+		call["type"], call["toolCallId"] = "tool_call", call["id"]
+		blocks = append(blocks, call)
+	}
+	if content := str(message["content"]); content != "" {
+		blocks = append(blocks, object{"type": "content", "id": "legacy-content", "content": content})
+	}
+	if len(blocks) > 0 {
+		message["timeline"] = blocks
+	}
 }
 
 func upgradeAttachments(message object) {

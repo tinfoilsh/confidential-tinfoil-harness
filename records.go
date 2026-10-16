@@ -1,20 +1,25 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"slices"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 func (h *harness) apiRoutes() []routeSpec {
 	routes := []routeSpec{
 		{"/v1/session", true, false, h.session}, {"/v1/verify", true, false, h.verification},
 		{"/v1/threads/list", false, true, h.listThreads}, {"/v1/threads/get", false, true, h.getThread},
-		{"/v1/threads/update", false, true, h.updateThread}, {"/v1/threads/delete", false, true, h.deleteThread},
+		{"/v1/threads/update", false, true, h.updateThread}, {"/v1/threads/delete", false, true, h.deleteThread}, {"/v1/threads/fork", false, true, h.forkThread},
+		{"/v1/threads/messages/delete", false, true, h.deleteMessage}, {"/v1/threads/messages/update", false, true, h.updateMessage},
 		{"/v1/threads/search", false, true, h.searchThreads}, {"/v1/threads/cancel", true, false, h.cancelThread},
-		{"/v1/threads/queue/send", true, false, h.sendQueued}, {"/v1/threads/queue/remove", true, false, h.removeQueued}, {"/v1/threads/share", false, true, h.shareThread},
+		{"/v1/threads/queue/send", true, false, h.sendQueued}, {"/v1/threads/queue/remove", true, false, h.removeQueued}, {"/v1/threads/share", false, false, h.shareThread},
 		{"/v1/threads/share/revoke", false, false, h.revokeShare}, {"/v1/threads/share/status", false, false, h.shareStatus},
+		{"/v1/threads/transcript", false, true, h.threadTranscript},
 		{"/v1/profile/get", false, true, h.getProfile}, {"/v1/profile/update", false, true, h.updateProfile},
 		{"/v1/projects/list", false, true, h.listProjects}, {"/v1/projects/get", false, true, h.getProject},
 		{"/v1/projects/create", false, true, h.createProject}, {"/v1/projects/update", false, true, h.updateProject},
@@ -268,6 +273,116 @@ func (h *harness) deleteThread(ctx context.Context, p *principal, key contentKey
 	h.stopThread(p, id)
 	return h.deleteRow(ctx, p, key, "chat", id)
 }
+func forkTitle(title string) string {
+	title = cmp.Or(title, "Untitled")
+	if strings.HasSuffix(title, " (fork)") {
+		return title
+	}
+	return title + " (fork)"
+}
+
+// forkThread starts a new stored chat from a chat's messages through the
+// given one. Sync makes the copy, with its own copies of the attachments.
+func (h *harness) forkThread(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
+	id, err := requiredID(in, "threadId")
+	if err != nil {
+		return nil, err
+	}
+	messageID, err := requiredID(in, "messageId")
+	if err != nil {
+		return nil, err
+	}
+	row, err := h.storeRows.load(ctx, p, key, "chat", id)
+	if err != nil {
+		return nil, err
+	}
+	title := forkTitle(str(row.Data["title"]))
+	t := normalizeThread(row)
+	if str(obj(t["activeRun"])["runId"]) != "" {
+		return nil, apiErr(409, "RUN_IN_FLIGHT", "The chat has a reply in progress")
+	}
+	count := 1 + slices.IndexFunc(arr(t["messages"]), func(m any) bool { return obj(m)["id"] == messageID })
+	if count == 0 {
+		return nil, apiErr(404, "THREAD_NOT_FOUND", "The message was not found")
+	}
+	target := rowID()
+	if err := h.syncAPI.call(ctx, p, "/v1/sync/fork", object{"source_id": id, "target_id": target, "key": key.base64(), "message_count": count, "title": title, "created_at": timestamp(), "idempotency_key": uuid.NewString()}, nil); err != nil {
+		return nil, err
+	}
+	// Sync leaves out the web client's bookkeeping, not the harness's.
+	forked, err := h.mutate(ctx, p, key, "chat", target, false, nil, func(data object) error {
+		for _, field := range []string{"activeRun", "harnessRequests", "harnessRetry", "contextUsage", "pinned"} {
+			delete(data, field)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return threadSummary(normalizeThread(forked)), nil
+}
+
+// Message actions change a stored chat's transcript. A local thread's client
+// changes its own copy, which its next turn sends.
+func (h *harness) deleteMessage(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
+	return h.changeMessages(ctx, p, key, in, func(messages []any, index int) ([]any, error) {
+		// As on the web client, a chat keeps its last message.
+		if len(messages) == 1 {
+			return nil, apiErr(400, "BAD_REQUEST", "A chat keeps its last message")
+		}
+		return slices.Delete(messages, index, index+1), nil
+	})
+}
+func (h *harness) updateMessage(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
+	text, ok := in["content"].(string)
+	if !ok {
+		return nil, apiErr(400, "BAD_REQUEST", "content must be a string")
+	}
+	return h.changeMessages(ctx, p, key, in, func(messages []any, index int) ([]any, error) {
+		if obj(messages[index])["role"] != "assistant" {
+			return nil, apiErr(400, "BAD_REQUEST", "Only a reply is edited in place")
+		}
+		replaceReplyText(obj(messages[index]), text)
+		return messages, nil
+	})
+}
+func (h *harness) changeMessages(ctx context.Context, p *principal, key contentKey, in object, change func([]any, int) ([]any, error)) (any, error) {
+	id, err := requiredID(in, "threadId")
+	if err != nil {
+		return nil, err
+	}
+	messageID, err := requiredID(in, "messageId")
+	if err != nil {
+		return nil, err
+	}
+	row, err := h.mutate(ctx, p, key, "chat", id, false, nil, func(data object) error {
+		if str(obj(data["activeRun"])["runId"]) != "" {
+			return apiErr(409, "RUN_IN_FLIGHT", "The chat has a reply in progress")
+		}
+		// Ids derived from a message's position are stored, so removing one
+		// message does not rename the messages after it.
+		messages := arr(data["messages"])
+		for i, item := range messages {
+			if m := obj(item); str(m["id"]) == "" {
+				m["id"] = id + "-message-" + jsonNumber(i)
+			}
+		}
+		index := slices.IndexFunc(messages, func(m any) bool { return obj(m)["id"] == messageID })
+		if index < 0 {
+			return apiErr(404, "THREAD_NOT_FOUND", "The message was not found")
+		}
+		changed, err := change(messages, index)
+		if err != nil {
+			return err
+		}
+		data["messages"] = changed
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return publicThread(row, "", 50), nil
+}
 func (h *harness) deleteAllThreads(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
 	if err := validateFields(in, "", "", "projectId"); err != nil {
 		return nil, err
@@ -328,7 +443,7 @@ func (h *harness) getProfile(ctx context.Context, p *principal, key contentKey, 
 	return profileView(profile), nil
 }
 
-var profileFields = strings.Fields("themeMode chatFont language nickname profession traits additionalContext isUsingPersonalization isUsingCustomPrompt customSystemPrompt customPromptPresets favoritePromptPresetIds selectedModel autoIntelligence reasoningEffort thinkingEnabled webSearchEnabled codeExecutionEnabled sandboxEnabled piiCheckEnabled genUIEnabled pixelateSidebarChatTitlesEnabled browserTabChatTitleEnabled enterToNewlineEnabled hasSeenOnboarding hasSeenWebSearchIntro dismissed")
+var profileFields = strings.Fields("themeMode chatFont language nickname profession traits additionalContext isUsingPersonalization isUsingCustomPrompt customSystemPrompt customPromptPresets favoritePromptPresetIds defaultPromptPresetId selectedModel autoIntelligence reasoningEffort thinkingEnabled webSearchEnabled codeExecutionEnabled sandboxEnabled piiCheckEnabled genUIEnabled pixelateSidebarChatTitlesEnabled browserTabChatTitleEnabled enterToNewlineEnabled hasSeenOnboarding hasSeenWebSearchIntro dismissed")
 
 func (h *harness) updateProfile(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
 	if !validObject(in["patch"]) {
@@ -337,6 +452,11 @@ func (h *harness) updateProfile(ctx context.Context, p *principal, key contentKe
 	patch := obj(in["patch"])
 	if err := validateProfile(patch); err != nil {
 		return nil, err
+	}
+	// The web client stores a cleared default as an empty string and ignores
+	// a synced profile that holds null.
+	if value, ok := patch["defaultPromptPresetId"]; ok && value == nil {
+		patch["defaultPromptPresetId"] = ""
 	}
 	fields := []string{}
 	for f := range patch {

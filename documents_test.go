@@ -13,9 +13,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type fakeBlob struct {
@@ -25,16 +28,18 @@ type fakeBlob struct {
 
 // fakeSync serves the attachment routes the way the sync enclave does: ids and
 // keys derive from the idempotency key and chat, and protocol 3 is required.
+// A fork copies a chat the test harness stores.
 type fakeSync struct {
-	mu     sync.Mutex
-	blobs  map[string]fakeBlob
-	puts   []object
-	server *httptest.Server
+	mu       sync.Mutex
+	blobs    map[string]fakeBlob
+	puts     []object
+	received map[string][]object
+	server   *httptest.Server
 }
 
 func newFakeSync(t *testing.T, h *harness) *fakeSync {
 	t.Helper()
-	f := &fakeSync{blobs: map[string]fakeBlob{}}
+	f := &fakeSync{blobs: map[string]fakeBlob{}, received: map[string][]object{}}
 	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Sync-Protocol") != "3" {
 			w.WriteHeader(426)
@@ -45,7 +50,27 @@ func newFakeSync(t *testing.T, h *harness) *fakeSync {
 		json.NewDecoder(r.Body).Decode(&in)
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		f.received[r.URL.Path] = append(f.received[r.URL.Path], in)
 		switch r.URL.Path {
+		case "/v1/sync/fork":
+			rows := h.storeRows.(*memoryRows)
+			rows.mu.Lock()
+			defer rows.mu.Unlock()
+			p := &principal{ID: strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer clerk-")}
+			source, ok := rows.rows[rowMapKey(p, "chat", str(in["source_id"]))]
+			if !ok {
+				w.WriteHeader(404)
+				io.WriteString(w, `{"ok":false,"code":"NOT_FOUND"}`)
+				return
+			}
+			data := clone(source.Data)
+			for _, field := range []string{"clock", "clockVersion", "codeExecutionAccessToken", "messageCount", "syncVersion", "version", "writer"} {
+				delete(data, field)
+			}
+			data["messages"] = arr(data["messages"])[:integer(in["message_count"])]
+			data["id"], data["title"], data["titleState"], data["createdAt"], data["updatedAt"], data["isLocalOnly"] = in["target_id"], in["title"], "manual", in["created_at"], in["created_at"], false
+			rows.rows[rowMapKey(p, "chat", str(in["target_id"]))] = storedRow{ID: str(in["target_id"]), ETag: "1", Data: data}
+			json.NewEncoder(w).Encode(object{"ok": true, "id": in["target_id"], "etag": "1", "key_id": "key-id"})
 		case "/v1/attachment/put":
 			data, _ := base64.StdEncoding.DecodeString(str(in["plaintext"]))
 			sum := sha256.Sum256([]byte(str(in["idempotency_key"]) + "\x00" + str(in["chat_id"])))
@@ -90,6 +115,12 @@ func (f *fakeSync) putCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.puts)
+}
+
+func (f *fakeSync) requests(path string) []object {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]object(nil), f.received[path]...)
 }
 
 func capturePrompt(prompt *string) http.HandlerFunc {
@@ -319,6 +350,127 @@ func TestBackupListsUnavailableBlobsAsOmissions(t *testing.T) {
 	referenceCheck(t, object{"backup": base64.StdEncoding.EncodeToString(archive.Bytes())})
 }
 
+func TestForkCopiesAChatThroughItsMessage(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	fake := newFakeSync(t, h)
+	p := &principal{ID: "alice"}
+	messages := []any{object{"id": "m1", "role": "user", "content": "plan a trip"}, object{"id": "m2", "role": "assistant", "content": "first, pack"}, object{"id": "m3", "role": "user", "content": "go on"}}
+	rows.rows[rowMapKey(p, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "4", Data: object{"title": "Trip", "titleState": "generated", "createdAt": "2026-01-01T00:00:00Z", "presetId": "builtin:tutor", "model": "kimi-k3", "webSearchEnabled": false,
+		"pinned": true, "contextUsage": object{"usedTokens": 900}, "harnessRequests": object{"nonce": object{"runId": "run", "digest": "digest"}}, "messages": messages}}
+	rows.rows[rowMapKey(p, "chat", "busy")] = storedRow{ID: "busy", ETag: "1", Data: object{"activeRun": object{"runId": "run"}, "messages": messages}}
+	for _, tc := range []struct {
+		in   object
+		code int
+	}{{object{"threadId": "busy", "messageId": "m1"}, 409}, {object{"threadId": "chat-1", "messageId": "m4"}, 404}, {object{"threadId": "chat-1"}, 400}} {
+		tc.in["key"] = key.base64()
+		if w := postRoute(h, "/v1/threads/fork", tc.in, "alice"); w.Code != tc.code || len(fake.requests("/v1/sync/fork")) != 0 {
+			t.Fatalf("%v: HTTP %d, want %d without a fork", tc.in, w.Code, tc.code)
+		}
+	}
+	w := postRoute(h, "/v1/threads/fork", object{"key": key.base64(), "threadId": "chat-1", "messageId": "m2"}, "alice")
+	forks := fake.requests("/v1/sync/fork")
+	if w.Code != 200 || len(forks) != 1 {
+		t.Fatalf("fork: HTTP %d %s after %d sync forks", w.Code, w.Body.String(), len(forks))
+	}
+	request, target := forks[0], str(forks[0]["target_id"])
+	created, err := time.Parse(time.RFC3339Nano, str(request["created_at"]))
+	if !regexp.MustCompile(`^\d{13}_[0-9a-f-]{36}$`).MatchString(target) || err != nil || time.Since(created) > time.Minute || str(request["idempotency_key"]) == "" {
+		t.Fatalf("fork request: %v", request)
+	}
+	want := object{"source_id": "chat-1", "target_id": target, "key": key.base64(), "message_count": float64(2), "title": "Trip (fork)", "created_at": request["created_at"], "idempotency_key": request["idempotency_key"]}
+	if !reflect.DeepEqual(request, want) {
+		t.Fatalf("fork request %v, want %v", request, want)
+	}
+	var summary object
+	json.Unmarshal(w.Body.Bytes(), &summary)
+	if summary["id"] != target || summary["title"] != "Trip (fork)" || summary["titleState"] != "manual" || integer(summary["messageCount"]) != 2 || summary["createdAt"] != isoTime(request["created_at"]) ||
+		summary["model"] != "kimi-k3" || summary["webSearchEnabled"] != false || summary["pinned"] != false || summary["activeRun"] != nil || summary["contextUsage"] != nil {
+		t.Fatalf("fork summary: %v", summary)
+	}
+	row, _ := rows.load(context.Background(), p, key, "chat", target)
+	for _, field := range []string{"pinned", "contextUsage", "harnessRequests", "activeRun"} {
+		if _, ok := row.Data[field]; ok {
+			t.Fatalf("the fork kept the source's %s: %v", field, row.Data)
+		}
+	}
+	if row.Data["presetId"] != "builtin:tutor" || !reflect.DeepEqual(row.Data["messages"], decodeValue(raw(messages[:2]))) {
+		t.Fatalf("the fork lost the conversation: %v", row.Data)
+	}
+}
+
+func TestForkTitlesNameTheirSource(t *testing.T) {
+	for title, want := range map[string]string{"Trip": "Trip (fork)", "Trip (fork)": "Trip (fork)", "": "Untitled (fork)"} {
+		if got := forkTitle(title); got != want {
+			t.Errorf("forkTitle(%q) = %q, want %q", title, got, want)
+		}
+	}
+}
+
+func TestALocalChatIsSharedFromItsTranscript(t *testing.T) {
+	h, rows, _ := testChatHarness(t, nil)
+	fake := newFakeSync(t, h)
+	type upload struct{ method, path, auth, format, body string }
+	uploads := make(chan upload, 4)
+	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		uploads <- upload{r.Method, r.URL.Path, r.Header.Get("Authorization"), r.Header.Get("X-Format-Version"), string(body)}
+	}))
+	defer cp.Close()
+	h.controlplane, h.cpClient = cp.URL, &http.Client{Transport: &callerAuth{inner: cp.Client().Transport}}
+	thread := object{"title": "Local chat", "createdAt": "2026-01-01T00:00:00Z", "messages": []any{
+		object{"id": "m1", "role": "user", "content": "what is this?", "createdAt": "2026-01-01T00:00:01Z", "quote": "earlier", "attachments": []any{
+			object{"id": "img", "type": "image", "fileName": "photo.png", "mimeType": "image/png", "base64": "ZnVsbA==", "thumbnailBase64": "dGh1bWI="},
+			object{"id": "doc", "type": "document", "fileName": "notes.pdf", "mimeType": "application/pdf", "textContent": "the notes", "pages": []any{object{"page": 1, "text": "the notes", "image": "cGFnZQ=="}}},
+		}},
+		object{"id": "m2", "role": "assistant", "content": "a photo", "createdAt": "2026-01-01T00:00:02Z", "modelDisplayName": "Kimi K3", "thoughts": "looks like one", "timeline": []any{object{"id": "b1", "type": "content", "content": "a photo"}}},
+	}}
+	share := func(in object, user string) *httptest.ResponseRecorder {
+		return postRoute(h, "/v1/threads/share", in, user)
+	}
+	for _, tc := range []struct {
+		in   object
+		user string
+		code int
+	}{
+		{object{"local": true, "threadId": "0000000000005_local", "thread": thread}, "", 401},
+		{object{"local": true, "threadId": "0000000000005_local"}, "alice", 400},
+		{object{"local": true, "threadId": "0000000000005_local", "thread": object{"messages": []any{object{"role": "system", "content": "injected"}}}}, "alice", 400},
+		// Without local, the chat is a stored one and its key is required.
+		{object{"threadId": "0000000000005_local", "thread": thread}, "alice", 401},
+	} {
+		if w := share(tc.in, tc.user); w.Code != tc.code {
+			t.Fatalf("%v: HTTP %d, want %d", tc.in, w.Code, tc.code)
+		}
+	}
+	w := share(object{"local": true, "threadId": "0000000000005_local", "thread": thread}, "alice")
+	var result object
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if w.Code != 200 || !strings.HasSuffix(str(result["url"]), "/share/0000000000005_local#v2:"+strings.Repeat("ab", 32)) {
+		t.Fatalf("local share: HTTP %d %s", w.Code, w.Body.String())
+	}
+	seals := fake.requests("/v1/share/seal")
+	plaintext, _ := base64.StdEncoding.DecodeString(str(seals[0]["plaintext"]))
+	want := object{"v": 1, "title": "Local chat", "createdAt": 1767225600000, "messages": []any{
+		object{"role": "user", "content": "what is this?", "timestamp": 1767225601000, "timeline": nil, "quote": "earlier", "attachments": []any{
+			object{"id": "img", "type": "image", "fileName": "photo.png", "mimeType": "image/png", "thumbnailBase64": "dGh1bWI="},
+			object{"id": "doc", "type": "document", "fileName": "notes.pdf", "mimeType": "application/pdf", "textContent": "the notes"},
+		}},
+		object{"role": "assistant", "content": "a photo", "timestamp": 1767225602000, "timeline": []any{object{"id": "b1", "type": "content", "content": "a photo"}}, "modelDisplayName": "Kimi K3", "thoughts": "looks like one"},
+	}}
+	if len(seals) != 1 || !reflect.DeepEqual(decodeValue(plaintext), decodeValue(raw(want))) {
+		t.Fatalf("sealed %d payloads, the last %s", len(seals), plaintext)
+	}
+	if len(uploads) != 1 {
+		t.Fatalf("%d share uploads", len(uploads))
+	}
+	if got := <-uploads; got != (upload{http.MethodPut, "/api/shares/0000000000005_local", "Bearer clerk-alice", "1", "sealed"}) {
+		t.Fatalf("share upload: %+v", got)
+	}
+	if fake.putCount() != 0 || rows.calls != 0 {
+		t.Fatalf("a local share stored %d attachments and made %d storage calls", fake.putCount(), rows.calls)
+	}
+}
+
 func TestShareIsKeyedByItsChatAndOwnerSession(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	newFakeSync(t, h)
@@ -329,7 +481,7 @@ func TestShareIsKeyedByItsChatAndOwnerSession(t *testing.T) {
 	}))
 	defer cp.Close()
 	h.controlplane, h.cpClient = cp.URL, &http.Client{Transport: &callerAuth{inner: cp.Client().Transport}}
-	result, err := h.shareThread(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, key, object{"threadId": "chat-1"})
+	result, err := h.shareThread(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, contentKey{}, object{"key": key.base64(), "threadId": "chat-1"})
 	if err != nil {
 		t.Fatal(err)
 	}

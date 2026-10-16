@@ -25,6 +25,7 @@ const (
 	maxSSEEvent    = 1 << 22
 
 	finalAnswerInstruction = "You have reached the maximum number of tool iterations. Do not call any more tools. Provide the best answer you can."
+	continueInstruction    = "Continue your previous response exactly where it left off. Do not repeat, summarize, or restate anything you already wrote, and do not add any preamble."
 	toolError              = `{"error":"tool_error"}`
 )
 

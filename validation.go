@@ -25,7 +25,7 @@ func validateFields(in object, stringsList, booleans, nullable string) error {
 	return nil
 }
 func validateProfile(patch object) error {
-	if err := validateFields(patch, "themeMode chatFont language nickname profession additionalContext customSystemPrompt selectedModel autoIntelligence reasoningEffort", "isUsingPersonalization isUsingCustomPrompt thinkingEnabled webSearchEnabled codeExecutionEnabled sandboxEnabled piiCheckEnabled genUIEnabled pixelateSidebarChatTitlesEnabled browserTabChatTitleEnabled enterToNewlineEnabled hasSeenOnboarding hasSeenWebSearchIntro", ""); err != nil {
+	if err := validateFields(patch, "themeMode chatFont language nickname profession additionalContext customSystemPrompt selectedModel autoIntelligence reasoningEffort", "isUsingPersonalization isUsingCustomPrompt thinkingEnabled webSearchEnabled codeExecutionEnabled sandboxEnabled piiCheckEnabled genUIEnabled pixelateSidebarChatTitlesEnabled browserTabChatTitleEnabled enterToNewlineEnabled hasSeenOnboarding hasSeenWebSearchIntro", "defaultPromptPresetId"); err != nil {
 		return err
 	}
 	for field, choices := range map[string][]string{"themeMode": {"light", "dark", "system"}, "chatFont": {"system", "serif", "mono", "dyslexic"}, "reasoningEffort": {"low", "medium", "high"}, "autoIntelligence": {"instant", "low", "medium", "high", "extra", "max"}} {
@@ -47,7 +47,7 @@ func validateProfile(patch object) error {
 					if str(preset["id"]) == "" || str(preset["name"]) == "" {
 						return apiErr(400, "BAD_REQUEST", "A custom preset requires an id and name")
 					}
-					if err := validateFields(preset, "id name description systemPrompt", "", ""); err != nil {
+					if err := validateFields(preset, "id name description systemPrompt model", "webSearchEnabled", ""); err != nil {
 						return err
 					}
 				} else if _, ok := value.(string); !ok {

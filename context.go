@@ -188,6 +188,11 @@ func (h *harness) buildRequest(thread, profile, project object, documents []obje
 	if err != nil {
 		return nil, nil, err
 	}
+	// As the web client does, the continue instruction shares the reminder's
+	// turn: some chat templates refuse two user messages in a row.
+	if in["kind"] == "continue" {
+		reminder += "\n\n" + continueInstruction
+	}
 	if h.memoryEnabled && boolean(project["memoryEnabled"], true) {
 		project = clone(project)
 		project["harnessMemoryEnabled"] = true

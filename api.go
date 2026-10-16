@@ -190,6 +190,7 @@ func (h *harness) routes() http.Handler {
 		})
 	}
 	mux.HandleFunc("POST /v1/threads/turn", h.handleTurn)
+	mux.HandleFunc("POST /v1/threads/import", h.handleThreadImport)
 	mux.HandleFunc("POST /v1/threads/follow", h.handleFollow)
 	mux.HandleFunc("POST /v1/speech", h.handleSpeech)
 	for _, path := range []string{"/v1/attachments/upload", "/v1/projects/documents/upload", "/v1/transcriptions", "/v1/import"} {
@@ -310,7 +311,9 @@ func boundedHandler(slots chan struct{}, handler http.HandlerFunc) http.HandlerF
 		case <-r.Context().Done():
 			return
 		default:
-			respond(w, nil, apiErr(503, "UPSTREAM_REFUSED", "The service is at capacity; retry shortly"))
+			e := apiErr(503, "UPSTREAM_REFUSED", "The service is at capacity; retry shortly")
+			e.RetryAfter = 5
+			respond(w, nil, e)
 			return
 		}
 		handler(w, r)
