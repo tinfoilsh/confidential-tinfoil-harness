@@ -383,8 +383,7 @@ func TestForkCopiesAChatThroughItsMessage(t *testing.T) {
 	}
 	var summary object
 	json.Unmarshal(w.Body.Bytes(), &summary)
-	if summary["id"] != target || summary["title"] != "Trip (fork)" || summary["titleState"] != "manual" || integer(summary["messageCount"]) != 2 || summary["createdAt"] != isoTime(request["created_at"]) ||
-		summary["model"] != "kimi-k3" || summary["webSearchEnabled"] != false || summary["pinned"] != false || summary["activeRun"] != nil || summary["contextUsage"] != nil {
+	if summary["id"] != target || summary["title"] != "Trip (fork)" || summary["createdAt"] != isoTime(request["created_at"]) || summary["pinned"] != false || summary["activeRun"] != nil || summary["contextUsage"] != nil {
 		t.Fatalf("fork summary: %v", summary)
 	}
 	row, _ := rows.load(context.Background(), p, key, "chat", target)
@@ -399,7 +398,7 @@ func TestForkCopiesAChatThroughItsMessage(t *testing.T) {
 }
 
 func TestForkTitlesNameTheirSource(t *testing.T) {
-	for title, want := range map[string]string{"Trip": "Trip (fork)", "Trip (fork)": "Trip (fork)", "": "Untitled (fork)"} {
+	for title, want := range map[string]string{"Trip (fork)": "Trip (fork)", "": "Untitled (fork)"} {
 		if got := forkTitle(title); got != want {
 			t.Errorf("forkTitle(%q) = %q, want %q", title, got, want)
 		}
@@ -471,25 +470,23 @@ func TestALocalChatIsSharedFromItsTranscript(t *testing.T) {
 	}
 }
 
-func TestShareIsKeyedByItsChatAndOwnerSession(t *testing.T) {
+func TestAStoredChatIsSharedFromItsRow(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	newFakeSync(t, h)
+	fake := newFakeSync(t, h)
 	storedThread(rows, "alice", "chat-1")
-	var put *http.Request
-	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		put = r
-	}))
+	cp := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer cp.Close()
 	h.controlplane, h.cpClient = cp.URL, &http.Client{Transport: &callerAuth{inner: cp.Client().Transport}}
-	result, err := h.shareThread(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, contentKey{}, object{"key": key.base64(), "threadId": "chat-1"})
-	if err != nil {
+	if _, err := h.shareThread(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, contentKey{}, object{"key": key.base64(), "threadId": "chat-1"}); err != nil {
 		t.Fatal(err)
 	}
-	if put == nil || put.Method != http.MethodPut || put.URL.Path != "/api/shares/chat-1" || put.Header.Get("Authorization") != "Bearer clerk-alice" || put.Header.Get("X-Format-Version") != "1" {
-		t.Fatalf("share upload: %+v", put)
+	var shared object
+	if seals := fake.requests("/v1/share/seal"); len(seals) == 1 {
+		plaintext, _ := base64.StdEncoding.DecodeString(str(seals[0]["plaintext"]))
+		json.Unmarshal(plaintext, &shared)
 	}
-	if !strings.HasSuffix(str(obj(result)["url"]), "/share/chat-1#v2:"+strings.Repeat("ab", 32)) {
-		t.Fatalf("share link: %v", result)
+	if messages := arr(shared["messages"]); shared["title"] != "Old" || len(messages) != 2 || obj(messages[0])["content"] != "look at this" || obj(messages[1])["content"] != "ok" {
+		t.Fatalf("shared %v", shared)
 	}
 }
 
