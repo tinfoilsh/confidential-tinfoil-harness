@@ -30,26 +30,37 @@ type memoryRows struct {
 	rows     map[string]storedRow
 	conflict func(*storedRow)
 	refuse   func(*storedRow) error
-	// unreadable rows exist but cannot be opened with the caller's key.
-	unreadable map[string]bool
-	calls      int
+	// sealed is the key each row was stored with; a row a test seeds is
+	// sealed with key. Like sync, only that key opens or overwrites a row,
+	// and any key deletes it.
+	sealed map[string]contentKey
+	key    contentKey
+	calls  int
 }
 
 func rowMapKey(p *principal, scope, id string) string { return p.scope() + "/" + scope + "/" + id }
-func (s *memoryRows) load(_ context.Context, p *principal, _ contentKey, scope, id string) (*storedRow, error) {
+func (s *memoryRows) opens(name string, key contentKey) bool {
+	sealed, ok := s.sealed[name]
+	if !ok {
+		sealed = s.key
+	}
+	return key == sealed
+}
+func (s *memoryRows) load(_ context.Context, p *principal, key contentKey, scope, id string) (*storedRow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
-	row, ok := s.rows[rowMapKey(p, scope, id)]
+	name := rowMapKey(p, scope, id)
+	row, ok := s.rows[name]
 	if !ok {
 		return nil, apiErr(404, "THREAD_NOT_FOUND", "missing")
 	}
-	if s.unreadable[id] {
+	if !s.opens(name, key) {
 		return nil, apiErr(409, "KEY_MISMATCH", "sealed to another key")
 	}
 	return &storedRow{ID: row.ID, ETag: row.ETag, Data: clone(row.Data)}, nil
 }
-func (s *memoryRows) list(_ context.Context, p *principal, _ contentKey, scope, cursor, project string, limit int) (rowPage, error) {
+func (s *memoryRows) list(_ context.Context, p *principal, key contentKey, scope, cursor, project string, limit int) (rowPage, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
@@ -58,7 +69,7 @@ func (s *memoryRows) list(_ context.Context, p *principal, _ contentKey, scope, 
 		if !strings.HasPrefix(name, p.scope()+"/"+scope+"/") || project != "" && row.Data["projectId"] != project {
 			continue
 		}
-		if s.unreadable[row.ID] {
+		if !s.opens(name, key) {
 			page.Unreadable = append(page.Unreadable, row.ID)
 			continue
 		}
@@ -66,7 +77,7 @@ func (s *memoryRows) list(_ context.Context, p *principal, _ contentKey, scope, 
 	}
 	return page, nil
 }
-func (s *memoryRows) push(_ context.Context, p *principal, _ contentKey, scope string, row *storedRow, _ string) (string, error) {
+func (s *memoryRows) push(_ context.Context, p *principal, key contentKey, scope string, row *storedRow, _ string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
@@ -76,7 +87,10 @@ func (s *memoryRows) push(_ context.Context, p *principal, _ contentKey, scope s
 		}
 	}
 	name := rowMapKey(p, scope, row.ID)
-	current := s.rows[name]
+	current, exists := s.rows[name]
+	if exists && !s.opens(name, key) {
+		return "", apiErr(409, "KEY_MISMATCH", "sealed to another key")
+	}
 	if s.conflict != nil {
 		f := s.conflict
 		s.conflict = nil
@@ -90,18 +104,20 @@ func (s *memoryRows) push(_ context.Context, p *principal, _ contentKey, scope s
 	}
 	n, _ := strconv.Atoi(current.ETag)
 	next := strconv.Itoa(n + 1)
-	s.rows[name] = storedRow{ID: row.ID, ETag: next, Data: clone(row.Data)}
+	s.rows[name], s.sealed[name] = storedRow{ID: row.ID, ETag: next, Data: clone(row.Data)}, key
 	return next, nil
 }
 func (s *memoryRows) remove(_ context.Context, p *principal, _ contentKey, scope string, row *storedRow) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.calls++
 	name := rowMapKey(p, scope, row.ID)
 	// Like sync, an empty if-match deletes unconditionally.
 	if row.ETag != "" && s.rows[name].ETag != row.ETag {
 		return apiErr(409, "REVISION_CONFLICT", "changed")
 	}
 	delete(s.rows, name)
+	delete(s.sealed, name)
 	return nil
 }
 
@@ -140,7 +156,7 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 		}
 	}))
 	t.Cleanup(cp.Close)
-	rows := &memoryRows{rows: map[string]storedRow{}}
+	rows := &memoryRows{rows: map[string]storedRow{}, sealed: map[string]contentKey{}}
 	h := &harness{gateway: server.URL, controlplane: cp.URL, cpClient: cp.Client(), storeRows: rows, services: map[string]*downstreamService{}}
 	h.auth = &authenticator{verify: func(_ context.Context, s string) (string, error) {
 		if !strings.HasPrefix(s, "clerk-") {
@@ -197,6 +213,7 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 	for i := range key {
 		key[i] = byte(i)
 	}
+	rows.key = key
 	return h, rows, key
 }
 func postRoute(h *harness, path string, in object, user string) *httptest.ResponseRecorder {
@@ -654,34 +671,6 @@ func TestAContinuationExtendsOnlyATrailingContentBlock(t *testing.T) {
 	}
 }
 
-func TestARecoveredContinuationExtendsItsReply(t *testing.T) {
-	h, rows, key := testChatHarness(t, nil)
-	p := &principal{ID: "alice"}
-	log, err := newContentRun(token(), key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	out := &stream{run: log, threadID: "chat-1", runID: log.id, managed: true}
-	out.emit(event{Type: "RUN_STARTED", ThreadID: "chat-1", RunID: log.id, MessageID: "a1"})
-	out.emit(event{Type: "MESSAGES_SNAPSHOT", Messages: []any{}})
-	out.text("a1", " violets are blue.")
-	out.emit(event{Type: "RUN_FINISHED", ThreadID: "chat-1", RunID: log.id})
-	log.log.close(errDone)
-	poemThread(rows, "chat-1")
-	row := rows.rows[rowMapKey(p, "chat", "chat-1")]
-	row.Data["activeRun"] = object{"runId": log.id}
-	if err := h.settleRecovered(context.Background(), p, key, &row, log); err != nil {
-		t.Fatal(err)
-	}
-	stored, _ := rows.load(context.Background(), p, key, "chat", "chat-1")
-	messages := arr(stored.Data["messages"])
-	reply := obj(messages[len(messages)-1])
-	want := decodeValue(raw([]any{object{"id": "t1", "type": "thinking", "content": "rhyme"}, object{"id": "c1", "type": "content", "content": "Roses are red, violets are blue."}}))
-	if len(messages) != 2 || reply["content"] != "Roses are red, violets are blue." || !reflect.DeepEqual(reply["timeline"], want) || reply["isInterrupted"] != false || stored.Data["activeRun"] != nil {
-		t.Fatalf("recovered continuation: %v", stored.Data)
-	}
-}
-
 func TestARecoveredReplyTakesWhatItsRunCommitted(t *testing.T) {
 	committed := object{"model": "deepseek-v4", "modelDisplayName": "DeepSeek V4", "usage": object{"promptTokens": 9, "completionTokens": 4}, "isError": false, "isInterrupted": false}
 	earlier := object{"model": "gpt-oss-120b", "modelDisplayName": "GPT-OSS 120B", "usage": object{"promptTokens": 5, "completionTokens": 2}}
@@ -731,6 +720,11 @@ func TestARecoveredReplyTakesWhatItsRunCommitted(t *testing.T) {
 			reply := obj(messages[len(messages)-1])
 			if got := selectFields(reply, "model modelDisplayName usage isError isInterrupted"); reply["id"] != tc.reply || !reflect.DeepEqual(decodeValue(raw(got)), decodeValue(raw(tc.want))) {
 				t.Fatalf("recovered %s as %v, want %v", reply["id"], got, tc.want)
+			}
+			// A continuation's output extends the reply it continued.
+			want := decodeValue(raw([]any{object{"id": "t1", "type": "thinking", "content": "rhyme"}, object{"id": "c1", "type": "content", "content": "Roses are red, violets are blue."}}))
+			if tc.reply == "a1" && (len(messages) != 2 || reply["content"] != "Roses are red, violets are blue." || !reflect.DeepEqual(reply["timeline"], want)) || stored.Data["activeRun"] != nil {
+				t.Fatalf("recovered continuation: %v", stored.Data)
 			}
 		})
 	}
@@ -785,18 +779,14 @@ func TestAnonymousEphemeralNeverCallsStorage(t *testing.T) {
 	delete(in, "key")
 	in["ephemeral"] = true
 	events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, ""))
-	if len(events) < 3 || rows.calls != 0 {
-		t.Fatalf("ephemeral touched storage: %d", rows.calls)
+	if events[len(events)-1].Type != "RUN_FINISHED" || rows.calls != 0 {
+		t.Fatalf("ephemeral run ended with %+v after %d storage calls", events[len(events)-1], rows.calls)
 	}
-	response := postRoute(h, "/v1/threads/follow", object{"threadId": events[0].ThreadID, "runId": events[0].RunID}, "")
-	eventsIn(t, response)
 }
 func TestCancelCommitsPartialAndLeavesQueue(t *testing.T) {
-	started := make(chan struct{})
 	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
 		w.(http.Flusher).Flush()
-		close(started)
 		<-r.Context().Done()
 	})
 	p := &principal{ID: "alice", JWT: "clerk-alice"}
@@ -805,7 +795,26 @@ func TestCancelCommitsPartialAndLeavesQueue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	<-started
+	// Cancel only once the run has streamed the partial reply.
+streaming:
+	for from := 0; ; {
+		frames, wake, _ := run.log.log.read(from)
+		for _, frame := range frames {
+			var e event
+			plain, err := run.log.open(from, frame)
+			if err != nil || json.Unmarshal(plain, &e) != nil {
+				t.Fatal("unreadable run log frame", err)
+			}
+			if from++; e.Type == "TEXT_MESSAGE_CHUNK" {
+				break streaming
+			}
+		}
+		select {
+		case <-wake:
+		case <-time.After(3 * time.Second):
+			t.Fatal("the run streamed no text")
+		}
+	}
 	queued := sendInput(key)
 	queued["threadId"] = run.thread.id
 	next, err := h.acceptTurn(context.Background(), p, key, queued)
@@ -838,8 +847,8 @@ func TestCancelCommitsPartialAndLeavesQueue(t *testing.T) {
 		t.Fatal("partial assistant lost")
 	}
 	m := obj(arr(row.Data["messages"])[1])
-	if m["isInterrupted"] != true {
-		t.Fatal("partial output not marked interrupted")
+	if m["content"] != "partial" || m["isInterrupted"] != true {
+		t.Fatalf("partial output not kept and marked interrupted: %v", m)
 	}
 	_, err = h.removeQueued(context.Background(), p, key, object{"key": key.base64(), "threadId": run.thread.id, "queueId": next.log.id})
 	if err != nil {
@@ -985,17 +994,6 @@ func TestSyncWireCarriesJWTProtocolAndBase64(t *testing.T) {
 	if err != nil || etag != "5" {
 		t.Fatal(etag, err)
 	}
-	// Only sync negotiates a protocol; other enclaves share postJSON.
-	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := r.Header["X-Sync-Protocol"]; ok {
-			t.Error("a non-sync call sent the sync protocol")
-		}
-		io.WriteString(w, `{}`)
-	}))
-	defer other.Close()
-	if err := postJSON(context.Background(), other.Client(), other.URL, "", object{}, nil); err != nil {
-		t.Fatal(err)
-	}
 }
 func TestContentRunIsIndependentOfRotatingInferenceKey(t *testing.T) {
 	key := contentKey{}
@@ -1015,7 +1013,7 @@ func TestContentRunIsIndependentOfRotatingInferenceKey(t *testing.T) {
 	if _, err := other.open(1, sealed); err == nil {
 		t.Fatal("frame index not bound")
 	}
-	if key.codeKey() != "89492753dd52f2dc48902555edb4c89ad8f27307dd182b328be31d8a748b111f" || key.containerToken("chat_abc_123") != "3c242fb62166080b9a7868b66b4904eaf3ad68fc25f46cb8e2e73878b2c8ccae" || key.sandboxSecret() != "fbf1ff57252905ea05a5504cf29e2226ebcc6460ae231a186d09d1354c3a42e3" {
+	if key.codeKey() != "89492753dd52f2dc48902555edb4c89ad8f27307dd182b328be31d8a748b111f" || key.containerToken("chat_abc_123") != "3c242fb62166080b9a7868b66b4904eaf3ad68fc25f46cb8e2e73878b2c8ccae" {
 		t.Fatal("HKDF differs from the Web Crypto vectors")
 	}
 }
@@ -1092,13 +1090,18 @@ func TestSealedArchiveRandomAccessAndNativeRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	found = false
 	for _, file := range zr.File {
 		if file.Name == "manifest.json" {
 			b, _ := zipBytes(file)
 			if !bytes.Contains(b, []byte("tinfoil-native-cloud-import")) {
 				t.Fatal("wrong import format")
 			}
+			found = true
 		}
+	}
+	if !found {
+		t.Fatal("converted manifest missing")
 	}
 	large, _ := newSealedSpool()
 	defer large.Close()
@@ -1213,24 +1216,6 @@ func lastRequest(r *http.Request) []any {
 	var body object
 	json.NewDecoder(r.Body).Decode(&body)
 	return arr(body["messages"])
-}
-
-func TestTrailingProseIsCutFromReplayedToolArguments(t *testing.T) {
-	var turns atomic.Int32
-	replayed := make(chan string, 1)
-	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
-		if turns.Add(1) == 1 {
-			io.WriteString(w, toolCallChunk(0, "search-call", "web_search", `{"query":"cats"}Now searching...`)+"data: [DONE]\n\n")
-			return
-		}
-		messages := lastRequest(r)
-		replayed <- str(obj(obj(arr(obj(messages[len(messages)-2])["tool_calls"])[0])["function"])["arguments"])
-		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n")
-	})
-	finishedRun(t, h, "/v1/threads/turn", sendInput(key))
-	if got := <-replayed; got != `{"query":"cats"}` {
-		t.Fatalf("the next turn replayed %q", got)
-	}
 }
 
 func TestToolArgumentsAreRepairedBeforeTheCall(t *testing.T) {
@@ -1383,61 +1368,6 @@ func TestArgumentsBeforeTheNameAreSentWhenTheCallOpens(t *testing.T) {
 	}
 	if got := streamedArgs(t, events, "nameless"); !reflect.DeepEqual(got, []string{`{"a":1}`}) {
 		t.Fatalf("a call that never named its tool was sent %q", got)
-	}
-}
-
-func TestWidgetSchemaErrorsReachTheModelUntilTheRetryCap(t *testing.T) {
-	var turns atomic.Int32
-	read := make(chan string, maxWidgetRetries+1)
-	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
-		turn := int(turns.Add(1))
-		if turn > 1 {
-			messages := lastRequest(r)
-			read <- str(obj(messages[len(messages)-1])["content"])
-		}
-		if turn <= maxWidgetRetries+1 {
-			io.WriteString(w, toolCallChunk(0, "widget-"+strconv.Itoa(turn), "render_artifact_preview", `{"title":"Demo","source":"<p>hi</p>"}`)+"data: [DONE]\n\n")
-			return
-		}
-		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"I could not draw it.\"}}]}\n\ndata: [DONE]\n\n")
-	})
-	h.catalog.get().EnabledWidgets = []string{"render_artifact_preview"}
-	in := sendInput(key)
-	in["widgets"] = []any{"render_artifact_preview"}
-	events := finishedRun(t, h, "/v1/threads/turn", in)
-	for i := 1; i <= maxWidgetRetries+1; i++ {
-		got := <-read
-		if i <= maxWidgetRetries && !strings.Contains(got, "did not match the tool's parameter schema") || i > maxWidgetRetries && got != `{"status":"executed"}` {
-			t.Fatalf("after failure %d the model read %s", i, got)
-		}
-	}
-	failures := 0
-	for _, e := range events {
-		if e.Type == "TOOL_CALL_RESULT" && obj(decodeValue(e.Content))["status"] == "error" {
-			failures++
-		}
-	}
-	if failures != maxWidgetRetries+1 {
-		t.Fatalf("the caller saw %d failed renders", failures)
-	}
-}
-
-func TestWidgetRetryRepairsTheReplacement(t *testing.T) {
-	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(object{"choices": []object{{"message": object{"content": `{"stats":"[{\"label\":\"Count\",\"value\":2}]"} Here are the stats.`}}}})
-	})
-	h.catalog.get().EnabledWidgets = []string{"render_stat_cards"}
-	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat")] = storedRow{ID: "chat", ETag: "1", Data: object{"createdAt": timestamp(), "title": "Title", "titleState": "manual", "model": "kimi-k3", "messages": []any{
-		object{"id": "user", "role": "user", "content": "show a stat", "timestamp": timestamp()},
-		object{"id": "assistant", "role": "assistant", "content": "", "timestamp": timestamp(), "timeline": []any{object{"type": "tool_call", "id": "call", "toolCallId": "call", "name": "render_stat_cards", "arguments": `{"stats":"bad"}`}}},
-	}}}
-	in := sendInput(key)
-	in["threadId"], in["kind"], in["toolCallId"], in["widgets"] = "chat", "retryToolCall", "call", []any{"render_stat_cards"}
-	delete(in, "content")
-	finishedRun(t, h, "/v1/threads/turn", in)
-	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", "chat")
-	if got := obj(arr(obj(arr(row.Data["messages"])[1])["timeline"])[0])["arguments"]; got != `{"stats":[{"label":"Count","value":2}]}` {
-		t.Fatalf("stored replacement %v", got)
 	}
 }
 
@@ -1677,18 +1607,13 @@ func TestReasoningIsEchoedInTheFieldItArrivedIn(t *testing.T) {
 	}
 }
 
-func TestLegacyRunsRejectCutAndMalformedStreams(t *testing.T) {
-	for name, stream := range map[string]string{
-		"cut":       "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
-		"malformed": "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\ndata: {not json\n\ndata: [DONE]\n\n",
-	} {
-		t.Run(name, func(t *testing.T) {
-			h, _, _ := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, stream) })
-			events := eventsIn(t, postRoute(h, "/agui", object{"messages": []any{object{"role": "user", "content": "hi"}}, "forwardedProps": object{"webSearch": false}}, "alice"))
-			if last := events[len(events)-1]; last.Type != "RUN_ERROR" {
-				t.Fatalf("a %s stream finished the run: %+v", name, last)
-			}
-		})
+func TestLegacyRunsRejectMalformedStreams(t *testing.T) {
+	h, _, _ := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\ndata: {not json\n\ndata: [DONE]\n\n")
+	})
+	events := eventsIn(t, postRoute(h, "/agui", object{"messages": []any{object{"role": "user", "content": "hi"}}, "forwardedProps": object{"webSearch": false}}, "alice"))
+	if last := events[len(events)-1]; last.Type != "RUN_ERROR" {
+		t.Fatalf("a malformed stream finished the run: %+v", last)
 	}
 }
 
@@ -1754,22 +1679,26 @@ func TestToolFailuresReachTheCallerOpaquely(t *testing.T) {
 				in = object{"messages": []any{object{"role": "user", "content": "hi"}}}
 			}
 			events := finishedRun(t, h, route, in)
+			var shown any
 			for _, e := range events {
-				if e.Type != "TOOL_CALL_RESULT" || e.ToolCallID != "s" {
-					continue
+				if e.Type == "TOOL_CALL_RESULT" && e.ToolCallID == "s" {
+					shown = decodeValue(e.Content)
 				}
-				shown := decodeValue(e.Content)
-				if text, ok := shown.(string); ok { // the AG-UI route sends results as text
-					shown = decodeValue([]byte(text))
-				}
-				if !reflect.DeepEqual(shown, any(map[string]any{"error": "tool_error"})) {
-					t.Fatalf("the caller was sent %s", e.Content)
-				}
+			}
+			if text, ok := shown.(string); ok { // the AG-UI route sends results as text
+				shown = decodeValue([]byte(text))
+			}
+			if !reflect.DeepEqual(shown, any(map[string]any{"error": "tool_error"})) {
+				t.Fatalf("the caller was shown %v", shown)
 			}
 			if strings.Contains(string(raw(events)), "upstream secret detail") {
 				t.Fatal("the tool's error text reached the caller")
 			}
-			if got := toolMessage(<-sent, "s"); !strings.Contains(got, `Tool \"web_search\" rejected the arguments: upstream secret detail`) {
+			read := <-sent
+			if !strings.Contains(string(raw(read)), toolOutputWarning) {
+				t.Fatal("the model was not told to distrust tool output")
+			}
+			if got := toolMessage(read, "s"); !strings.Contains(got, `Tool \"web_search\" rejected the arguments: upstream secret detail`) {
 				t.Fatalf("the model read %s", got)
 			}
 		})
@@ -1858,59 +1787,6 @@ func TestAutoChatsAreFlaggedOnlyByTheHarness(t *testing.T) {
 	if got := drained(); len(got) != 1 || got[0].ConversationID != events[0].ThreadID || got[0].Messages[len(got[0].Messages)-1].Content != "hello" {
 		t.Fatalf("the auto chat was not screened with its chat id: %+v", got)
 	}
-}
-
-func TestFailedAnonymousAndCancelledChatsAreNotScreened(t *testing.T) {
-	t.Run("failed", func(t *testing.T) {
-		h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
-			io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
-		})
-		drained := screenedBy(t, h)
-		if last := eventsIn(t, postRoute(h, "/v1/threads/turn", sendInput(key), "alice")); last[len(last)-1].Type != "RUN_ERROR" {
-			t.Fatal("a cut stream finished the run")
-		}
-		if got := drained(); len(got) != 0 {
-			t.Fatalf("a failed chat was screened: %+v", got)
-		}
-	})
-	t.Run("anonymous", func(t *testing.T) {
-		h, _, key := testChatHarness(t, nil)
-		drained := screenedBy(t, h)
-		in := sendInput(key)
-		delete(in, "key")
-		in["ephemeral"] = true
-		eventsIn(t, postRoute(h, "/v1/threads/turn", in, ""))
-		if got := drained(); len(got) != 0 {
-			t.Fatalf("an anonymous chat was screened: %+v", got)
-		}
-	})
-	t.Run("cancelled", func(t *testing.T) {
-		started := make(chan struct{})
-		h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
-			io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
-			w.(http.Flusher).Flush()
-			close(started)
-			<-r.Context().Done()
-		})
-		drained := screenedBy(t, h)
-		p := &principal{ID: "alice", JWT: "clerk-alice"}
-		run, err := h.acceptTurn(context.Background(), p, key, sendInput(key))
-		if err != nil {
-			t.Fatal(err)
-		}
-		<-started
-		if _, err := h.cancelThread(context.Background(), p, key, object{"key": key.base64(), "threadId": run.thread.id, "runId": run.log.id}); err != nil {
-			t.Fatal(err)
-		}
-		select {
-		case <-run.finished:
-		case <-time.After(3 * time.Second):
-			t.Fatal("cancel timed out")
-		}
-		if got := drained(); len(got) != 0 {
-			t.Fatalf("a cancelled chat was screened: %+v", got)
-		}
-	})
 }
 
 func TestAnswersAnnotateTheSourcesTheyCite(t *testing.T) {

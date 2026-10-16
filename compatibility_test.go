@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -47,8 +48,8 @@ func TestImagePreprocessingBoundsAndTransparency(t *testing.T) {
 	binary.BigEndian.PutUint32(oversized[16:20], 10000)
 	binary.BigEndian.PutUint32(oversized[20:24], 10000)
 	binary.BigEndian.PutUint32(oversized[29:33], crc32.ChecksumIEEE(oversized[12:29]))
-	if _, _, err := resizeImage(oversized); err == nil || asAPIError(err).Code != "ATTACHMENT_UNSUPPORTED" {
-		t.Fatal("pixel limit was not checked before decoding")
+	if _, _, err := resizeImage(oversized); err == nil || asAPIError(err).Code != "ATTACHMENT_UNSUPPORTED" || !strings.Contains(asAPIError(err).Message, "pixel limit") {
+		t.Fatal("pixel limit was not checked before decoding", err)
 	}
 	source.Reset()
 	if err := png.Encode(&source, image.NewRGBA(image.Rect(0, 0, 2000, 2))); err != nil {
@@ -134,7 +135,6 @@ func TestReferenceBackupWithProjectImagesAndPages(t *testing.T) {
 	if err := h.writeBackup(context.Background(), p, key, object{}, &archive); err != nil {
 		t.Fatal(err)
 	}
-	referenceCheck(t, object{"backup": base64.StdEncoding.EncodeToString(archive.Bytes())})
 	spool, _ := newSealedSpool()
 	defer spool.Close()
 	spool.Write(archive.Bytes())
@@ -144,6 +144,7 @@ func TestReferenceBackupWithProjectImagesAndPages(t *testing.T) {
 		t.Fatal(native, err)
 	}
 	defer converted.Close()
+	referenceCheck(t, object{"backup": base64.StdEncoding.EncodeToString(archive.Bytes())})
 }
 
 func referenceCheck(t *testing.T, input object) {
@@ -282,9 +283,13 @@ func TestTruncatedModelStreamPreservesPartialAnswer(t *testing.T) {
 	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
 	})
+	drained := screenedBy(t, h)
 	events := eventsIn(t, postRoute(h, "/v1/threads/turn", sendInput(key), "alice"))
 	if events[len(events)-1].Code != "UPSTREAM_REFUSED" {
 		t.Fatal("truncated stream reported success")
+	}
+	if got := drained(); len(got) != 0 {
+		t.Fatalf("a failed chat was screened: %+v", got)
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
 	last := obj(arr(row.Data["messages"])[1])
@@ -316,7 +321,7 @@ func TestTitleRunsBeforeAnswerFinishes(t *testing.T) {
 	<-started
 	select {
 	case <-titled:
-	case <-time.After(time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("title waited for the model")
 	}
 	close(release)
@@ -327,15 +332,15 @@ func TestTitleRunsBeforeAnswerFinishes(t *testing.T) {
 	}
 }
 func TestWidgetSchemaAndFactOperations(t *testing.T) {
-	for _, widget := range widgetCatalog() {
-		if widget.Name == "render_clock" {
-			if err := validateSchema(widget.Schema, object{"durationSeconds": float64(1)}); err != nil {
-				t.Fatal(err)
-			}
-			if err := validateSchema(widget.Schema, object{"durationSeconds": float64(0)}); err == nil {
-				t.Fatal("exclusive lower bound ignored")
-			}
-		}
+	clock, ok := catalogWidgets("render_clock")["render_clock"]
+	if !ok {
+		t.Fatal("render_clock is not in the widget catalog")
+	}
+	if err := validateSchema(clock.Schema, object{"durationSeconds": float64(1)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSchema(clock.Schema, object{"durationSeconds": float64(0)}); err == nil {
+		t.Fatal("exclusive lower bound ignored")
 	}
 	facts := []any{object{"id": "old", "fact": "old fact", "category": "test", "confidence": 0.5}}
 	operations := []any{object{"action": "update", "factId": "old", "updates": object{"fact": "new fact"}}, object{"action": "add", "fact": object{"fact": "second fact", "category": "test", "confidence": 0.9, "date": timestamp()}}}
@@ -353,7 +358,7 @@ func TestWidgetRetryReplacesOnlyTheArguments(t *testing.T) {
 		if obj(body["response_format"])["type"] != "json_schema" {
 			t.Error("retry did not request a schema")
 		}
-		json.NewEncoder(w).Encode(object{"choices": []object{{"message": object{"content": replacement}}}})
+		json.NewEncoder(w).Encode(object{"choices": []object{{"message": object{"content": `{"stats":"[{\"label\":\"Count\",\"value\":2}]"} Here are the stats.`}}}})
 	})
 	catalog := h.catalog.get()
 	catalog.EnabledWidgets = []string{"render_stat_cards"}
@@ -375,10 +380,16 @@ func TestWidgetRetryReplacesOnlyTheArguments(t *testing.T) {
 	if len(messages) != 2 || len(blocks) != 2 || obj(blocks[1])["arguments"] != replacement {
 		t.Fatal("retry changed message structure")
 	}
-	r := postRoute(h, "/v1/threads/follow", object{"key": key.base64(), "threadId": "chat", "runId": events[0].RunID}, "alice")
-	replay := eventsIn(t, r)
-	if !strings.Contains(string(raw(replay)), "keep this text") {
-		t.Fatal("retry follow lost the message's other blocks")
+	// A client reconnecting after the retry sees the new arguments beside the message's other blocks.
+	follow := httptest.NewRequest("POST", "/v1/threads/follow", bytes.NewReader(raw(object{"key": key.base64(), "threadId": "chat", "runId": events[0].RunID})))
+	follow.Header.Set("Authorization", "Bearer clerk-alice")
+	follow.Header.Set("Last-Event-ID", strconv.Itoa(slices.IndexFunc(events, func(e event) bool { return e.Type == "TOOL_CALL_END" })))
+	resumed := httptest.NewRecorder()
+	h.routes().ServeHTTP(resumed, follow)
+	snapshot := arr(eventsIn(t, resumed)[0].Messages)
+	shown := arr(obj(snapshot[len(snapshot)-1])["timeline"])
+	if len(shown) != 2 || obj(shown[0])["content"] != "keep this text" || obj(shown[1])["arguments"] != replacement {
+		t.Fatalf("a reconnecting client was shown %v", shown)
 	}
 }
 

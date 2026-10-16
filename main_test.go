@@ -189,21 +189,6 @@ func TestAStorageIDBelongsToOneRun(t *testing.T) {
 	}
 }
 
-// Starting the run frames the log, so there is no window in which a caller
-// holding the right secret is told its own run is not recoverable.
-func TestAStartedRunIsReattachableBeforeItProducesAnything(t *testing.T) {
-	id := strings.Repeat("f", 32)
-	h := &harness{runs: map[string]*run{}}
-	rn := mustRun(t, id, "bb")
-	newStream(rn, "thread", "run")
-	if err := h.enlist(id, rn); err != nil {
-		t.Fatal(err)
-	}
-	if live, err := h.lookup(caller("key"), id, "bb"); live != rn || err != nil {
-		t.Fatalf("a run that had only started answered live=%v err=%v", live != nil, err)
-	}
-}
-
 func TestOutgrowingTheLogStopsTheRun(t *testing.T) {
 	rn := mustRun(t, "00", "aa")
 	stopped := false

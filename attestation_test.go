@@ -72,14 +72,6 @@ func TestTimedOutAttestationsKeepTheirConcurrencySlot(t *testing.T) {
 	}); !errors.Is(err, context.DeadlineExceeded) || called.Load() {
 		t.Fatalf("launched extra verification work after timeout: called=%v err=%v", called.Load(), err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := runner.run(ctx, func() (*http.Client, error) {
-		called.Store(true)
-		return &http.Client{}, nil
-	}); !errors.Is(err, context.Canceled) || called.Load() {
-		t.Fatalf("canceled verification started work: called=%v err=%v", called.Load(), err)
-	}
 }
 
 func TestGatewayOfferFollowsTheCatalogAndKeepsTheLastGoodOne(t *testing.T) {

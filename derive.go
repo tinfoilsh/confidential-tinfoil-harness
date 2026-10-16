@@ -48,9 +48,6 @@ func (k contentKey) codeKey() string {
 func (k contentKey) containerToken(id string) string {
 	return hex.EncodeToString(k.derive("tinfoil-code-execution-v1:" + id))
 }
-func (k contentKey) sandboxSecret() string {
-	return hex.EncodeToString(k.derive("tinfoil-agent-sandbox-cache-secret-v1"))
-}
 
 func randomKey() contentKey { var k contentKey; rand.Read(k[:]); return k }
 func rowID() string {

@@ -116,15 +116,16 @@ func TestImportMayReuseADeletedChatID(t *testing.T) {
 		}
 		return syncTestResponse(200, object{"ok": true, "etag": "1"})
 	})}}
-	row := &storedRow{ID: "chat-1", Data: object{"messages": []any{}}, restore: true}
-	if _, err := client.push(context.Background(), &principal{ID: "alice", JWT: "jwt"}, randomKey(), "chat", row, "nonce"); err != nil {
+	h, _, key := testChatHarness(t, nil)
+	h.storeRows = client
+	if _, err := h.importThread(context.Background(), &principal{ID: "alice", JWT: "jwt"}, key, object{"threadId": "chat-1", "thread": object{"messages": []any{}}}); err != nil {
 		t.Fatal(err)
 	}
 	if metadata["restoreDeleted"] != true {
 		t.Fatalf("metadata: %v", metadata)
 	}
-	row.restore = false
-	client.push(context.Background(), &principal{ID: "alice", JWT: "jwt"}, randomKey(), "chat", row, "nonce")
+	row := &storedRow{ID: "chat-1", Data: object{"messages": []any{}}}
+	client.push(context.Background(), &principal{ID: "alice", JWT: "jwt"}, key, "chat", row, "nonce")
 	if _, ok := metadata["restoreDeleted"]; ok {
 		t.Fatal("an ordinary push asked to restore a deleted chat")
 	}
