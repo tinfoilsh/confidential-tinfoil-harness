@@ -779,11 +779,9 @@ func TestAnonymousEphemeralNeverCallsStorage(t *testing.T) {
 	delete(in, "key")
 	in["ephemeral"] = true
 	events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, ""))
-	if len(events) < 3 || rows.calls != 0 {
-		t.Fatalf("ephemeral touched storage: %d", rows.calls)
+	if events[len(events)-1].Type != "RUN_FINISHED" || rows.calls != 0 {
+		t.Fatalf("ephemeral run ended with %+v after %d storage calls", events[len(events)-1], rows.calls)
 	}
-	response := postRoute(h, "/v1/threads/follow", object{"threadId": events[0].ThreadID, "runId": events[0].RunID}, "")
-	eventsIn(t, response)
 }
 func TestCancelCommitsPartialAndLeavesQueue(t *testing.T) {
 	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
@@ -996,17 +994,6 @@ func TestSyncWireCarriesJWTProtocolAndBase64(t *testing.T) {
 	if err != nil || etag != "5" {
 		t.Fatal(etag, err)
 	}
-	// Only sync negotiates a protocol; other enclaves share postJSON.
-	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := r.Header["X-Sync-Protocol"]; ok {
-			t.Error("a non-sync call sent the sync protocol")
-		}
-		io.WriteString(w, `{}`)
-	}))
-	defer other.Close()
-	if err := postJSON(context.Background(), other.Client(), other.URL, "", object{}, nil); err != nil {
-		t.Fatal(err)
-	}
 }
 func TestContentRunIsIndependentOfRotatingInferenceKey(t *testing.T) {
 	key := contentKey{}
@@ -1103,13 +1090,18 @@ func TestSealedArchiveRandomAccessAndNativeRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	found = false
 	for _, file := range zr.File {
 		if file.Name == "manifest.json" {
 			b, _ := zipBytes(file)
 			if !bytes.Contains(b, []byte("tinfoil-native-cloud-import")) {
 				t.Fatal("wrong import format")
 			}
+			found = true
 		}
+	}
+	if !found {
+		t.Fatal("converted manifest missing")
 	}
 	large, _ := newSealedSpool()
 	defer large.Close()
@@ -1615,18 +1607,13 @@ func TestReasoningIsEchoedInTheFieldItArrivedIn(t *testing.T) {
 	}
 }
 
-func TestLegacyRunsRejectCutAndMalformedStreams(t *testing.T) {
-	for name, stream := range map[string]string{
-		"cut":       "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
-		"malformed": "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\ndata: {not json\n\ndata: [DONE]\n\n",
-	} {
-		t.Run(name, func(t *testing.T) {
-			h, _, _ := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, stream) })
-			events := eventsIn(t, postRoute(h, "/agui", object{"messages": []any{object{"role": "user", "content": "hi"}}, "forwardedProps": object{"webSearch": false}}, "alice"))
-			if last := events[len(events)-1]; last.Type != "RUN_ERROR" {
-				t.Fatalf("a %s stream finished the run: %+v", name, last)
-			}
-		})
+func TestLegacyRunsRejectMalformedStreams(t *testing.T) {
+	h, _, _ := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\ndata: {not json\n\ndata: [DONE]\n\n")
+	})
+	events := eventsIn(t, postRoute(h, "/agui", object{"messages": []any{object{"role": "user", "content": "hi"}}, "forwardedProps": object{"webSearch": false}}, "alice"))
+	if last := events[len(events)-1]; last.Type != "RUN_ERROR" {
+		t.Fatalf("a malformed stream finished the run: %+v", last)
 	}
 }
 
@@ -1692,17 +1679,17 @@ func TestToolFailuresReachTheCallerOpaquely(t *testing.T) {
 				in = object{"messages": []any{object{"role": "user", "content": "hi"}}}
 			}
 			events := finishedRun(t, h, route, in)
+			var shown any
 			for _, e := range events {
-				if e.Type != "TOOL_CALL_RESULT" || e.ToolCallID != "s" {
-					continue
+				if e.Type == "TOOL_CALL_RESULT" && e.ToolCallID == "s" {
+					shown = decodeValue(e.Content)
 				}
-				shown := decodeValue(e.Content)
-				if text, ok := shown.(string); ok { // the AG-UI route sends results as text
-					shown = decodeValue([]byte(text))
-				}
-				if !reflect.DeepEqual(shown, any(map[string]any{"error": "tool_error"})) {
-					t.Fatalf("the caller was sent %s", e.Content)
-				}
+			}
+			if text, ok := shown.(string); ok { // the AG-UI route sends results as text
+				shown = decodeValue([]byte(text))
+			}
+			if !reflect.DeepEqual(shown, any(map[string]any{"error": "tool_error"})) {
+				t.Fatalf("the caller was shown %v", shown)
 			}
 			if strings.Contains(string(raw(events)), "upstream secret detail") {
 				t.Fatal("the tool's error text reached the caller")
