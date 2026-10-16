@@ -254,8 +254,9 @@ func (h *harness) inflateDocument(ctx context.Context, p *principal, a object) e
 }
 
 // repairAttachments makes a row pushable when sync names references it does
-// not hold under the row's chat: rows written before references were checked
-// may point at blobs filed under another chat or deleted since.
+// not hold under the row's chat: a row the web or iOS app wrote before sync
+// checked references may point at blobs filed under another chat or deleted
+// since.
 func (h *harness) repairAttachments(ctx context.Context, p *principal, row *storedRow, missing []string) error {
 	for _, item := range arr(row.Data["messages"]) {
 		for _, value := range arr(obj(item)["attachments"]) {

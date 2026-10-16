@@ -449,9 +449,9 @@ func (h *harness) attachmentBytes(ctx context.Context, p *principal, descriptor 
 
 var legacyAttachments = &http.Client{Timeout: 5 * time.Minute}
 
-// Attachments from before the sync enclave stored them carry only a `key`
-// and live encrypted at the control plane, as a 12-byte IV and AES-256-GCM
-// ciphertext. The web client reads them the same way.
+// Images the web and iOS apps stored before the sync enclave existed carry
+// only a `key` and live encrypted at the control plane, as a 12-byte IV and
+// AES-256-GCM ciphertext. The web client reads them the same way.
 func (h *harness) legacyAttachmentBytes(ctx context.Context, id, encodedKey string) ([]byte, error) {
 	key, err := base64.StdEncoding.DecodeString(encodedKey)
 	if err != nil || len(key) != 32 {
