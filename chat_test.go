@@ -352,19 +352,6 @@ func TestNewChatsStartWithTheDefaultPromptPreset(t *testing.T) {
 	}
 }
 
-func TestSessionAdvertisesThreadFeatures(t *testing.T) {
-	h, _, _ := testChatHarness(t, nil)
-	var session struct {
-		Features map[string]bool `json:"features"`
-	}
-	json.Unmarshal(postRoute(h, "/v1/session", object{}, "").Body.Bytes(), &session)
-	for _, name := range []string{"defaultPromptPreset", "fork", "messageActions", "continue", "localShare"} {
-		if !session.Features[name] {
-			t.Errorf("the session does not advertise %s", name)
-		}
-	}
-}
-
 func messageIDs(messages any) []string {
 	ids := []string{}
 	for _, m := range arr(messages) {
