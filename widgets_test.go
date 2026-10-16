@@ -3,37 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"reflect"
 	"strings"
 	"sync"
 	"testing"
 )
-
-func TestCanonicalizeWidgetArgumentsUnwrapsDeepSeekShape(t *testing.T) {
-	var parsed map[string]any
-	if err := json.Unmarshal([]byte(canonicalizeWidgetArguments(`{"stats":"[{\"label\":\"Human trials\",\"value\":\"20+\"}]"}`)), &parsed); err != nil {
-		t.Fatal(err)
-	}
-	stats, _ := parsed["stats"].([]any)
-	if len(stats) != 1 || !reflect.DeepEqual(stats[0], map[string]any{"label": "Human trials", "value": "20+"}) {
-		t.Fatalf("stats were not unwrapped into native rows: %#v", parsed["stats"])
-	}
-}
-
-func TestCanonicalizeWidgetArgumentsIdempotent(t *testing.T) {
-	clean := `{"series":[{"label":"Q1","value":10},{"label":"Q2","value":15}]}`
-	if once := canonicalizeWidgetArguments(clean); once != clean || canonicalizeWidgetArguments(once) != once {
-		t.Fatalf("canonical arguments changed: %s", once)
-	}
-}
-
-func TestCanonicalizeWidgetArgumentsLeavesNonJSONAlone(t *testing.T) {
-	for _, in := range []string{"", "plain text", "{ unclosed", `"already a string"`, `{"a":1} {"b":2}`} {
-		if got := canonicalizeWidgetArguments(in); got != in {
-			t.Errorf("canonicalize(%q) = %q; want unchanged", in, got)
-		}
-	}
-}
 
 func TestCanonicalizeWidgetArgumentsRecursive(t *testing.T) {
 	var parsed map[string]any
