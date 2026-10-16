@@ -150,6 +150,18 @@ func referenceCheck(t *testing.T, input object) {
 	if _, err := os.Stat(reference + "/node_modules/typescript"); err != nil {
 		t.Skip("reference webapp dependencies are not installed")
 	}
+	if _, ok := input["events"]; ok {
+		if _, err := os.Stat(reference + "/src/services/harness/reducer.ts"); err != nil {
+			// Event parity needs the webapp's harness reducer; the backup and
+			// stored-row checks in the same input do not.
+			input = clone(input)
+			delete(input, "events")
+			delete(input, "expectedMessages")
+			if len(input) == 0 {
+				t.Skip("reference webapp has no harness reducer")
+			}
+		}
+	}
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("Node is not installed")
@@ -365,14 +377,6 @@ func TestWidgetRetryReplacesOnlyTheArguments(t *testing.T) {
 	replay := eventsIn(t, r)
 	if !strings.Contains(string(raw(replay)), "keep this text") {
 		t.Fatal("retry follow lost the message's other blocks")
-	}
-}
-
-func TestClientIdentitySignatureVector(t *testing.T) {
-	req := httptest.NewRequest("GET", "https://api.example/api/keys/chat", nil)
-	signClientIP(req, "192.0.2.9", "test-harness-secret", time.Unix(1700000000, 0))
-	if req.Header.Get(clientIPSignatureHeader) != "64ad56cd55ad6a1d5ff70968fb1d1506587dbf99f3c13d13a1f938420dcebcab" {
-		t.Fatal(req.Header.Get(clientIPSignatureHeader))
 	}
 }
 

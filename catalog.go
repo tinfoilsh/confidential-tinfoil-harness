@@ -74,9 +74,7 @@ func fetchConfig(ctx context.Context, client *http.Client, base, path string, ou
 }
 func (h *harness) refreshCatalog(ctx context.Context) error {
 	client := &http.Client{Timeout: 15 * time.Second}
-	var models struct {
-		Models []object `json:"models"`
-	}
+	var models []object
 	var prompt object
 	if err := fetchConfig(ctx, client, h.controlplane, "/api/config/models", &models); err != nil {
 		return err
@@ -84,7 +82,7 @@ func (h *harness) refreshCatalog(ctx context.Context) error {
 	if err := fetchConfig(ctx, client, h.controlplane, "/api/config/system-prompt", &prompt); err != nil {
 		return err
 	}
-	c, err := buildCatalog(models.Models, prompt, h.models)
+	c, err := buildCatalog(models, prompt, h.models)
 	if err != nil {
 		return err
 	}

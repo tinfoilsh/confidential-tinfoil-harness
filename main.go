@@ -40,6 +40,9 @@ type model struct {
 var pinned = []struct{ name, repo string }{
 	{"kimi-k3", "tinfoilsh/confidential-kimi-k3"},
 	{"deepseek-v4-flash", "tinfoilsh/confidential-deepseek-v4-flash"},
+	{"deepseek-v4-1-flash", "tinfoilsh/confidential-deepseek-v4-1-flash"},
+	{"glm-5-3", "tinfoilsh/confidential-glm5-3-nvfp4"},
+	{"glm-5-3-flash", "tinfoilsh/confidential-glm5-3-flash"},
 	{"gemma4-31b", "tinfoilsh/confidential-gemma4-31b"},
 	{"gpt-oss-120b", "tinfoilsh/confidential-gpt-oss-120b"},
 	{"llama3-3-70b", "tinfoilsh/confidential-llama3-3-70b"},
@@ -80,9 +83,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The pinned SDK uses http.DefaultClient for attestation metadata, while
+	// streamed inference has its own client and remains governed by run context.
+	http.DefaultClient.Timeout = verificationHTTPTimeout
+	ctx, shutdown := context.WithCancel(context.Background())
+	defer shutdown()
 	gw := strings.TrimRight(*gateway, "/")
-	attestFamilies(usageSecret)
-	models, err := attestCatalog(gw, usageSecret)
+	attestFamilies(ctx, usageSecret)
+	models, err := attestCatalog(ctx, gw, usageSecret)
 	if err != nil {
 		slog.Error("verify model enclaves", "gateway", gw, "error", err)
 		os.Exit(1)
@@ -92,8 +100,6 @@ func main() {
 		cpClient:     &http.Client{Transport: &callerAuth{inner: http.DefaultTransport}},
 		runs:         map[string]*run{}}
 
-	ctx, shutdown := context.WithCancel(context.Background())
-	defer shutdown()
 	if err := h.bootChat(ctx, usageSecret); err != nil {
 		slog.Error("initialize chat service", "error", err)
 		os.Exit(1)
@@ -128,25 +134,27 @@ func env(key, fallback string) string {
 	return fallback
 }
 
-func attest(enclave, repo, baseURL, usageSecret string) (*http.Client, error) {
-	opts := []tinfoil.ClientOption{tinfoil.WithEnclave(enclave), tinfoil.WithRepo(repo)}
-	if baseURL != "" { // the tools enclave is dialled directly, not via the gateway
-		opts = append(opts, tinfoil.WithBaseURL(baseURL))
-	}
-	verified, err := tinfoil.NewClientWithOptions(opts...)
-	if err != nil {
-		return nil, err
-	}
-	client := verified.HTTPClient()
-	client.Transport = &callerAuth{inner: client.Transport, usageSecret: usageSecret}
-	return client, nil
+func attest(ctx context.Context, enclave, repo, baseURL, usageSecret string) (*http.Client, error) {
+	return startupAttestation.run(ctx, func() (*http.Client, error) {
+		opts := []tinfoil.ClientOption{tinfoil.WithEnclave(enclave), tinfoil.WithRepo(repo)}
+		if baseURL != "" { // the tools enclave is dialled directly, not via the gateway
+			opts = append(opts, tinfoil.WithBaseURL(baseURL))
+		}
+		verified, err := tinfoil.NewClientWithOptions(opts...)
+		if err != nil {
+			return nil, err
+		}
+		client := verified.HTTPClient()
+		client.Transport = &callerAuth{inner: client.Transport, usageSecret: usageSecret}
+		return client, nil
+	})
 }
 
 // A family is opt-in per run, so one that does not verify is skipped, not fatal.
-func attestFamilies(usageSecret string) {
+func attestFamilies(ctx context.Context, usageSecret string) {
 	for _, f := range families {
 		f.enclave = env(f.env, f.enclave)
-		client, err := attest(f.enclave, f.repo, "", usageSecret)
+		client, err := attest(ctx, f.enclave, f.repo, "", usageSecret)
 		if err != nil {
 			slog.Warn("tool enclave did not verify", "family", f.name, "enclave", f.enclave, "error", err)
 			continue
@@ -166,12 +174,15 @@ func attestFamilies(usageSecret string) {
 // which model -- a wrong one costs a refusal or a gateway error, never
 // confidentiality. That is what lets the enclave list live in one place, on the
 // side that already owns replica placement.
-func attestCatalog(gateway, usageSecret string) ([]*model, error) {
-	offered, err := fetchCatalog(gateway)
+func attestCatalog(ctx context.Context, gateway, usageSecret string) ([]*model, error) {
+	offered, err := fetchCatalog(ctx, gateway)
 	if err != nil {
 		return nil, err
 	}
+	return attestModels(ctx, offered, gateway, usageSecret, attest)
+}
 
+func attestModels(ctx context.Context, offered map[string]catalogEntry, gateway, usageSecret string, verify enclaveVerifier) ([]*model, error) {
 	models := make([]*model, len(pinned))
 	var wg sync.WaitGroup
 	for i, p := range pinned {
@@ -187,17 +198,14 @@ func attestCatalog(gateway, usageSecret string) ([]*model, error) {
 			// Any replica that verifies will do as the starting point: the
 			// gateway answers a 421 naming the one it routed to, and the SDK
 			// attests that host against the same repo before re-sealing there.
-			for _, host := range entry.Hosts {
-				client, err := attest(host, m.repo, gateway+"/v1/", usageSecret)
-				if err != nil {
-					slog.Warn("replica did not verify", "model", m.name, "enclave", host, "error", err)
-					continue
-				}
-				m.client = client
-				m.enclave, m.verifiedAt = host, timestamp()
-				models[i] = m
+			host, client, err := attestReplicas(ctx, entry.Hosts, m.repo, gateway+"/v1/", usageSecret, verify)
+			if err != nil {
+				slog.Warn("model unavailable", "model", m.name, "error", err)
 				return
 			}
+			m.client = client
+			m.enclave, m.verifiedAt = host, timestamp()
+			models[i] = m
 		}()
 	}
 	wg.Wait()
@@ -218,8 +226,12 @@ type catalogEntry struct {
 
 // fetchCatalog reads the pools the gateway routes to. It needs no API key: the
 // harness holds none, and every caller's key belongs to a request.
-func fetchCatalog(gateway string) (map[string]catalogEntry, error) {
-	resp, err := (&http.Client{Timeout: 15 * time.Second}).Get(gateway + "/catalog")
+func fetchCatalog(ctx context.Context, gateway string) (map[string]catalogEntry, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gateway+"/catalog", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("read catalog: %w", err)
 	}

@@ -40,15 +40,6 @@ var families = []*family{
 		prompt: searchInstructions,
 		live:   searchLive,
 	},
-	{
-		name: "codeExecution", env: "TINFOIL_CODE_ENCLAVE",
-		repo: "tinfoilsh/confidential-code-execution", enclave: "code-execution.tinfoil.sh",
-		tools: []tool{{"bash", "bash"}, {"view", "view"}, {"str_replace", "str_replace"},
-			{"create", "create"}, {"insert", "insert"}, {"present", "present"}},
-		prompt: codeInstructions,
-		serial: true,
-		live:   codeLive,
-	},
 }
 
 const (
