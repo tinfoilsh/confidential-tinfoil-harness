@@ -792,11 +792,9 @@ func TestAnonymousEphemeralNeverCallsStorage(t *testing.T) {
 	eventsIn(t, response)
 }
 func TestCancelCommitsPartialAndLeavesQueue(t *testing.T) {
-	started := make(chan struct{})
 	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
 		w.(http.Flusher).Flush()
-		close(started)
 		<-r.Context().Done()
 	})
 	p := &principal{ID: "alice", JWT: "clerk-alice"}
@@ -805,7 +803,26 @@ func TestCancelCommitsPartialAndLeavesQueue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	<-started
+	// Cancel only once the run has streamed the partial reply.
+streaming:
+	for from := 0; ; {
+		frames, wake, _ := run.log.log.read(from)
+		for _, frame := range frames {
+			var e event
+			plain, err := run.log.open(from, frame)
+			if err != nil || json.Unmarshal(plain, &e) != nil {
+				t.Fatal("unreadable run log frame", err)
+			}
+			if from++; e.Type == "TEXT_MESSAGE_CHUNK" {
+				break streaming
+			}
+		}
+		select {
+		case <-wake:
+		case <-time.After(3 * time.Second):
+			t.Fatal("the run streamed no text")
+		}
+	}
 	queued := sendInput(key)
 	queued["threadId"] = run.thread.id
 	next, err := h.acceptTurn(context.Background(), p, key, queued)
@@ -838,8 +855,8 @@ func TestCancelCommitsPartialAndLeavesQueue(t *testing.T) {
 		t.Fatal("partial assistant lost")
 	}
 	m := obj(arr(row.Data["messages"])[1])
-	if m["isInterrupted"] != true {
-		t.Fatal("partial output not marked interrupted")
+	if m["content"] != "partial" || m["isInterrupted"] != true {
+		t.Fatalf("partial output not kept and marked interrupted: %v", m)
 	}
 	_, err = h.removeQueued(context.Background(), p, key, object{"key": key.base64(), "threadId": run.thread.id, "queueId": next.log.id})
 	if err != nil {
