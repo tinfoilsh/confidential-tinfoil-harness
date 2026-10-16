@@ -30,26 +30,37 @@ type memoryRows struct {
 	rows     map[string]storedRow
 	conflict func(*storedRow)
 	refuse   func(*storedRow) error
-	// unreadable rows exist but cannot be opened with the caller's key.
-	unreadable map[string]bool
-	calls      int
+	// sealed is the key each row was stored with; a row a test seeds is
+	// sealed with key. Like sync, only that key opens or overwrites a row,
+	// and any key deletes it.
+	sealed map[string]contentKey
+	key    contentKey
+	calls  int
 }
 
 func rowMapKey(p *principal, scope, id string) string { return p.scope() + "/" + scope + "/" + id }
-func (s *memoryRows) load(_ context.Context, p *principal, _ contentKey, scope, id string) (*storedRow, error) {
+func (s *memoryRows) opens(name string, key contentKey) bool {
+	sealed, ok := s.sealed[name]
+	if !ok {
+		sealed = s.key
+	}
+	return key == sealed
+}
+func (s *memoryRows) load(_ context.Context, p *principal, key contentKey, scope, id string) (*storedRow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
-	row, ok := s.rows[rowMapKey(p, scope, id)]
+	name := rowMapKey(p, scope, id)
+	row, ok := s.rows[name]
 	if !ok {
 		return nil, apiErr(404, "THREAD_NOT_FOUND", "missing")
 	}
-	if s.unreadable[id] {
+	if !s.opens(name, key) {
 		return nil, apiErr(409, "KEY_MISMATCH", "sealed to another key")
 	}
 	return &storedRow{ID: row.ID, ETag: row.ETag, Data: clone(row.Data)}, nil
 }
-func (s *memoryRows) list(_ context.Context, p *principal, _ contentKey, scope, cursor, project string, limit int) (rowPage, error) {
+func (s *memoryRows) list(_ context.Context, p *principal, key contentKey, scope, cursor, project string, limit int) (rowPage, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
@@ -58,7 +69,7 @@ func (s *memoryRows) list(_ context.Context, p *principal, _ contentKey, scope, 
 		if !strings.HasPrefix(name, p.scope()+"/"+scope+"/") || project != "" && row.Data["projectId"] != project {
 			continue
 		}
-		if s.unreadable[row.ID] {
+		if !s.opens(name, key) {
 			page.Unreadable = append(page.Unreadable, row.ID)
 			continue
 		}
@@ -66,7 +77,7 @@ func (s *memoryRows) list(_ context.Context, p *principal, _ contentKey, scope, 
 	}
 	return page, nil
 }
-func (s *memoryRows) push(_ context.Context, p *principal, _ contentKey, scope string, row *storedRow, _ string) (string, error) {
+func (s *memoryRows) push(_ context.Context, p *principal, key contentKey, scope string, row *storedRow, _ string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
@@ -76,7 +87,10 @@ func (s *memoryRows) push(_ context.Context, p *principal, _ contentKey, scope s
 		}
 	}
 	name := rowMapKey(p, scope, row.ID)
-	current := s.rows[name]
+	current, exists := s.rows[name]
+	if exists && !s.opens(name, key) {
+		return "", apiErr(409, "KEY_MISMATCH", "sealed to another key")
+	}
 	if s.conflict != nil {
 		f := s.conflict
 		s.conflict = nil
@@ -90,18 +104,20 @@ func (s *memoryRows) push(_ context.Context, p *principal, _ contentKey, scope s
 	}
 	n, _ := strconv.Atoi(current.ETag)
 	next := strconv.Itoa(n + 1)
-	s.rows[name] = storedRow{ID: row.ID, ETag: next, Data: clone(row.Data)}
+	s.rows[name], s.sealed[name] = storedRow{ID: row.ID, ETag: next, Data: clone(row.Data)}, key
 	return next, nil
 }
 func (s *memoryRows) remove(_ context.Context, p *principal, _ contentKey, scope string, row *storedRow) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.calls++
 	name := rowMapKey(p, scope, row.ID)
 	// Like sync, an empty if-match deletes unconditionally.
 	if row.ETag != "" && s.rows[name].ETag != row.ETag {
 		return apiErr(409, "REVISION_CONFLICT", "changed")
 	}
 	delete(s.rows, name)
+	delete(s.sealed, name)
 	return nil
 }
 
@@ -140,7 +156,7 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 		}
 	}))
 	t.Cleanup(cp.Close)
-	rows := &memoryRows{rows: map[string]storedRow{}}
+	rows := &memoryRows{rows: map[string]storedRow{}, sealed: map[string]contentKey{}}
 	h := &harness{gateway: server.URL, controlplane: cp.URL, cpClient: cp.Client(), storeRows: rows, services: map[string]*downstreamService{}}
 	h.auth = &authenticator{verify: func(_ context.Context, s string) (string, error) {
 		if !strings.HasPrefix(s, "clerk-") {
@@ -197,6 +213,7 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 	for i := range key {
 		key[i] = byte(i)
 	}
+	rows.key = key
 	return h, rows, key
 }
 func postRoute(h *harness, path string, in object, user string) *httptest.ResponseRecorder {

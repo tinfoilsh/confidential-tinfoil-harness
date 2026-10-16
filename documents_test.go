@@ -497,7 +497,7 @@ func TestDeleteAllIncludesRowsTheKeyCannotOpen(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	storedThread(rows, "alice", "readable")
 	storedThread(rows, "alice", "sealed-to-a-retired-key")
-	rows.unreadable = map[string]bool{"sealed-to-a-retired-key": true}
+	rows.sealed[rowMapKey(&principal{ID: "alice"}, "chat", "sealed-to-a-retired-key")] = randomKey()
 	result, err := h.deleteAllThreads(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, key, object{})
 	if err != nil {
 		t.Fatal(err)
