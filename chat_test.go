@@ -374,7 +374,7 @@ func windowIDs(t *testing.T, w *httptest.ResponseRecorder) []string {
 func TestDeletingAMessageRemovesOnlyThatMessage(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	p := &principal{ID: "alice"}
-	// A row written before messages had ids is shown with ids from their positions.
+	// The web client stores messages without ids, so they are shown with ids from their positions.
 	rows.rows[rowMapKey(p, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: object{"title": "Old", "messages": []any{
 		object{"role": "user", "content": "one", "imageData": []any{object{"base64": "aW1hZ2U=", "mimeType": "image/png"}}}, object{"role": "assistant", "content": "two"}, object{"role": "user", "content": "three"}, object{"role": "assistant", "content": "four"},
 	}}}
