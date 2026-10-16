@@ -119,6 +119,7 @@ func TestReferenceBackupWithProjectImagesAndPages(t *testing.T) {
 		t.Fatal(err)
 	}
 	encoded := base64.StdEncoding.EncodeToString(pixel.Bytes())
+	answer := "[Answer](https://example.com)"
 	rows.rows[rowMapKey(p, "project", "project")] = storedRow{ID: "project", ETag: "1", Data: object{"name": "Project", "description": "Description", "systemInstructions": "Instructions", "memory": []any{}, "createdAt": now, "updatedAt": now}}
 	rows.rows[rowMapKey(p, "project_document", "project/doc")] = storedRow{ID: "project/doc", ETag: "1", Data: object{"projectId": "project", "filename": "doc.txt", "contentType": "text/plain", "sizeBytes": 4, "content": "text", "createdAt": now, "updatedAt": now}}
 	rows.rows[rowMapKey(p, "chat", "chat")] = storedRow{ID: "chat", ETag: "1", Data: object{"title": "Chat", "projectId": "project", "createdAt": now, "updatedAt": now, "messages": []any{
@@ -126,7 +127,8 @@ func TestReferenceBackupWithProjectImagesAndPages(t *testing.T) {
 			object{"id": "image", "type": "image", "fileName": "image.png", "mimeType": "image/png", "base64": encoded},
 			object{"id": "doc", "type": "document", "fileName": "doc.pdf", "textContent": "Text", "pages": []any{object{"page": 1, "text": "Text", "is_scanned": true, "image": encoded}}},
 		}},
-		object{"id": "assistant", "role": "assistant", "content": "Answer", "createdAt": now, "thoughts": "Reasoning", "webSearch": object{"query": "test", "status": "completed", "sources": []any{object{"title": "Source", "url": "https://example.com"}}}},
+		object{"id": "assistant", "role": "assistant", "content": answer, "createdAt": now, "thoughts": "Reasoning", "webSearch": object{"query": "test", "status": "completed", "sources": []any{object{"title": "Source", "url": "https://example.com"}}},
+			"annotations": citationAnnotations(answer, []citationSource{{"https://example.com", "Source"}})},
 	}}}
 	var archive bytes.Buffer
 	if err := h.writeBackup(context.Background(), p, key, object{}, &archive); err != nil {

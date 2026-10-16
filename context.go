@@ -136,6 +136,10 @@ func (h *harness) buildRequest(thread, profile, project object, documents []obje
 	}
 	name := normalizeModel(firstString(options["model"], thread["model"], profile["selectedModel"], "auto"))
 	req := &request{threadID: str(thread["id"]), runID: runID, model: name, managed: true, families: map[string]mcp.Meta{}}
+	req.conversation = req.threadID
+	if in["kind"] == "ask" {
+		req.conversation = str(in["threadId"])
+	}
 	def, display, policy, window := c.definition(name), "Auto", "none", 0
 	var picked *model
 	for _, m := range h.offer.get() {
@@ -248,7 +252,7 @@ func renderMessage(message object, vision bool, policy string) []json.RawMessage
 			reasoning += str(block["content"])
 		case "tool_call":
 			id := firstString(block["toolCallId"], block["id"])
-			calls = append(calls, object{"id": id, "type": "function", "function": object{"name": block["name"], "arguments": firstString(block["arguments"], "{}")}})
+			calls = append(calls, object{"id": id, "type": "function", "function": object{"name": block["name"], "arguments": historyArgs(firstString(block["arguments"], "{}"))}})
 			result := "executed"
 			if value, ok := block["result"]; ok && !strings.HasPrefix(str(block["name"]), "render_") {
 				if text, ok := value.(string); ok {

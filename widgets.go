@@ -1,13 +1,122 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"path"
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 )
+
+// maxWidgetRetries bounds how often one run tells the model a widget's
+// arguments failed validation; two cover fixing one field surfacing another.
+const maxWidgetRetries = 2
+
+// widgetArguments is what a widget call is drawn and validated with: repaired,
+// then canonical.
+func widgetArguments(raw string) string {
+	if repaired, ok := sanitizeToolCallArgumentsJSON([]byte(raw)); ok && json.Valid(repaired) {
+		raw = string(repaired)
+	}
+	return canonicalizeWidgetArguments(raw)
+}
+
+// canonicalizeWidgetArguments unwraps nested arrays and objects sent as JSON
+// strings, such as DeepSeek's {"stats":"[{...}]"}, which widget schemas
+// reject. Arguments that need no unwrapping come back byte-for-byte, and
+// anything that does not parse comes back untouched.
+func canonicalizeWidgetArguments(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed[0] != '{' && trimmed[0] != '[' {
+		return raw
+	}
+	decoded, err := decodeJSONValue(trimmed)
+	if err != nil {
+		return raw
+	}
+	unwrapped, changed := deepUnwrapJSONStrings(decoded)
+	if !changed {
+		return raw
+	}
+	encoded, err := json.Marshal(unwrapped)
+	if err != nil {
+		return raw
+	}
+	return string(encoded)
+}
+
+// deepUnwrapJSONStrings replaces every string holding a JSON array or object
+// with its decoded value, reporting whether any was replaced.
+func deepUnwrapJSONStrings(value any) (any, bool) {
+	switch v := value.(type) {
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" || trimmed[0] != '{' && trimmed[0] != '[' {
+			return v, false
+		}
+		nested, err := decodeJSONValue(trimmed)
+		if err != nil {
+			return v, false
+		}
+		unwrapped, _ := deepUnwrapJSONStrings(nested)
+		return unwrapped, true
+	case []any:
+		out, changed := make([]any, len(v)), false
+		for i, item := range v {
+			var itemChanged bool
+			out[i], itemChanged = deepUnwrapJSONStrings(item)
+			changed = changed || itemChanged
+		}
+		return out, changed
+	case map[string]any:
+		out, changed := make(map[string]any, len(v)), false
+		for k, item := range v {
+			var itemChanged bool
+			out[k], itemChanged = deepUnwrapJSONStrings(item)
+			changed = changed || itemChanged
+		}
+		return out, changed
+	}
+	return value, false
+}
+
+// decodeJSONValue keeps numbers exact and refuses trailing data.
+func decodeJSONValue(raw string) (any, error) {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
+	var decoded any
+	if err := decoder.Decode(&decoded); err != nil {
+		return nil, err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return nil, errors.New("multiple JSON values")
+		}
+		return nil, err
+	}
+	return decoded, nil
+}
+
+// widgetFailure is what a widget call whose arguments cannot be drawn
+// returns, or nil when they can.
+func widgetFailure(w widget, args string) json.RawMessage {
+	var value any
+	problem := "arguments are not valid JSON"
+	if json.Unmarshal([]byte(cmp.Or(args, "{}")), &value) == nil {
+		err := validateSchema(w.Schema, value)
+		if err == nil {
+			return nil
+		}
+		problem = strings.TrimPrefix(err.Error(), "validating root: ")
+	}
+	return raw(object{"status": "error", "error": fmt.Sprintf("The arguments for %s did not match the tool's parameter schema and the component was not displayed: %s. Call %s again with corrected arguments that match the schema exactly.", w.Name, problem, w.Name)})
+}
 
 func validateSchema(raw json.RawMessage, value any) error {
 	var schema jsonschema.Schema
@@ -80,34 +189,74 @@ func (h *harness) widgetResult(ctx context.Context, call toolCall) (any, error) 
 	}
 	return object{"url": args["url"], "title": result["title"], "description": result["description"], "siteName": firstString(result["siteName"], result["site_name"]), "image": result["image"]}, nil
 }
+
+// normalizeToolResult is the caller's copy of a tool result. Its text shares
+// one budget, spent after parsing so that a large result still parses.
 func normalizeToolResult(call toolCall, content string) any {
 	var result any
 	if json.Unmarshal([]byte(content), &result) != nil {
 		result = object{"output": content}
 	}
 	value := obj(result)
-	args := obj(decodeValue([]byte(call.args)))
+	args := obj(decodeValue([]byte(historyArgs(call.args))))
 	if strings.HasPrefix(call.name, "render_") {
 		return result
 	}
+	budget := maxShownOutput
+	take := func(s string) string {
+		if len(s) > budget {
+			s = s[:budget] + "\n[truncated]"
+		}
+		budget -= min(budget, len(s))
+		return s
+	}
 	switch call.name {
 	case "web_search":
-		rows := []object{}
+		rows, seen := []object{}, map[string]bool{}
 		for _, r := range arr(value["results"]) {
 			row := obj(r)
-			rows = append(rows, object{"url": row["url"], "title": row["title"], "snippet": firstString(row["snippet"], row["content"], row["text"])})
+			url := strings.TrimSpace(str(row["url"]))
+			if url == "" || seen[url] {
+				continue
+			}
+			seen[url] = true
+			source := object{"url": url, "title": strings.TrimSpace(str(row["title"])), "snippet": take(firstString(row["snippet"], row["content"], row["text"]))}
+			if published := strings.TrimSpace(str(row["published_date"])); published != "" {
+				source["publishedDate"] = published
+			}
+			if author := strings.TrimSpace(str(row["author"])); author != "" {
+				source["author"] = author
+			}
+			rows = append(rows, source)
 		}
-		return object{"query": args["query"], "results": rows}
+		shown := object{"query": args["query"], "results": rows}
+		if boolean(value["pii_checked"], false) {
+			shown["pii"] = piiReport(value)
+		}
+		return shown
 	case "web_fetch":
-		pages := arr(value["pages"])
-		if len(pages) == 0 {
-			pages = arr(value["results"])
+		shown := object{"url": firstString(arr(args["urls"])...), "title": "Fetched page", "text": ""}
+		pages, failed := []object{}, []object{}
+		for _, p := range arr(value["pages"]) {
+			page := obj(p)
+			url := strings.TrimSpace(str(page["url"]))
+			if url == "" {
+				continue
+			}
+			text := take(firstString(page["content"], page["text"]))
+			if len(pages) == 0 {
+				// Shown twice, as the result and as its first page, so spent twice.
+				shown["url"], shown["text"] = url, take(text)
+			}
+			pages = append(pages, object{"url": url, "title": "Fetched page", "text": text})
 		}
-		if len(pages) > 0 {
-			page := obj(pages[0])
-			return object{"url": page["url"], "title": page["title"], "text": clip(firstString(page["text"], page["content"]), maxShownOutput)}
+		for _, r := range arr(value["results"]) {
+			if result := obj(r); str(result["status"]) != "completed" {
+				failed = append(failed, object{"url": result["url"], "error": result["error"]})
+			}
 		}
-		return value
+		shown["pages"], shown["failed"] = pages, failed
+		return shown
 	case "present":
 		if _, ok := value["filename"]; ok {
 			return value
@@ -121,14 +270,35 @@ func normalizeToolResult(call toolCall, content string) any {
 				body = strings.TrimSuffix(rest, "\n"+fence)
 			}
 		}
-		return object{"filename": name, "language": language, "content": body}
+		return object{"filename": name, "language": language, "content": take(body)}
 	default:
-		if output := firstString(value["output"], value["stdout"]); output != "" {
-			return object{"output": output}
-		}
-		return object{"output": content}
+		return object{"output": take(cmp.Or(firstString(value["output"], value["stdout"]), content))}
 	}
 }
+
+// piiReport is what the privacy filter masked from a search's query, in the
+// model router's shape. Offsets are code points into the query the model
+// sent; the removed text itself never leaves the enclave.
+func piiReport(result object) object {
+	offset := func(v any) (int64, bool) {
+		f, ok := v.(float64)
+		if !ok {
+			return 0, false
+		}
+		return floatToBoundedInt64(f)
+	}
+	redactions := []object{}
+	for _, item := range arr(result["pii_redactions"]) {
+		span := obj(item)
+		start, startOK := offset(span["start"])
+		end, endOK := offset(span["end"])
+		if startOK && endOK {
+			redactions = append(redactions, object{"type": str(span["type"]), "start": start, "end": end})
+		}
+	}
+	return object{"masked": boolean(result["pii_masked"], false), "redacted_query": str(result["redacted_query"]), "redactions": redactions}
+}
+
 func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *model) error {
 	var declaration widget
 	for _, w := range widgetCatalog() {
@@ -153,7 +323,7 @@ func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *
 	if err != nil {
 		return err
 	}
-	content = strings.TrimSpace(content)
+	content = widgetArguments(strings.TrimSpace(content))
 	var value any
 	if json.Unmarshal([]byte(content), &value) != nil || validateSchema(declaration.Schema, value) != nil {
 		return apiErr(502, "UPSTREAM_REFUSED", "The replacement widget arguments do not match the schema")

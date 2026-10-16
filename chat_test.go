@@ -12,13 +12,17 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
 type memoryRows struct {
@@ -604,6 +608,847 @@ func TestTypedErrors(t *testing.T) {
 		t.Fatal(e)
 	}
 }
+
+// finishedRun posts one turn as alice and fails unless it finished.
+func finishedRun(t *testing.T, h *harness, path string, in object) []event {
+	t.Helper()
+	events := eventsIn(t, postRoute(h, path, in, "alice"))
+	if last := events[len(events)-1]; last.Type != "RUN_FINISHED" {
+		t.Fatalf("run failed: %+v", last)
+	}
+	return events
+}
+
+type recordedCall struct {
+	name   string
+	args   map[string]any
+	header http.Header
+}
+
+type recordedCalls struct {
+	mu    sync.Mutex
+	calls []recordedCall
+}
+
+func (r *recordedCalls) list() []recordedCall {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]recordedCall(nil), r.calls...)
+}
+
+// serveWebsearch points the webSearch family at a stateless MCP server that
+// publishes confidential-websearch's tools, validates arguments against their
+// schemas as it does, and answers every call with respond.
+func serveWebsearch(t *testing.T, respond func(name string, args map[string]any) (*mcp.CallToolResult, any)) *recordedCalls {
+	t.Helper()
+	type searchArgs struct {
+		Query      string `json:"query"`
+		MaxResults int    `json:"max_results,omitempty"`
+	}
+	type fetchArgs struct {
+		URLs []string `json:"urls"`
+	}
+	recorded := &recordedCalls{}
+	record := func(req *mcp.CallToolRequest) (*mcp.CallToolResult, any, error) {
+		var args map[string]any
+		json.Unmarshal(req.Params.Arguments, &args)
+		recorded.mu.Lock()
+		recorded.calls = append(recorded.calls, recordedCall{req.Params.Name, args, req.Extra.Header.Clone()})
+		recorded.mu.Unlock()
+		result, structured := respond(req.Params.Name, args)
+		return result, structured, nil
+	}
+	server := httptest.NewTLSServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+		s := mcp.NewServer(&mcp.Implementation{Name: "confidential-websearch", Version: "test"}, nil)
+		mcp.AddTool(s, &mcp.Tool{Name: "search", Description: "Search the web."}, func(_ context.Context, req *mcp.CallToolRequest, _ searchArgs) (*mcp.CallToolResult, any, error) {
+			return record(req)
+		})
+		mcp.AddTool(s, &mcp.Tool{Name: "fetch", Description: "Fetch pages."}, func(_ context.Context, req *mcp.CallToolRequest, _ fetchArgs) (*mcp.CallToolResult, any, error) {
+			return record(req)
+		})
+		return s
+	}, &mcp.StreamableHTTPOptions{Stateless: true}))
+	t.Cleanup(server.Close)
+	f := families[0]
+	saved := *f
+	t.Cleanup(func() { *f = saved })
+	f.enclave = strings.TrimPrefix(server.URL, "https://")
+	f.client = &http.Client{Transport: &callerAuth{inner: server.Client().Transport, usageSecret: "test-usage-secret"}}
+	return recorded
+}
+
+func searchInput(key contentKey) object {
+	in := sendInput(key)
+	obj(in["options"])["webSearch"] = true
+	return in
+}
+
+// toolCallChunk is one streamed chunk opening a tool call with all of its arguments.
+func toolCallChunk(index int, id, name, args string) string {
+	return "data: " + string(raw(object{"choices": []object{{"delta": object{"tool_calls": []object{{"index": index, "id": id, "function": object{"name": name, "arguments": args}}}}}}})) + "\n\n"
+}
+
+// lastRequest decodes the messages a model turn was sent.
+func lastRequest(r *http.Request) []any {
+	var body object
+	json.NewDecoder(r.Body).Decode(&body)
+	return arr(body["messages"])
+}
+
+func TestTrailingProseIsCutFromReplayedToolArguments(t *testing.T) {
+	var turns atomic.Int32
+	replayed := make(chan string, 1)
+	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if turns.Add(1) == 1 {
+			io.WriteString(w, toolCallChunk(0, "search-call", "web_search", `{"query":"cats"}Now searching...`)+"data: [DONE]\n\n")
+			return
+		}
+		messages := lastRequest(r)
+		replayed <- str(obj(obj(arr(obj(messages[len(messages)-2])["tool_calls"])[0])["function"])["arguments"])
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	finishedRun(t, h, "/v1/threads/turn", sendInput(key))
+	if got := <-replayed; got != `{"query":"cats"}` {
+		t.Fatalf("the next turn replayed %q", got)
+	}
+}
+
+func TestToolArgumentsAreRepairedBeforeTheCall(t *testing.T) {
+	enclave := serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
+		return nil, object{"pages": []object{{"url": "https://a.test/x", "content": "page"}}, "results": []object{{"url": "https://a.test/x", "status": "completed"}}}
+	})
+	var turns atomic.Int32
+	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if turns.Add(1) == 1 {
+			io.WriteString(w, toolCallChunk(0, "fetch-call", "web_fetch", `{"urls":["<|\"|https://a.test/x<|\"|>"]} Let me read it.`)+"data: [DONE]\n\n")
+			return
+		}
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"read\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	finishedRun(t, h, "/v1/threads/turn", searchInput(key))
+	calls := enclave.list()
+	if len(calls) != 1 || calls[0].name != "fetch" || !reflect.DeepEqual(calls[0].args, map[string]any{"urls": []any{"https://a.test/x"}}) {
+		t.Fatalf("the enclave was called with %+v", calls)
+	}
+}
+
+func TestToolArgumentsAreCoercedAndRejectionsExplained(t *testing.T) {
+	enclave := serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
+		return nil, object{"results": []object{}}
+	})
+	var turns atomic.Int32
+	rejected := make(chan string, 1)
+	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if turns.Add(1) == 1 {
+			io.WriteString(w, toolCallChunk(0, "coerced", "web_search", `{"query":"cats","max_results":"3"}`)+toolCallChunk(1, "rejected", "web_search", `{"query":"dogs","max_results":"lots"}`)+"data: [DONE]\n\n")
+			return
+		}
+		messages := lastRequest(r)
+		rejected <- str(obj(messages[len(messages)-1])["content"])
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	finishedRun(t, h, "/v1/threads/turn", searchInput(key))
+	calls := enclave.list()
+	if len(calls) != 1 || calls[0].args["max_results"] != float64(3) || calls[0].args["query"] != "cats" {
+		t.Fatalf("the enclave accepted %+v", calls)
+	}
+	failure := str(obj(decodeValue([]byte(<-rejected)))["error"])
+	if !strings.Contains(failure, `Tool "web_search" rejected the arguments. Field "max_results" must be integer (received "string")`) {
+		t.Fatalf("the model read %q", failure)
+	}
+}
+
+// widgetTurn streams chunks as the first model turn, with render_artifact_preview offered.
+func widgetTurn(t *testing.T, chunks ...string) []event {
+	t.Helper()
+	var turns atomic.Int32
+	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if turns.Add(1) == 1 {
+			io.WriteString(w, strings.Join(chunks, "")+"data: [DONE]\n\n")
+			return
+		}
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	h.catalog.get().EnabledWidgets = []string{"render_artifact_preview"}
+	in := sendInput(key)
+	in["widgets"] = []any{"render_artifact_preview"}
+	return finishedRun(t, h, "/v1/threads/turn", in)
+}
+
+// streamedArgs is every TOOL_CALL_ARGS delta one call was sent, in order.
+func streamedArgs(t *testing.T, events []event, id string) []string {
+	t.Helper()
+	var deltas []string
+	started := false
+	for _, e := range events {
+		switch {
+		case e.ToolCallID != id:
+		case e.Type == "TOOL_CALL_START":
+			started = true
+		case e.Type == "TOOL_CALL_ARGS":
+			if !started {
+				t.Fatalf("arguments for %s were sent before its TOOL_CALL_START", id)
+			}
+			deltas = append(deltas, str(e.Delta))
+		}
+	}
+	return deltas
+}
+
+func TestWidgetArgumentsReachTheCallerWhole(t *testing.T) {
+	large := `{"source":{"type":"markdown","markdown":"` + strings.Repeat("x", 5000) + `"}}`
+	for name, tc := range map[string]struct {
+		chunks []string
+		want   string
+	}{
+		"fragmented":     {[]string{toolCallChunk(0, "w", "render_artifact_preview", `{"title":"Demo","source":{"type":`), toolCallChunk(0, "", "", `"markdown","markdown":"# hi"}}`)}, `{"title":"Demo","source":{"type":"markdown","markdown":"# hi"}}`},
+		"trailing prose": {[]string{toolCallChunk(0, "w", "render_artifact_preview", `{"title":"Demo"}I will explain the artifact next.`)}, `{"title":"Demo"}`},
+		"irreparable":    {[]string{toolCallChunk(0, "w", "render_artifact_preview", `{"title":"Demo"`)}, `{"title":"Demo"`},
+		"large":          {[]string{toolCallChunk(0, "w", "render_artifact_preview", large)}, large},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := streamedArgs(t, widgetTurn(t, tc.chunks...), "w"); len(got) != 1 || got[0] != tc.want {
+				t.Fatalf("the caller was sent %q, want one delta %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestStringifiedWidgetArgumentsAreUnwrappedBeforeValidation(t *testing.T) {
+	events := widgetTurn(t, toolCallChunk(0, "w", "render_artifact_preview", `{"title":"Demo","source":"{\"type\":\"html\",\"html\":\"<p>hi</p>\"}"}`))
+	got := streamedArgs(t, events, "w")
+	want := map[string]any{"title": "Demo", "source": map[string]any{"type": "html", "html": "<p>hi</p>"}}
+	if len(got) != 1 || !reflect.DeepEqual(decodeValue([]byte(got[0])), any(want)) {
+		t.Fatalf("the caller was sent %q", got)
+	}
+	for _, e := range events {
+		if e.Type == "TOOL_CALL_RESULT" && e.ToolCallID == "w" && string(e.Content) != `"[rendered for the user]"` {
+			t.Fatalf("unwrapped arguments failed validation: %s", e.Content)
+		}
+	}
+}
+
+func TestOrdinaryToolCallsStreamLiveBesideAWidget(t *testing.T) {
+	events := widgetTurn(t,
+		toolCallChunk(0, "lookup", "lookup_order", `{"id":`),
+		toolCallChunk(1, "w", "render_artifact_preview", `{"title":"Demo"}extra prose`),
+		toolCallChunk(0, "", "", `1}leave this trailing text`))
+	if got := streamedArgs(t, events, "lookup"); !reflect.DeepEqual(got, []string{`{"id":`, `1}leave this trailing text`}) {
+		t.Fatalf("the ordinary call was sent %q", got)
+	}
+	if got := streamedArgs(t, events, "w"); !reflect.DeepEqual(got, []string{`{"title":"Demo"}`}) {
+		t.Fatalf("the widget was sent %q", got)
+	}
+	lastOrdinary, widgetArgs := -1, -1
+	for i, e := range events {
+		if e.Type == "TOOL_CALL_ARGS" && e.ToolCallID == "lookup" {
+			lastOrdinary = i
+		} else if e.Type == "TOOL_CALL_ARGS" && e.ToolCallID == "w" {
+			widgetArgs = i
+		}
+	}
+	if lastOrdinary > widgetArgs {
+		t.Fatal("the widget's arguments were sent before the turn ended")
+	}
+}
+
+func TestArgumentsBeforeTheNameAreSentWhenTheCallOpens(t *testing.T) {
+	events := widgetTurn(t,
+		toolCallChunk(0, "early", "", `{"query":`),
+		toolCallChunk(0, "", "lookup_order", ""),
+		toolCallChunk(0, "", "", `"cats"}`),
+		toolCallChunk(1, "nameless", "", `{"a":1}`))
+	if got := streamedArgs(t, events, "early"); !reflect.DeepEqual(got, []string{`{"query":`, `"cats"}`}) {
+		t.Fatalf("the call was sent %q", got)
+	}
+	if got := streamedArgs(t, events, "nameless"); !reflect.DeepEqual(got, []string{`{"a":1}`}) {
+		t.Fatalf("a call that never named its tool was sent %q", got)
+	}
+}
+
+func TestWidgetSchemaErrorsReachTheModelUntilTheRetryCap(t *testing.T) {
+	var turns atomic.Int32
+	read := make(chan string, maxWidgetRetries+1)
+	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		turn := int(turns.Add(1))
+		if turn > 1 {
+			messages := lastRequest(r)
+			read <- str(obj(messages[len(messages)-1])["content"])
+		}
+		if turn <= maxWidgetRetries+1 {
+			io.WriteString(w, toolCallChunk(0, "widget-"+strconv.Itoa(turn), "render_artifact_preview", `{"title":"Demo","source":"<p>hi</p>"}`)+"data: [DONE]\n\n")
+			return
+		}
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"I could not draw it.\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	h.catalog.get().EnabledWidgets = []string{"render_artifact_preview"}
+	in := sendInput(key)
+	in["widgets"] = []any{"render_artifact_preview"}
+	events := finishedRun(t, h, "/v1/threads/turn", in)
+	for i := 1; i <= maxWidgetRetries+1; i++ {
+		got := <-read
+		if i <= maxWidgetRetries && !strings.Contains(got, "did not match the tool's parameter schema") || i > maxWidgetRetries && got != `{"status":"executed"}` {
+			t.Fatalf("after failure %d the model read %s", i, got)
+		}
+	}
+	failures := 0
+	for _, e := range events {
+		if e.Type == "TOOL_CALL_RESULT" && obj(decodeValue(e.Content))["status"] == "error" {
+			failures++
+		}
+	}
+	if failures != maxWidgetRetries+1 {
+		t.Fatalf("the caller saw %d failed renders", failures)
+	}
+}
+
+func TestWidgetRetryRepairsTheReplacement(t *testing.T) {
+	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(object{"choices": []object{{"message": object{"content": `{"stats":"[{\"label\":\"Count\",\"value\":2}]"} Here are the stats.`}}}})
+	})
+	h.catalog.get().EnabledWidgets = []string{"render_stat_cards"}
+	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat")] = storedRow{ID: "chat", ETag: "1", Data: object{"createdAt": timestamp(), "title": "Title", "titleState": "manual", "model": "kimi-k3", "messages": []any{
+		object{"id": "user", "role": "user", "content": "show a stat", "timestamp": timestamp()},
+		object{"id": "assistant", "role": "assistant", "content": "", "timestamp": timestamp(), "timeline": []any{object{"type": "tool_call", "id": "call", "toolCallId": "call", "name": "render_stat_cards", "arguments": `{"stats":"bad"}`}}},
+	}}}
+	in := sendInput(key)
+	in["threadId"], in["kind"], in["toolCallId"], in["widgets"] = "chat", "retryToolCall", "call", []any{"render_stat_cards"}
+	delete(in, "content")
+	finishedRun(t, h, "/v1/threads/turn", in)
+	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", "chat")
+	if got := obj(arr(obj(arr(row.Data["messages"])[1])["timeline"])[0])["arguments"]; got != `{"stats":[{"label":"Count","value":2}]}` {
+		t.Fatalf("stored replacement %v", got)
+	}
+}
+
+// toolTurns answers the first model turn with chunks and every later one with
+// a plain answer, sending each later turn's messages to sent.
+func toolTurns(chunks string, sent chan<- []any) http.HandlerFunc {
+	var turns atomic.Int32
+	return func(w http.ResponseWriter, r *http.Request) {
+		if turns.Add(1) == 1 {
+			io.WriteString(w, chunks+"data: [DONE]\n\n")
+			return
+		}
+		if messages := lastRequest(r); sent != nil {
+			sent <- messages
+		}
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n")
+	}
+}
+
+// toolMessage is what the model read back from one call.
+func toolMessage(messages []any, id string) string {
+	for _, m := range messages {
+		if obj(m)["role"] == "tool" && obj(m)["tool_call_id"] == id {
+			return str(obj(m)["content"])
+		}
+	}
+	return ""
+}
+
+// toolResult is the content the caller was sent for one call.
+func toolResult(events []event, id string) object {
+	for _, e := range events {
+		if e.Type == "TOOL_CALL_RESULT" && e.ToolCallID == id {
+			return obj(decodeValue(e.Content))
+		}
+	}
+	return nil
+}
+
+func TestToolSessionsCarryTheEnclaveHeaders(t *testing.T) {
+	sessions := map[string]bool{}
+	for _, tc := range []struct {
+		route string
+		pii   bool
+	}{{"/v1/threads/turn", false}, {"/v1/threads/turn", true}, {"/agui", true}} {
+		t.Run(tc.route+"/"+strconv.FormatBool(tc.pii), func(t *testing.T) {
+			enclave := serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) { return nil, object{"results": []object{}} })
+			bodies := make(chan object, 2)
+			answer := toolTurns(toolCallChunk(0, "one", "web_search", `{"query":"cats"}`)+toolCallChunk(1, "two", "web_search", `{"query":"dogs"}`), nil)
+			h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				bodies <- obj(decodeValue(body))
+				r.Body = io.NopCloser(bytes.NewReader(body))
+				answer(w, r)
+			})
+			in := searchInput(key)
+			obj(in["options"])["piiCheck"] = tc.pii
+			if tc.route == "/agui" {
+				in = object{"messages": []any{object{"role": "user", "content": "hi"}}, "forwardedProps": object{"piiCheck": tc.pii}}
+			}
+			events := finishedRun(t, h, tc.route, in)
+			calls := enclave.list()
+			if len(calls) != 2 {
+				t.Fatalf("the enclave saw %d calls", len(calls))
+			}
+			header := calls[0].header
+			id := header.Get("X-Tinfoil-Tool-Request-Id")
+			if _, err := uuid.Parse(id); err != nil || id == events[0].RunID || sessions[id] || calls[1].header.Get("X-Tinfoil-Tool-Request-Id") != id {
+				t.Fatalf("the session was named %q (run %q, seen %v)", id, events[0].RunID, sessions)
+			}
+			sessions[id] = true
+			if header.Get("X-Tinfoil-Tool-Model") != "kimi-k3" || header.Get("X-Tinfoil-Tool-Route") != tc.route || header.Get("X-Tinfoil-Tool-Streaming") != "true" {
+				t.Fatalf("wrong session headers: %v", header)
+			}
+			if got := header.Values("X-Tinfoil-Tool-PII-Check"); tc.pii && !reflect.DeepEqual(got, []string{"true"}) || !tc.pii && len(got) != 0 {
+				t.Fatalf("the PII check header was %q", got)
+			}
+			for range 2 {
+				if body := <-bodies; body["pii_check_options"] != nil {
+					t.Fatal("the model was sent pii_check_options")
+				}
+			}
+		})
+	}
+}
+
+func TestSearchResultsShowWhatThePrivacyFilterMasked(t *testing.T) {
+	for _, checked := range []bool{true, false} {
+		t.Run(strconv.FormatBool(checked), func(t *testing.T) {
+			serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
+				return nil, object{"results": []object{{"url": "https://a.test", "title": "A", "content": "alpha"}}, "pii_checked": checked, "pii_masked": checked, "redacted_query": "hiking trails",
+					"pii_redactions": []object{{"type": "private_email", "start": 0, "end": 16}}, "pii_filter_requests": 1}
+			})
+			h, _, key := testChatHarness(t, toolTurns(toolCallChunk(0, "s", "web_search", `{"query":"me@example.com hiking trails"}`), nil))
+			shown := toolResult(finishedRun(t, h, "/v1/threads/turn", searchInput(key)), "s")
+			want := map[string]any{"masked": true, "redacted_query": "hiking trails", "redactions": []any{map[string]any{"type": "private_email", "start": float64(0), "end": float64(16)}}}
+			if pii, ok := shown["pii"]; checked && !reflect.DeepEqual(pii, any(want)) || !checked && ok {
+				t.Fatalf("the caller was shown %v", shown)
+			}
+		})
+	}
+}
+
+func TestFailedSearchReadsAsItsErrorNotItsReceipt(t *testing.T) {
+	serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
+		return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: "search provider unavailable; retry after a short delay"}}, StructuredContent: map[string]any{"pii_filter_requests": 1}}, nil
+	})
+	sent := make(chan []any, 1)
+	h, _, key := testChatHarness(t, toolTurns(toolCallChunk(0, "s", "web_search", `{"query":"cats"}`), sent))
+	finishedRun(t, h, "/v1/threads/turn", searchInput(key))
+	if got := toolMessage(<-sent, "s"); !strings.Contains(got, "search provider unavailable; retry after a short delay") || strings.Contains(got, "pii_filter_requests") {
+		t.Fatalf("the model read %s", got)
+	}
+}
+
+func TestSearchResultsReachTheModelAsTextAndTheCallerAsData(t *testing.T) {
+	serveWebsearch(t, func(name string, _ map[string]any) (*mcp.CallToolResult, any) {
+		if name == "fetch" {
+			return nil, object{"pages": []object{{"url": "https://a.test/1", "content": "first page"}, {"url": "https://b.test", "content": "second page"}},
+				"results": []object{{"url": "https://a.test/1", "status": "completed"}, {"url": "https://b.test", "status": "completed"}, {"url": "https://c.test", "status": "failed", "error": "timeout"}}}
+		}
+		return nil, object{"pii_checked": false, "results": []object{
+			{"title": "A", "url": "https://a.test/1", "content": "alpha", "published_date": "2026-04-17", "author": "Ann"},
+			{"title": "A again", "url": "https://a.test/1", "content": "duplicate"},
+			{"title": "No URL", "url": "", "content": "dropped"},
+			{"title": "B", "url": "https://b.test", "content": "beta"},
+		}}
+	})
+	sent := make(chan []any, 1)
+	h, _, key := testChatHarness(t, toolTurns(toolCallChunk(0, "s", "web_search", `{"query":"cats"}`)+toolCallChunk(1, "f", "web_fetch", `{"urls":["https://a.test/1","https://b.test","https://c.test"]}`), sent))
+	events := finishedRun(t, h, "/v1/threads/turn", searchInput(key))
+	messages := <-sent
+	if got := toolMessage(messages, "s"); got != "Source: A\nURL: https://a.test/1\nPublished: 2026-04-17\nalpha\n\nSource: A again\nURL: https://a.test/1\nduplicate\n\nSource: No URL\ndropped\n\nSource: B\nURL: https://b.test\nbeta" {
+		t.Fatalf("the model read the search as %q", got)
+	}
+	if got := toolMessage(messages, "f"); got != "Source: Fetched page\nURL: https://a.test/1\nfirst page\n\nSource: Fetched page\nURL: https://b.test\nsecond page" {
+		t.Fatalf("the model read the fetch as %q", got)
+	}
+	search := map[string]any{"query": "cats", "results": []any{
+		map[string]any{"url": "https://a.test/1", "title": "A", "snippet": "alpha", "publishedDate": "2026-04-17", "author": "Ann"},
+		map[string]any{"url": "https://b.test", "title": "B", "snippet": "beta"},
+	}}
+	if got := toolResult(events, "s"); !reflect.DeepEqual(map[string]any(got), search) {
+		t.Fatalf("the caller was shown the search as %v", got)
+	}
+	fetch := map[string]any{"url": "https://a.test/1", "title": "Fetched page", "text": "first page",
+		"pages":  []any{map[string]any{"url": "https://a.test/1", "title": "Fetched page", "text": "first page"}, map[string]any{"url": "https://b.test", "title": "Fetched page", "text": "second page"}},
+		"failed": []any{map[string]any{"url": "https://c.test", "error": "timeout"}}}
+	if got := toolResult(events, "f"); !reflect.DeepEqual(map[string]any(got), fetch) {
+		t.Fatalf("the caller was shown the fetch as %v", got)
+	}
+}
+
+func TestALargeSearchResultIsClippedNotFlattened(t *testing.T) {
+	serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
+		return nil, object{"results": []object{{"title": "Huge", "url": "https://huge.test", "content": strings.Repeat("word ", maxShownOutput/5+200)}, {"title": "Next", "url": "https://next.test", "content": "small"}}}
+	})
+	sent := make(chan []any, 1)
+	h, _, key := testChatHarness(t, toolTurns(toolCallChunk(0, "s", "web_search", `{"query":"cats"}`), sent))
+	h.catalog.get().Models[0]["budgetWindow"] = 1 << 16
+	events := finishedRun(t, h, "/v1/threads/turn", searchInput(key))
+	results := arr(toolResult(events, "s")["results"])
+	if len(results) != 2 || obj(results[0])["title"] != "Huge" || len(str(obj(results[0])["snippet"])) != maxShownOutput+len("\n[truncated]") || obj(results[1])["url"] != "https://next.test" || obj(results[1])["snippet"] != "\n[truncated]" {
+		t.Fatalf("the caller's copy was not clipped field by field: %d results", len(results))
+	}
+	if read := toolMessage(<-sent, "s"); len(read) != maxToolOutput+len("\n[truncated]") || !strings.HasPrefix(read, "Source: Huge\nURL: https://huge.test\nword word") {
+		t.Fatalf("the model read %d bytes", len(read))
+	}
+}
+
+func TestWebSearchIsNeverBilled(t *testing.T) {
+	for _, route := range []string{"/v1/threads/turn", "/agui"} {
+		t.Run(route, func(t *testing.T) {
+			enclave := serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) { return nil, object{"results": []object{}} })
+			h, _, key := testChatHarness(t, toolTurns(toolCallChunk(0, "one", "web_search", `{"query":"cats"}`)+toolCallChunk(1, "two", "web_search", `{"query":"dogs"}`), nil))
+			in, apiKey := searchInput(key), "inference-alice"
+			if route == "/agui" {
+				in, apiKey = object{"runId": "client-chosen", "messages": []any{object{"role": "user", "content": "hi"}}}, "clerk-alice"
+			}
+			events := finishedRun(t, h, route, in)
+			calls := enclave.list()
+			if len(calls) != 2 {
+				t.Fatalf("the enclave saw %d calls", len(calls))
+			}
+			for _, call := range calls {
+				usage, ok, err := usagereporting.FromHeaders(call.header, "test-usage-secret", time.Now(), time.Minute)
+				if err != nil || !ok {
+					t.Fatalf("no signed usage context: %v", err)
+				}
+				// The run's model turns are billed; a search within it is not.
+				if usage.BillCustomerRequest {
+					t.Fatalf("search was marked billable: %+v", usage)
+				}
+				if usage.ContextID != events[0].RunID || usage.RootRequestID != events[0].RunID || usage.ParentService != "harness" || usage.Depth != 1 || !usagereporting.VerifyAPIKeyHash(apiKey, usage.APIKeyHash) {
+					t.Fatalf("search lost the run's identity: %+v", usage)
+				}
+			}
+		})
+	}
+}
+
+func TestReasoningPrecedesTheAnswerItArrivesWith(t *testing.T) {
+	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"The answer\",\"reasoning_content\":\"last thought\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	events := finishedRun(t, h, "/v1/threads/turn", sendInput(key))
+	var order []string
+	for _, e := range events {
+		if e.Type == "REASONING_MESSAGE_CHUNK" || e.Type == "TEXT_MESSAGE_CHUNK" {
+			order = append(order, e.Type)
+		}
+	}
+	if !reflect.DeepEqual(order, []string{"REASONING_MESSAGE_CHUNK", "TEXT_MESSAGE_CHUNK"}) {
+		t.Fatalf("streamed %v", order)
+	}
+	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
+	timeline := arr(obj(arr(row.Data["messages"])[1])["timeline"])
+	if len(timeline) != 2 || obj(timeline[0])["type"] != "thinking" || obj(timeline[1])["type"] != "content" {
+		t.Fatalf("stored timeline %v", timeline)
+	}
+}
+
+func TestReasoningIsEchoedInTheFieldItArrivedIn(t *testing.T) {
+	for _, field := range []string{"reasoning", "reasoning_content"} {
+		t.Run(field, func(t *testing.T) {
+			sent := make(chan []any, 1)
+			h, _, key := testChatHarness(t, toolTurns("data: "+string(raw(object{"choices": []object{{"delta": object{field: "think first"}}}}))+"\n\n"+toolCallChunk(0, "c", "lookup_order", `{}`), sent))
+			obj(h.catalog.get().Models[0]["chatConfig"])["reasoningConfig"] = object{"reasoningHistoryPolicy": "tool-call-only"}
+			finishedRun(t, h, "/v1/threads/turn", sendInput(key))
+			messages := <-sent
+			assistant := obj(messages[len(messages)-2])
+			other := map[string]string{"reasoning": "reasoning_content", "reasoning_content": "reasoning"}[field]
+			if assistant["role"] != "assistant" || assistant[field] != "think first" || assistant[other] != nil {
+				t.Fatalf("the reasoning was echoed as %v", assistant)
+			}
+		})
+	}
+}
+
+func TestLegacyRunsRejectCutAndMalformedStreams(t *testing.T) {
+	for name, stream := range map[string]string{
+		"cut":       "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+		"malformed": "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\ndata: {not json\n\ndata: [DONE]\n\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, _, _ := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, stream) })
+			events := eventsIn(t, postRoute(h, "/agui", object{"messages": []any{object{"role": "user", "content": "hi"}}, "forwardedProps": object{"webSearch": false}}, "alice"))
+			if last := events[len(events)-1]; last.Type != "RUN_ERROR" {
+				t.Fatalf("a %s stream finished the run: %+v", name, last)
+			}
+		})
+	}
+}
+
+func TestAModelChunkOverAMebibyteIsRead(t *testing.T) {
+	answer := strings.Repeat("a", 3<<20/2)
+	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "data: "+string(raw(object{"choices": []object{{"delta": object{"content": answer}}}}))+"\n\ndata: [DONE]\n\n")
+	})
+	events := finishedRun(t, h, "/v1/threads/turn", sendInput(key))
+	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
+	if obj(arr(row.Data["messages"])[1])["content"] != answer {
+		t.Fatal("the large chunk was not read whole")
+	}
+}
+
+func TestToolCapEndsWithOneTurnWithoutTools(t *testing.T) {
+	for _, obeys := range []bool{true, false} {
+		t.Run(strconv.FormatBool(obeys), func(t *testing.T) {
+			var turns atomic.Int32
+			final := make(chan []any, 1)
+			h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+				turn := turns.Add(1)
+				var body object
+				json.NewDecoder(r.Body).Decode(&body)
+				if body["tools"] == nil {
+					final <- arr(body["messages"])
+					if obeys {
+						io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"best answer\"}}]}\n\ndata: [DONE]\n\n")
+						return
+					}
+				}
+				io.WriteString(w, toolCallChunk(0, "clock-"+strconv.Itoa(int(turn)), "render_clock", `{}`)+"data: [DONE]\n\n")
+			})
+			h.catalog.get().EnabledWidgets = []string{"render_clock"}
+			in := sendInput(key)
+			in["widgets"] = []any{"render_clock"}
+			events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice"))
+			if last := events[len(events)-1]; obeys && last.Type != "RUN_FINISHED" || !obeys && last.Code != "MAX_TURNS" {
+				t.Fatalf("the capped run ended with %+v", last)
+			}
+			if turns.Load() != maxTurns+1 {
+				t.Fatalf("the model was called %d times", turns.Load())
+			}
+			messages := <-final
+			last, previous := obj(messages[len(messages)-1]), obj(messages[len(messages)-2])
+			if last["role"] != "system" || last["content"] != finalAnswerInstruction || previous["role"] != "tool" || previous["tool_call_id"] != "clock-"+strconv.Itoa(maxTurns) {
+				t.Fatalf("the final turn ended with %v after %v", last, previous)
+			}
+		})
+	}
+}
+
+func TestToolFailuresReachTheCallerOpaquely(t *testing.T) {
+	for _, route := range []string{"/v1/threads/turn", "/agui"} {
+		t.Run(route, func(t *testing.T) {
+			serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
+				return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: "upstream secret detail"}}}, nil
+			})
+			sent := make(chan []any, 1)
+			h, _, key := testChatHarness(t, toolTurns(toolCallChunk(0, "s", "web_search", `{"query":"cats"}`), sent))
+			in := searchInput(key)
+			if route == "/agui" {
+				in = object{"messages": []any{object{"role": "user", "content": "hi"}}}
+			}
+			events := finishedRun(t, h, route, in)
+			for _, e := range events {
+				if e.Type != "TOOL_CALL_RESULT" || e.ToolCallID != "s" {
+					continue
+				}
+				shown := decodeValue(e.Content)
+				if text, ok := shown.(string); ok { // the AG-UI route sends results as text
+					shown = decodeValue([]byte(text))
+				}
+				if !reflect.DeepEqual(shown, any(map[string]any{"error": "tool_error"})) {
+					t.Fatalf("the caller was sent %s", e.Content)
+				}
+			}
+			if strings.Contains(string(raw(events)), "upstream secret detail") {
+				t.Fatal("the tool's error text reached the caller")
+			}
+			if got := toolMessage(<-sent, "s"); !strings.Contains(got, `Tool \"web_search\" rejected the arguments: upstream secret detail`) {
+				t.Fatalf("the model read %s", got)
+			}
+		})
+	}
+}
+
+// screenedBy points h at a sidecar; the returned func drains the submitter
+// and reports what the sidecar received.
+func screenedBy(t *testing.T, h *harness) func() []submission {
+	t.Helper()
+	var mu sync.Mutex
+	var got []submission
+	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var sub submission
+		json.NewDecoder(r.Body).Decode(&sub)
+		mu.Lock()
+		got = append(got, sub)
+		mu.Unlock()
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	t.Cleanup(sidecar.Close)
+	h.safeguards = newSubmitter(sidecar.URL)
+	h.auth.credentials["user:alice"] = inferenceCredential{Key: secret(accessJWT("tinfoil-chat", "chat")), Expires: nowUTC().Add(time.Hour)}
+	// As deployed, auto is the router, not one of the gateway's models.
+	h.autoModel = &model{name: "auto", client: h.offer.get()[0].client}
+	return func() []submission {
+		h.safeguards.close()
+		mu.Lock()
+		defer mu.Unlock()
+		return got
+	}
+}
+
+func TestACompletedFirstPartyChatIsScreenedOnce(t *testing.T) {
+	for _, kind := range []string{"send", "ask"} {
+		t.Run(kind, func(t *testing.T) {
+			conversationHeaders := make(chan string, 1)
+			h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+				conversationHeaders <- r.Header.Get("X-Tinfoil-Conversation-Id")
+				io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n")
+			})
+			drained := screenedBy(t, h)
+			in, history := sendInput(key), []safeguardMessage{{Role: "user", Content: "test message"}}
+			if kind == "ask" {
+				rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "source")] = storedRow{ID: "source", ETag: "1", Data: object{"title": "Source", "messages": []any{
+					object{"id": "q", "role": "user", "content": "earlier question"}, object{"id": "a", "role": "assistant", "content": "earlier answer"}}}}
+				in["kind"], in["threadId"], in["quote"] = "ask", "source", "what does this mean?"
+				delete(in, "content")
+				history = []safeguardMessage{{Role: "user", Content: "earlier question"}, {Role: "assistant", Content: "earlier answer"}, {Role: "user", Content: "what does this mean?"}}
+			}
+			events := finishedRun(t, h, "/v1/threads/turn", in)
+			if header := <-conversationHeaders; header != "" {
+				t.Fatalf("a gateway model was sent the conversation header %q", header)
+			}
+			got := drained()
+			conversation := events[0].ThreadID
+			if kind == "ask" {
+				conversation = "source"
+			}
+			if len(got) != 1 || got[0].Credential != accessJWT("tinfoil-chat", "chat") || got[0].ConversationID != conversation {
+				t.Fatalf("the sidecar received %+v", got)
+			}
+			messages := got[0].Messages
+			if len(messages) == 0 || messages[0].Role != "system" || !strings.Contains(messages[0].Content, "You are Kimi K3.") ||
+				!reflect.DeepEqual(messages[1:], append(history, safeguardMessage{Role: "assistant", Content: "hello"})) {
+				t.Fatalf("the sidecar received %+v", messages)
+			}
+		})
+	}
+}
+
+func TestAutoChatsAreFlaggedOnlyByTheHarness(t *testing.T) {
+	conversationHeaders := make(chan string, 1)
+	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		conversationHeaders <- r.Header.Get("X-Tinfoil-Conversation-Id")
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	drained := screenedBy(t, h)
+	in := sendInput(key)
+	obj(in["options"])["model"] = "auto"
+	events := finishedRun(t, h, "/v1/threads/turn", in)
+	// Without the chat id the control plane ignores the router's own report.
+	if header := <-conversationHeaders; header != "" {
+		t.Fatalf("the router was told the conversation is %q", header)
+	}
+	if got := drained(); len(got) != 1 || got[0].ConversationID != events[0].ThreadID || got[0].Messages[len(got[0].Messages)-1].Content != "hello" {
+		t.Fatalf("the auto chat was not screened with its chat id: %+v", got)
+	}
+}
+
+func TestFailedAnonymousAndCancelledChatsAreNotScreened(t *testing.T) {
+	t.Run("failed", func(t *testing.T) {
+		h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+			io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
+		})
+		drained := screenedBy(t, h)
+		if last := eventsIn(t, postRoute(h, "/v1/threads/turn", sendInput(key), "alice")); last[len(last)-1].Type != "RUN_ERROR" {
+			t.Fatal("a cut stream finished the run")
+		}
+		if got := drained(); len(got) != 0 {
+			t.Fatalf("a failed chat was screened: %+v", got)
+		}
+	})
+	t.Run("anonymous", func(t *testing.T) {
+		h, _, key := testChatHarness(t, nil)
+		drained := screenedBy(t, h)
+		in := sendInput(key)
+		delete(in, "key")
+		in["ephemeral"] = true
+		eventsIn(t, postRoute(h, "/v1/threads/turn", in, ""))
+		if got := drained(); len(got) != 0 {
+			t.Fatalf("an anonymous chat was screened: %+v", got)
+		}
+	})
+	t.Run("cancelled", func(t *testing.T) {
+		started := make(chan struct{})
+		h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+			io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
+			w.(http.Flusher).Flush()
+			close(started)
+			<-r.Context().Done()
+		})
+		drained := screenedBy(t, h)
+		p := &principal{ID: "alice", JWT: "clerk-alice"}
+		run, err := h.acceptTurn(context.Background(), p, key, sendInput(key))
+		if err != nil {
+			t.Fatal(err)
+		}
+		<-started
+		if _, err := h.cancelThread(context.Background(), p, key, object{"key": key.base64(), "threadId": run.thread.id, "runId": run.log.id}); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-run.finished:
+		case <-time.After(3 * time.Second):
+			t.Fatal("cancel timed out")
+		}
+		if got := drained(); len(got) != 0 {
+			t.Fatalf("a cancelled chat was screened: %+v", got)
+		}
+	})
+}
+
+func TestAnswersAnnotateTheSourcesTheyCite(t *testing.T) {
+	serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
+		return nil, object{"results": []object{{"title": "A", "url": "https://a.test/1", "content": "alpha"}, {"title": "", "url": "https://b.test", "content": "beta"}}}
+	})
+	answer := "Cats sleep [A](https://a.test/1/) and purr [b](https://b.test). See also [x](https://unknown.test)."
+	var turns atomic.Int32
+	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if turns.Add(1) == 1 {
+			io.WriteString(w, toolCallChunk(0, "s", "web_search", `{"query":"cats"}`)+"data: [DONE]\n\n")
+			return
+		}
+		io.WriteString(w, "data: "+string(raw(object{"choices": []object{{"delta": object{"content": answer}}}}))+"\n\ndata: [DONE]\n\n")
+	})
+	events := finishedRun(t, h, "/v1/threads/turn", searchInput(key))
+	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
+	cite := func(url, title, label string) any {
+		start := strings.Index(answer, "["+label+"]") + 1
+		return map[string]any{"type": "url_citation", "url_citation": map[string]any{"url": url, "title": title, "start_index": float64(start), "end_index": float64(start + len(label))}}
+	}
+	want := []any{cite("https://a.test/1/", "A", "A"), cite("https://b.test", "https://b.test", "b")}
+	if got := obj(arr(row.Data["messages"])[1])["annotations"]; !reflect.DeepEqual(got, any(want)) {
+		t.Fatalf("stored annotations %v", got)
+	}
+	state := h.threadState(&principal{ID: "alice"}, events[0].ThreadID)
+	state.mu.Lock()
+	run := state.runs[events[0].RunID]
+	state.mu.Unlock()
+	run.out.mu.Lock()
+	defer run.out.mu.Unlock()
+	if run.out.sources != nil {
+		t.Fatal("the run kept the pages its tools found")
+	}
+}
+
+func TestCutModelStreamDoesNotCompleteItsToolCall(t *testing.T) {
+	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, toolCallChunk(0, "search-call", "web_search", `{"query":"ca`))
+		w.(http.Flusher).Flush()
+		panic(http.ErrAbortHandler)
+	})
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", sendInput(key), "alice"))
+	if last := events[len(events)-1]; last.Type != "RUN_ERROR" {
+		t.Fatalf("a cut stream finished the run: %+v", last)
+	}
+	for _, e := range events {
+		if e.Type == "TOOL_CALL_END" {
+			t.Fatal("a cut stream closed its truncated tool call")
+		}
+	}
+	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
+	block := obj(arr(obj(arr(row.Data["messages"])[1])["timeline"])[0])
+	if block["arguments"] != `{"query":"ca` || block["complete"] == true {
+		t.Fatalf("truncated arguments stored as complete: %v", block)
+	}
+}
+
 func TestRehydrationChecksEveryFrame(t *testing.T) {
 	key := randomKey()
 	original, _ := newContentRun("run", key)

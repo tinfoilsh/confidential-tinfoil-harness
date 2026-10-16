@@ -1,0 +1,279 @@
+package main
+
+import (
+	"encoding/json"
+	"net/url"
+	"reflect"
+	"strings"
+	"testing"
+)
+
+func TestStripModelControlTokens_CleanInputUnchanged(t *testing.T) {
+	for _, in := range []string{"", "https://example.com", "plain string with no tokens", "string with a lone < and | characters", `{"json":"yes","url":"https://a.test/path"}`} {
+		if got := stripModelControlTokens(in); got != in {
+			t.Errorf("clean input mutated: in=%q got=%q", in, got)
+		}
+	}
+}
+
+func TestStripModelControlTokens_GemmaURLLeak(t *testing.T) {
+	if got := stripModelControlTokens(`<|"|https://local.test/cats/gazette<|"|>`); got != "https://local.test/cats/gazette" {
+		t.Errorf("strip leaked-URL failed: got=%q", got)
+	}
+}
+
+func TestStripModelControlTokens_KimiToolCallTokens(t *testing.T) {
+	if got := stripModelControlTokens(`<|tool_call_argument_begin|>{"a":1}<|tool_call_end|>`); got != `{"a":1}` {
+		t.Errorf("strip kimi tokens failed: got=%q", got)
+	}
+}
+
+func TestStripModelControlTokens_Idempotent(t *testing.T) {
+	once := stripModelControlTokens(`<|"|https://x<|"|>`)
+	if twice := stripModelControlTokens(once); once != twice {
+		t.Errorf("not idempotent: once=%q twice=%q", once, twice)
+	}
+}
+
+func TestStripModelControlTokens_LegitimatePipesSurvive(t *testing.T) {
+	in := "https://example.com/?x=|y|&z=a"
+	if got := stripModelControlTokens(in); got != in {
+		t.Errorf("legit pipes got stripped: got=%q", got)
+	}
+}
+
+func TestStripModelControlTokens_LongSequenceIsNotMatched(t *testing.T) {
+	in := "<|" + strings.Repeat("x", 80) + "|>"
+	if got := stripModelControlTokens(in); got != in {
+		t.Errorf("overlong token was eaten: got=%q", got)
+	}
+}
+
+func TestDeepStripURLTokens_AllowlistedField(t *testing.T) {
+	args := map[string]any{"url": `<|"|https://local.test/a<|"|>`, "max_results": float64(5)}
+	if !deepStripURLTokens(args) {
+		t.Fatal("deepStripURLTokens reported no change")
+	}
+	if args["url"] != "https://local.test/a" || args["max_results"] != float64(5) {
+		t.Errorf("wrong repair: %v", args)
+	}
+}
+
+func TestDeepStripURLTokens_AllowlistedIsCaseInsensitive(t *testing.T) {
+	args := map[string]any{"URL": `<|"|https://x<|"|>`}
+	if !deepStripURLTokens(args) || args["URL"] != "https://x" {
+		t.Errorf("uppercase url key not cleaned: %v", args)
+	}
+}
+
+func TestDeepStripURLTokens_URLsArray(t *testing.T) {
+	args := map[string]any{"urls": []any{`<|"|https://a<|"|>`, "https://b", `<|tool_call_argument_begin|>https://c<|tool_call_end|>`}}
+	if !deepStripURLTokens(args) {
+		t.Fatal("array-valued url field not cleaned")
+	}
+	if want := []any{"https://a", "https://b", "https://c"}; !reflect.DeepEqual(args["urls"], want) {
+		t.Errorf("urls array mismatch: got=%v want=%v", args["urls"], want)
+	}
+}
+
+func TestDeepStripURLTokens_NestedObject(t *testing.T) {
+	args := map[string]any{"page": map[string]any{"href": `<|"|https://deep.test/x<|"|>`, "id": float64(3)}}
+	if !deepStripURLTokens(args) {
+		t.Fatal("nested href not cleaned")
+	}
+	if got := args["page"].(map[string]any)["href"]; got != "https://deep.test/x" {
+		t.Errorf("nested href: got=%q", got)
+	}
+}
+
+func TestDeepStripURLTokens_NonURLFieldLeftAlone(t *testing.T) {
+	args := map[string]any{"query": "find <|maybe|> a restaurant"}
+	if deepStripURLTokens(args) || args["query"] != "find <|maybe|> a restaurant" {
+		t.Fatalf("non-URL field was stripped: %v", args)
+	}
+}
+
+func TestDeepStripURLTokens_LeakedURLInUnknownField(t *testing.T) {
+	args := map[string]any{"target": `<|"|https://local.test/almanac<|"|>`}
+	if !deepStripURLTokens(args) || args["target"] != "https://local.test/almanac" {
+		t.Fatalf("unknown field with leaked URL was not cleaned: %v", args)
+	}
+}
+
+func TestDeepStripURLTokens_CleanInputUnchanged(t *testing.T) {
+	args := map[string]any{"query": "cats", "urls": []any{"https://a", "https://b"}, "nested": map[string]any{"href": "https://c"}}
+	snapshot := deepCopyJSON(t, args)
+	if deepStripURLTokens(args) || !reflect.DeepEqual(any(args), snapshot) {
+		t.Fatalf("clean input changed: %v", args)
+	}
+}
+
+func TestSanitizeToolCallArguments_ReturnValue(t *testing.T) {
+	if sanitizeToolCallArguments(map[string]any{"query": "cats", "max_results": float64(5)}) {
+		t.Error("clean args reported as changed")
+	}
+	dirty := map[string]any{"url": `<|"|https://x<|"|>`}
+	if !sanitizeToolCallArguments(dirty) || dirty["url"] != "https://x" {
+		t.Errorf("dirty args not repaired: %v", dirty)
+	}
+}
+
+func TestSanitizeToolCallArguments_EmptyMapNoop(t *testing.T) {
+	if sanitizeToolCallArguments(map[string]any{}) || sanitizeToolCallArguments(nil) {
+		t.Error("empty arguments reported as changed")
+	}
+}
+
+func TestSanitizeToolCallArguments_GemmaEndToEnd(t *testing.T) {
+	var args map[string]any
+	if err := json.Unmarshal([]byte(`{"url":"<|\"|https://local.test/cats/gazette<|\"|>"}`), &args); err != nil {
+		t.Fatal(err)
+	}
+	if !sanitizeToolCallArguments(args) {
+		t.Fatal("captured gemma args reported as clean")
+	}
+	got, _ := args["url"].(string)
+	if _, err := url.Parse(got); err != nil || got != "https://local.test/cats/gazette" {
+		t.Errorf("repaired URL %q: %v", got, err)
+	}
+}
+
+func TestExtractFirstJSONObject(t *testing.T) {
+	for in, want := range map[string]string{
+		`{"a":1}`: `{"a":1}`,
+		`{"action":"read","path":"/etc/hostname"}Let me read this file...`: `{"action":"read","path":"/etc/hostname"}`,
+		`{"a":{"b":2}} Then I'll ...`:                                      `{"a":{"b":2}}`,
+		`{"cmd":"echo }"}`:                                                 `{"cmd":"echo }"}`,
+		`{"cmd":"she said \"hi\" then }"}`:                                 `{"cmd":"she said \"hi\" then }"}`,
+		`{"cmd":"a \\"}trailing`:                                           `{"cmd":"a \\"}`,
+		`{"cmd":"unterminated`:                                             "",
+		`[1,2,3]`:                                                          "",
+		``:                                                                 "",
+		`}{`:                                                               "",
+	} {
+		if got, ok := extractFirstJSONObject(in); got != want || ok != (want != "") {
+			t.Errorf("extractFirstJSONObject(%q) = %q, %v; want %q", in, got, ok, want)
+		}
+	}
+}
+
+func TestSanitizeToolCallArgumentsJSON_CleanPassthrough(t *testing.T) {
+	in := []byte(`{"a":1,"b":"x"}`)
+	if out, changed := sanitizeToolCallArgumentsJSON(in); changed || !reflect.DeepEqual(in, out) {
+		t.Errorf("clean input changed: %q %v", out, changed)
+	}
+}
+
+func TestSanitizeToolCallArgumentsJSON_RepairsTrailingProse(t *testing.T) {
+	for _, in := range []string{
+		`{"query":"cats","max_results":5}Now searching...`,
+		`{"query":"Neighborhood Cat Gazette breakfast routines","max_results":5}  Now I'll review these results carefully.`,
+	} {
+		out, changed := sanitizeToolCallArgumentsJSON([]byte(in))
+		var parsed map[string]any
+		if !changed || json.Unmarshal(out, &parsed) != nil || parsed["max_results"] != float64(5) || !strings.HasPrefix(in, string(out)) {
+			t.Errorf("%q repaired to %q (changed %v)", in, out, changed)
+		}
+	}
+}
+
+func TestSanitizeToolCallArgumentsJSON_UnrepairableLeftAlone(t *testing.T) {
+	in := []byte(`{"cmd":"unterminated`)
+	if out, changed := sanitizeToolCallArgumentsJSON(in); changed || !reflect.DeepEqual(in, out) {
+		t.Errorf("unrepairable input changed: %q %v", out, changed)
+	}
+}
+
+func TestSanitizeToolCallArgumentsJSON_EmptyInput(t *testing.T) {
+	if out, changed := sanitizeToolCallArgumentsJSON(nil); changed || out != nil {
+		t.Errorf("nil in: out=%v changed=%v", out, changed)
+	}
+	if out, changed := sanitizeToolCallArgumentsJSON([]byte{}); changed || len(out) != 0 {
+		t.Errorf("empty in: out=%v changed=%v", out, changed)
+	}
+}
+
+// The router's history sanitiser is historyArgs here, applied wherever the
+// harness builds history: requested, renderMessage and convert.
+func TestHistoryArgs(t *testing.T) {
+	for in, want := range map[string]string{
+		"":                     "{}",
+		`{"query":"cats"}`:     `{"query":"cats"}`,
+		`{"cmd":"unterminated`: "{}",
+		`{"cmd":"`:             "{}",
+		`{"a"}trailing`:        "{}",
+		`not json at all`:      "{}",
+		`{"query":"cats","max_results":5} Now searching...`: `{"query":"cats","max_results":5}`,
+	} {
+		got := historyArgs(in)
+		if got != want || historyArgs(got) != got {
+			t.Errorf("historyArgs(%q) = %q, want %q (idempotently)", in, got, want)
+		}
+	}
+}
+
+func TestContinuationReplaysRepairedArguments(t *testing.T) {
+	got := string(requested("", []toolCall{{id: "c1", name: "render_clock"}, {id: "c2", name: "web_search", args: `{"query":"cats"} Now searching...`}}))
+	if want := `{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"render_clock","arguments":"{}"}},{"id":"c2","type":"function","function":{"name":"web_search","arguments":"{\"query\":\"cats\"}"}}]}`; got != want {
+		t.Fatalf("the continuation carried %s", got)
+	}
+}
+
+func TestStoredToolCallsReplayWithRepairedArguments(t *testing.T) {
+	message := object{"role": "assistant", "timeline": []any{
+		object{"type": "tool_call", "toolCallId": "call_1", "name": "web_search", "arguments": `{"query":"cats"}`},
+		object{"type": "tool_call", "toolCallId": "call_2", "name": "web_search", "arguments": `{"query":"`},
+		object{"type": "tool_call", "toolCallId": "call_3", "name": "web_fetch", "arguments": `{"urls":["https://a.test"]} Now fetching`},
+		object{"type": "tool_call", "toolCallId": "call_4", "name": "web_search"},
+	}}
+	var assistant struct {
+		ToolCalls []toolCallJSON `json:"tool_calls"`
+	}
+	json.Unmarshal(renderMessage(message, false, "none")[0], &assistant)
+	var got []string
+	for _, call := range assistant.ToolCalls {
+		got = append(got, call.Function.Arguments)
+	}
+	if want := []string{`{"query":"cats"}`, "{}", `{"urls":["https://a.test"]}`, "{}"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("replayed arguments %q, want %q", got, want)
+	}
+}
+
+func TestAGUIHistoryRepairsOnlyAssistantToolCalls(t *testing.T) {
+	calls := func(args string) []toolCallJSON {
+		call := toolCallJSON{ID: "call_1"}
+		call.Function.Name, call.Function.Arguments = "web_search", args
+		return []toolCallJSON{call}
+	}
+	p, err := convert([]inMessage{
+		{Role: "user", Content: json.RawMessage(`"find cats"`), ToolCalls: calls(`{"cmd":"unterminated`)},
+		{Role: "assistant", ToolCalls: calls(`{"query":"cats","max_results":5} Now searching...`)},
+		{Role: "assistant", ToolCalls: calls(`{"query":"`)},
+		{Role: "assistant", ToolCalls: calls(`{"query":"dogs"}`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, message := range p.messages {
+		var m outMessage
+		json.Unmarshal(message, &m)
+		got = append(got, m.ToolCalls[0].Function.Arguments)
+	}
+	if want := []string{`{"cmd":"unterminated`, `{"query":"cats","max_results":5}`, "{}", `{"query":"dogs"}`}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("forwarded arguments %q, want %q", got, want)
+	}
+}
+
+func deepCopyJSON(t *testing.T, v any) any {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out any
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}

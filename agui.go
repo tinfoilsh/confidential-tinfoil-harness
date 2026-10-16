@@ -118,6 +118,7 @@ type request struct {
 	groups                     [][]json.RawMessage
 	reminder                   json.RawMessage
 	threadID                   string
+	conversation               string // the chat the run is classified under: an ask's source thread
 	runID                      string
 	model                      string
 	cacheScope                 string              // partitions the enclave's prompt cache per caller; a namespace, not a credential
@@ -266,6 +267,9 @@ func convert(messages []inMessage) (prompt, error) {
 		}
 		for i := range msg.ToolCalls {
 			msg.ToolCalls[i].Type = "function"
+			if msg.Role == "assistant" {
+				msg.ToolCalls[i].Function.Arguments = historyArgs(msg.ToolCalls[i].Function.Arguments)
+			}
 			p.tokens += len(msg.ToolCalls[i].Function.Arguments) / 4
 		}
 		encoded, err := json.Marshal(outMessage{Role: msg.Role, Content: content,
@@ -399,19 +403,27 @@ func terminal(frame []byte) bool {
 }
 
 type stream struct {
-	run           *run
-	managed       bool
-	concreteModel string
-	modelAccepted bool
-	replyID       string
-	turnReasoning string
-	threadID      string
-	runID         string
+	run            *run
+	managed        bool
+	concreteModel  string
+	modelAccepted  bool
+	replyID        string
+	turnReasoning  string
+	reasoningField string // which of reasoning_content and reasoning the last turn streamed
+	threadID       string
+	runID          string
 
 	// mu serializes writes against the tool goroutines.
 	mu      sync.Mutex
 	spend   usage
 	observe func(event)
+	sources []citationSource // pages the run's tools showed the model
+}
+
+func (s *stream) cite(sources []citationSource) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sources = append(s.sources, sources...)
 }
 
 // A run has started the moment it is accepted, not when the first upstream

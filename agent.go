@@ -22,7 +22,10 @@ const (
 	// A tool result is bounded twice: what the model reads back, what the caller sees.
 	maxToolOutput  = 30000
 	maxShownOutput = 1 << 20
-	maxSSEEvent    = 1 << 20
+	maxSSEEvent    = 1 << 22
+
+	finalAnswerInstruction = "You have reached the maximum number of tool iterations. Do not call any more tools. Provide the best answer you can."
+	toolError              = `{"error":"tool_error"}`
 )
 
 func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model) error {
@@ -39,7 +42,7 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 	ctx = context.WithValue(ctx, usageContextKey{}, inRun)
 	first := context.WithValue(ctx, usageContextKey{}, billing)
 
-	set, err := openTools(ctx, req, out.progress)
+	set, err := openTools(ctx, req, m.name, out.progress)
 	if err != nil {
 		return fmt.Errorf("tools: %w", err)
 	}
@@ -70,13 +73,19 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 	}
 	refreshed := false
 	for turn := 1; ; turn++ {
+		// Past the cap the model answers from what it has, with no tools to call.
+		tools := defs
+		if turn > maxTurns {
+			tools = nil
+			conversation = append(conversation, raw(object{"role": "system", "content": finalAnswerInstruction}))
+		}
 		if req.managed {
-			conversation, err = trimToolHistory(req, conversation, defs)
+			conversation, err = trimToolHistory(req, conversation, tools)
 			if err != nil {
 				return err
 			}
 		}
-		payload, err := body(req, m, conversation, defs)
+		payload, err := body(req, m, conversation, tools)
 		if err != nil {
 			return err
 		}
@@ -84,7 +93,7 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 		if turn == 1 {
 			turnCtx = first
 		}
-		calls, answer, err := h.turn(turnCtx, out, m, payload)
+		calls, answer, err := h.turn(turnCtx, out, m, payload, set.widgets)
 		if err != nil && req.refreshAuth != nil && !refreshed && asAPIError(err).HTTP == http.StatusUnauthorized {
 			// A 401 rejected this model request before processing. Replay its
 			// exact body once, retaining the run ID and request billing flag.
@@ -101,7 +110,7 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 				billing.APIKeyHash = inRun.APIKeyHash
 				turnCtx = context.WithValue(ctx, usageContextKey{}, billing)
 			}
-			calls, answer, err = h.turn(turnCtx, out, m, payload)
+			calls, answer, err = h.turn(turnCtx, out, m, payload, set.widgets)
 		}
 		if err != nil {
 			return err
@@ -109,17 +118,18 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 		if len(calls) == 0 {
 			return nil
 		}
-		if turn == maxTurns {
+		if turn > maxTurns {
 			return apiErr(502, "MAX_TURNS", fmt.Sprintf("The model called tools for %d turns without answering", maxTurns))
 		}
 		reply := requested(answer, calls)
 		if req.managed && (req.policy == "all" || req.policy == "tool-call-only") {
 			out.mu.Lock()
-			reasoning := out.turnReasoning
+			reasoning, field := out.turnReasoning, out.reasoningField
 			out.mu.Unlock()
 			if reasoning != "" {
+				// Echoed in the field the enclave streamed it in, since vLLM versions disagree on it.
 				value := obj(decodeValue(reply))
-				value["reasoning_content"] = reasoning
+				value[field] = reasoning
 				reply = raw(value)
 			}
 		}
@@ -145,9 +155,6 @@ func body(req *request, m *model, conversation []json.RawMessage, defs json.RawM
 	}
 	if len(defs) > 0 {
 		payload["tools"] = defs
-	}
-	if req.piiCheck {
-		payload["pii_check_options"] = map[string]any{}
 	}
 	return json.Marshal(payload)
 }
@@ -242,10 +249,13 @@ func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) (mess
 			if !ok {
 				return answered(call.id, `{"error":"unknown tool"}`)
 			}
-			var args any
-			if json.Unmarshal([]byte(call.args), &args) != nil || validateSchema(w.Schema, args) != nil {
-				out.result(call.id, `{"error":"invalid widget arguments"}`, nil)
-				return answered(call.id, `{"error":"invalid widget arguments"}`)
+			// The caller never reports back, so only the model can be told the widget was not drawn.
+			if failure := widgetFailure(w, call.args); failure != nil {
+				out.emit(event{Type: "TOOL_CALL_RESULT", MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: failure})
+				if !set.retry(call.name) {
+					return answered(call.id, `{"status":"executed"}`)
+				}
+				return answered(call.id, string(failure))
 			}
 			content, err := set.local(ctx, call)
 			if err != nil {
@@ -259,18 +269,25 @@ func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) (mess
 	}
 	out.activity(call)
 	content, meta, err := set.call(ctx, call.name, call.id, json.RawMessage(call.args))
+	// The model reads search results as cited text, the caller as data.
+	read, sources := modelCopy(call.name, content)
+	out.cite(sources)
+	var shown any
 	if err != nil {
-		// The model reads the failure and can retry rather than the turn dying.
+		// The model reads the failure and can retry rather than the turn dying;
+		// the caller learns only that the call failed, never the tool's own text.
 		failure, _ := json.Marshal(map[string]string{"error": err.Error()})
-		content, meta = string(failure), nil
+		content, read, meta, shown = toolError, string(failure), nil, json.RawMessage(toolError)
+	} else if set.widgets != nil {
+		shown = normalizeToolResult(call, content)
 	}
 	// The caller's copy is clipped far later than the model's: present renders whole files.
 	if set.widgets != nil {
-		out.emit(event{Type: "TOOL_CALL_RESULT", MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: raw(normalizeToolResult(call, clip(content, maxShownOutput))), Metadata: meta})
+		out.emit(event{Type: "TOOL_CALL_RESULT", MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: raw(shown), Metadata: meta})
 	} else {
 		out.result(call.id, clip(content, maxShownOutput), meta)
 	}
-	return answered(call.id, clip(content, maxToolOutput))
+	return answered(call.id, clip(read, maxToolOutput))
 }
 
 func clip(out string, limit int) string {
@@ -283,7 +300,7 @@ func clip(out string, limit int) string {
 	return out
 }
 
-func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byte) ([]toolCall, string, error) {
+func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byte, widgets map[string]widget) ([]toolCall, string, error) {
 	endpoint := m.endpoint
 	if endpoint == "" {
 		endpoint = h.gateway + "/v1/chat/completions"
@@ -311,6 +328,7 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 	var calls []toolCall
 	ended := false
 	var answer, reasoningText strings.Builder
+	reasoningField := "reasoning_content"
 	message := "msg_" + token()
 	if out.managed {
 		out.mu.Lock()
@@ -320,7 +338,11 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 		message = out.replyID
 		out.mu.Unlock()
 	}
-	defer func() { out.mu.Lock(); out.turnReasoning = reasoningText.String(); out.mu.Unlock() }()
+	defer func() {
+		out.mu.Lock()
+		out.turnReasoning, out.reasoningField = reasoningText.String(), reasoningField
+		out.mu.Unlock()
+	}()
 	events := bufio.NewScanner(resp.Body)
 	events.Buffer(nil, maxSSEEvent)
 	for events.Scan() {
@@ -353,10 +375,7 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 			Usage json.RawMessage `json:"usage"`
 		}
 		if json.Unmarshal([]byte(data), &chunk) != nil {
-			if out.managed {
-				return nil, answer.String(), apiErr(502, "UPSTREAM_REFUSED", "The model stream contains invalid JSON")
-			}
-			continue
+			return nil, answer.String(), apiErr(502, "UPSTREAM_REFUSED", "The model stream contains invalid JSON")
 		}
 		if len(chunk.Error) > 0 && string(chunk.Error) != "null" || chunk.Object == "error" {
 			return nil, answer.String(), streamError([]byte(data))
@@ -376,36 +395,49 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 			ended = true
 		}
 		delta := chunk.Choices[0].Delta
+		// Reasoning first: at the think-close boundary one delta carries the last
+		// of the reasoning and the first of the answer.
+		if reasoning := cmp.Or(delta.Reasoning, delta.ReasoningAlt); reasoning != "" {
+			if delta.Reasoning == "" {
+				reasoningField = "reasoning"
+			}
+			reasoningText.WriteString(reasoning)
+			out.reasoning(message, reasoning)
+		}
 		if delta.Content != "" {
 			answer.WriteString(delta.Content)
 			out.text(message, delta.Content)
-		}
-		if reasoning := cmp.Or(delta.Reasoning, delta.ReasoningAlt); reasoning != "" {
-			reasoningText.WriteString(reasoning)
-			out.reasoning(message, reasoning)
 		}
 		for _, called := range delta.ToolCalls {
 			if called.Index < 0 || called.Index >= 128 {
 				return nil, answer.String(), apiErr(502, "UPSTREAM_REFUSED", "The model exceeded the tool call limit")
 			}
-			calls = announce(out, message, calls, called)
+			calls = announce(out, message, calls, called, widgets)
 		}
+	}
+	// A cut stream leaves its calls open: TOOL_CALL_END would mark truncated arguments complete.
+	if err := events.Err(); err != nil {
+		return calls, answer.String(), err
+	}
+	if !ended {
+		return calls, answer.String(), apiErr(502, "UPSTREAM_REFUSED", "The model stream ended before completion")
 	}
 	for i := range calls {
-		if !calls[i].open {
-			out.callStart(calls[i].id, calls[i].name, parent(message, &answer))
+		c := &calls[i]
+		shown := c.open && !c.held
+		if !c.open {
+			out.callStart(c.id, c.name, parent(message, &answer))
+		}
+		if c.held {
+			c.args = widgetArguments(c.args)
 		}
 		// The enclave reads absent arguments as none; the caller should too.
-		if calls[i].args == "" {
-			out.callArgs(calls[i].id, "{}")
+		if c.args == "" {
+			out.callArgs(c.id, "{}")
+		} else if !shown {
+			out.callArgs(c.id, c.args)
 		}
-		out.callEnd(calls[i].id)
-	}
-	if events.Err() != nil {
-		return calls, answer.String(), events.Err()
-	}
-	if out.managed && !ended {
-		return calls, answer.String(), apiErr(502, "UPSTREAM_REFUSED", "The model stream ended before completion")
+		out.callEnd(c.id)
 	}
 	return calls, answer.String(), nil
 }
@@ -413,6 +445,7 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 type toolCall struct {
 	id, name, args string
 	open           bool
+	held           bool // a widget: its arguments reach the caller whole, once repaired
 }
 
 type toolCallDelta struct {
@@ -432,7 +465,8 @@ func parent(message string, answer *strings.Builder) string {
 	return message
 }
 
-func announce(out *stream, message string, calls []toolCall, delta toolCallDelta) []toolCall {
+// Arguments that arrive before the name are sent once the call opens.
+func announce(out *stream, message string, calls []toolCall, delta toolCallDelta, widgets map[string]widget) []toolCall {
 	for len(calls) <= delta.Index {
 		calls = append(calls, toolCall{id: "call_" + token()})
 	}
@@ -443,10 +477,13 @@ func announce(out *stream, message string, calls []toolCall, delta toolCallDelta
 	call.name += delta.Function.Name
 	call.args += delta.Function.Arguments
 	if !call.open && call.name != "" {
+		_, call.held = widgets[call.name]
 		call.open = true
 		out.callStart(call.id, call.name, message)
-	}
-	if delta.Function.Arguments != "" {
+		if !call.held && call.args != "" {
+			out.callArgs(call.id, call.args)
+		}
+	} else if call.open && !call.held && delta.Function.Arguments != "" {
 		out.callArgs(call.id, delta.Function.Arguments)
 	}
 	return calls
@@ -456,7 +493,7 @@ func requested(answer string, calls []toolCall) json.RawMessage {
 	made := make([]toolCallJSON, len(calls))
 	for i, call := range calls {
 		made[i].ID, made[i].Type = call.id, "function"
-		made[i].Function.Name, made[i].Function.Arguments = call.name, call.args
+		made[i].Function.Name, made[i].Function.Arguments = call.name, historyArgs(call.args)
 	}
 	message, _ := json.Marshal(outMessage{Role: "assistant", Content: quote(answer), ToolCalls: made})
 	return message
