@@ -846,25 +846,56 @@ func TestCancelCommitsPartialAndLeavesQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 }
-func TestPrioritySendKeepsTheOtherQueuedTurns(t *testing.T) {
-	p, key := &principal{ID: "alice"}, randomKey()
-	log, err := newContentRun("active", key)
+func TestPrioritySendStartsTheChosenTurnNext(t *testing.T) {
+	var calls atomic.Int32
+	started, latest := make(chan struct{}), make(chan any, 2)
+	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		messages := lastRequest(r)
+		if calls.Add(1) == 1 {
+			io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
+			w.(http.Flusher).Flush()
+			close(started)
+			<-r.Context().Done()
+			return
+		}
+		for i := len(messages) - 1; i >= 0; i-- {
+			if m := obj(messages[i]); m["role"] == "user" && !strings.HasPrefix(str(m["content"]), "<system-reminder>") {
+				latest <- m["content"]
+				break
+			}
+		}
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	p := &principal{ID: "alice", JWT: "clerk-alice"}
+	run, err := h.acceptTurn(context.Background(), p, key, sendInput(key))
 	if err != nil {
 		t.Fatal(err)
 	}
-	stopped := false
-	log.stop = func() { stopped = true }
-	active := &chatRun{log: log, out: &stream{run: log}}
-	first := &chatRun{log: &run{id: "first"}, input: object{"content": "first"}}
-	second := &chatRun{log: &run{id: "second"}, input: object{"content": "second"}}
-	session := &threadSession{id: "thread", keyHash: key.fingerprint(), active: active, queue: []*chatRun{first, second}, runs: map[string]*chatRun{"first": first, "second": second}}
-	h := &harness{threads: map[string]*threadSession{p.scope() + "/thread": session}}
-	_, err = h.sendQueued(context.Background(), p, contentKey{}, object{"key": key.base64(), "threadId": "thread", "queueId": "second"})
-	if err != nil {
+	<-started
+	queue := func(content string) *chatRun {
+		in := sendInput(key)
+		in["threadId"], in["content"] = run.thread.id, content
+		next, err := h.acceptTurn(context.Background(), p, key, in)
+		if err != nil || !next.queued {
+			t.Fatalf("turn not queued: %v", err)
+		}
+		return next
+	}
+	queue("first")
+	second := queue("second")
+	if _, err := h.sendQueued(context.Background(), p, key, object{"key": key.base64(), "threadId": run.thread.id, "queueId": second.log.id}); err != nil {
 		t.Fatal(err)
 	}
-	if !stopped || !active.cancelled || len(session.queue) != 2 || session.queue[0] != second || session.queue[1] != first {
-		t.Fatal("priority send lost queue order or did not stop the active turn")
+	// The chosen turn runs next, and the other queued turn after it.
+	for _, want := range []string{"second", "first"} {
+		select {
+		case content := <-latest:
+			if content != want {
+				t.Fatalf("the model was sent %v, want %s", content, want)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("the %s turn never started", want)
+		}
 	}
 }
 

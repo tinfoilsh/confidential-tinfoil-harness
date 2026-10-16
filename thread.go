@@ -46,6 +46,9 @@ type chatRun struct {
 	replacement              string
 	profile                  object // a local thread's settings, sent by its client
 	screening                *screening
+
+	// yielded marks an active run stopped so a queued turn starts now.
+	yielded bool
 }
 
 func (h *harness) threadState(p *principal, id string) *threadSession {
@@ -862,7 +865,7 @@ func (h *harness) finishChatRun(r *chatRun, runErr error) {
 	r.log.log.close(errDone)
 	s.active = nil
 	s.expires = nowUTC().Add(runTimeout)
-	if !r.cancelled && !s.deleted && len(s.queue) > 0 {
+	if (!r.cancelled || r.yielded) && !s.deleted && len(s.queue) > 0 {
 		next := s.queue[0]
 		s.queue = s.queue[1:]
 		if err := h.beginChatRun(ctx, next); err != nil {
@@ -950,7 +953,7 @@ func (h *harness) sendQueued(ctx context.Context, p *principal, _ contentKey, in
 	s.queue = append([]*chatRun{r}, slices.Delete(s.queue, index, index+1)...)
 	if s.active != nil {
 		s.active.out.emit(event{Type: "STATE_DELTA", Delta: []object{{"op": "replace", "path": "/queue", "value": queueItems(s)}}})
-		s.active.cancelled = true
+		s.active.cancelled, s.active.yielded = true, true
 		s.active.log.stop()
 	}
 	return object{}, nil
