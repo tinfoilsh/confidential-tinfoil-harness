@@ -57,6 +57,11 @@ func publicAttachment(a object) object {
 	if text := str(a["textContent"]); text != "" {
 		out["textContent"] = text
 	}
+	// A text-only model reads an image through this. Local clients keep it,
+	// so later turns do not ask a vision model to describe the image again.
+	if text := str(a["description"]); text != "" {
+		out["description"] = text
+	}
 	if pages := arr(a["pages"]); len(pages) > 0 {
 		out["pages"] = len(pages)
 	}
@@ -131,9 +136,12 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 		respond(w, object{"text": text}, err)
 		return
 	}
-	ephemeral := str(fields["ephemeral"]) == "true" || p.Anonymous
+	// A local upload returns the whole descriptor, since its client stores it
+	// and sends it back with the transcript of later turns.
+	local := str(fields["local"]) == "true" && r.URL.Path == "/v1/attachments/upload"
+	ephemeral := str(fields["ephemeral"]) == "true" || p.Anonymous || local
 	var key contentKey
-	if !p.Anonymous {
+	if !p.Anonymous && !local {
 		key, err = decodeContentKey(str(fields["key"]))
 		if err != nil {
 			respond(w, nil, err)
@@ -238,7 +246,11 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	h.attachments[p.scope()+"/"+id] = entry
 	h.chatMu.Unlock()
-	respond(w, publicAttachment(descriptor), nil)
+	view := publicAttachment(descriptor)
+	if local {
+		view["descriptor"] = descriptor
+	}
+	respond(w, view, nil)
 }
 
 func (h *harness) preprocess(ctx context.Context, filename string, data []byte) (object, error) {
@@ -424,6 +436,9 @@ func (h *harness) attachment(ctx context.Context, p *principal, key contentKey, 
 	if p.Anonymous {
 		return nil, nil, apiErr(404, "THREAD_NOT_FOUND", "The attachment expired")
 	}
+	if key == (contentKey{}) {
+		return nil, nil, apiErr(401, "KEY_REQUIRED", "A content key is required")
+	}
 	profile, err := h.profile(ctx, p, key)
 	if err != nil {
 		return nil, nil, err
@@ -500,7 +515,7 @@ func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 		descriptor = in
 		data, err = h.attachmentBytes(r.Context(), &principal{Anonymous: true}, descriptor, true)
 	} else {
-		key, keyErr := requestKey(p, in)
+		key, keyErr := requestKey(in)
 		if keyErr != nil {
 			respond(w, nil, keyErr)
 			return
@@ -542,7 +557,7 @@ func (h *harness) deleteAttachment(ctx context.Context, p *principal, key conten
 	h.chatMu.Unlock()
 	return object{}, err
 }
-func (h *harness) turnAttachments(ctx context.Context, p *principal, key contentKey, in, thread object, ephemeral bool) ([]any, error) {
+func (h *harness) turnAttachments(ctx context.Context, p *principal, key contentKey, in, thread object, ephemeral, keyless bool) ([]any, error) {
 	result := []any{}
 	for _, value := range arr(in["attachments"]) {
 		var descriptor object
@@ -551,7 +566,7 @@ func (h *harness) turnAttachments(ctx context.Context, p *principal, key content
 		if ephemeral {
 			h.chatMu.Lock()
 			cached := h.attachments[p.scope()+"/"+str(value)]
-			if cached != nil && cached.expires.After(nowUTC()) && (p.Anonymous || cached.keyHash == key.fingerprint()) && len(cached.bytes) > 0 {
+			if cached != nil && cached.expires.After(nowUTC()) && (keyless || cached.keyHash == key.fingerprint()) && len(cached.bytes) > 0 {
 				descriptor = clone(cached.descriptor)
 				cached.expires = nowUTC().Add(runTimeout)
 			}
@@ -647,7 +662,9 @@ func copyAttachmentDerivatives(source, target object) {
 	}
 }
 
-func (h *harness) hydrateContext(ctx context.Context, p *principal, key contentKey, thread object, ephemeral bool) error {
+// A local transcript may omit older images' bytes to stay small. The model
+// then reads such an image through its description, or not at all.
+func (h *harness) hydrateContext(ctx context.Context, p *principal, key contentKey, thread object, ephemeral, local bool) error {
 	name := str(thread["model"])
 	c := h.catalog.get()
 	if c == nil {
@@ -698,6 +715,9 @@ func (h *harness) hydrateContext(ctx context.Context, p *principal, key contentK
 					cached.expires = nowUTC().Add(runTimeout)
 				}
 				h.chatMu.Unlock()
+				if len(data) == 0 && local {
+					continue
+				}
 				if len(data) == 0 {
 					return apiErr(404, "THREAD_NOT_FOUND", "The temporary attachment expired")
 				}

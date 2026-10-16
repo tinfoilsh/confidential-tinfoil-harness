@@ -125,7 +125,11 @@ func respond(w http.ResponseWriter, result any, err error) {
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request) (object, error) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+	return decodeJSONWithin(w, r, maxRequestBody)
+}
+
+func decodeJSONWithin(w http.ResponseWriter, r *http.Request, limit int64) (object, error) {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	decoder := json.NewDecoder(r.Body)
 	var in object
 	if err := decoder.Decode(&in); err != nil {
