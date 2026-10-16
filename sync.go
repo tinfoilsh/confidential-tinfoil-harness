@@ -129,7 +129,6 @@ func (s *syncClient) push(ctx context.Context, p *principal, key contentKey, sco
 	}
 	metadata := object{}
 	if scope == "chat" {
-		metadata["messageCount"] = len(arr(row.Data["messages"]))
 		metadata["projectId"] = row.Data["projectId"]
 	}
 	if scope == "profile" {
