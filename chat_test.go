@@ -1694,7 +1694,11 @@ func TestToolFailuresReachTheCallerOpaquely(t *testing.T) {
 			if strings.Contains(string(raw(events)), "upstream secret detail") {
 				t.Fatal("the tool's error text reached the caller")
 			}
-			if got := toolMessage(<-sent, "s"); !strings.Contains(got, `Tool \"web_search\" rejected the arguments: upstream secret detail`) {
+			read := <-sent
+			if !strings.Contains(string(raw(read)), toolOutputWarning) {
+				t.Fatal("the model was not told to distrust tool output")
+			}
+			if got := toolMessage(read, "s"); !strings.Contains(got, `Tool \"web_search\" rejected the arguments: upstream secret detail`) {
 				t.Fatalf("the model read %s", got)
 			}
 		})
