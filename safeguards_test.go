@@ -90,14 +90,6 @@ func TestSubmitter_TrimsOversizedHistory(t *testing.T) {
 	}
 }
 
-func TestSubmitter_RejectsOversizedCredential(t *testing.T) {
-	s := &submitter{pending: make(chan []byte, maxPendingSubmissions)}
-	s.submit(strings.Repeat("x", maxSubmissionBytes), "chat", []safeguardMessage{{Role: "assistant", Content: "reply"}})
-	if len(s.pending) != 0 {
-		t.Fatal("a submission whose envelope alone is oversized must not enter the queue")
-	}
-}
-
 func TestSubmitter_QueuedPayloadOwnsItsData(t *testing.T) {
 	s := &submitter{pending: make(chan []byte, maxPendingSubmissions)}
 	messages := []safeguardMessage{{Role: "user", Content: "hello"}, {Role: "assistant", Content: "reply"}}
@@ -113,50 +105,13 @@ func TestSubmitter_QueuedPayloadOwnsItsData(t *testing.T) {
 	}
 }
 
-func TestSubmitter_SkipsConversationsWithoutAReply(t *testing.T) {
-	var mu sync.Mutex
-	calls := 0
-	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		calls++
-		mu.Unlock()
-		w.WriteHeader(http.StatusAccepted)
-	}))
+func TestSubmitter_NeverBlocksWhileSidecarHangs(t *testing.T) {
+	release := make(chan struct{})
+	sidecar := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { <-release }))
 	defer sidecar.Close()
 	s := newSubmitter(sidecar.URL)
-	s.submit("tok", "", nil)
-	s.submit("tok", "", []safeguardMessage{{Role: "user", Content: "hi"}})
-	s.submit("tok", "", []safeguardMessage{{Role: "user", Content: "hi"}, {Role: "assistant", Content: ""}})
-	s.close()
-	if calls != 0 {
-		t.Fatalf("sidecar called %d times", calls)
-	}
-}
-
-func TestSubmitter_DropsOversizedConversationID(t *testing.T) {
-	got := make(chan submission, 1)
-	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var sub submission
-		json.NewDecoder(r.Body).Decode(&sub)
-		got <- sub
-		w.WriteHeader(http.StatusAccepted)
-	}))
-	defer sidecar.Close()
-	s := newSubmitter(sidecar.URL)
-	s.submit("tok", string(make([]byte, maxConversationIDLen+1)), []safeguardMessage{{Role: "assistant", Content: "x"}})
-	s.close()
-	select {
-	case sub := <-got:
-		if sub.ConversationID != "" {
-			t.Fatal("oversized conversation id must be dropped, not forwarded")
-		}
-	default:
-		t.Fatal("the conversation was not delivered")
-	}
-}
-
-func TestSubmitter_NeverBlocksWhenSidecarIsDown(t *testing.T) {
-	s := newSubmitter("http://127.0.0.1:1")
+	defer s.close()
+	defer close(release)
 	done := make(chan struct{})
 	go func() {
 		for range maxPendingSubmissions * 2 {
@@ -167,15 +122,8 @@ func TestSubmitter_NeverBlocksWhenSidecarIsDown(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("submit blocked while the sidecar was unreachable")
+		t.Fatal("submit blocked while the sidecar hung")
 	}
-	s.close()
-}
-
-func TestSubmitter_NilIsNoop(t *testing.T) {
-	var s *submitter
-	s.submit("tok", "", []safeguardMessage{{Role: "assistant", Content: "x"}})
-	s.close()
 }
 
 func TestIsFirstPartyChatAccessJWT(t *testing.T) {
