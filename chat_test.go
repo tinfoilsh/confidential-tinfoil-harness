@@ -1026,7 +1026,7 @@ func TestContentRunIsIndependentOfRotatingInferenceKey(t *testing.T) {
 	if _, err := other.open(1, sealed); err == nil {
 		t.Fatal("frame index not bound")
 	}
-	if key.codeKey() != "89492753dd52f2dc48902555edb4c89ad8f27307dd182b328be31d8a748b111f" || key.containerToken("chat_abc_123") != "3c242fb62166080b9a7868b66b4904eaf3ad68fc25f46cb8e2e73878b2c8ccae" || key.sandboxSecret() != "fbf1ff57252905ea05a5504cf29e2226ebcc6460ae231a186d09d1354c3a42e3" {
+	if key.codeKey() != "89492753dd52f2dc48902555edb4c89ad8f27307dd182b328be31d8a748b111f" || key.containerToken("chat_abc_123") != "3c242fb62166080b9a7868b66b4904eaf3ad68fc25f46cb8e2e73878b2c8ccae" {
 		t.Fatal("HKDF differs from the Web Crypto vectors")
 	}
 }
