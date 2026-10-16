@@ -847,6 +847,12 @@ func TestCancelCommitsPartialAndLeavesQueue(t *testing.T) {
 	}
 }
 func TestPrioritySendStartsTheChosenTurnNext(t *testing.T) {
+	for _, stopped := range []bool{false, true} {
+		t.Run(map[bool]string{false: "while a reply streams", true: "after a stop"}[stopped], func(t *testing.T) { prioritySend(t, stopped) })
+	}
+}
+
+func prioritySend(t *testing.T, stopped bool) {
 	var calls atomic.Int32
 	started, latest := make(chan struct{}), make(chan any, 2)
 	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
@@ -883,6 +889,12 @@ func TestPrioritySendStartsTheChosenTurnNext(t *testing.T) {
 	}
 	queue("first")
 	second := queue("second")
+	if stopped {
+		if _, err := h.cancelThread(context.Background(), p, key, object{"key": key.base64(), "threadId": run.thread.id, "runId": run.log.id}); err != nil {
+			t.Fatal(err)
+		}
+		<-run.finished
+	}
 	if _, err := h.sendQueued(context.Background(), p, key, object{"key": key.base64(), "threadId": run.thread.id, "queueId": second.log.id}); err != nil {
 		t.Fatal(err)
 	}

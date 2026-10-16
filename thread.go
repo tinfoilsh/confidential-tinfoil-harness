@@ -764,7 +764,7 @@ func (h *harness) finishChatRun(r *chatRun, runErr error) {
 		r.credential.Key = ""
 		r.profile = nil
 		// The client keeps a local thread, so only a queued turn needs its row.
-		if (!s.ephemeral || s.local) && s.active == nil {
+		if (!s.ephemeral || s.local) && s.active == nil && len(s.queue) == 0 {
 			s.row = nil
 		}
 	}()
@@ -866,15 +866,20 @@ func (h *harness) finishChatRun(r *chatRun, runErr error) {
 	s.active = nil
 	s.expires = nowUTC().Add(runTimeout)
 	if (!r.cancelled || r.yielded) && !s.deleted && len(s.queue) > 0 {
-		next := s.queue[0]
-		s.queue = s.queue[1:]
-		if err := h.beginChatRun(ctx, next); err != nil {
-			e := asAPIError(err)
-			next.out.emit(event{Type: "RUN_ERROR", ThreadID: s.id, RunID: next.log.id, Message: e.Message, Code: e.Code})
-			next.log.log.close(errDone)
-			close(next.finished)
-			clear(next.key[:])
-		}
+		h.startQueued(ctx, s)
+	}
+}
+
+// startQueued begins the thread's first queued turn; s.mu must be held.
+func (h *harness) startQueued(ctx context.Context, s *threadSession) {
+	next := s.queue[0]
+	s.queue = s.queue[1:]
+	if err := h.beginChatRun(ctx, next); err != nil {
+		e := asAPIError(err)
+		next.out.emit(event{Type: "RUN_ERROR", ThreadID: s.id, RunID: next.log.id, Message: e.Message, Code: e.Code})
+		next.log.log.close(errDone)
+		close(next.finished)
+		clear(next.key[:])
 	}
 }
 
@@ -955,6 +960,9 @@ func (h *harness) sendQueued(ctx context.Context, p *principal, _ contentKey, in
 		s.active.out.emit(event{Type: "STATE_DELTA", Delta: []object{{"op": "replace", "path": "/queue", "value": queueItems(s)}}})
 		s.active.cancelled, s.active.yielded = true, true
 		s.active.log.stop()
+	} else {
+		// After a stop the queue waits, so there is no run to yield.
+		h.startQueued(ctx, s)
 	}
 	return object{}, nil
 }
