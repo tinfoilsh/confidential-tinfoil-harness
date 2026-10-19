@@ -102,6 +102,11 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 		limit = exhaustedLimit("free_daily")
 	}
 	summary := threadSummary(normalizeThread(r.row))
+	metadata := object{"messages": committed}
+	// A device chat's client stores the thread the run leaves as it is.
+	if s.local && r.input["kind"] != "ask" {
+		metadata["thread"] = deviceThread(r.row)
+	}
 	h.live.mu.Lock()
 	queue := queueItems(s)
 	if s.ephemeral {
@@ -111,11 +116,6 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 	deleted = s.deleted
 	h.live.mu.Unlock()
 	r.out.emit(event{Type: "STATE_SNAPSHOT", Snapshot: object{"thread": summary, "queue": queue, "rateLimit": limit}})
-	metadata := object{"messages": committed}
-	// A device chat's client stores the thread the run leaves as it is.
-	if s.local && r.input["kind"] != "ask" {
-		metadata["thread"] = deviceThread(r.row)
-	}
 	if runErr != nil && !cancelled {
 		e := asAPIError(runErr)
 		r.out.emit(event{Type: "RUN_ERROR", ThreadID: s.id, RunID: r.log.id, Message: e.Message, Code: e.Code, Kind: e.Kind, ResetsAt: e.ResetsAt, RetryAfter: e.RetryAfter, Metadata: raw(metadata)})
