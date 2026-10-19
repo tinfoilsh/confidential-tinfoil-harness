@@ -310,6 +310,15 @@ func identifier(s string) bool {
 	return true
 }
 
+// A missing key is checked against the run: keyless threads accept it, and
+// every other thread compares the key's fingerprint.
+func requestKey(in object) (contentKey, error) {
+	if str(in["key"]) == "" {
+		return contentKey{}, nil
+	}
+	return decodeContentKey(str(in["key"]))
+}
+
 func requiredID(in object, field string) (string, error) {
 	id := str(in[field])
 	if id == "" || !identifier(id) || strings.ContainsAny(id, "/\\?#") {
