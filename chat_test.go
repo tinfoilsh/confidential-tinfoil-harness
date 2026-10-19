@@ -987,7 +987,7 @@ func TestPromptEscapingReasoningAndBudget(t *testing.T) {
 		t.Fatal("prompt was not escaped")
 	}
 	req.groups = [][]json.RawMessage{{raw(object{"role": "user", "content": strings.Repeat("test ", 20000)})}}
-	_, err = budgetConversation(req, &toolset{}, nil)
+	_, err = budgetConversation(req, false, nil)
 	if err == nil || asAPIError(err).Code != "CONTEXT_TOO_LARGE" {
 		t.Fatal("oversized final message accepted")
 	}
@@ -1116,7 +1116,7 @@ func (r *recordedCalls) list() []recordedCall {
 	return append([]recordedCall(nil), r.calls...)
 }
 
-// serveWebsearch points the webSearch family at a stateless MCP server that
+// serveWebsearch points the web search enclave at a stateless MCP server that
 // publishes confidential-websearch's tools, validates arguments against their
 // schemas as it does, and answers every call with respond.
 func serveWebsearch(t *testing.T, respond func(name string, args map[string]any) (*mcp.CallToolResult, any)) *recordedCalls {
@@ -1149,7 +1149,7 @@ func serveWebsearch(t *testing.T, respond func(name string, args map[string]any)
 		return s
 	}, &mcp.StreamableHTTPOptions{Stateless: true}))
 	t.Cleanup(server.Close)
-	f := families[0]
+	f := webSearch
 	saved := *f
 	t.Cleanup(func() { *f = saved })
 	f.enclave = strings.TrimPrefix(server.URL, "https://")

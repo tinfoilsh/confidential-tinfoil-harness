@@ -27,8 +27,7 @@ type request struct {
 	model                      string
 	cacheScope                 string            // partitions the enclave's prompt cache per caller; a namespace, not a credential
 	rendered                   []json.RawMessage // widgets the caller draws: advertised, never dialled
-	families                   map[string]bool   // tool enclaves this run dials
-	piiCheck                   bool
+	webSearch, piiCheck        bool
 }
 
 func cacheScope(apiKey string) string {
@@ -153,7 +152,7 @@ func (h *harness) buildRequest(thread, profile, project object, documents []obje
 	}
 	options := obj(in["options"])
 	name := normalizeModel(firstString(options["model"], thread["model"], profile["selectedModel"], "auto"))
-	req := &request{threadID: str(thread["id"]), runID: runID, model: name, families: map[string]bool{}}
+	req := &request{threadID: str(thread["id"]), runID: runID, model: name}
 	req.conversation = req.threadID
 	if in["kind"] == "ask" {
 		req.conversation = str(in["threadId"])
@@ -214,19 +213,9 @@ func (h *harness) buildRequest(thread, profile, project object, documents []obje
 	req.system = systemPrompt(c, thread, profile, project, documents, display, zone)
 	req.window, req.policy = window, policy
 	req.piiCheck = boolean(options["piiCheck"], boolean(profile["piiCheckEnabled"], false))
-	for _, f := range families {
-		on := false
-		switch f.name {
-		case "webSearch":
-			on = boolean(options["webSearch"], boolean(thread["webSearchEnabled"], boolean(profile["webSearchEnabled"], true)))
-		}
-		if !on {
-			continue
-		}
-		if f.client == nil {
-			return nil, nil, apiErr(503, "TOOL_UNAVAILABLE", f.name+" is unavailable")
-		}
-		req.families[f.name] = true
+	req.webSearch = boolean(options["webSearch"], boolean(thread["webSearchEnabled"], boolean(profile["webSearchEnabled"], true)))
+	if req.webSearch && webSearch.client == nil {
+		return nil, nil, apiErr(503, "TOOL_UNAVAILABLE", "webSearch is unavailable")
 	}
 	widgets := c.selectedWidgets(arr(in["widgets"]), boolean(options["genUI"], boolean(profile["genUIEnabled"], true)))
 	if len(widgets) > 0 {
@@ -365,10 +354,10 @@ func messageTokens(message json.RawMessage) int {
 	}
 	return count
 }
-func budgetConversation(req *request, set *toolset, definitions json.RawMessage) ([]json.RawMessage, error) {
+func budgetConversation(req *request, searching bool, definitions json.RawMessage) ([]json.RawMessage, error) {
 	system := req.system
-	for _, session := range set.sessions {
-		system += "\n\n" + session.fam.prompt
+	if searching {
+		system += "\n\n" + searchInstructions
 	}
 	if req.widgetHint != "" {
 		system += "\n\n" + req.widgetHint
@@ -465,23 +454,15 @@ func englishTime(now time.Time, zone string) string {
 }
 
 func preflightBudget(request *request) error {
-	preflight := &toolset{}
-	for _, family := range families {
-		if request.families[family.name] {
-			preflight.sessions = append(preflight.sessions, &session{fam: family})
-		}
-	}
-	_, err := budgetConversation(request, preflight, raw(request.rendered))
+	_, err := budgetConversation(request, request.webSearch, raw(request.rendered))
 	return err
 }
 
 // Report the full requested history so the UI can show when older turns are omitted.
 func requestContextUsage(req *request) object {
 	system := req.system + "\n\n" + req.widgetHint
-	for _, family := range families {
-		if req.families[family.name] {
-			system += "\n\n" + family.prompt
-		}
+	if req.webSearch {
+		system += "\n\n" + searchInstructions
 	}
 	used := tokenCount(system) + tokenCount(string(raw(req.rendered))) + messageTokens(req.reminder) + 8
 	for _, group := range req.groups {

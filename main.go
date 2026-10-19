@@ -77,7 +77,7 @@ func main() {
 	ctx, shutdown := context.WithCancel(context.Background())
 	defer shutdown()
 	gw := strings.TrimRight(*gateway, "/")
-	attestFamilies(ctx, usageSecret)
+	attestWebSearch(ctx, usageSecret)
 	h := &harness{gateway: gw,
 		controlplane: strings.TrimRight(*controlplane, "/"),
 		cpClient:     &http.Client{Transport: &callerAuth{inner: http.DefaultTransport}},
@@ -144,18 +144,17 @@ func newGateway(gateway string, catalog func() tinfoil.Catalog) (*tinfoil.Gatewa
 	return tinfoil.NewGateway(gateway+"/v1/", catalog, tinfoil.GatewayOptions{ClientOptions: []tinfoil.ClientOption{cacheFallback}, ModelPins: pins, PinnedModelsOnly: true})
 }
 
-// A family is opt-in per run, so one that does not verify is skipped, not fatal.
-func attestFamilies(ctx context.Context, usageSecret string) {
-	for _, f := range families {
-		f.enclave = env(f.env, f.enclave)
-		client, err := attest(ctx, f.enclave, f.repo, usageSecret)
-		if err != nil {
-			slog.Warn("tool enclave did not verify", "family", f.name, "enclave", f.enclave, "error", err)
-			continue
-		}
-		f.client = client
-		slog.Info("tool enclave verified", "family", f.name, "enclave", f.enclave)
+// Web search is opt-in per run, so an enclave that does not verify is
+// skipped, not fatal.
+func attestWebSearch(ctx context.Context, usageSecret string) {
+	webSearch.enclave = env("TINFOIL_TOOLS_ENCLAVE", webSearch.enclave)
+	client, err := attest(ctx, webSearch.enclave, webSearch.repo, usageSecret)
+	if err != nil {
+		slog.Warn("tool enclave did not verify", "enclave", webSearch.enclave, "error", err)
+		return
 	}
+	webSearch.client = client
+	slog.Info("tool enclave verified", "enclave", webSearch.enclave)
 }
 
 // offerCache holds the pinned models the gateway last offered. The SDK reads

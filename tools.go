@@ -17,28 +17,21 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// A family's tools are named here rather than discovered, so an enclave that
-// grows one does not widen what this harness offers.
-type family struct {
-	name    string
-	env     string
+// The web search enclave's tools are named here rather than discovered, so an
+// enclave that grows one does not widen what this harness offers.
+type toolEnclave struct {
 	repo    string
 	enclave string
 	tools   []tool
-	prompt  string
 
-	client *http.Client
+	client *http.Client // nil unless the enclave verified at startup
 }
 
 type tool struct{ remote, as string }
 
-var families = []*family{
-	{
-		name: "webSearch", env: "TINFOIL_TOOLS_ENCLAVE",
-		repo: "tinfoilsh/confidential-websearch", enclave: "websearch.tinfoil.sh",
-		tools:  []tool{{"search", "web_search"}, {"fetch", "web_fetch"}},
-		prompt: searchInstructions,
-	},
+var webSearch = &toolEnclave{
+	repo: "tinfoilsh/confidential-websearch", enclave: "websearch.tinfoil.sh",
+	tools: []tool{{"search", "web_search"}, {"fetch", "web_fetch"}},
 }
 
 const (
@@ -49,10 +42,9 @@ const (
 )
 
 type toolset struct {
-	widgets  map[string]widget
-	local    func(context.Context, toolCall) (any, error)
-	sessions []*session
-	byName   map[string]*session
+	widgets map[string]widget
+	local   func(context.Context, toolCall) (any, error)
+	search  *session // nil unless the run searches the web
 
 	mu       sync.Mutex
 	rejected map[string]int // widget calls whose arguments failed validation, by name
@@ -74,7 +66,6 @@ func (t *toolset) retry(name string) bool {
 }
 
 type session struct {
-	fam     *family
 	mcp     *mcp.ClientSession
 	remote  map[string]string
 	schemas map[string]*jsonschema.Schema // what each tool's arguments are coerced to
@@ -82,30 +73,24 @@ type session struct {
 }
 
 func openTools(ctx context.Context, req *request, model string, progress func(string, string, float64)) (*toolset, error) {
-	set := &toolset{byName: map[string]*session{}}
-	for _, f := range families {
-		if !req.families[f.name] {
-			continue
-		}
-		header := http.Header{"X-Tinfoil-Tool-Model": {model}, "X-Tinfoil-Tool-Route": {"/v1/threads/turn"}, "X-Tinfoil-Tool-Streaming": {"true"}}
-		// Absent leaves the enclave's default, which checks; false is never sent.
-		if req.piiCheck {
-			header.Set("X-Tinfoil-Tool-PII-Check", "true")
-		}
-		opened, err := f.dial(ctx, header, progress)
-		if err != nil {
-			set.close()
-			return nil, fmt.Errorf("%s: %w", f.name, err)
-		}
-		set.sessions = append(set.sessions, opened)
-		for _, t := range f.tools {
-			set.byName[t.as] = opened
-		}
+	set := &toolset{}
+	if !req.webSearch {
+		return set, nil
 	}
+	header := http.Header{"X-Tinfoil-Tool-Model": {model}, "X-Tinfoil-Tool-Route": {"/v1/threads/turn"}, "X-Tinfoil-Tool-Streaming": {"true"}}
+	// Absent leaves the enclave's default, which checks; false is never sent.
+	if req.piiCheck {
+		header.Set("X-Tinfoil-Tool-PII-Check", "true")
+	}
+	opened, err := webSearch.dial(ctx, header, progress)
+	if err != nil {
+		return nil, fmt.Errorf("webSearch: %w", err)
+	}
+	set.search = opened
 	return set, nil
 }
 
-func (f *family) dial(ctx context.Context, header http.Header, progress func(string, string, float64)) (*session, error) {
+func (f *toolEnclave) dial(ctx context.Context, header http.Header, progress func(string, string, float64)) (*session, error) {
 	// Nil means unverified at startup; the default client would seal to nothing.
 	if f.client == nil {
 		return nil, errors.New("enclave did not verify at startup")
@@ -134,7 +119,7 @@ func (f *family) dial(ctx context.Context, header http.Header, progress func(str
 		published[t.Name] = t
 	}
 	schemas := schemaLookup(found.Tools)
-	s := &session{fam: f, mcp: opened, remote: map[string]string{}, schemas: map[string]*jsonschema.Schema{}}
+	s := &session{mcp: opened, remote: map[string]string{}, schemas: map[string]*jsonschema.Schema{}}
 	for _, t := range f.tools {
 		serves, ok := published[t.remote]
 		if !ok {
@@ -170,11 +155,16 @@ func (t *sessionHeaders) RoundTrip(r *http.Request) (*http.Response, error) {
 	return t.inner.RoundTrip(r)
 }
 
+// searches reports whether name is a tool of the run's search session.
+func (t *toolset) searches(name string) bool {
+	return t.search != nil && t.search.remote[name] != ""
+}
+
 func (t *toolset) call(ctx context.Context, name, progress string, args json.RawMessage) (string, json.RawMessage, error) {
-	s := t.byName[name]
-	if s == nil {
+	if !t.searches(name) {
 		return "", nil, fmt.Errorf("no such tool %q", name)
 	}
+	s := t.search
 	arguments := map[string]any{}
 	if len(bytes.TrimSpace(args)) > 0 {
 		args, _ = sanitizeToolCallArgumentsJSON(args)
@@ -202,8 +192,8 @@ func (t *toolset) call(ctx context.Context, name, progress string, args json.Raw
 }
 
 func (t *toolset) close() {
-	for _, s := range t.sessions {
-		s.mcp.Close()
+	if t.search != nil {
+		t.search.mcp.Close()
 	}
 }
 

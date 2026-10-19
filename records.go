@@ -54,10 +54,7 @@ func (h *harness) session(ctx context.Context, p *principal, _ contentKey, _ obj
 		}
 		credential.Limit = h.auth.currentLimit(p)
 	}
-	features := object{"webSearch": false, "transcription": h.serviceReady("router"), "speech": h.serviceReady("router")}
-	for _, family := range families {
-		features[family.name] = family.client != nil
-	}
+	features := object{"webSearch": webSearch.client != nil, "transcription": h.serviceReady("router"), "speech": h.serviceReady("router")}
 	presets := []object{}
 	for _, p := range c.Presets {
 		d := clone(p)

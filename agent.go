@@ -61,7 +61,7 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 	if err != nil {
 		return fmt.Errorf("tools: %w", err)
 	}
-	conversation, err := budgetConversation(req, set, defs)
+	conversation, err := budgetConversation(req, set.search != nil, defs)
 	if err != nil {
 		return err
 	}
@@ -148,11 +148,11 @@ func body(req *request, conversation []json.RawMessage, defs json.RawMessage) ([
 	return json.Marshal(payload)
 }
 
-// Order follows the family table, so a caller's turns keep hitting the prompt cache.
+// Search tools come first, so a caller's turns keep hitting the prompt cache.
 func offer(set *toolset, rendered []json.RawMessage) (json.RawMessage, error) {
 	var defs []json.RawMessage
-	for _, s := range set.sessions {
-		defs = append(defs, s.defs...)
+	if set.search != nil {
+		defs = append(defs, set.search.defs...)
 	}
 	defs = append(defs, rendered...)
 	if len(defs) == 0 {
@@ -181,7 +181,7 @@ func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) (mess
 		}
 	}()
 	// A widget is drawn by the caller from TOOL_CALL_ARGS; the model just needs a result.
-	if set.byName[call.name] == nil {
+	if !set.searches(call.name) {
 		w, ok := set.widgets[call.name]
 		if !ok {
 			return answered(call.id, `{"error":"unknown tool"}`)

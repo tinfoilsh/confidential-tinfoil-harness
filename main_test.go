@@ -28,10 +28,9 @@ func TestOutgrowingTheLogStopsTheRun(t *testing.T) {
 }
 
 func TestAPanickingToolCallDoesNotTakeTheRun(t *testing.T) {
-	// byName holds the call's name, so invoke gets past the widget branch and
-	// panics on the nil session behind it.
-	set := &toolset{byName: map[string]*session{"boom": nil}}
-	set.byName["boom"] = &session{}
+	// The search session names the call, so invoke gets past the widget
+	// branch and panics on the nil MCP session behind it.
+	set := &toolset{search: &session{remote: map[string]string{"boom": "boom"}}}
 	rn := newRun("00")
 	out := &stream{run: rn}
 	message := invoke(context.Background(), out, set, toolCall{id: "call_1", name: "boom"})

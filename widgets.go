@@ -307,7 +307,7 @@ func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *
 			break
 		}
 	}
-	conversation, err := budgetConversation(req, &toolset{}, nil)
+	conversation, err := budgetConversation(req, false, nil)
 	if err != nil {
 		return err
 	}
