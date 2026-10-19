@@ -25,7 +25,7 @@ func validateFields(in object, stringsList, booleans, nullable string) error {
 	return nil
 }
 func validateProfile(patch object) error {
-	if err := validateFields(patch, "themeMode chatFont language nickname profession additionalContext customSystemPrompt selectedModel autoIntelligence reasoningEffort", "isUsingPersonalization isUsingCustomPrompt thinkingEnabled webSearchEnabled codeExecutionEnabled sandboxEnabled piiCheckEnabled genUIEnabled pixelateSidebarChatTitlesEnabled browserTabChatTitleEnabled enterToNewlineEnabled hasSeenOnboarding hasSeenWebSearchIntro", "defaultPromptPresetId"); err != nil {
+	if err := validateFields(patch, "themeMode chatFont language nickname profession additionalContext customSystemPrompt selectedModel autoIntelligence reasoningEffort", "isUsingPersonalization isUsingCustomPrompt thinkingEnabled webSearchEnabled codeExecutionEnabled piiCheckEnabled genUIEnabled pixelateSidebarChatTitlesEnabled browserTabChatTitleEnabled enterToNewlineEnabled hasSeenOnboarding hasSeenWebSearchIntro", "defaultPromptPresetId"); err != nil {
 		return err
 	}
 	for field, choices := range map[string][]string{"themeMode": {"light", "dark", "system"}, "chatFont": {"system", "serif", "mono", "dyslexic"}, "reasoningEffort": {"low", "medium", "high"}, "autoIntelligence": {"instant", "low", "medium", "high", "extra", "max"}} {

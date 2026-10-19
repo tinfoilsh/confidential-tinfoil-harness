@@ -39,13 +39,6 @@ var documentExtensions = strings.Fields(".pdf .docx .pptx .xlsx")
 var audioExtensions = strings.Fields(".mp3 .wav .ogg .m4a .aac .flac .webm .wma")
 var textExtensions = strings.Fields(".txt .md .py .js .jsx .ts .tsx .css .json .xml .yaml .yml .toml .sh .bash .rb .java .cpp .c .h .hpp .go .rs .swift .kt .kts .r .sql .lua .pl .php .cs .csx .vb .fs .fsx .scala .dart .ex .exs .erl .hs .ml .mli .clj .cljs .groovy .gradle .m .mm .zig .nim .jl .ps1 .psm1 .bat .cmd .asm .s .proto .graphql .gql .tf .tfvars .dockerfile .makefile .cmake .tex .bib .svg .properties .lock .diff .patch .env .ini .cfg .conf .log .rtf .html .htm .xhtml .csv .tsv .qfx .qif .ofx .ifs .qbo .qbx .bai .bai2 .mt940 .sta .ics .vcf")
 
-func uploadAccept() []string {
-	result := []string{}
-	result = append(result, documentExtensions...)
-	result = append(result, imageExtensions...)
-	result = append(result, audioExtensions...)
-	return append(result, textExtensions...)
-}
 func randomBytes(n int) []byte { b := make([]byte, n); rand.Read(b); return b }
 
 func publicAttachment(a object) object {

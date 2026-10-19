@@ -54,23 +54,7 @@ func (h *harness) session(ctx context.Context, p *principal, _ contentKey, _ obj
 		}
 		credential.Limit = h.auth.currentLimit(p)
 	}
-	keyInfo := object{"registered": false, "keyId": nil, "bundles": []any{}}
-	if !p.Anonymous {
-		var current object
-		err := h.syncAPI.call(ctx, p, "/v1/key/current", object{}, &current)
-		if err != nil && asAPIError(err).HTTP != 404 {
-			return nil, err
-		}
-		keyInfo["registered"], keyInfo["keyId"] = current["key_id"] != nil, current["key_id"]
-		bundles := []object{}
-		for id, value := range obj(current["bundles"]) {
-			bundles = append(bundles, object{"credentialId": id, "createdAt": obj(value)["created_at"]})
-		}
-		slices.SortFunc(bundles, func(a, b object) int { return strings.Compare(str(a["credentialId"]), str(b["credentialId"])) })
-		keyInfo["bundles"] = bundles
-		keyInfo["hasData"] = boolean(current["has_data"], false)
-	}
-	features := object{"webSearch": false, "codeExecution": false, "sandbox": h.serviceReady("sandbox"), "piiCheck": true, "genUI": len(c.EnabledWidgets) > 0, "transcription": h.serviceReady("router"), "speech": h.serviceReady("router")}
+	features := object{"webSearch": false, "transcription": h.serviceReady("router"), "speech": h.serviceReady("router")}
 	for _, family := range families {
 		features[family.name] = family.client != nil
 	}
@@ -88,7 +72,7 @@ func (h *harness) session(ctx context.Context, p *principal, _ contentKey, _ obj
 		auto = object{"multimodal": false, "default": "high", "levels": intelligenceLevels}
 		defaultModel = "auto"
 	}
-	return object{"user": object{"id": p.ID, "anonymous": p.Anonymous}, "rateLimit": credential.Limit, "key": keyInfo, "models": c.displayModels(), "auto": auto, "defaultModel": defaultModel, "widgets": c.EnabledWidgets, "presets": presets, "features": features, "upload": object{"accept": uploadAccept(), "maxBytes": maxUploadBytes, "maxTextBytes": maxTextBytes}}, nil
+	return object{"user": object{"id": p.ID, "anonymous": p.Anonymous}, "rateLimit": credential.Limit, "models": c.displayModels(), "auto": auto, "defaultModel": defaultModel, "widgets": c.EnabledWidgets, "presets": presets, "features": features}, nil
 }
 
 func normalizeThread(row *storedRow) object {
@@ -442,7 +426,7 @@ func (h *harness) getProfile(ctx context.Context, p *principal, key contentKey, 
 	return profileView(profile), nil
 }
 
-var profileFields = strings.Fields("themeMode chatFont language nickname profession traits additionalContext isUsingPersonalization isUsingCustomPrompt customSystemPrompt customPromptPresets favoritePromptPresetIds defaultPromptPresetId selectedModel autoIntelligence reasoningEffort thinkingEnabled webSearchEnabled codeExecutionEnabled sandboxEnabled piiCheckEnabled genUIEnabled pixelateSidebarChatTitlesEnabled browserTabChatTitleEnabled enterToNewlineEnabled hasSeenOnboarding hasSeenWebSearchIntro dismissed")
+var profileFields = strings.Fields("themeMode chatFont language nickname profession traits additionalContext isUsingPersonalization isUsingCustomPrompt customSystemPrompt customPromptPresets favoritePromptPresetIds defaultPromptPresetId selectedModel autoIntelligence reasoningEffort thinkingEnabled webSearchEnabled codeExecutionEnabled piiCheckEnabled genUIEnabled pixelateSidebarChatTitlesEnabled browserTabChatTitleEnabled enterToNewlineEnabled hasSeenOnboarding hasSeenWebSearchIntro dismissed")
 
 func (h *harness) updateProfile(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
 	if !validObject(in["patch"]) {

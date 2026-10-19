@@ -99,7 +99,7 @@ func validateTurn(in object) error {
 		if !validObject(value) {
 			return apiErr(400, "BAD_REQUEST", "options must be an object")
 		}
-		if err := validateFields(obj(value), "model autoIntelligence reasoningEffort timezone", "thinking webSearch codeExecution sandbox piiCheck genUI", ""); err != nil {
+		if err := validateFields(obj(value), "model autoIntelligence reasoningEffort timezone", "thinking webSearch codeExecution piiCheck genUI", ""); err != nil {
 			return err
 		}
 	}

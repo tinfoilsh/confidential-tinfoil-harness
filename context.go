@@ -152,9 +152,6 @@ func (h *harness) buildRequest(thread, profile, project object, documents []obje
 		return nil, nil, apiErr(503, "MODEL_UNAVAILABLE", "The model catalog is unavailable")
 	}
 	options := obj(in["options"])
-	if boolean(options["sandbox"], boolean(profile["sandboxEnabled"], false)) {
-		return nil, nil, apiErr(503, "TOOL_UNAVAILABLE", "Agent sandbox is not available")
-	}
 	name := normalizeModel(firstString(options["model"], thread["model"], profile["selectedModel"], "auto"))
 	req := &request{threadID: str(thread["id"]), runID: runID, model: name, families: map[string]bool{}}
 	req.conversation = req.threadID
