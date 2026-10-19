@@ -80,3 +80,16 @@ func localProfile(profile object) object {
 	}
 	return out
 }
+
+// deviceThread is a local thread as its client stores it after a run. Image
+// bytes are left out: the client holds them and puts them back by id.
+func deviceThread(row *storedRow) object {
+	thread := clone(normalizeThread(row))
+	for _, message := range arr(thread["messages"]) {
+		for _, a := range arr(obj(message)["attachments"]) {
+			delete(obj(a), "base64")
+			delete(obj(a), "inferenceMimeType")
+		}
+	}
+	return thread
+}

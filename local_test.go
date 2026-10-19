@@ -1,11 +1,13 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/google/uuid"
@@ -216,5 +218,68 @@ func TestLocalAskHidesTheTranscriptItStartsFrom(t *testing.T) {
 	// The model still reads the conversation the question refers to.
 	if len(prompt) < 4 || str(obj(prompt[1])["content"]) != "first question" {
 		t.Fatalf("the model lost the asked-about conversation: %v", prompt)
+	}
+}
+
+// endedThread posts a device chat's turn and returns the thread its run's
+// terminal event carries.
+func endedThread(t *testing.T, h *harness, in object, terminal string) object {
+	t.Helper()
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice"))
+	last := events[len(events)-1]
+	if last.Type != terminal {
+		t.Fatalf("the run ended with %+v", last)
+	}
+	return obj(obj(decodeValue(last.Metadata))["thread"])
+}
+
+// A device chat's run ends with the whole thread its client stores, which
+// the client sends back to continue the chat.
+func TestADeviceChatRunReturnsItsUpdatedThread(t *testing.T) {
+	var down atomic.Bool
+	h, rows, _ := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if down.Load() {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"an answer\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	summarizer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(object{"summary": "Device title"})
+	}))
+	defer summarizer.Close()
+	h.services["summarizer"] = &downstreamService{URL: summarizer.URL, Client: summarizer.Client()}
+	in := localInput("", object{"messages": []any{}})
+	id := str(in["threadId"])
+	in["content"] = "what is this?"
+	in["attachments"] = []any{object{"id": "att_photo", "kind": "image", "fileName": "photo.png", "mimeType": "image/png", "size": 9, "thumbnail": "dGh1bWI=", "description": "a cat", "base64": base64.StdEncoding.EncodeToString([]byte("png bytes"))}}
+	thread := endedThread(t, h, in, "RUN_FINISHED")
+	messages := arr(thread["messages"])
+	if thread["id"] != id || thread["title"] != "Device title" || thread["titleState"] != "generated" || thread["lastRequestId"] != in["clientRequestId"] || thread["activeRun"] != nil || len(messages) != 2 {
+		t.Fatalf("the run returned %v", thread)
+	}
+	question, reply := obj(messages[0]), obj(messages[1])
+	photo := obj(arr(question["attachments"])[0])
+	if question["id"] != in["clientRequestId"] || question["content"] != "what is this?" || photo["id"] != "att_photo" || photo["description"] != "a cat" || photo["thumbnailBase64"] != "dGh1bWI=" || photo["base64"] != nil {
+		t.Fatalf("the question was returned as %v", question)
+	}
+	if reply["role"] != "assistant" || reply["content"] != "an answer" || reply["model"] != "kimi-k3" || reply["isError"] != false {
+		t.Fatalf("the reply was returned as %v", reply)
+	}
+	next := localInput(id, thread)
+	next["content"] = "and now?"
+	thread = endedThread(t, h, next, "RUN_FINISHED")
+	if messages := arr(thread["messages"]); len(messages) != 4 || obj(messages[2])["id"] != next["clientRequestId"] || obj(arr(obj(messages[0])["attachments"])[0])["description"] != "a cat" {
+		t.Fatalf("the continued thread is %v", messages)
+	}
+	// A failed run's error carries the thread with the question it added.
+	down.Store(true)
+	failed := localInput(id, thread)
+	thread = endedThread(t, h, failed, "RUN_ERROR")
+	if messages := arr(thread["messages"]); len(messages) != 5 || obj(messages[4])["id"] != failed["clientRequestId"] {
+		t.Fatalf("the failed run returned %v", messages)
+	}
+	if rows.calls != 0 {
+		t.Fatalf("a device chat used storage %d times", rows.calls)
 	}
 }

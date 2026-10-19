@@ -887,11 +887,17 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 	deleted = s.deleted
 	h.live.mu.Unlock()
 	r.out.emit(event{Type: "STATE_SNAPSHOT", Snapshot: object{"thread": summary, "queue": queue, "rateLimit": limit}})
+	metadata := object{"messages": committed}
+	// A device chat's client stores the thread the run leaves as it is.
+	if s.local && r.input["kind"] != "ask" {
+		metadata["thread"] = deviceThread(r.row)
+	}
 	if runErr != nil && !cancelled {
 		e := asAPIError(runErr)
-		r.out.emit(event{Type: "RUN_ERROR", ThreadID: s.id, RunID: r.log.id, Message: e.Message, Code: e.Code, Kind: e.Kind, ResetsAt: e.ResetsAt, RetryAfter: e.RetryAfter, Metadata: raw(object{"messages": committed})})
+		r.out.emit(event{Type: "RUN_ERROR", ThreadID: s.id, RunID: r.log.id, Message: e.Message, Code: e.Code, Kind: e.Kind, ResetsAt: e.ResetsAt, RetryAfter: e.RetryAfter, Metadata: raw(metadata)})
 	} else {
-		r.out.emit(event{Type: "RUN_FINISHED", ThreadID: s.id, RunID: r.log.id, Metadata: raw(object{"usage": spend, "rateLimit": limit, "cancelled": cancelled, "messages": committed})})
+		metadata["usage"], metadata["rateLimit"], metadata["cancelled"] = spend, limit, cancelled
+		r.out.emit(event{Type: "RUN_FINISHED", ThreadID: s.id, RunID: r.log.id, Metadata: raw(metadata)})
 	}
 	r.log.log.close(errDone)
 	if next != nil {
