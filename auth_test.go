@@ -63,6 +63,26 @@ func TestAnonymousInferenceValidatesTheClientKey(t *testing.T) {
 	}
 }
 
+type watchedBody struct{ read atomic.Bool }
+
+func (b *watchedBody) Read([]byte) (int, error) { b.read.Store(true); return 0, io.EOF }
+
+// A turn or an import may be tens of mebibytes; only a caller who signed in
+// gets them read.
+func TestLargeBodiesAreReadOnlyAfterAuthentication(t *testing.T) {
+	h, _, _ := testChatHarness(t, nil)
+	for _, path := range []string{"/v1/threads/turn", "/v1/threads/import"} {
+		body := &watchedBody{}
+		r := httptest.NewRequest(http.MethodPost, path, body)
+		r.Header.Set("Authorization", "Bearer forged-session")
+		w := httptest.NewRecorder()
+		h.routes().ServeHTTP(w, r)
+		if w.Code != 401 || body.read.Load() {
+			t.Fatalf("%s: HTTP %d, body read: %v", path, w.Code, body.read.Load())
+		}
+	}
+}
+
 func TestAnonymousKeyValidationRefusesWorkBeforeAllocatingThreads(t *testing.T) {
 	for _, tc := range []struct {
 		name, body, retryAfter string

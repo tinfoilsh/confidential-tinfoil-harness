@@ -59,12 +59,12 @@ func (h *harness) threadState(p *principal, id string) *threadSession {
 	return h.threads[p.scope()+"/"+id]
 }
 func (h *harness) handleTurn(w http.ResponseWriter, r *http.Request) {
-	in, err := decodeJSONWithin(w, r, maxTurnBody)
+	p, err := h.auth.authenticate(r, true)
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
-	p, err := h.auth.authenticate(r, true)
+	in, err := decodeJSONWithin(w, r, maxTurnBody)
 	if err != nil {
 		respond(w, nil, err)
 		return

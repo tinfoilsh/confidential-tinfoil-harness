@@ -75,12 +75,12 @@ func (h *harness) threadTranscript(ctx context.Context, p *principal, key conten
 // requires; the chat itself is a create, so an existing cloud chat is never
 // overwritten.
 func (h *harness) handleThreadImport(w http.ResponseWriter, r *http.Request) {
-	in, err := decodeJSONWithin(w, r, maxTurnBody)
+	p, err := h.auth.authenticate(r, false)
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
-	p, err := h.auth.authenticate(r, false)
+	in, err := decodeJSONWithin(w, r, maxTurnBody)
 	if err != nil {
 		respond(w, nil, err)
 		return
