@@ -166,7 +166,7 @@ func (h *harness) admit(ctx context.Context, p *principal, key contentKey, in ob
 	if local {
 		r.profile = localProfile(obj(in["profile"]))
 	}
-	r.out = &stream{run: r.log, threadID: id, runID: r.log.id}
+	r.out = &stream{run: r.log}
 
 	h.live.mu.Lock()
 	defer h.live.mu.Unlock()
