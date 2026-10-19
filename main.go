@@ -103,7 +103,6 @@ func main() {
 		defer cancel()
 		srv.Shutdown(ctx)
 		h.waitRuns(ctx)
-		h.safeguards.close()
 	}()
 
 	slog.Info("listening", "addr", *addr, "gateway", gw, "models", served(h.offer.get()), "safeguards", h.safeguards != nil)

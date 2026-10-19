@@ -123,7 +123,7 @@ func within(t *testing.T, what string, call func() error) {
 		if err != nil {
 			t.Fatalf("%s: %v", what, err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(2 * time.Second):
 		t.Fatalf("%s waited for the finishing run", what)
 	}
 }
@@ -282,5 +282,29 @@ func TestAFirstTurnCreatesItsChatUnderTheClientsID(t *testing.T) {
 	delete(in, "threadId")
 	if w := postRoute(h, "/v1/threads/turn", in, "alice"); w.Code != 400 {
 		t.Fatalf("a turn without a chat id: HTTP %d %s", w.Code, w.Body.String())
+	}
+}
+
+// A run submits its conversation for screening after its terminal frame,
+// so a sidecar that is slow to answer holds up neither the run nor its chat.
+func TestASlowSafeguardsSidecarHoldsUpNothing(t *testing.T) {
+	h, _, key := testChatHarness(t, nil)
+	hold := make(chan struct{})
+	var once sync.Once
+	answer := func() { once.Do(func() { close(hold) }) }
+	drained := heldScreening(t, h, hold)
+	t.Cleanup(answer)
+	first := sendInput(key)
+	for _, in := range []object{first, continueInput(key, str(first["threadId"]))} {
+		within(t, "a turn", func() error {
+			if w := postRoute(h, "/v1/threads/turn", in, "alice"); !strings.Contains(w.Body.String(), `"type":"RUN_FINISHED"`) {
+				return fmt.Errorf("HTTP %d %s", w.Code, w.Body.String())
+			}
+			return nil
+		})
+	}
+	answer()
+	if got := drained(); len(got) != 2 {
+		t.Fatalf("the sidecar received %d submissions", len(got))
 	}
 }

@@ -1634,9 +1634,16 @@ func TestToolFailuresReachTheCallerOpaquely(t *testing.T) {
 	}
 }
 
-// screenedBy points h at a sidecar; the returned func drains the submitter
-// and reports what the sidecar received.
+// screenedBy points h at a sidecar; the returned func waits for every run
+// to make its last write and reports what the sidecar received.
 func screenedBy(t *testing.T, h *harness) func() []submission {
+	t.Helper()
+	return heldScreening(t, h, nil)
+}
+
+// heldScreening is screenedBy with a sidecar that answers each submission
+// only once hold closes.
+func heldScreening(t *testing.T, h *harness, hold chan struct{}) func() []submission {
 	t.Helper()
 	var mu sync.Mutex
 	var got []submission
@@ -1646,6 +1653,9 @@ func screenedBy(t *testing.T, h *harness) func() []submission {
 		mu.Lock()
 		got = append(got, sub)
 		mu.Unlock()
+		if hold != nil {
+			<-hold
+		}
 		w.WriteHeader(http.StatusAccepted)
 	}))
 	t.Cleanup(sidecar.Close)
@@ -1654,7 +1664,11 @@ func screenedBy(t *testing.T, h *harness) func() []submission {
 	// As deployed, auto is the router, not one of the gateway's models.
 	h.autoModel = &model{name: "auto", client: h.offer.get()[0].client}
 	return func() []submission {
-		h.safeguards.close()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if !h.waitRuns(ctx) {
+			t.Fatal("runs did not finish")
+		}
 		mu.Lock()
 		defer mu.Unlock()
 		return got

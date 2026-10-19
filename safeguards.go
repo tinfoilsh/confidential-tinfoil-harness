@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -11,7 +10,6 @@ import (
 	"net/http"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -21,14 +19,10 @@ import (
 // chats it serves. Ported from the router's safeguards package.
 
 const (
-	safeguardsTimeout   = 5 * time.Second
-	safeguardsDrain     = 10 * time.Second
-	maxSubmissionBytes  = 1 << 20
-	messageJSONOverhead = len(`{"role":"","content":""},`)
-	// Conversations waiting for a delivery slot; past this, new ones are dropped.
-	maxPendingSubmissions  = 256
-	maxSubmissionsInFlight = 8
-	maxConversationIDLen   = 128
+	safeguardsTimeout    = 5 * time.Second
+	maxSubmissionBytes   = 1 << 20
+	messageJSONOverhead  = len(`{"role":"","content":""},`)
+	maxConversationIDLen = 128
 )
 
 type safeguardMessage struct {
@@ -42,17 +36,12 @@ type submission struct {
 	Messages       []safeguardMessage `json:"messages"`
 }
 
-// submitter delivers conversations without ever blocking or failing the run
-// that produced them.
+// submitter delivers a conversation from the run that produced it, after the
+// run's terminal frame and within safeguardsTimeout, so it never delays or
+// fails the run.
 type submitter struct {
 	endpoint string
 	client   *http.Client
-	pending  chan []byte
-	wg       sync.WaitGroup
-	cancel   context.CancelFunc
-
-	mu     sync.Mutex
-	closed bool
 }
 
 // newSubmitter is nil without a sidecar; a nil submitter does nothing.
@@ -60,21 +49,13 @@ func newSubmitter(baseURL string) *submitter {
 	if baseURL == "" {
 		return nil
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	s := &submitter{
+	return &submitter{
 		endpoint: strings.TrimRight(baseURL, "/") + "/ingest",
 		client:   &http.Client{Timeout: safeguardsTimeout},
-		pending:  make(chan []byte, maxPendingSubmissions),
-		cancel:   cancel,
 	}
-	for range maxSubmissionsInFlight {
-		s.wg.Add(1)
-		go s.worker(ctx)
-	}
-	return s
 }
 
-// submit queues a conversation that ends in an assistant reply; without one
+// submit delivers a conversation that ends in an assistant reply; without one
 // there is nothing to judge.
 func (s *submitter) submit(credential, conversationID string, messages []safeguardMessage) {
 	if s == nil || len(messages) == 0 || messages[len(messages)-1].Role != "assistant" || messages[len(messages)-1].Content == "" {
@@ -87,16 +68,7 @@ func (s *submitter) submit(credential, conversationID string, messages []safegua
 	if !ok {
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return
-	}
-	select {
-	case s.pending <- body:
-	default:
-		slog.Warn("safeguards queue full; conversation not classified")
-	}
+	s.deliver(body)
 }
 
 // encodeSubmission serializes within maxSubmissionBytes, trimming the oldest
@@ -200,37 +172,9 @@ func fitsSubmission(credential, conversationID string, messages []safeguardMessa
 	return true
 }
 
-// close stops accepting work, drains the queue, and cancels whatever is
-// still in flight after safeguardsDrain.
-func (s *submitter) close() {
-	if s == nil {
-		return
-	}
-	s.mu.Lock()
-	if !s.closed {
-		s.closed = true
-		close(s.pending)
-	}
-	s.mu.Unlock()
-	timer := time.AfterFunc(safeguardsDrain, s.cancel)
-	s.wg.Wait()
-	timer.Stop()
-	s.cancel()
-}
-
-func (s *submitter) worker(ctx context.Context) {
-	defer s.wg.Done()
-	for body := range s.pending {
-		if ctx.Err() != nil {
-			return
-		}
-		s.deliver(ctx, body)
-	}
-}
-
-func (s *submitter) deliver(ctx context.Context, body []byte) {
+func (s *submitter) deliver(body []byte) {
 	defer func() { rescued("safeguards submission", recover()) }()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.endpoint, bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, s.endpoint, bytes.NewReader(body))
 	if err != nil {
 		return
 	}

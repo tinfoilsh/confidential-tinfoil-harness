@@ -9,8 +9,8 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
-	"time"
 	"unicode/utf8"
 )
 
@@ -37,7 +37,6 @@ func TestSubmitter_DeliversCompletedConversation(t *testing.T) {
 	defer sidecar.Close()
 	s := newSubmitter(sidecar.URL + "/")
 	s.submit("tok", "chat-1", []safeguardMessage{{Role: "user", Content: "hi"}, {Role: "assistant", Content: "hello"}})
-	s.close()
 	mu.Lock()
 	defer mu.Unlock()
 	if len(got) != 1 || got[0].Credential != "tok" || got[0].ConversationID != "chat-1" || len(got[0].Messages) != 2 {
@@ -59,12 +58,10 @@ func TestSubmitter_TrimsOversizedHistory(t *testing.T) {
 		{"many messages", append(make([]safeguardMessage, maxSubmissionBytes/messageJSONOverhead), safeguardMessage{Role: "assistant", Content: "reply"})},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := &submitter{pending: make(chan []byte, maxPendingSubmissions)}
-			s.submit("token", "chat", tc.messages)
-			if len(s.pending) != 1 {
+			body, ok := encodeSubmission("token", "chat", tc.messages)
+			if !ok {
 				t.Fatal("oversized history must be trimmed, not dropped")
 			}
-			body := <-s.pending
 			if len(body) > maxSubmissionBytes {
 				t.Fatalf("body is %d bytes, want at most %d", len(body), maxSubmissionBytes)
 			}
@@ -87,42 +84,6 @@ func TestSubmitter_TrimsOversizedHistory(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestSubmitter_QueuedPayloadOwnsItsData(t *testing.T) {
-	s := &submitter{pending: make(chan []byte, maxPendingSubmissions)}
-	messages := []safeguardMessage{{Role: "user", Content: "hello"}, {Role: "assistant", Content: "reply"}}
-	s.submit("token", "chat", messages)
-	messages[0].Content = strings.Repeat("x", maxSubmissionBytes)
-	body := <-s.pending
-	var got submission
-	if err := json.Unmarshal(body, &got); err != nil {
-		t.Fatal(err)
-	}
-	if len(body) > maxSubmissionBytes || got.Messages[0].Content != "hello" {
-		t.Fatal("queue must own bounded serialized data rather than retain the caller's slice")
-	}
-}
-
-func TestSubmitter_NeverBlocksWhileSidecarHangs(t *testing.T) {
-	release := make(chan struct{})
-	sidecar := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { <-release }))
-	defer sidecar.Close()
-	s := newSubmitter(sidecar.URL)
-	defer s.close()
-	defer close(release)
-	done := make(chan struct{})
-	go func() {
-		for range maxPendingSubmissions * 2 {
-			s.submit("tok", "", []safeguardMessage{{Role: "assistant", Content: "x"}})
-		}
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("submit blocked while the sidecar hung")
 	}
 }
 
@@ -177,12 +138,18 @@ func TestOnlyCompletedFirstPartyChatsAreScreened(t *testing.T) {
 		"no reply":     {func(*chatRun) {}, []object{{"content": ""}}, nil, false},
 	} {
 		t.Run(name, func(t *testing.T) {
-			h := &harness{safeguards: &submitter{pending: make(chan []byte, 1)}}
+			var submissions atomic.Int32
+			sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				submissions.Add(1)
+				w.WriteHeader(http.StatusAccepted)
+			}))
+			defer sidecar.Close()
+			h := &harness{safeguards: newSubmitter(sidecar.URL)}
 			r := &chatRun{thread: &threadSession{id: "chat-1"}, principal: &principal{ID: "alice"}, credential: inferenceCredential{Key: secret(accessJWT("tinfoil-chat", "chat"))},
 				screening: &screening{conversation: "chat-1", messages: []safeguardMessage{{Role: "user", Content: "hi"}}}}
 			tc.change(r)
 			h.screen(r, tc.reply, tc.err)
-			if submitted := len(h.safeguards.pending) == 1; submitted != tc.want {
+			if submitted := submissions.Load() == 1; submitted != tc.want {
 				t.Fatalf("submitted = %v, want %v", submitted, tc.want)
 			}
 		})
