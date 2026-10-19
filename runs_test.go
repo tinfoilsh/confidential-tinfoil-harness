@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -155,7 +157,7 @@ func TestAFinishingRunsWritesBlockNothing(t *testing.T) {
 		return replayOf(h, req)
 	}
 	within(t, "following", func() error {
-		if w := follow(run); w.Code != 200 || !strings.Contains(w.Body.String(), `"type":"RUN_STARTED"`) {
+		if w := follow(run); w.Code != 200 || !strings.HasPrefix(w.Body.String(), `id: 0`+"\n"+`data: {"type":"RUN_STARTED"`) {
 			return fmt.Errorf("HTTP %d %s", w.Code, w.Body.String())
 		}
 		return nil
@@ -174,4 +176,40 @@ func TestAFinishingRunsWritesBlockNothing(t *testing.T) {
 	})
 	release()
 	awaitFrame(t, run.log, "RUN_FINISHED")
+}
+
+// Re-attaching replays a live run from its first frame, whatever the client
+// last saw, and a run that is no longer live is not found.
+func TestFollowReplaysALiveRunFromItsFirstFrame(t *testing.T) {
+	model, release := heldModel()
+	h, _, key := testChatHarness(t, model)
+	t.Cleanup(release)
+	run, err := h.acceptTurn(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, key, sendInput(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitFrame(t, run.log, "TEXT_MESSAGE_CHUNK")
+	request := func() *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/v1/threads/follow", bytes.NewReader(raw(object{"key": key.base64(), "threadId": run.thread.id, "runId": run.log.id})))
+		req.Header.Set("Authorization", "Bearer clerk-alice")
+		req.Header.Set("Last-Event-ID", "2")
+		return req
+	}
+	w := replayOf(h, request())
+	frames, _, _ := run.log.log.read(0)
+	ids := regexp.MustCompile(`(?m)^id: (\d+)$`).FindAllStringSubmatch(w.Body.String(), -1)
+	events := eventsIn(t, w)
+	if len(ids) != len(frames) || len(events) != len(frames) || events[0].Type != "RUN_STARTED" || eventOfType(events, "TEXT_MESSAGE_CHUNK") == nil {
+		t.Fatalf("replayed %d of %d frames: %s", len(events), len(frames), w.Body.String())
+	}
+	for i, id := range ids {
+		if id[1] != strconv.Itoa(i) {
+			t.Fatalf("frame %d replayed as id %s", i, id[1])
+		}
+	}
+	release()
+	<-run.finished
+	if w := replayOf(h, request()); w.Code != 404 || !strings.Contains(w.Body.String(), "RUN_NOT_FOUND") {
+		t.Fatalf("following a finished run: HTTP %d %s", w.Code, w.Body.String())
+	}
 }

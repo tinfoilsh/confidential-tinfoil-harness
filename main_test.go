@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -10,35 +9,6 @@ import (
 // caller is a request context carrying one API key.
 func caller(apiKey string) context.Context {
 	return context.WithValue(context.Background(), apiKeyKey{}, apiKey)
-}
-
-func TestFollowReplaysFromCursorAndEndsOnClose(t *testing.T) {
-	rn := newRun("00")
-	out := &stream{run: rn}
-	out.emit(event{Type: "RUN_STARTED"})
-	out.emit(event{Type: "TEXT_MESSAGE_CHUNK", Delta: "one"})
-	out.emit(event{Type: "TEXT_MESSAGE_CHUNK", Delta: "two"})
-	out.emit(event{Type: "RUN_FINISHED"})
-	rn.log.close(errDone)
-
-	whole := httptest.NewRecorder()
-	follow(whole, httptest.NewRequest("POST", "/v1/threads/follow", nil), rn, 0)
-	if got := strings.Count(whole.Body.String(), "data: "); got != 4 {
-		t.Fatalf("whole log: got %d frames, want 4", got)
-	}
-	if !strings.HasPrefix(whole.Body.String(), "id: 0\ndata: {\"type\":\"RUN_STARTED\"") {
-		t.Fatalf("whole log did not open with RUN_STARTED: %q", whole.Body.String())
-	}
-
-	rest := httptest.NewRecorder()
-	follow(rest, httptest.NewRequest("POST", "/v1/threads/follow", nil), rn, 2)
-	body := rest.Body.String()
-	if strings.Contains(body, "one") || !strings.Contains(body, "two") {
-		t.Fatalf("resume from 2 replayed the wrong frames: %q", body)
-	}
-	if !strings.Contains(body, `"id": 3`) && !strings.Contains(body, "id: 3") {
-		t.Fatalf("resume lost its ids: %q", body)
-	}
 }
 
 func TestOutgrowingTheLogStopsTheRun(t *testing.T) {

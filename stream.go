@@ -5,18 +5,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"sync"
 	"time"
 )
-
-func resumeFrom(header string) int {
-	n, err := strconv.Atoi(header)
-	if err != nil || n < 0 {
-		return 0
-	}
-	return n + 1
-}
 
 type event struct {
 	Type       string          `json:"type"`
@@ -152,7 +143,10 @@ func (s *stream) frame(e event) {
 	}
 }
 
-func follow(w http.ResponseWriter, r *http.Request, rn *run, from int) {
+// follow streams a run's log from its first frame and tails it until the run
+// ends. A client that re-attaches skips the frames it already applied.
+func follow(w http.ResponseWriter, r *http.Request, rn *run) {
+	from := 0
 	flush := http.NewResponseController(w)
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()

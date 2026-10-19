@@ -335,3 +335,26 @@ func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *
 	r.out.callEnd(id)
 	return nil
 }
+
+// A retry must not revive a deleted widget or overwrite a concurrent writer.
+// expected is the widget's arguments when the retry started.
+func replaceWidget(data object, messageID, callID, expected, replacement string) error {
+	for _, message := range arr(data["messages"]) {
+		m := obj(message)
+		if m["id"] != messageID {
+			continue
+		}
+		for _, item := range arr(m["timeline"]) {
+			block := obj(item)
+			if firstString(block["toolCallId"], block["id"]) != callID {
+				continue
+			}
+			if block["arguments"] != expected && block["arguments"] != replacement {
+				return apiErr(409, "REVISION_CONFLICT", "The widget changed during its retry")
+			}
+			block["arguments"] = replacement
+			return nil
+		}
+	}
+	return apiErr(409, "REVISION_CONFLICT", "The widget was removed during its retry")
+}

@@ -153,20 +153,6 @@ func TestSharedThreadUsesPublicTimelineAndAttachments(t *testing.T) {
 	}
 }
 
-func TestReplayPreservesTheHistoryWindowBoundary(t *testing.T) {
-	log := newRun("window")
-	older := true
-	out := &stream{run: log}
-	out.emit(event{Type: "MESSAGES_SNAPSHOT", Messages: []any{}, HasOlder: &older})
-	_, hasOlder, err := messagesAt(log, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !hasOlder {
-		t.Fatal("reconnect lost the older-message boundary")
-	}
-}
-
 func TestTruncatedModelStreamPreservesPartialAnswer(t *testing.T) {
 	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")

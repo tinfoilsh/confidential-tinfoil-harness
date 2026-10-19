@@ -150,7 +150,7 @@ func (h *harness) handleTurn(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, err)
 		return
 	}
-	follow(w, r, accepted.log, resumeFrom(r.Header.Get("Last-Event-ID")))
+	follow(w, r, accepted.log)
 }
 func validateTurn(in object) error {
 	if err := validateFields(in, "kind clientRequestId content quote messageId toolCallId", "ephemeral local", "threadId projectId presetId"); err != nil {
@@ -1148,5 +1148,5 @@ func (h *harness) handleFollow(w http.ResponseWriter, r *http.Request) {
 		}
 		h.live.mu.Unlock()
 	}
-	followChat(w, r, live.log, resumeFrom(r.Header.Get("Last-Event-ID")))
+	follow(w, r, live.log)
 }
