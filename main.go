@@ -48,21 +48,20 @@ var pinned = []struct{ name, repo string }{
 }
 
 type harness struct {
-	gateway       string
-	offer         offerCache
-	modelClient   *http.Client
-	verified      func() []tinfoil.GatewayVerification
-	controlplane  string
-	cpClient      *http.Client
-	storeRows     rowStore
-	syncAPI       *syncClient
-	auth          *authenticator
-	catalog       catalogCache
-	autoModel     *model
-	services      map[string]*downstreamService
-	safeguards    *submitter // nil unless SAFEGUARDS_URL names the sidecar
-	memoryEnabled bool
-	live          liveRuns
+	gateway      string
+	offer        offerCache
+	modelClient  *http.Client
+	verified     func() []tinfoil.GatewayVerification
+	controlplane string
+	cpClient     *http.Client
+	storeRows    rowStore
+	syncAPI      *syncClient
+	auth         *authenticator
+	catalog      catalogCache
+	autoModel    *model
+	services     map[string]*downstreamService
+	safeguards   *submitter // nil unless SAFEGUARDS_URL names the sidecar
+	live         liveRuns
 }
 
 func main() {

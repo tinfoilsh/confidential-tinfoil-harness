@@ -16,7 +16,6 @@ type downstreamService struct {
 }
 
 func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
-	h.memoryEnabled = env("TINFOIL_MEMORY_ENABLED", "false") == "true"
 	auth, err := newAuthenticator(ctx, env("CLERK_ISSUER", "https://clerk.tinfoil.sh"), env("CLERK_AUDIENCE", ""), h.controlplane)
 	if err != nil {
 		return err

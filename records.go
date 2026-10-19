@@ -25,7 +25,6 @@ func (h *harness) apiRoutes() []routeSpec {
 		{"/v1/projects/list", false, true, h.listProjects}, {"/v1/projects/get", false, true, h.getProject},
 		{"/v1/projects/create", false, true, h.createProject}, {"/v1/projects/update", false, true, h.updateProject},
 		{"/v1/projects/delete", false, true, h.deleteProject}, {"/v1/projects/documents/delete", false, true, h.deleteDocument},
-		{"/v1/projects/memory/get", false, true, h.getMemory}, {"/v1/projects/memory/update", false, true, h.updateMemory},
 		{"/v1/shares/open", true, false, h.openShare},
 		{"/v1/import/status", false, false, h.importStatus},
 		{"/v1/threads/delete-all", false, true, h.deleteAllThreads},
@@ -71,7 +70,7 @@ func (h *harness) session(ctx context.Context, p *principal, _ contentKey, _ obj
 		keyInfo["bundles"] = bundles
 		keyInfo["hasData"] = boolean(current["has_data"], false)
 	}
-	features := object{"webSearch": false, "codeExecution": false, "sandbox": h.serviceReady("sandbox"), "piiCheck": true, "genUI": len(c.EnabledWidgets) > 0, "transcription": h.serviceReady("router"), "speech": h.serviceReady("router"), "memory": h.memoryEnabled}
+	features := object{"webSearch": false, "codeExecution": false, "sandbox": h.serviceReady("sandbox"), "piiCheck": true, "genUI": len(c.EnabledWidgets) > 0, "transcription": h.serviceReady("router"), "speech": h.serviceReady("router")}
 	for _, family := range families {
 		features[family.name] = family.client != nil
 	}
@@ -484,7 +483,7 @@ func projectView(row *storedRow) object {
 			out[field] = value
 		}
 	}
-	for _, f := range []string{"syncVersion", "clock", "writer", "clockVersion", "harnessMemoryCursors"} {
+	for _, f := range []string{"syncVersion", "clock", "writer", "clockVersion"} {
 		delete(out, f)
 	}
 	return out
@@ -544,7 +543,6 @@ func (h *harness) getProject(ctx context.Context, p *principal, key contentKey, 
 	}
 	out := projectView(row)
 	out["documents"] = docs
-	out["contextUsage"] = h.projectUsage(row.Data, docs)
 	return out, nil
 }
 func (h *harness) createProject(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
@@ -556,7 +554,7 @@ func (h *harness) createProject(ctx context.Context, p *principal, key contentKe
 	}
 	id := rowID()
 	row, err := h.mutate(ctx, p, key, "project", id, true, nil, func(data object) error {
-		data["name"], data["description"], data["systemInstructions"], data["color"], data["memory"] = in["name"], str(in["description"]), str(in["systemInstructions"]), in["color"], []any{}
+		data["name"], data["description"], data["systemInstructions"], data["color"] = in["name"], str(in["description"]), str(in["systemInstructions"]), in["color"]
 		return nil
 	})
 	if err != nil {
@@ -565,7 +563,7 @@ func (h *harness) createProject(ctx context.Context, p *principal, key contentKe
 	return projectView(row), nil
 }
 func (h *harness) updateProject(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
-	if err := validateFields(in, "name description systemInstructions color", "memoryEnabled", ""); err != nil {
+	if err := validateFields(in, "name description systemInstructions color", "", ""); err != nil {
 		return nil, err
 	}
 	id, err := requiredID(in, "id")
@@ -573,7 +571,7 @@ func (h *harness) updateProject(ctx context.Context, p *principal, key contentKe
 		return nil, err
 	}
 	row, err := h.mutate(ctx, p, key, "project", id, false, nil, func(data object) error {
-		for _, f := range []string{"name", "description", "systemInstructions", "color", "memoryEnabled"} {
+		for _, f := range []string{"name", "description", "systemInstructions", "color"} {
 			if v, ok := in[f]; ok {
 				data[f] = v
 			}
@@ -615,54 +613,6 @@ func (h *harness) deleteDocument(ctx context.Context, p *principal, key contentK
 		return nil, err
 	}
 	return h.deleteRow(ctx, p, key, "project_document", project+"/"+doc)
-}
-func (h *harness) getMemory(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
-	id, err := requiredID(in, "projectId")
-	if err != nil {
-		return nil, err
-	}
-	row, err := h.storeRows.load(ctx, p, key, "project", id)
-	if err != nil {
-		return nil, err
-	}
-	return object{"facts": arr(row.Data["memory"])}, nil
-}
-func (h *harness) updateMemory(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
-	id, err := requiredID(in, "projectId")
-	if err != nil {
-		return nil, err
-	}
-	if _, ok := in["facts"].([]any); !ok {
-		return nil, apiErr(400, "BAD_REQUEST", "facts must be an array")
-	}
-	row, err := h.mutate(ctx, p, key, "project", id, false, nil, func(data object) error { data["memory"] = in["facts"]; return nil })
-	if err != nil {
-		return nil, err
-	}
-	return object{"facts": row.Data["memory"]}, nil
-}
-func (h *harness) projectUsage(project object, documents []object) object {
-	instructions := tokenCount(str(project["systemInstructions"]))
-	memory := 0
-	if h.memoryEnabled && boolean(project["memoryEnabled"], true) {
-		memory = tokenCount(string(raw(arr(project["memory"]))))
-	}
-	total, limit := instructions+memory, 0
-	docs := []object{}
-	for _, doc := range documents {
-		tokens := tokenCount(str(doc["content"]))
-		total += tokens
-		docs = append(docs, object{"filename": doc["filename"], "tokens": tokens})
-	}
-	if catalog := h.catalog.get(); catalog != nil {
-		for _, m := range catalog.Models {
-			n := integer(m["budgetWindow"]) * 4 / 5
-			if limit == 0 || n < limit {
-				limit = n
-			}
-		}
-	}
-	return object{"systemInstructions": instructions, "documents": docs, "memory": memory, "totalUsed": total, "modelLimit": limit, "availableForChat": max(0, limit-total)}
 }
 func (h *harness) searchThreads(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
 	var found object

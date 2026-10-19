@@ -105,12 +105,6 @@ func projectPrompt(project object, documents []object) string {
 			}
 		}
 	}
-	if boolean(project["harnessMemoryEnabled"], false) && len(arr(project["memory"])) > 0 {
-		content += "\n### Memory\n"
-		for _, item := range arr(project["memory"]) {
-			content += "- " + escapePrompt(str(obj(item)["fact"])) + "\n"
-		}
-	}
 	return "\n\n<project_context>\n" + content + "\n</project_context>"
 }
 func systemPrompt(c *chatCatalog, thread, profile, project object, documents []object, displayName, timezone string) string {
@@ -219,10 +213,6 @@ func (h *harness) buildRequest(thread, profile, project object, documents []obje
 	// turn: some chat templates refuse two user messages in a row.
 	if in["kind"] == "continue" {
 		reminder += "\n\n" + continueInstruction
-	}
-	if h.memoryEnabled && boolean(project["memoryEnabled"], true) {
-		project = clone(project)
-		project["harnessMemoryEnabled"] = true
 	}
 	req.system = systemPrompt(c, thread, profile, project, documents, display, zone)
 	req.window, req.policy = window, policy

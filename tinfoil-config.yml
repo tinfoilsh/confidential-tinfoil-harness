@@ -27,7 +27,6 @@ containers:
       - TINFOIL_ROUTER_ENCLAVE: inference.tinfoil.sh
       - TINFOIL_SUMMARIZER_ENCLAVE: summarizer.tinfoil.sh
       - TINFOIL_METADATA_ENCLAVE: opengraph-metadata.tinfoil.sh
-      - TINFOIL_MEMORY_ENABLED: "false"
       - SAFEGUARDS_URL: "http://safeguards:8090"
     secrets:
       - USAGE_CONTEXT_SECRET

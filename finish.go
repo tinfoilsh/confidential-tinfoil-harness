@@ -6,8 +6,8 @@ import (
 )
 
 // finishRun commits what the run produced and frames its end, then hands the
-// chat to the next queued turn. Its slower work, memory extraction and the
-// safeguards submission, follows the terminal frame and holds no lock.
+// chat to the next queued turn. Its slower work, the safeguards submission,
+// follows the terminal frame and holds no lock.
 func (h *harness) finishRun(r *chatRun, runErr error) {
 	defer h.live.working.Done()
 	defer close(r.finished)
@@ -126,9 +126,6 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 	r.log.log.close(errDone)
 	if next != nil {
 		go h.runQueue(next)
-	}
-	if runErr == nil && !s.ephemeral && !deleted {
-		h.extractMemory(ctx, p, r.key, r.row)
 	}
 	h.screen(r, messages, runErr)
 	r.release()

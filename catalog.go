@@ -47,12 +47,12 @@ func (w widget) declaration() json.RawMessage {
 }
 
 type chatCatalog struct {
-	Models                                    []object
-	Deprecated                                []object
-	Prompt, Rules, WidgetHeader, MemoryPrompt string
-	EnabledWidgets                            []string
-	Presets                                   []object
-	Fallback                                  int // smallest configured window, for Auto while no model is offered
+	Models                      []object
+	Deprecated                  []object
+	Prompt, Rules, WidgetHeader string
+	EnabledWidgets              []string
+	Presets                     []object
+	Fallback                    int // smallest configured window, for Auto while no model is offered
 }
 type catalogCache struct {
 	mu    sync.RWMutex
@@ -89,10 +89,6 @@ func (h *harness) refreshCatalog(ctx context.Context) error {
 	// The first catalog may offer only Auto; a later one without models keeps the last.
 	if len(c.Models) == 0 && h.catalog.get() != nil {
 		return errors.New("no configured chat model is offered by the gateway")
-	}
-	var memory object
-	if err := fetchConfig(ctx, client, h.controlplane, "/api/config/memory-prompt", &memory); err == nil {
-		c.MemoryPrompt = str(memory["memoryPrompt"])
 	}
 	h.catalog.set(c)
 	return nil

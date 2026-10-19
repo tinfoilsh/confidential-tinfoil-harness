@@ -317,7 +317,7 @@ func TestManagedTurnStoresV2AndKeepsKeyOutOfEvents(t *testing.T) {
 func TestFirstTurnUsesProjectAndPreset(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	p := &principal{ID: "alice"}
-	rows.rows[rowMapKey(p, "project", "project-1")] = storedRow{ID: "project-1", ETag: "1", Data: object{"name": "Research", "systemInstructions": "Use this project", "memory": []any{}}}
+	rows.rows[rowMapKey(p, "project", "project-1")] = storedRow{ID: "project-1", ETag: "1", Data: object{"name": "Research", "systemInstructions": "Use this project"}}
 	input := sendInput(key)
 	input["projectId"], input["presetId"] = "project-1", "builtin:tutor"
 	events := eventsIn(t, postRoute(h, "/v1/threads/turn", input, "alice"))

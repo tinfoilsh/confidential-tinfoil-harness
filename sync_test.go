@@ -88,7 +88,7 @@ func TestGetProjectLoadsDocumentsAcrossSyncPages(t *testing.T) {
 							if id != "project-main" {
 								t.Errorf("unexpected project %q", id)
 							}
-							data = object{"name": "New project", "memory": []any{}}
+							data = object{"name": "New project"}
 						case "project_document":
 							doc, ok := strings.CutPrefix(id, "project-main/")
 							if !ok {

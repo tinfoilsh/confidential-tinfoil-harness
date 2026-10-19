@@ -205,7 +205,7 @@ func TestTitleRunsBeforeAnswerFinishes(t *testing.T) {
 		t.Fatal("title did not commit")
 	}
 }
-func TestWidgetSchemaAndFactOperations(t *testing.T) {
+func TestWidgetSchemaBounds(t *testing.T) {
 	clock, ok := catalogWidgets("render_clock")["render_clock"]
 	if !ok {
 		t.Fatal("render_clock is not in the widget catalog")
@@ -215,12 +215,6 @@ func TestWidgetSchemaAndFactOperations(t *testing.T) {
 	}
 	if err := validateSchema(clock.Schema, object{"durationSeconds": float64(0)}); err == nil {
 		t.Fatal("exclusive lower bound ignored")
-	}
-	facts := []any{object{"id": "old", "fact": "old fact", "category": "test", "confidence": 0.5}}
-	operations := []any{object{"action": "update", "factId": "old", "updates": object{"fact": "new fact"}}, object{"action": "add", "fact": object{"fact": "second fact", "category": "test", "confidence": 0.9, "date": timestamp()}}}
-	result := applyFacts(facts, operations)
-	if len(result) != 2 || obj(result[0])["fact"] != "new fact" || str(obj(result[1])["id"]) == "" || obj(facts[0])["fact"] != "old fact" {
-		t.Fatal("fact mutation is not isolated")
 	}
 }
 

@@ -43,8 +43,6 @@ func TestCatalogRefreshAcceptsControlplaneArray(t *testing.T) {
 			}
 		case "/api/config/system-prompt":
 			response = object{"systemPrompt": "Test prompt", "rules": "Test rules", "genUI": object{"enabledWidgets": []string{"render_chart"}}}
-		case "/api/config/memory-prompt":
-			response = object{"memoryPrompt": "Test memory prompt"}
 		default:
 			http.NotFound(w, r)
 			return
@@ -71,7 +69,7 @@ func TestCatalogRefreshAcceptsControlplaneArray(t *testing.T) {
 	if catalog.Fallback != 65536 || len(catalog.Deprecated) != 1 {
 		t.Fatal("lost the configured fallback window or deprecated model metadata")
 	}
-	if catalog.Prompt != "Test prompt" || catalog.MemoryPrompt != "Test memory prompt" || len(catalog.EnabledWidgets) != 1 {
+	if catalog.Prompt != "Test prompt" || len(catalog.EnabledWidgets) != 1 {
 		t.Fatal("lost prompt configuration")
 	}
 	for i, name := range []string{"wrong response shape", "untrusted repository", "no active models"} {
