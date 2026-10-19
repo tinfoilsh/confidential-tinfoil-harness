@@ -131,6 +131,8 @@ func respond(w http.ResponseWriter, result any, err error) {
 	json.NewEncoder(w).Encode(result)
 }
 
+const maxRequestBody = 8 << 20
+
 func decodeJSON(w http.ResponseWriter, r *http.Request) (object, error) {
 	return decodeJSONWithin(w, r, maxRequestBody)
 }
@@ -161,9 +163,6 @@ type routeSpec struct {
 func (h *harness) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { respond(w, object{"ok": true}, nil) })
-	// /agui remains available for the shadow and client transition phases.
-	mux.HandleFunc("POST /agui", h.agui)
-	mux.HandleFunc("DELETE /agui", h.drop)
 	for _, spec := range h.apiRoutes() {
 		mux.HandleFunc("POST "+spec.path, func(w http.ResponseWriter, r *http.Request) {
 			in, err := decodeJSON(w, r)
@@ -290,6 +289,25 @@ func postJSONWithHeaders(ctx context.Context, client *http.Client, url, auth str
 		return err
 	}
 	return json.NewDecoder(io.LimitReader(resp.Body, 96<<20)).Decode(out)
+}
+
+// maxIDLength bounds the ids a caller names its rows with. A thread id is
+// echoed into every frame of its run's log, so an unbounded one is an
+// unbounded frame.
+const maxIDLength = 128
+
+// identifier holds a caller's id to printable ASCII, short of the length at
+// which it stops being a name.
+func identifier(s string) bool {
+	if len(s) > maxIDLength {
+		return false
+	}
+	for _, r := range s {
+		if r < ' ' || r > '~' {
+			return false
+		}
+	}
+	return true
 }
 
 func requiredID(in object, field string) (string, error) {

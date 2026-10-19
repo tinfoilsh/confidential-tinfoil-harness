@@ -17,6 +17,18 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+type secret string
+
+func (secret) LogValue() slog.Value { return slog.StringValue("REDACTED") }
+
+func bearer(header string) string {
+	const scheme = "bearer "
+	if len(header) < len(scheme) || !strings.EqualFold(header[:len(scheme)], scheme) {
+		return ""
+	}
+	return strings.TrimSpace(header[len(scheme):])
+}
+
 type principal struct {
 	ID           string
 	JWT          secret

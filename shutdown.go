@@ -27,11 +27,6 @@ func (h *harness) stopRuns() []*chatRun {
 		state.queue = nil
 		state.mu.Unlock()
 	}
-	h.mu.Lock()
-	for _, run := range h.runs {
-		run.stop()
-	}
-	h.mu.Unlock()
 	return active
 }
 func waitRuns(ctx context.Context, runs []*chatRun) {

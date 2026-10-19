@@ -1,5 +1,5 @@
-// Command confidential-tinfoil-harness serves an AG-UI endpoint whose model
-// turns and tool calls all go to enclaves it attests against a pinned repo.
+// Command confidential-tinfoil-harness runs Tinfoil Chat conversations whose
+// model turns and tool calls all go to enclaves it attests against a pinned repo.
 package main
 
 import (
@@ -68,9 +68,6 @@ type harness struct {
 	requests      map[string]*chatRun
 	starting      map[string]chan struct{}
 	attachments   map[string]*pendingAttachment
-
-	mu   sync.Mutex
-	runs map[string]*run
 }
 
 func main() {
@@ -92,8 +89,7 @@ func main() {
 	h := &harness{gateway: gw,
 		controlplane: strings.TrimRight(*controlplane, "/"),
 		cpClient:     &http.Client{Transport: &callerAuth{inner: http.DefaultTransport}},
-		safeguards:   newSubmitter(os.Getenv("SAFEGUARDS_URL")),
-		runs:         map[string]*run{}}
+		safeguards:   newSubmitter(os.Getenv("SAFEGUARDS_URL"))}
 
 	if err := h.bootChat(ctx, usageSecret); err != nil {
 		slog.Error("initialize chat service", "error", err)
@@ -264,30 +260,6 @@ func served(models []*model) string {
 		names[i] = m.name
 	}
 	return strings.Join(names, ", ")
-}
-
-func (h *harness) pick(req *request) *model {
-	named := req.model != "" && req.model != "auto"
-	for _, m := range h.offer.get() {
-		if named {
-			if m.name == req.model {
-				return m
-			}
-			continue
-		}
-		if (req.images && !m.vision) || req.tokens > m.context {
-			continue
-		}
-		return m
-	}
-	return nil
-}
-
-func (h *harness) unserved(req *request) string {
-	if req.model != "" && req.model != "auto" {
-		return fmt.Sprintf("unknown model %q: this agent serves %s and \"auto\"", req.model, served(h.offer.get()))
-	}
-	return fmt.Sprintf("no pinned model fits this run (about %d tokens, images: %t)", req.tokens, req.images)
 }
 
 type apiKeyKey struct{}

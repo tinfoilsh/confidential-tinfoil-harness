@@ -5,12 +5,8 @@ memory: 8192
 
 shim:
   upstream-port: 8081
-  authenticated: true
-  # The legacy route uses Tinfoil API keys. /v1/* validates Clerk inside Go.
-  authenticated-endpoints:
-    - /agui
+  # /v1/* validates Clerk sessions and anonymous chat keys inside Go.
   paths:
-    - /agui
     - /healthz
     - /v1/*
 

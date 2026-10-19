@@ -3,10 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/aes"
 	"crypto/cipher"
-	"crypto/hkdf"
-	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -16,8 +13,6 @@ import (
 	"runtime/debug"
 	"sync"
 	"time"
-
-	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
 const (
@@ -33,8 +28,6 @@ var (
 	errDone      = errors.New("run finished")
 	errAbandoned = errors.New("run did not survive the harness that started it")
 	errTooLong   = errors.New("run outgrew the log this harness can hold for it")
-	errTaken     = errors.New("another run is already using this storage id")
-	errNotYours  = errors.New("not a recoverable run")
 )
 
 // rescued logs a panic and turns it into an error worth surfacing. Without one
@@ -113,32 +106,8 @@ type run struct {
 	aead cipher.AEAD
 	log  *runlog
 
-	begin   func() // the caller let go: detach and spill, or cancel a run nobody can return to
 	stop    func() // cancels the run itself
 	abandon func() // the caller deleted the log: stop writing to the store
-}
-
-// The caller's API key salts the derivation, so a session id and secret that
-// belong to another key open nothing here, warm or cold. Opening the log is
-// still the whole of the authorization; the key just scopes whose log it is.
-func newRun(ctx context.Context, id string, key secret) (*run, error) {
-	material, err := hkdf.Key(sha256.New, []byte(key),
-		[]byte(usagereporting.HashAPIKey(callerKey(ctx))),
-		"confidential-tinfoil-harness run log v1", 32)
-	if err != nil {
-		return nil, err
-	}
-	block, err := aes.NewCipher(material)
-	if err != nil {
-		return nil, err
-	}
-	// Random nonces, not the frame index: a caller reusing a secret would repeat one.
-	aead, err := cipher.NewGCMWithRandomNonce(block)
-	if err != nil {
-		return nil, err
-	}
-	idle := func() {}
-	return &run{id: id, aead: aead, log: newRunlog(), begin: idle, stop: idle, abandon: idle}, nil
 }
 
 func (r *run) seal(id int, plain []byte) []byte {
@@ -151,109 +120,6 @@ func (r *run) open(id int, sealed []byte) ([]byte, error) {
 
 func (r *run) aad(id int) []byte {
 	return binary.BigEndian.AppendUint64([]byte(r.id), uint64(id))
-}
-
-// Opening frame 0 is the whole authorization, and a run is enlisted only once
-// its RUN_STARTED is framed, so every registered run has one to open.
-func (h *harness) lookup(ctx context.Context, id string, key secret) (*run, error) {
-	h.mu.Lock()
-	rn := h.runs[id]
-	h.mu.Unlock()
-	if rn == nil {
-		return nil, nil
-	}
-	probe, err := newRun(ctx, id, key)
-	if err != nil {
-		return nil, errNotYours
-	}
-	frames, _, _ := rn.log.read(0)
-	if len(frames) == 0 {
-		return nil, errNotYours
-	}
-	if _, err := probe.open(0, frames[0]); err != nil {
-		return nil, errNotYours
-	}
-	return rn, nil
-}
-
-func (h *harness) stored(ctx context.Context, id string, key secret) (*run, error) {
-	rn, err := newRun(ctx, id, key)
-	if err != nil {
-		return nil, err
-	}
-	return rn, rn.rehydrate(h.fetch(ctx, id))
-}
-
-func (h *harness) start(ctx context.Context, req *request, m *model) (*run, error) {
-	rn, err := newRun(ctx, req.storageID, req.secret)
-	if err != nil {
-		return nil, err
-	}
-	runCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), runTimeout)
-	rn.stop, rn.begin = cancel, cancel
-	if req.storageID != "" {
-		// The spill outlives the run: a run that ends is still owed its last frames.
-		spillCtx, endSpill := context.WithTimeout(context.WithoutCancel(runCtx), runTimeout)
-		rn.abandon = endSpill
-		rn.begin = sync.OnceFunc(func() {
-			go func() {
-				defer endSpill()
-				defer func() { rescued("run log spill", recover()) }()
-				h.spill(spillCtx, rn)
-			}()
-		})
-	}
-	// Framed before the run is published: the caller sees RUN_STARTED without
-	// waiting on the gateway, and a reattach never lands on an unopenable log.
-	out := newStream(rn, req.threadID, req.runID)
-	// Published only once begin is final, or a racing reattach cancels the run.
-	if err := h.enlist(req.storageID, rn); err != nil {
-		rn.abandon()
-		cancel()
-		return nil, err
-	}
-	go func() {
-		defer cancel()
-		defer h.retire(req.storageID, rn)
-		defer out.done()
-		// Last deferred, so it unwinds first and the panic becomes this run's
-		// RUN_ERROR: out.done below then finds the log already closed.
-		defer func() {
-			if err := rescued("run", recover()); err != nil {
-				out.fail(err)
-			}
-		}()
-		began := time.Now()
-		if err := h.loop(runCtx, out, req, m); err != nil {
-			slog.Error("run", "model", m.name, "error", err)
-			out.fail(err)
-			return
-		}
-		slog.Info("served", "model", m.name, "elapsed", time.Since(began).Round(time.Millisecond))
-	}()
-	return rn, nil
-}
-
-// enlist makes a storage id the property of exactly one run.
-func (h *harness) enlist(id string, rn *run) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if id != "" {
-		if _, taken := h.runs[id]; taken {
-			return errTaken
-		}
-		h.runs[id] = rn
-	}
-	return nil
-}
-
-// retire unregisters this run only; an id it no longer holds belongs to another.
-func (h *harness) retire(id string, rn *run) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.runs[id] == rn {
-		delete(h.runs, id)
-	}
 }
 
 func (h *harness) spill(ctx context.Context, rn *run) {

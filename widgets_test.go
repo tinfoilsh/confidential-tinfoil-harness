@@ -41,7 +41,7 @@ func catalogWidgets(names ...string) map[string]widget {
 // results the caller was sent.
 func invokeWidget(t *testing.T, set *toolset, call toolCall) (string, []string) {
 	t.Helper()
-	out := newStream(mustRun(t, "00", "aa"), "thread", "run")
+	out := &stream{run: mustRun(t, "00")}
 	var results []string
 	out.observe = func(e event) {
 		if e.Type == "TOOL_CALL_RESULT" {
@@ -96,7 +96,7 @@ func TestWidgetRetriesAreCountedPerNameWithinRun(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				out := newStream(mustRun(t, "00", "aa"), "thread", "run")
+				out := &stream{run: mustRun(t, "00")}
 				if strings.Contains(string(invoke(context.Background(), out, set, call)), "did not match") {
 					mu.Lock()
 					told[call.name]++

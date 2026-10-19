@@ -409,7 +409,7 @@ func (h *harness) acceptTurn(ctx context.Context, p *principal, key contentKey, 
 		accepted.profile = localProfile(obj(in["profile"]))
 	}
 	accepted.queued = state.active != nil
-	accepted.out = &stream{run: log, threadID: id, runID: runID, managed: true}
+	accepted.out = &stream{run: log, threadID: id, runID: runID}
 	if accepted.queued {
 		state.queue = append(state.queue, accepted)
 		accepted.out.emit(event{Type: "STATE_DELTA", ThreadID: id, RunID: runID, Delta: []object{{"op": "add", "path": "/queue/-", "value": queueItem(accepted)}}})

@@ -402,7 +402,8 @@ func TestRecoveredWidgetRetryChecksConcurrentChanges(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			stream := newStream(log, "chat", log.id)
+			stream := &stream{run: log, threadID: "chat", runID: log.id}
+			stream.emit(event{Type: "RUN_STARTED", ThreadID: "chat", RunID: log.id})
 			stream.callStart("call", "render_clock", "assistant")
 			stream.callArgs("call", `{"durationSeconds":2}`)
 			stream.callEnd("call")

@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -11,6 +14,31 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/tiktoken-go/tokenizer"
 )
+
+type request struct {
+	refreshAuth                func(context.Context) (inferenceCredential, error)
+	params                     object
+	system, widgetHint, policy string
+	window                     int
+	groups                     [][]json.RawMessage
+	reminder                   json.RawMessage
+	threadID                   string
+	conversation               string // the chat the run is classified under: an ask's source thread
+	runID                      string
+	model                      string
+	cacheScope                 string              // partitions the enclave's prompt cache per caller; a namespace, not a credential
+	rendered                   []json.RawMessage   // widgets the caller draws: advertised, never dialled
+	families                   map[string]mcp.Meta // tool enclaves this run dials, and what its calls carry
+	piiCheck                   bool
+}
+
+func cacheScope(apiKey string) string {
+	sum := sha256.Sum256([]byte("confidential-tinfoil-harness cache scope\x00" + apiKey))
+	return hex.EncodeToString(sum[:])
+}
+
+// imageTokens is what one image costs; sizing its base64 as text fits nothing.
+const imageTokens = 1500
 
 var encoder = sync.OnceValue(func() tokenizer.Codec {
 	enc, err := tokenizer.Get(tokenizer.Cl100kBase)
@@ -135,7 +163,7 @@ func (h *harness) buildRequest(thread, profile, project object, documents []obje
 		return nil, nil, apiErr(503, "TOOL_UNAVAILABLE", "Agent sandbox is not available")
 	}
 	name := normalizeModel(firstString(options["model"], thread["model"], profile["selectedModel"], "auto"))
-	req := &request{threadID: str(thread["id"]), runID: runID, model: name, managed: true, families: map[string]mcp.Meta{}}
+	req := &request{threadID: str(thread["id"]), runID: runID, model: name, families: map[string]mcp.Meta{}}
 	req.conversation = req.threadID
 	if in["kind"] == "ask" {
 		req.conversation = str(in["threadId"])

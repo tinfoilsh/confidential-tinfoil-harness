@@ -66,5 +66,5 @@ func newContentRun(id string, key contentKey) (*run, error) {
 		return nil, err
 	}
 	idle := func() {}
-	return &run{id: id, aead: aead, log: newRunlog(), begin: idle, stop: idle, abandon: idle}, nil
+	return &run{id: id, aead: aead, log: newRunlog(), stop: idle, abandon: idle}, nil
 }

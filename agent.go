@@ -6,14 +6,12 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"sync"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
@@ -48,29 +46,24 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 		return fmt.Errorf("tools: %w", err)
 	}
 	defer set.close()
-	if req.managed {
-		set.widgets = map[string]widget{}
-		for _, offered := range req.rendered {
-			declaration := obj(obj(decodeValue(offered))["function"])
-			for _, w := range widgetCatalog() {
-				if w.Name == str(declaration["name"]) {
-					set.widgets[w.Name] = w
-				}
+	set.widgets = map[string]widget{}
+	for _, offered := range req.rendered {
+		declaration := obj(obj(decodeValue(offered))["function"])
+		for _, w := range widgetCatalog() {
+			if w.Name == str(declaration["name"]) {
+				set.widgets[w.Name] = w
 			}
 		}
-		set.local = h.widgetResult
 	}
+	set.local = h.widgetResult
 
 	defs, err := offer(set, req.rendered)
 	if err != nil {
 		return fmt.Errorf("tools: %w", err)
 	}
-	conversation := append(set.system(), req.messages...)
-	if req.managed {
-		conversation, err = budgetConversation(req, set, defs)
-		if err != nil {
-			return err
-		}
+	conversation, err := budgetConversation(req, set, defs)
+	if err != nil {
+		return err
 	}
 	refreshed := false
 	for turn := 1; ; turn++ {
@@ -80,13 +73,11 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 			tools = nil
 			conversation = append(conversation, raw(object{"role": "system", "content": finalAnswerInstruction}))
 		}
-		if req.managed {
-			conversation, err = trimToolHistory(req, conversation, tools)
-			if err != nil {
-				return err
-			}
+		conversation, err = trimToolHistory(req, conversation, tools)
+		if err != nil {
+			return err
 		}
-		payload, err := body(req, m, conversation, tools)
+		payload, err := body(req, conversation, tools)
 		if err != nil {
 			return err
 		}
@@ -123,7 +114,7 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 			return apiErr(502, "MAX_TURNS", fmt.Sprintf("The model called tools for %d turns without answering", maxTurns))
 		}
 		reply := requested(answer, calls)
-		if req.managed && (req.policy == "all" || req.policy == "tool-call-only") {
+		if req.policy == "all" || req.policy == "tool-call-only" {
 			out.mu.Lock()
 			reasoning, field := out.turnReasoning, out.reasoningField
 			out.mu.Unlock()
@@ -139,20 +130,17 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 	}
 }
 
-func body(req *request, m *model, conversation []json.RawMessage, defs json.RawMessage) ([]byte, error) {
+func body(req *request, conversation []json.RawMessage, defs json.RawMessage) ([]byte, error) {
 	payload := map[string]any{
-		"model":  m.name,
+		"model":  req.model,
 		"stream": true,
 		// Without this the stream carries no usage chunk and nothing is metered.
 		"stream_options":    map[string]any{"include_usage": true},
 		"messages":          conversation,
 		"user_cache_secret": req.cacheScope,
 	}
-	if req.managed {
-		payload["model"] = req.model
-		for key, value := range req.params {
-			payload[key] = value
-		}
+	for key, value := range req.params {
+		payload[key] = value
 	}
 	if len(defs) > 0 {
 		payload["tools"] = defs
@@ -171,33 +159,6 @@ func offer(set *toolset, rendered []json.RawMessage) (json.RawMessage, error) {
 		return nil, nil
 	}
 	return json.Marshal(defs)
-}
-
-// declaration refuses a caller tool that shadows one the run itself dials.
-func declaration(raw json.RawMessage, dialled map[string]mcp.Meta) error {
-	var decl struct {
-		Type     string `json:"type"`
-		Function struct {
-			Name string `json:"name"`
-		} `json:"function"`
-	}
-	if err := json.Unmarshal(raw, &decl); err != nil {
-		return fmt.Errorf("tool is not an object: %w", err)
-	}
-	if decl.Type != "function" || decl.Function.Name == "" {
-		return errors.New(`each tool must be {"type":"function","function":{"name":...}}`)
-	}
-	for _, f := range families {
-		if _, on := dialled[f.name]; !on {
-			continue
-		}
-		for _, t := range f.tools {
-			if decl.Function.Name == t.as {
-				return fmt.Errorf("tool %q is served by this run and cannot be redeclared", t.as)
-			}
-		}
-	}
-	return nil
 }
 
 func execute(ctx context.Context, out *stream, set *toolset, calls []toolCall) []json.RawMessage {
@@ -245,27 +206,23 @@ func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) (mess
 	}()
 	// A widget is drawn by the caller from TOOL_CALL_ARGS; the model just needs a result.
 	if set.byName[call.name] == nil {
-		if set.widgets != nil {
-			w, ok := set.widgets[call.name]
-			if !ok {
-				return answered(call.id, `{"error":"unknown tool"}`)
-			}
-			// The caller never reports back, so only the model can be told the widget was not drawn.
-			if failure := widgetFailure(w, call.args); failure != nil {
-				out.emit(event{Type: "TOOL_CALL_RESULT", MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: failure})
-				if !set.retry(call.name) {
-					return answered(call.id, `{"status":"executed"}`)
-				}
-				return answered(call.id, string(failure))
-			}
-			content, err := set.local(ctx, call)
-			if err != nil {
-				content = object{"error": asAPIError(err).Message}
-			}
-			out.emit(event{Type: "TOOL_CALL_RESULT", MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: raw(content)})
-			return answered(call.id, "[rendered for the user]")
+		w, ok := set.widgets[call.name]
+		if !ok {
+			return answered(call.id, `{"error":"unknown tool"}`)
 		}
-		out.result(call.id, "[rendered for the user]", nil)
+		// The caller never reports back, so only the model can be told the widget was not drawn.
+		if failure := widgetFailure(w, call.args); failure != nil {
+			out.emit(event{Type: "TOOL_CALL_RESULT", MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: failure})
+			if !set.retry(call.name) {
+				return answered(call.id, `{"status":"executed"}`)
+			}
+			return answered(call.id, string(failure))
+		}
+		content, err := set.local(ctx, call)
+		if err != nil {
+			content = object{"error": asAPIError(err).Message}
+		}
+		out.emit(event{Type: "TOOL_CALL_RESULT", MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: raw(content)})
 		return answered(call.id, "[rendered for the user]")
 	}
 	out.activity(call)
@@ -278,16 +235,11 @@ func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) (mess
 		// The model reads the failure and can retry rather than the turn dying;
 		// the caller learns only that the call failed, never the tool's own text.
 		failure, _ := json.Marshal(map[string]string{"error": err.Error()})
-		content, read, meta, shown = toolError, string(failure), nil, json.RawMessage(toolError)
-	} else if set.widgets != nil {
+		read, meta, shown = string(failure), nil, json.RawMessage(toolError)
+	} else {
 		shown = normalizeToolResult(call, content)
 	}
-	// The caller's copy is clipped far later than the model's: present renders whole files.
-	if set.widgets != nil {
-		out.emit(event{Type: "TOOL_CALL_RESULT", MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: raw(shown), Metadata: meta})
-	} else {
-		out.result(call.id, clip(content, maxShownOutput), meta)
-	}
+	out.emit(event{Type: "TOOL_CALL_RESULT", MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: raw(shown), Metadata: meta})
 	return answered(call.id, clip(read, maxToolOutput))
 }
 
@@ -331,14 +283,12 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 	var answer, reasoningText strings.Builder
 	reasoningField := "reasoning_content"
 	message := "msg_" + token()
-	if out.managed {
-		out.mu.Lock()
-		if out.replyID == "" {
-			out.replyID = message
-		}
-		message = out.replyID
-		out.mu.Unlock()
+	out.mu.Lock()
+	if out.replyID == "" {
+		out.replyID = message
 	}
+	message = out.replyID
+	out.mu.Unlock()
 	defer func() {
 		out.mu.Lock()
 		out.turnReasoning, out.reasoningField = reasoningText.String(), reasoningField

@@ -125,29 +125,3 @@ func TestStoredToolCallsReplayWithRepairedArguments(t *testing.T) {
 		t.Fatalf("replayed arguments %q, want %q", got, want)
 	}
 }
-
-func TestAGUIHistoryRepairsOnlyAssistantToolCalls(t *testing.T) {
-	calls := func(args string) []toolCallJSON {
-		call := toolCallJSON{ID: "call_1"}
-		call.Function.Name, call.Function.Arguments = "web_search", args
-		return []toolCallJSON{call}
-	}
-	p, err := convert([]inMessage{
-		{Role: "user", Content: json.RawMessage(`"find cats"`), ToolCalls: calls(`{"cmd":"unterminated`)},
-		{Role: "assistant", ToolCalls: calls(`{"query":"cats","max_results":5} Now searching...`)},
-		{Role: "assistant", ToolCalls: calls(`{"query":"`)},
-		{Role: "assistant", ToolCalls: calls(`{"query":"dogs"}`)},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var got []string
-	for _, message := range p.messages {
-		var m outMessage
-		json.Unmarshal(message, &m)
-		got = append(got, m.ToolCalls[0].Function.Arguments)
-	}
-	if want := []string{`{"cmd":"unterminated`, `{"query":"cats","max_results":5}`, "{}", `{"query":"dogs"}`}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("forwarded arguments %q, want %q", got, want)
-	}
-}

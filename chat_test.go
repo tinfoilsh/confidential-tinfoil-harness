@@ -691,7 +691,7 @@ func TestARecoveredReplyTakesWhatItsRunCommitted(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			out := &stream{run: log, threadID: "chat-1", runID: log.id, managed: true}
+			out := &stream{run: log, threadID: "chat-1", runID: log.id}
 			started := event{Type: "RUN_STARTED", ThreadID: "chat-1", RunID: log.id}
 			if tc.reply == "a1" {
 				started.MessageID = "a1"
@@ -1412,7 +1412,7 @@ func TestToolSessionsCarryTheEnclaveHeaders(t *testing.T) {
 	for _, tc := range []struct {
 		route string
 		pii   bool
-	}{{"/v1/threads/turn", false}, {"/v1/threads/turn", true}, {"/agui", true}} {
+	}{{"/v1/threads/turn", false}, {"/v1/threads/turn", true}} {
 		t.Run(tc.route+"/"+strconv.FormatBool(tc.pii), func(t *testing.T) {
 			enclave := serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) { return nil, object{"results": []object{}} })
 			bodies := make(chan object, 2)
@@ -1425,9 +1425,6 @@ func TestToolSessionsCarryTheEnclaveHeaders(t *testing.T) {
 			})
 			in := searchInput(key)
 			obj(in["options"])["piiCheck"] = tc.pii
-			if tc.route == "/agui" {
-				in = object{"messages": []any{object{"role": "user", "content": "hi"}}, "forwardedProps": object{"piiCheck": tc.pii}}
-			}
 			events := finishedRun(t, h, tc.route, in)
 			calls := enclave.list()
 			if len(calls) != 2 {
@@ -1539,33 +1536,25 @@ func TestALargeSearchResultIsClippedNotFlattened(t *testing.T) {
 }
 
 func TestWebSearchIsNeverBilled(t *testing.T) {
-	for _, route := range []string{"/v1/threads/turn", "/agui"} {
-		t.Run(route, func(t *testing.T) {
-			enclave := serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) { return nil, object{"results": []object{}} })
-			h, _, key := testChatHarness(t, toolTurns(toolCallChunk(0, "one", "web_search", `{"query":"cats"}`)+toolCallChunk(1, "two", "web_search", `{"query":"dogs"}`), nil))
-			in, apiKey := searchInput(key), "inference-alice"
-			if route == "/agui" {
-				in, apiKey = object{"runId": "client-chosen", "messages": []any{object{"role": "user", "content": "hi"}}}, "clerk-alice"
-			}
-			events := finishedRun(t, h, route, in)
-			calls := enclave.list()
-			if len(calls) != 2 {
-				t.Fatalf("the enclave saw %d calls", len(calls))
-			}
-			for _, call := range calls {
-				usage, ok, err := usagereporting.FromHeaders(call.header, "test-usage-secret", time.Now(), time.Minute)
-				if err != nil || !ok {
-					t.Fatalf("no signed usage context: %v", err)
-				}
-				// The run's model turns are billed; a search within it is not.
-				if usage.BillCustomerRequest {
-					t.Fatalf("search was marked billable: %+v", usage)
-				}
-				if usage.ContextID != events[0].RunID || usage.RootRequestID != events[0].RunID || usage.ParentService != "harness" || usage.Depth != 1 || !usagereporting.VerifyAPIKeyHash(apiKey, usage.APIKeyHash) {
-					t.Fatalf("search lost the run's identity: %+v", usage)
-				}
-			}
-		})
+	enclave := serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) { return nil, object{"results": []object{}} })
+	h, _, key := testChatHarness(t, toolTurns(toolCallChunk(0, "one", "web_search", `{"query":"cats"}`)+toolCallChunk(1, "two", "web_search", `{"query":"dogs"}`), nil))
+	events := finishedRun(t, h, "/v1/threads/turn", searchInput(key))
+	calls := enclave.list()
+	if len(calls) != 2 {
+		t.Fatalf("the enclave saw %d calls", len(calls))
+	}
+	for _, call := range calls {
+		usage, ok, err := usagereporting.FromHeaders(call.header, "test-usage-secret", time.Now(), time.Minute)
+		if err != nil || !ok {
+			t.Fatalf("no signed usage context: %v", err)
+		}
+		// The run's model turns are billed; a search within it is not.
+		if usage.BillCustomerRequest {
+			t.Fatalf("search was marked billable: %+v", usage)
+		}
+		if usage.ContextID != events[0].RunID || usage.RootRequestID != events[0].RunID || usage.ParentService != "harness" || usage.Depth != 1 || !usagereporting.VerifyAPIKeyHash("inference-alice", usage.APIKeyHash) {
+			t.Fatalf("search lost the run's identity: %+v", usage)
+		}
 	}
 }
 
@@ -1607,11 +1596,11 @@ func TestReasoningIsEchoedInTheFieldItArrivedIn(t *testing.T) {
 	}
 }
 
-func TestLegacyRunsRejectMalformedStreams(t *testing.T) {
-	h, _, _ := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+func TestMalformedModelStreamsFailTheRun(t *testing.T) {
+	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\ndata: {not json\n\ndata: [DONE]\n\n")
 	})
-	events := eventsIn(t, postRoute(h, "/agui", object{"messages": []any{object{"role": "user", "content": "hi"}}, "forwardedProps": object{"webSearch": false}}, "alice"))
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", sendInput(key), "alice"))
 	if last := events[len(events)-1]; last.Type != "RUN_ERROR" {
 		t.Fatalf("a malformed stream finished the run: %+v", last)
 	}
@@ -1667,41 +1656,24 @@ func TestToolCapEndsWithOneTurnWithoutTools(t *testing.T) {
 }
 
 func TestToolFailuresReachTheCallerOpaquely(t *testing.T) {
-	for _, route := range []string{"/v1/threads/turn", "/agui"} {
-		t.Run(route, func(t *testing.T) {
-			serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
-				return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: "upstream secret detail"}}}, nil
-			})
-			sent := make(chan []any, 1)
-			h, _, key := testChatHarness(t, toolTurns(toolCallChunk(0, "s", "web_search", `{"query":"cats"}`), sent))
-			in := searchInput(key)
-			if route == "/agui" {
-				in = object{"messages": []any{object{"role": "user", "content": "hi"}}}
-			}
-			events := finishedRun(t, h, route, in)
-			var shown any
-			for _, e := range events {
-				if e.Type == "TOOL_CALL_RESULT" && e.ToolCallID == "s" {
-					shown = decodeValue(e.Content)
-				}
-			}
-			if text, ok := shown.(string); ok { // the AG-UI route sends results as text
-				shown = decodeValue([]byte(text))
-			}
-			if !reflect.DeepEqual(shown, any(map[string]any{"error": "tool_error"})) {
-				t.Fatalf("the caller was shown %v", shown)
-			}
-			if strings.Contains(string(raw(events)), "upstream secret detail") {
-				t.Fatal("the tool's error text reached the caller")
-			}
-			read := <-sent
-			if !strings.Contains(string(raw(read)), toolOutputWarning) {
-				t.Fatal("the model was not told to distrust tool output")
-			}
-			if got := toolMessage(read, "s"); !strings.Contains(got, `Tool \"web_search\" rejected the arguments: upstream secret detail`) {
-				t.Fatalf("the model read %s", got)
-			}
-		})
+	serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
+		return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: "upstream secret detail"}}}, nil
+	})
+	sent := make(chan []any, 1)
+	h, _, key := testChatHarness(t, toolTurns(toolCallChunk(0, "s", "web_search", `{"query":"cats"}`), sent))
+	events := finishedRun(t, h, "/v1/threads/turn", searchInput(key))
+	if shown := toolResult(events, "s"); !reflect.DeepEqual(map[string]any(shown), map[string]any{"error": "tool_error"}) {
+		t.Fatalf("the caller was shown %v", shown)
+	}
+	if strings.Contains(string(raw(events)), "upstream secret detail") {
+		t.Fatal("the tool's error text reached the caller")
+	}
+	read := <-sent
+	if !strings.Contains(string(raw(read)), toolOutputWarning) {
+		t.Fatal("the model was not told to distrust tool output")
+	}
+	if got := toolMessage(read, "s"); !strings.Contains(got, `Tool \"web_search\" rejected the arguments: upstream secret detail`) {
+		t.Fatalf("the model read %s", got)
 	}
 }
 
