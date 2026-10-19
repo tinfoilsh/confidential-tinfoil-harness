@@ -1,9 +1,6 @@
 package main
 
-import (
-	"encoding/hex"
-	"slices"
-)
+import "slices"
 
 // A local transcript carries its attachments inline, so a turn may be larger
 // than other requests. Uploads already accept files of up to 50 MiB.
@@ -66,9 +63,6 @@ func localThread(id string, thread object) *storedRow {
 	}
 	if str(data["createdAt"]) == "" && integer(data["createdAt"]) == 0 {
 		data["createdAt"] = timestamp()
-	}
-	if str(data["codeExecutionAccessToken"]) == "" {
-		data["codeExecutionAccessToken"] = hex.EncodeToString(randomBytes(32))
 	}
 	row := &storedRow{ID: id, Data: data}
 	normalizeThread(row)

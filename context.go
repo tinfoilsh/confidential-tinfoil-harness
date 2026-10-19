@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/tiktoken-go/tokenizer"
 )
 
@@ -26,9 +25,9 @@ type request struct {
 	conversation               string // the chat the run is classified under: an ask's source thread
 	runID                      string
 	model                      string
-	cacheScope                 string              // partitions the enclave's prompt cache per caller; a namespace, not a credential
-	rendered                   []json.RawMessage   // widgets the caller draws: advertised, never dialled
-	families                   map[string]mcp.Meta // tool enclaves this run dials, and what its calls carry
+	cacheScope                 string            // partitions the enclave's prompt cache per caller; a namespace, not a credential
+	rendered                   []json.RawMessage // widgets the caller draws: advertised, never dialled
+	families                   map[string]bool   // tool enclaves this run dials
 	piiCheck                   bool
 }
 
@@ -153,7 +152,7 @@ func timeReminder(now time.Time, zone string) (string, error) {
 	return "<system-reminder>Current time: " + englishTime(now.In(loc), zone) + " (" + zone + ")</system-reminder>", nil
 }
 
-func (h *harness) buildRequest(thread, profile, project object, documents []object, in object, key contentKey, runID string) (*request, *model, error) {
+func (h *harness) buildRequest(thread, profile, project object, documents []object, in object, runID string) (*request, *model, error) {
 	c := h.catalog.get()
 	if c == nil {
 		return nil, nil, apiErr(503, "MODEL_UNAVAILABLE", "The model catalog is unavailable")
@@ -163,7 +162,7 @@ func (h *harness) buildRequest(thread, profile, project object, documents []obje
 		return nil, nil, apiErr(503, "TOOL_UNAVAILABLE", "Agent sandbox is not available")
 	}
 	name := normalizeModel(firstString(options["model"], thread["model"], profile["selectedModel"], "auto"))
-	req := &request{threadID: str(thread["id"]), runID: runID, model: name, families: map[string]mcp.Meta{}}
+	req := &request{threadID: str(thread["id"]), runID: runID, model: name, families: map[string]bool{}}
 	req.conversation = req.threadID
 	if in["kind"] == "ask" {
 		req.conversation = str(in["threadId"])
@@ -233,8 +232,6 @@ func (h *harness) buildRequest(thread, profile, project object, documents []obje
 		switch f.name {
 		case "webSearch":
 			on = boolean(options["webSearch"], boolean(thread["webSearchEnabled"], boolean(profile["webSearchEnabled"], true)))
-		case "codeExecution":
-			on = boolean(options["codeExecution"], boolean(profile["codeExecutionEnabled"], false))
 		}
 		if !on {
 			continue
@@ -242,11 +239,7 @@ func (h *harness) buildRequest(thread, profile, project object, documents []obje
 		if f.client == nil {
 			return nil, nil, apiErr(503, "TOOL_UNAVAILABLE", f.name+" is unavailable")
 		}
-		if f.name == "codeExecution" {
-			req.families[f.name] = mcp.Meta{"tinfoil_code_exec": sandbox{AccessToken: str(thread["codeExecutionAccessToken"]), EncryptionKey: key.codeKey(), ContainerAuthToken: key.containerToken(str(thread["id"]))}}
-		} else {
-			req.families[f.name] = nil
-		}
+		req.families[f.name] = true
 	}
 	widgets := c.selectedWidgets(arr(in["widgets"]), boolean(options["genUI"], boolean(profile["genUIEnabled"], true)))
 	if len(widgets) > 0 {
@@ -487,7 +480,7 @@ func englishTime(now time.Time, zone string) string {
 func preflightBudget(request *request) error {
 	preflight := &toolset{}
 	for _, family := range families {
-		if _, on := request.families[family.name]; on {
+		if request.families[family.name] {
 			preflight.sessions = append(preflight.sessions, &session{fam: family})
 		}
 	}
@@ -499,7 +492,7 @@ func preflightBudget(request *request) error {
 func requestContextUsage(req *request) object {
 	system := req.system + "\n\n" + req.widgetHint
 	for _, family := range families {
-		if _, on := req.families[family.name]; on {
+		if req.families[family.name] {
 			system += "\n\n" + family.prompt
 		}
 	}

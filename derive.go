@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/hkdf"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -31,23 +29,9 @@ func decodeContentKey(value string) (contentKey, error) {
 	return key, nil
 }
 
-func (k contentKey) base64() string { return base64.StdEncoding.EncodeToString(k[:]) }
-func (k contentKey) derive(info string) []byte {
-	b, err := hkdf.Key(sha256.New, k[:], nil, info, 32)
-	if err != nil {
-		panic("invalid HKDF length")
-	}
-	return b
-}
+func (k contentKey) base64() string      { return base64.StdEncoding.EncodeToString(k[:]) }
 func (k contentKey) fingerprint() string { b := sha256.Sum256(k[:]); return hex.EncodeToString(b[:]) }
-func (k contentKey) codeKey() string {
-	return hex.EncodeToString(k.derive("tinfoil-code-execution-encryption-key-v1"))
-}
-func (k contentKey) containerToken(id string) string {
-	return hex.EncodeToString(k.derive("tinfoil-code-execution-v1:" + id))
-}
 
-func randomKey() contentKey { var k contentKey; rand.Read(k[:]); return k }
 func rowID() string {
 	return fmt.Sprintf("%013d_%s", int64(9999999999999)-nowUTC().UnixMilli(), uuid.NewString())
 }

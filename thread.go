@@ -337,7 +337,7 @@ func (h *harness) acceptTurn(ctx context.Context, p *principal, key contentKey, 
 			normalizeThread(row)
 			state.row = row
 		} else {
-			data := object{"id": id, "title": "New Chat", "titleState": "placeholder", "createdAt": timestamp(), "updatedAt": timestamp(), "messages": []any{}, "model": "auto", "activeRun": nil, "codeExecutionAccessToken": hex.EncodeToString(randomBytes(32))}
+			data := object{"id": id, "title": "New Chat", "titleState": "placeholder", "createdAt": timestamp(), "updatedAt": timestamp(), "messages": []any{}, "model": "auto", "activeRun": nil}
 			data["projectId"], data["presetId"] = in["projectId"], in["presetId"]
 			if source != nil {
 				data["messages"] = source["messages"]
@@ -468,9 +468,6 @@ func (h *harness) beginChatRun(ctx context.Context, r *chatRun) error {
 	if _, ok := options["webSearch"]; ok {
 		working["webSearchEnabled"] = options["webSearch"]
 	}
-	if str(working["codeExecutionAccessToken"]) == "" {
-		working["codeExecutionAccessToken"] = hex.EncodeToString(randomBytes(32))
-	}
 	// Sync stores a chat only if every attachment it names is stored under the
 	// chat. Offloaded documents are read back before the budget counts them.
 	// An ask's stored source has attachments in sync; a local source carries them.
@@ -485,7 +482,7 @@ func (h *harness) beginChatRun(ctx context.Context, r *chatRun) error {
 			return err
 		}
 	}
-	preview, _, err := h.buildRequest(working, profile, project, docs, r.input, r.key, r.log.id)
+	preview, _, err := h.buildRequest(working, profile, project, docs, r.input, r.log.id)
 	if err != nil {
 		return err
 	}
@@ -496,7 +493,7 @@ func (h *harness) beginChatRun(ctx context.Context, r *chatRun) error {
 		return err
 	}
 	titleText := titleSource(working)
-	request, model, err := h.buildRequest(working, profile, project, docs, r.input, r.key, r.log.id)
+	request, model, err := h.buildRequest(working, profile, project, docs, r.input, r.log.id)
 	if err != nil {
 		return err
 	}
@@ -555,7 +552,7 @@ func (h *harness) beginChatRun(ctx context.Context, r *chatRun) error {
 			if err := applyTurn(data, r.input, r.messageID, stored); err != nil {
 				return err
 			}
-			data["model"], data["webSearchEnabled"], data["codeExecutionAccessToken"] = working["model"], working["webSearchEnabled"], working["codeExecutionAccessToken"]
+			data["model"], data["webSearchEnabled"] = working["model"], working["webSearchEnabled"]
 			data["contextUsage"] = working["contextUsage"]
 			copyAttachmentDerivatives(working, data)
 			stripInlineAttachments(data)

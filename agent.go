@@ -164,35 +164,11 @@ func offer(set *toolset, rendered []json.RawMessage) (json.RawMessage, error) {
 func execute(ctx context.Context, out *stream, set *toolset, calls []toolCall) []json.RawMessage {
 	messages := make([]json.RawMessage, len(calls))
 	var wg sync.WaitGroup
-	for _, queue := range schedule(set, calls) {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for _, i := range queue {
-				messages[i] = invoke(ctx, out, set, calls[i])
-			}
-		}()
+	for i, call := range calls {
+		wg.Go(func() { messages[i] = invoke(ctx, out, set, call) })
 	}
 	wg.Wait()
 	return messages
-}
-
-// schedule gives serial families one queue in call order, everything else its own.
-func schedule(set *toolset, calls []toolCall) [][]int {
-	var queues [][]int
-	held := map[*session]int{}
-	for i, call := range calls {
-		s := set.byName[call.name]
-		if at, ok := held[s]; ok {
-			queues[at] = append(queues[at], i)
-			continue
-		}
-		if s != nil && s.fam.serial {
-			held[s] = len(queues)
-		}
-		queues = append(queues, []int{i})
-	}
-	return queues
 }
 
 func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) (message json.RawMessage) {
