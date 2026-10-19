@@ -26,7 +26,6 @@ type threadSession struct {
 	queue          []*chatRun
 	runs           map[string]*chatRun
 	expires        time.Time
-	key            contentKey // retained only for an ephemeral thread's lifetime
 }
 type chatRun struct {
 	thread                   *threadSession
@@ -40,7 +39,6 @@ type chatRun struct {
 	queued, cancelled        bool
 	finished                 chan struct{}
 	titleDone                chan struct{}
-	spilled                  chan struct{}
 	assembler                *messageAssembler
 	retryTarget              object
 	replacement              string
@@ -291,13 +289,7 @@ func (h *harness) acceptTurn(ctx context.Context, p *principal, key contentKey, 
 			h.chatMu.Unlock()
 			return nil, apiErr(503, "UPSTREAM_REFUSED", "The thread registry is at capacity")
 		}
-		if keyless {
-			key = randomKey()
-		}
 		state = &threadSession{id: id, owner: p.scope(), keyHash: key.fingerprint(), ephemeral: ephemeral, local: local, keyless: keyless, runs: map[string]*chatRun{}, expires: nowUTC().Add(runTimeout)}
-		if ephemeral {
-			state.key = key
-		}
 		h.threads[p.scope()+"/"+id] = state
 	}
 	h.chatMu.Unlock()
@@ -305,9 +297,6 @@ func (h *harness) acceptTurn(ctx context.Context, p *principal, key contentKey, 
 	defer state.mu.Unlock()
 	if state.deleted || state.ephemeral != ephemeral || state.local != local || !state.keyless && state.keyHash != key.fingerprint() {
 		return nil, apiErr(404, "THREAD_NOT_FOUND", "The thread is unavailable")
-	}
-	if state.keyless {
-		key = state.key
 	}
 	h.chatMu.Lock()
 	if previous := h.requests[requestID]; previous != nil {
@@ -366,37 +355,16 @@ func (h *harness) acceptTurn(ctx context.Context, p *principal, key contentKey, 
 		if str(saved["digest"]) != digest {
 			return nil, apiErr(409, "REVISION_CONFLICT", "The request nonce was already used")
 		}
-		runID := str(saved["runId"])
-		log, err := newContentRun(runID, key)
-		if err == nil {
-			err = log.rehydrate(h.fetch(context.WithValue(ctx, apiKeyKey{}, string(credential.Key)), runID))
-		}
-		if err != nil {
-			return nil, apiErr(409, "REVISION_CONFLICT", "This request was already accepted; its log is unavailable")
-		}
-		if err := h.settleRecovered(ctx, p, key, state.row, log); err != nil {
-			return nil, err
-		}
-		recovered := &chatRun{thread: state, log: log, nonce: nonce, digest: digest, principal: p, finished: make(chan struct{})}
-		close(recovered.finished)
-		state.runs[runID] = recovered
-		h.chatMu.Lock()
-		h.requests[requestID] = recovered
-		h.chatMu.Unlock()
-		return recovered, nil
+		return nil, apiErr(409, "REVISION_CONFLICT", "This request was already accepted")
 	}
-	// Stored nonce recovery remains available after the last free request.
 	if credential.Limit.exhausted() {
 		e := apiErr(429, "QUOTA_EXHAUSTED", "The daily quota is exhausted")
 		e.Kind = str(credential.Limit.Kind)
 		e.ResetsAt = credential.Limit.ResetsAt
 		return nil, e
 	}
-	runID := token() // recovery store accepts 32 hex characters
-	log, err := newContentRun(runID, key)
-	if err != nil {
-		return nil, err
-	}
+	runID := token()
+	log := newRun(runID)
 	clean := clone(in)
 	delete(clean, "key")
 	// The transcript has already seeded the row; holding it again per run would
@@ -627,17 +595,6 @@ func (h *harness) beginChatRun(ctx context.Context, r *chatRun) error {
 	r.out.emit(event{Type: "MESSAGES_SNAPSHOT", Messages: window["messages"], HasOlder: &hasOlder})
 	r.out.emit(event{Type: "STATE_SNAPSHOT", Snapshot: object{"thread": threadSummary(normalizeThread(s.row)), "queue": queueItems(s), "rateLimit": r.credential.Limit}})
 	r.out.observe = r.assembler.apply
-	if !s.ephemeral {
-		spillCtx, stopSpill := context.WithTimeout(context.WithoutCancel(runCtx), runTimeout+time.Minute)
-		r.log.abandon = func() { cancel(); stopSpill() }
-		r.spilled = make(chan struct{})
-		go func() {
-			defer stopSpill()
-			defer close(r.spilled)
-			defer func() { rescued("chat run spill", recover()) }()
-			h.spill(spillCtx, r.log)
-		}()
-	}
 	r.titleDone = make(chan struct{})
 	titlePrincipal := *r.principal
 	titleRun := &chatRun{thread: s, out: r.out, principal: &titlePrincipal, key: r.key}
@@ -1034,80 +991,18 @@ func (h *harness) handleFollow(w http.ResponseWriter, r *http.Request) {
 	}
 	defer clear(key[:])
 	_, live, err := h.authorizedRun(p, key, in)
-	if err == nil {
-		if !p.Anonymous {
-			live.thread.mu.Lock()
-			if live.thread.active == live {
-				live.principal = p
-			} else if !live.thread.ephemeral {
-				row, loadErr := h.storeRows.load(r.Context(), p, key, "chat", live.thread.id)
-				if loadErr != nil {
-					err = loadErr
-				} else {
-					err = h.settleRecovered(r.Context(), p, key, row, live.log)
-				}
-			}
-			live.thread.mu.Unlock()
-			if err != nil {
-				respond(w, nil, err)
-				return
-			}
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	if !p.Anonymous {
+		live.thread.mu.Lock()
+		if live.thread.active == live {
+			live.principal = p
 		}
-		followChat(w, r, live.log, resumeFrom(r.Header.Get("Last-Event-ID")))
-		return
+		live.thread.mu.Unlock()
 	}
-	if asAPIError(err).HTTP != 404 || p.Anonymous {
-		respond(w, nil, err)
-		return
-	}
-	if key == (contentKey{}) {
-		respond(w, nil, apiErr(401, "KEY_REQUIRED", "A content key is required"))
-		return
-	}
-	id, err := requiredID(in, "threadId")
-	if err != nil {
-		respond(w, nil, err)
-		return
-	}
-	runID, err := requiredID(in, "runId")
-	if err != nil {
-		respond(w, nil, err)
-		return
-	}
-	row, err := h.storeRows.load(r.Context(), p, key, "chat", id)
-	if err != nil {
-		respond(w, nil, err)
-		return
-	}
-	known := obj(row.Data["activeRun"])["runId"] == runID
-	for _, value := range obj(row.Data["harnessRequests"]) {
-		if obj(value)["runId"] == runID {
-			known = true
-		}
-	}
-	if !known {
-		respond(w, nil, apiErr(409, "RUN_IN_FLIGHT", "The run does not belong to this thread"))
-		return
-	}
-	cred, err := h.auth.inference(r.Context(), p)
-	if err != nil {
-		respond(w, nil, err)
-		return
-	}
-	ctx := context.WithValue(r.Context(), apiKeyKey{}, string(cred.Key))
-	log, err := newContentRun(runID, key)
-	if err == nil {
-		err = log.rehydrate(h.fetch(ctx, runID))
-	}
-	if err != nil {
-		respond(w, nil, apiErr(404, "THREAD_NOT_FOUND", "The run log could not be opened"))
-		return
-	}
-	if err := h.settleRecovered(r.Context(), p, key, row, log); err != nil {
-		respond(w, nil, err)
-		return
-	}
-	followChat(w, r, log, resumeFrom(r.Header.Get("Last-Event-ID")))
+	followChat(w, r, live.log, resumeFrom(r.Header.Get("Last-Event-ID")))
 }
 
 func (h *harness) expireThreads() {
@@ -1135,7 +1030,6 @@ func (h *harness) expireThreads() {
 			}
 			s.queue = nil
 			s.row = nil
-			clear(s.key[:])
 		}
 		s.mu.Unlock()
 	}

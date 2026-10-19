@@ -50,14 +50,6 @@ type usage struct {
 	Total      int64 `json:"total_tokens"`
 }
 
-func terminal(frame []byte) bool {
-	var e struct {
-		Type string `json:"type"`
-	}
-	json.Unmarshal(frame, &e)
-	return e.Type == "RUN_FINISHED" || e.Type == "RUN_ERROR"
-}
-
 type stream struct {
 	run            *run
 	concreteModel  string
@@ -153,7 +145,7 @@ func (s *stream) frame(e event) {
 		return
 	}
 	// Nothing can read a closed log, so stop the run rather than bill turns into it.
-	if s.run.log.grow(func(id int) []byte { return s.run.seal(id, encoded) }) != nil {
+	if s.run.log.grow(encoded) != nil {
 		s.run.stop()
 	} else if s.observe != nil {
 		s.observe(e)
@@ -177,12 +169,8 @@ func follow(w http.ResponseWriter, r *http.Request, rn *run, from int) {
 	for {
 		frames, wake, closed := rn.log.read(from)
 		for i, frame := range frames {
-			plain, err := rn.open(from+i, frame)
-			if err != nil {
-				return
-			}
 			open()
-			if _, err := fmt.Fprintf(w, "id: %d\ndata: %s\n\n", from+i, plain); err != nil {
+			if _, err := fmt.Fprintf(w, "id: %d\ndata: %s\n\n", from+i, frame); err != nil {
 				return
 			}
 		}

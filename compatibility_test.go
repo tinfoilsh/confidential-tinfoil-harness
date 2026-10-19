@@ -210,38 +210,8 @@ func TestReferenceBackupAndStoredSchemas(t *testing.T) {
 	}
 	referenceCheck(t, object{"backup": base64.StdEncoding.EncodeToString(archive.Bytes()), "chat": row.Data, "events": events, "expectedMessages": publicThread(row, "", 50)["messages"]})
 }
-func TestColdRetryPreservesNewThreadIdentity(t *testing.T) {
-	var calls atomic.Int32
-	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\ndata: [DONE]\n\n")
-	})
-	in := sendInput(key)
-	first := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice"))[0]
-	state := h.threadState(&principal{ID: "alice"}, first.ThreadID)
-	state.mu.Lock()
-	run := state.runs[first.RunID]
-	state.mu.Unlock()
-	<-run.finished
-	<-run.spilled
-	h.chatMu.Lock()
-	h.threads = nil
-	h.requests = nil
-	h.chatMu.Unlock()
-	retry := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice"))
-	if retry[0].ThreadID != first.ThreadID || retry[0].RunID != first.RunID || calls.Load() != 1 {
-		t.Fatal("retry created another run")
-	}
-	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", first.ThreadID)
-	if len(arr(row.Data["messages"])) != 2 {
-		t.Fatal("retry appended another message")
-	}
-}
 func TestReplayPreservesTheHistoryWindowBoundary(t *testing.T) {
-	log, err := newContentRun("window", randomKey())
-	if err != nil {
-		t.Fatal(err)
-	}
+	log := newRun("window")
 	older := true
 	out := &stream{run: log}
 	out.emit(event{Type: "MESSAGES_SNAPSHOT", Messages: []any{}, HasOlder: &older})
@@ -390,49 +360,6 @@ func TestWidgetRetryReplacesOnlyTheArguments(t *testing.T) {
 	shown := arr(obj(snapshot[len(snapshot)-1])["timeline"])
 	if len(shown) != 2 || obj(shown[0])["content"] != "keep this text" || obj(shown[1])["arguments"] != replacement {
 		t.Fatalf("a reconnecting client was shown %v", shown)
-	}
-}
-
-func TestRecoveredWidgetRetryChecksConcurrentChanges(t *testing.T) {
-	for _, changed := range []bool{false, true} {
-		t.Run(strconv.FormatBool(changed), func(t *testing.T) {
-			h, rows, key := testChatHarness(t, nil)
-			p := &principal{ID: "alice"}
-			log, err := newContentRun(token(), key)
-			if err != nil {
-				t.Fatal(err)
-			}
-			stream := &stream{run: log, threadID: "chat", runID: log.id}
-			stream.emit(event{Type: "RUN_STARTED", ThreadID: "chat", RunID: log.id})
-			stream.callStart("call", "render_clock", "assistant")
-			stream.callArgs("call", `{"durationSeconds":2}`)
-			stream.callEnd("call")
-			stream.emit(event{Type: "RUN_FINISHED"})
-			log.log.close(errDone)
-			original := `{"durationSeconds":1}`
-			current := original
-			if changed {
-				current = `{"durationSeconds":3}`
-			}
-			row := storedRow{ID: "chat", ETag: "1", Data: object{
-				"activeRun":    object{"runId": log.id},
-				"harnessRetry": object{"runId": log.id, "messageId": "assistant", "toolCallId": "call", "arguments": original},
-				"messages":     []any{object{"id": "assistant", "role": "assistant", "content": "keep", "timeline": []any{object{"type": "tool_call", "toolCallId": "call", "arguments": current}}}},
-			}}
-			rows.rows[rowMapKey(p, "chat", "chat")] = row
-			err = h.settleRecovered(context.Background(), p, key, &row, log)
-			if changed && (err == nil || asAPIError(err).Code != "REVISION_CONFLICT") || !changed && err != nil {
-				t.Fatal("unexpected recovery result", err)
-			}
-			stored, _ := rows.load(context.Background(), p, key, "chat", "chat")
-			got := obj(arr(obj(arr(stored.Data["messages"])[0])["timeline"])[0])["arguments"]
-			if !changed {
-				current = `{"durationSeconds":2}`
-			}
-			if got != current || !changed && stored.Data["activeRun"] != nil {
-				t.Fatal("recovery overwrote a concurrent edit or left its run active")
-			}
-		})
 	}
 }
 

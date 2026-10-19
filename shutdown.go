@@ -2,6 +2,8 @@ package main
 
 import "context"
 
+var errShutdown = apiErr(503, "UPSTREAM_REFUSED", "The service is shutting down")
+
 func (h *harness) stopRuns() []*chatRun {
 	h.chatMu.Lock()
 	h.closing = true
@@ -19,7 +21,7 @@ func (h *harness) stopRuns() []*chatRun {
 			active = append(active, state.active)
 		}
 		for _, run := range state.queue {
-			run.log.log.close(errAbandoned)
+			run.log.log.close(errShutdown)
 			clear(run.key[:])
 			run.input = nil
 			close(run.finished)
@@ -35,13 +37,6 @@ func waitRuns(ctx context.Context, runs []*chatRun) {
 		case <-run.finished:
 		case <-ctx.Done():
 			return
-		}
-		if run.spilled != nil {
-			select {
-			case <-run.spilled:
-			case <-ctx.Done():
-				return
-			}
 		}
 	}
 }

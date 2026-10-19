@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
@@ -52,19 +50,4 @@ func (k contentKey) containerToken(id string) string {
 func randomKey() contentKey { var k contentKey; rand.Read(k[:]); return k }
 func rowID() string {
 	return fmt.Sprintf("%013d_%s", int64(9999999999999)-nowUTC().UnixMilli(), uuid.NewString())
-}
-
-func newContentRun(id string, key contentKey) (*run, error) {
-	material := key.derive("confidential-tinfoil-harness run log v2:" + id)
-	defer clear(material)
-	block, err := aes.NewCipher(material)
-	if err != nil {
-		return nil, err
-	}
-	aead, err := cipher.NewGCMWithRandomNonce(block)
-	if err != nil {
-		return nil, err
-	}
-	idle := func() {}
-	return &run{id: id, aead: aead, log: newRunlog(), stop: idle, abandon: idle}, nil
 }

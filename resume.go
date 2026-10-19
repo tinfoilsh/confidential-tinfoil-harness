@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"slices"
-	"time"
 )
 
 func (h *harness) reserveThreadID(ctx context.Context, p *principal, key contentKey, nonce, digest string) (string, error) {
@@ -43,12 +41,8 @@ func messagesAt(log *run, through int) ([]any, bool, error) {
 		if index > through {
 			break
 		}
-		plain, err := log.open(index, frame)
-		if err != nil {
-			return nil, false, err
-		}
 		var e event
-		if err := json.Unmarshal(plain, &e); err != nil {
+		if err := json.Unmarshal(frame, &e); err != nil {
 			return nil, false, err
 		}
 		switch e.Type {
@@ -148,13 +142,8 @@ func followChat(w http.ResponseWriter, r *http.Request, log *run, from int) {
 	if through < 0 {
 		frames, _, _ := log.log.read(0)
 		for i, frame := range frames {
-			plain, err := log.open(i, frame)
-			if err != nil {
-				respond(w, nil, err)
-				return
-			}
 			var e event
-			json.Unmarshal(plain, &e)
+			json.Unmarshal(frame, &e)
 			if e.Type == "MESSAGES_SNAPSHOT" {
 				through = i
 				break
@@ -178,109 +167,4 @@ func followChat(w http.ResponseWriter, r *http.Request, log *run, from int) {
 		http.NewResponseController(w).Flush()
 	}
 	follow(w, r, log, from)
-}
-
-// A fresh session can finish the final CAS after a restart or after the Clerk
-// token used to begin a long run expired. The output is recovered from the log.
-func (h *harness) settleRecovered(ctx context.Context, p *principal, key contentKey, row *storedRow, log *run) error {
-	if obj(row.Data["activeRun"])["runId"] != log.id {
-		return nil
-	}
-	frames, _, closed := log.log.read(0)
-	if closed == nil {
-		return nil
-	}
-	if closed == errAbandoned {
-		expiry, parseErr := time.Parse(time.RFC3339Nano, str(obj(row.Data["activeRun"])["expiresAt"]))
-		if parseErr == nil && nowUTC().Before(expiry) {
-			e := apiErr(409, "RUN_IN_FLIGHT", "The run may still be active on another replica")
-			e.RetryAfter = 5
-			return e
-		}
-	}
-	assembler := newMessageAssembler()
-	interrupted, failed := closed == errAbandoned, false
-	continued, events, committed := "", []event{}, map[string]object{}
-	for index, frame := range frames {
-		plain, err := log.open(index, frame)
-		if err != nil {
-			return err
-		}
-		var e event
-		if err := json.Unmarshal(plain, &e); err != nil {
-			return err
-		}
-		if e.Type == "RUN_STARTED" {
-			continued = e.MessageID
-		}
-		if continued != "" {
-			events = append(events, e)
-		}
-		if e.Type == "RUN_ERROR" {
-			failed = true
-		}
-		if e.Type == "RUN_FINISHED" {
-			interrupted = interrupted || boolean(obj(decodeValue(e.Metadata))["cancelled"], false)
-		}
-		if e.Type == "RUN_FINISHED" || e.Type == "RUN_ERROR" {
-			for _, item := range arr(obj(decodeValue(e.Metadata))["messages"]) {
-				committed[str(obj(item)["id"])] = obj(item)
-			}
-		}
-		assembler.apply(e)
-	}
-	_, err := h.mutate(ctx, p, key, "chat", row.ID, false, nil, func(data object) error {
-		if obj(data["activeRun"])["runId"] != log.id {
-			return nil
-		}
-		// A reply takes the metadata its run's last event committed, as the run
-		// would have stored it. A run cut off before then leaves a new reply the
-		// thread's model and a continued reply its own.
-		settle := func(m object) {
-			m["isInterrupted"], m["isError"] = interrupted, failed && !interrupted
-			if m["model"] == nil {
-				m["model"] = data["model"]
-			}
-			for field, value := range committed[str(m["id"])] {
-				m[field] = value
-			}
-		}
-		messages := arr(data["messages"])
-		// A continuation's output extends the stored reply it continued.
-		if index := slices.IndexFunc(messages, func(value any) bool { return continued != "" && obj(value)["id"] == continued }); index >= 0 {
-			replay := newMessageAssembler()
-			replay.seed(obj(messages[index]))
-			for _, e := range events {
-				replay.apply(e)
-			}
-			m := replay.messages()[0]
-			settle(m)
-			messages[index] = m
-		}
-		retry := obj(data["harnessRetry"])
-		for _, m := range assembler.messages() {
-			if retry["runId"] == log.id && retry["messageId"] == m["id"] {
-				for _, item := range arr(m["timeline"]) {
-					block := obj(item)
-					if block["toolCallId"] == retry["toolCallId"] && boolean(block["complete"], false) {
-						if err := replaceWidget(data, str(retry["messageId"]), str(retry["toolCallId"]), str(retry["arguments"]), str(block["arguments"])); err != nil {
-							return err
-						}
-					}
-				}
-				continue
-			}
-			if index := slices.IndexFunc(messages, func(value any) bool { return obj(value)["id"] == m["id"] }); index >= 0 {
-				// Normal runs never modify an existing assistant message. Without
-				// a retry baseline there is no safe way to replace its arguments.
-				continue
-			}
-			settle(m)
-			messages = append(messages, m)
-		}
-		data["messages"], data["activeRun"] = messages, nil
-		delete(data, "harnessRetry")
-		return nil
-	})
-	return err
 }

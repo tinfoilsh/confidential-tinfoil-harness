@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
@@ -131,29 +130,17 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 	}
 	server := httptest.NewServer(upstream)
 	t.Cleanup(server.Close)
-	var spillMu sync.Mutex
-	logs := map[string][]byte{}
 	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/shim/validate-key" {
-			var in object
-			if json.NewDecoder(r.Body).Decode(&in) != nil || str(in["api_key"]) != "free_anonymous-key" {
-				w.WriteHeader(http.StatusUnauthorized)
-				return
-			}
-			io.WriteString(w, "OK")
+		if r.URL.Path != "/api/shim/validate-key" {
+			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		spillMu.Lock()
-		defer spillMu.Unlock()
-		id := strings.TrimPrefix(r.URL.Path, "/recovery/")
-		switch {
-		case r.Method == "GET":
-			w.Write(logs[id])
-		case strings.HasSuffix(id, "/chunks"):
-			b, _ := io.ReadAll(r.Body)
-			key := strings.TrimSuffix(id, "/chunks")
-			logs[key] = append(logs[key], b...)
+		var in object
+		if json.NewDecoder(r.Body).Decode(&in) != nil || str(in["api_key"]) != "free_anonymous-key" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
 		}
+		io.WriteString(w, "OK")
 	}))
 	t.Cleanup(cp.Close)
 	rows := &memoryRows{rows: map[string]storedRow{}, sealed: map[string]contentKey{}}
@@ -198,13 +185,6 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 			case <-run.finished:
 			case <-time.After(2 * time.Second):
 				t.Error("run did not stop")
-			}
-			if run.spilled != nil {
-				select {
-				case <-run.spilled:
-				case <-time.After(2 * time.Second):
-					t.Error("log did not spill")
-				}
 			}
 		}
 	})
@@ -671,65 +651,6 @@ func TestAContinuationExtendsOnlyATrailingContentBlock(t *testing.T) {
 	}
 }
 
-func TestARecoveredReplyTakesWhatItsRunCommitted(t *testing.T) {
-	committed := object{"model": "deepseek-v4", "modelDisplayName": "DeepSeek V4", "usage": object{"promptTokens": 9, "completionTokens": 4}, "isError": false, "isInterrupted": false}
-	earlier := object{"model": "gpt-oss-120b", "modelDisplayName": "GPT-OSS 120B", "usage": object{"promptTokens": 5, "completionTokens": 2}}
-	for name, tc := range map[string]struct {
-		reply, end string // the reply the run streamed into, and its terminal event
-		want       object
-	}{
-		// The final commit failed after the run finished, as when the Clerk token expired.
-		"continued": {"a1", "RUN_FINISHED", committed},
-		"new":       {"a2", "RUN_ERROR", committed},
-		// A restart cut the run off before it committed anything.
-		"continued and cut off": {"a1", "", object{"model": "gpt-oss-120b", "modelDisplayName": "GPT-OSS 120B", "usage": earlier["usage"], "isError": false, "isInterrupted": true}},
-	} {
-		t.Run(name, func(t *testing.T) {
-			h, rows, key := testChatHarness(t, nil)
-			p := &principal{ID: "alice"}
-			log, err := newContentRun(token(), key)
-			if err != nil {
-				t.Fatal(err)
-			}
-			out := &stream{run: log, threadID: "chat-1", runID: log.id}
-			started := event{Type: "RUN_STARTED", ThreadID: "chat-1", RunID: log.id}
-			if tc.reply == "a1" {
-				started.MessageID = "a1"
-			}
-			out.emit(started)
-			out.emit(event{Type: "MESSAGES_SNAPSHOT", Messages: []any{}})
-			out.text(tc.reply, " violets are blue.")
-			if tc.end != "" {
-				out.emit(event{Type: tc.end, ThreadID: "chat-1", RunID: log.id, Metadata: raw(object{"messages": []any{object{"id": tc.reply, "model": committed["model"], "modelDisplayName": committed["modelDisplayName"],
-					"usage": committed["usage"], "isError": false, "isInterrupted": false}}})})
-				log.log.close(errDone)
-			} else {
-				log.log.close(errAbandoned)
-			}
-			poemThread(rows, "chat-1")
-			row := rows.rows[rowMapKey(p, "chat", "chat-1")]
-			for field, value := range earlier {
-				obj(arr(row.Data["messages"])[1])[field] = value
-			}
-			row.Data["activeRun"] = object{"runId": log.id}
-			if err := h.settleRecovered(context.Background(), p, key, &row, log); err != nil {
-				t.Fatal(err)
-			}
-			stored, _ := rows.load(context.Background(), p, key, "chat", "chat-1")
-			messages := arr(stored.Data["messages"])
-			reply := obj(messages[len(messages)-1])
-			if got := selectFields(reply, "model modelDisplayName usage isError isInterrupted"); reply["id"] != tc.reply || !reflect.DeepEqual(decodeValue(raw(got)), decodeValue(raw(tc.want))) {
-				t.Fatalf("recovered %s as %v, want %v", reply["id"], got, tc.want)
-			}
-			// A continuation's output extends the reply it continued.
-			want := decodeValue(raw([]any{object{"id": "t1", "type": "thinking", "content": "rhyme"}, object{"id": "c1", "type": "content", "content": "Roses are red, violets are blue."}}))
-			if tc.reply == "a1" && (len(messages) != 2 || reply["content"] != "Roses are red, violets are blue." || !reflect.DeepEqual(reply["timeline"], want)) || stored.Data["activeRun"] != nil {
-				t.Fatalf("recovered continuation: %v", stored.Data)
-			}
-		})
-	}
-}
-
 func TestAContinuedReplyKeepsItsCitations(t *testing.T) {
 	serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
 		return nil, object{"results": []object{{"title": "A", "url": "https://a.test/1", "content": "alpha"}, {"title": "B", "url": "https://b.test", "content": "beta"}}}
@@ -801,8 +722,7 @@ streaming:
 		frames, wake, _ := run.log.log.read(from)
 		for _, frame := range frames {
 			var e event
-			plain, err := run.log.open(from, frame)
-			if err != nil || json.Unmarshal(plain, &e) != nil {
+			if err := json.Unmarshal(frame, &e); err != nil {
 				t.Fatal("unreadable run log frame", err)
 			}
 			if from++; e.Type == "TEXT_MESSAGE_CHUNK" {
@@ -995,23 +915,10 @@ func TestSyncWireCarriesJWTProtocolAndBase64(t *testing.T) {
 		t.Fatal(etag, err)
 	}
 }
-func TestContentRunIsIndependentOfRotatingInferenceKey(t *testing.T) {
+func TestCodeExecutionKeysMatchTheWebCryptoVectors(t *testing.T) {
 	key := contentKey{}
 	for i := range key {
 		key[i] = byte(i)
-	}
-	run, _ := newContentRun("run", key)
-	sealed := run.seal(0, []byte("private"))
-	other, _ := newContentRun("run", key)
-	if _, err := other.open(0, sealed); err != nil {
-		t.Fatal(err)
-	}
-	wrong, _ := newContentRun("another", key)
-	if _, err := wrong.open(0, sealed); err == nil {
-		t.Fatal("run id not bound")
-	}
-	if _, err := other.open(1, sealed); err == nil {
-		t.Fatal("frame index not bound")
 	}
 	if key.codeKey() != "89492753dd52f2dc48902555edb4c89ad8f27307dd182b328be31d8a748b111f" || key.containerToken("chat_abc_123") != "3c242fb62166080b9a7868b66b4904eaf3ad68fc25f46cb8e2e73878b2c8ccae" {
 		t.Fatal("HKDF differs from the Web Crypto vectors")
@@ -1814,22 +1721,6 @@ func TestCutModelStreamDoesNotCompleteItsToolCall(t *testing.T) {
 	block := obj(arr(obj(arr(row.Data["messages"])[1])["timeline"])[0])
 	if block["arguments"] != `{"query":"ca` || block["complete"] == true {
 		t.Fatalf("truncated arguments stored as complete: %v", block)
-	}
-}
-
-func TestRehydrationChecksEveryFrame(t *testing.T) {
-	key := randomKey()
-	original, _ := newContentRun("run", key)
-	frames := [][]byte{original.seal(0, []byte(`{"type":"RUN_STARTED"}`)), original.seal(1, []byte(`{"type":"TEXT_MESSAGE_CHUNK"}`)), original.seal(2, []byte(`{"type":"RUN_FINISHED"}`))}
-	frames[1][0] ^= 1
-	var bytes []byte
-	for _, frame := range frames {
-		bytes = binary.BigEndian.AppendUint32(bytes, uint32(len(frame)))
-		bytes = append(bytes, frame...)
-	}
-	restored, _ := newContentRun("run", key)
-	if err := restored.rehydrate(bytes); err == nil {
-		t.Fatal("corrupt interior frame accepted")
 	}
 }
 
