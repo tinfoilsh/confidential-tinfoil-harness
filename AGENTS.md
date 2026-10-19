@@ -25,4 +25,4 @@ Use these instead of building new fakes:
 ## Things that only fail in CI
 
 - Waiting on a fake's flush instead of on the harness: a cancel test that waited for the fake model to write its chunk failed every run with `-cpu=1`. Wait for the run log to contain the frame you need.
-- The reference checks in `compatibility_test.go` need `../tinfoil-webapp` with `node_modules` and skip without it, as in CI. Keep each test's Go assertions before its skip.
+- The reference check in `compatibility_test.go` needs a web client with the harness reducer and `node_modules` in `../tinfoil-webapp` or `TINFOIL_WEBAPP`, and skips without it, as in CI. Keep each test's Go assertions before its skip.

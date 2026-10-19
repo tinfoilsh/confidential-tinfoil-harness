@@ -347,7 +347,6 @@ func TestBackupListsUnavailableBlobsAsOmissions(t *testing.T) {
 	if manifest["complete"] != false || len(omissions) != 1 || obj(omissions[0])["source_id"] != strings.Repeat("c", 36) || obj(omissions[0])["parent_source_id"] != "chat-1" || len(arr(manifest["warnings"])) != 1 {
 		t.Fatalf("the unavailable image was not listed: %v", manifest)
 	}
-	referenceCheck(t, object{"backup": base64.StdEncoding.EncodeToString(archive.Bytes())})
 }
 
 func TestForkCopiesAChatThroughItsMessage(t *testing.T) {

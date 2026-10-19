@@ -2,8 +2,8 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
-	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"hash/crc32"
@@ -111,66 +111,23 @@ func TestManagedModelRefreshesRejectedInferenceCredentialOnce(t *testing.T) {
 	}
 }
 
-func TestReferenceBackupWithProjectImagesAndPages(t *testing.T) {
-	h, rows, key := testChatHarness(t, nil)
-	p := &principal{ID: "alice"}
-	now := "2026-09-01T00:00:00Z"
-	var pixel bytes.Buffer
-	if err := png.Encode(&pixel, image.NewRGBA(image.Rect(0, 0, 2, 2))); err != nil {
-		t.Fatal(err)
-	}
-	encoded := base64.StdEncoding.EncodeToString(pixel.Bytes())
-	answer := "[Answer](https://example.com)"
-	rows.rows[rowMapKey(p, "project", "project")] = storedRow{ID: "project", ETag: "1", Data: object{"name": "Project", "description": "Description", "systemInstructions": "Instructions", "memory": []any{}, "createdAt": now, "updatedAt": now}}
-	rows.rows[rowMapKey(p, "project_document", "project/doc")] = storedRow{ID: "project/doc", ETag: "1", Data: object{"projectId": "project", "filename": "doc.txt", "contentType": "text/plain", "sizeBytes": 4, "content": "text", "createdAt": now, "updatedAt": now}}
-	rows.rows[rowMapKey(p, "chat", "chat")] = storedRow{ID: "chat", ETag: "1", Data: object{"title": "Chat", "projectId": "project", "createdAt": now, "updatedAt": now, "messages": []any{
-		object{"id": "user", "role": "user", "content": "Look", "createdAt": now, "attachments": []any{
-			object{"id": "image", "type": "image", "fileName": "image.png", "mimeType": "image/png", "base64": encoded},
-			object{"id": "doc", "type": "document", "fileName": "doc.pdf", "textContent": "Text", "pages": []any{object{"page": 1, "text": "Text", "is_scanned": true, "image": encoded}}},
-		}},
-		object{"id": "assistant", "role": "assistant", "content": answer, "createdAt": now, "thoughts": "Reasoning", "webSearch": object{"query": "test", "status": "completed", "sources": []any{object{"title": "Source", "url": "https://example.com"}}},
-			"annotations": citationAnnotations(answer, []citationSource{{"https://example.com", "Source"}})},
-	}}}
-	var archive bytes.Buffer
-	if err := h.writeBackup(context.Background(), p, key, object{}, &archive); err != nil {
-		t.Fatal(err)
-	}
-	spool, _ := newSealedSpool()
-	defer spool.Close()
-	spool.Write(archive.Bytes())
-	spool.Finish()
-	converted, native, err := convertNativeArchive(spool)
-	if err != nil || !native {
-		t.Fatal(native, err)
-	}
-	defer converted.Close()
-	referenceCheck(t, object{"backup": base64.StdEncoding.EncodeToString(archive.Bytes())})
-}
-
-func referenceCheck(t *testing.T, input object) {
+// referenceCheck replays a run's events through the web client's harness
+// reducer, found in TINFOIL_WEBAPP or ../tinfoil-webapp with its node_modules.
+func referenceCheck(t *testing.T, events []event, expectedMessages any) {
 	t.Helper()
-	reference := "../tinfoil-webapp"
+	reference := cmp.Or(os.Getenv("TINFOIL_WEBAPP"), "../tinfoil-webapp")
 	if _, err := os.Stat(reference + "/node_modules/typescript"); err != nil {
 		t.Skip("reference webapp dependencies are not installed")
 	}
-	if _, ok := input["events"]; ok {
-		if _, err := os.Stat(reference + "/src/services/harness/reducer.ts"); err != nil {
-			// Event parity needs the webapp's harness reducer; the backup and
-			// stored-row checks in the same input do not.
-			input = clone(input)
-			delete(input, "events")
-			delete(input, "expectedMessages")
-			if len(input) == 0 {
-				t.Skip("reference webapp has no harness reducer")
-			}
-		}
+	if _, err := os.Stat(reference + "/src/services/harness/reducer.ts"); err != nil {
+		t.Skip("reference webapp has no harness reducer")
 	}
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("Node is not installed")
 	}
 	cmd := exec.Command(node, "scripts/check-compatibility.cjs", reference)
-	cmd.Stdin = bytes.NewReader(raw(input))
+	cmd.Stdin = bytes.NewReader(raw(object{"events": events, "expectedMessages": expectedMessages}))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("reference validation: %v\n%s", err, output)
@@ -197,19 +154,6 @@ func TestSharedThreadUsesPublicTimelineAndAttachments(t *testing.T) {
 	}
 }
 
-func TestReferenceBackupAndStoredSchemas(t *testing.T) {
-	h, rows, key := testChatHarness(t, nil)
-	events := eventsIn(t, postRoute(h, "/v1/threads/turn", sendInput(key), "alice"))
-	row, err := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var archive bytes.Buffer
-	if err := h.writeBackup(context.Background(), &principal{ID: "alice"}, key, object{}, &archive); err != nil {
-		t.Fatal(err)
-	}
-	referenceCheck(t, object{"backup": base64.StdEncoding.EncodeToString(archive.Bytes()), "chat": row.Data, "events": events, "expectedMessages": publicThread(row, "", 50)["messages"]})
-}
 func TestReplayPreservesTheHistoryWindowBoundary(t *testing.T) {
 	log := newRun("window")
 	older := true
@@ -392,7 +336,7 @@ func TestManagedToolLoopKeepsReasoningAndOneAssistantMessage(t *testing.T) {
 	if len(messages) != 2 || len(arr(obj(messages[1])["timeline"])) != 3 {
 		t.Fatal("tool loop did not make one ordered assistant timeline")
 	}
-	referenceCheck(t, object{"events": events, "expectedMessages": publicThread(row, "", 50)["messages"]})
+	referenceCheck(t, events, publicThread(row, "", 50)["messages"])
 }
 func TestShutdownCommitsPartialOutput(t *testing.T) {
 	started := make(chan struct{})

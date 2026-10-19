@@ -12,7 +12,7 @@ GOWORK=off go vet ./...
 GOWORK=off go build ./...
 ```
 
-With `../tinfoil-webapp/node_modules` installed, the tests also check Go-produced rows and archives against the web validators in [scripts/fixtures](scripts/fixtures). `node scripts/check-widgets.cjs ../tinfoil-webapp` checks the web widget renderers against [widgets.json](widgets.json).
+With a web client checkout and its `node_modules` in `../tinfoil-webapp` (or the path in `TINFOIL_WEBAPP`), the tests also replay run events through its harness reducer. `node scripts/check-widgets.cjs ../tinfoil-webapp` checks the web widget renderers against [widgets.json](widgets.json).
 
 Anonymous chat works only from a deployed harness, because the control plane accepts `free_` key validation only from registered Tinfoil hosts.
 
