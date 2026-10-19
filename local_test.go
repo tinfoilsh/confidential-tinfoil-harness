@@ -12,9 +12,9 @@ import (
 )
 
 func localInput(threadID string, thread object) object {
-	in := object{"clientRequestId": uuid.NewString(), "kind": "send", "local": true, "content": "second question", "options": object{"model": "kimi-k3", "webSearch": false}}
-	if threadID != "" {
-		in["threadId"] = threadID
+	in := object{"threadId": threadID, "clientRequestId": uuid.NewString(), "kind": "send", "local": true, "content": "second question", "options": object{"model": "kimi-k3", "webSearch": false}}
+	if threadID == "" {
+		in["threadId"] = rowID()
 	}
 	if thread != nil {
 		in["thread"] = thread
@@ -131,7 +131,7 @@ func TestLocalTitleIsGeneratedWithoutStorage(t *testing.T) {
 	}))
 	defer summarizer.Close()
 	h.services["summarizer"] = &downstreamService{URL: summarizer.URL, Client: summarizer.Client()}
-	events := eventsIn(t, postRoute(h, "/v1/threads/turn", localInput("", nil), "alice"))
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", localInput("", object{"messages": []any{}}), "alice"))
 	if rows.calls != 0 {
 		t.Fatalf("local title used storage %d times", rows.calls)
 	}

@@ -213,3 +213,74 @@ func TestFollowReplaysALiveRunFromItsFirstFrame(t *testing.T) {
 		t.Fatalf("following a finished run: HTTP %d %s", w.Code, w.Body.String())
 	}
 }
+
+// A retried request is told apart through the chat itself: while its run is
+// live it follows that run, and afterwards it is refused as already applied,
+// by any instance, without adding its message twice.
+func TestARetriedRequestFollowsItsRunOrIsAlreadyApplied(t *testing.T) {
+	model, release := heldModel()
+	h, rows, key := testChatHarness(t, model)
+	t.Cleanup(release)
+	p := &principal{ID: "alice", JWT: "clerk-alice"}
+	in := sendInput(key)
+	run, err := h.acceptTurn(context.Background(), p, key, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitFrame(t, run.log, "TEXT_MESSAGE_CHUNK")
+	retry := func(h *harness) *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/v1/threads/turn", bytes.NewReader(raw(in)))
+		req.Header.Set("Authorization", "Bearer clerk-alice")
+		return req
+	}
+	w := replayOf(h, retry(h))
+	events := eventsIn(t, w)
+	if frames, _, _ := run.log.log.read(0); events[0].Type != "RUN_STARTED" || events[0].RunID != run.log.id || len(events) != len(frames) {
+		t.Fatalf("a retry during the run was not its replay: %s", w.Body.String())
+	}
+	release()
+	<-run.finished
+	fresh, _, _ := testChatHarness(t, nil)
+	fresh.storeRows = rows
+	for _, instance := range []*harness{h, fresh} {
+		w := httptest.NewRecorder()
+		instance.routes().ServeHTTP(w, retry(instance))
+		if w.Code != 409 || !strings.Contains(w.Body.String(), "ALREADY_APPLIED") {
+			t.Fatalf("a retry after the run: HTTP %d %s", w.Code, w.Body.String())
+		}
+	}
+	row, _ := rows.load(context.Background(), p, key, "chat", run.thread.id)
+	messages := arr(row.Data["messages"])
+	if len(messages) != 2 || obj(messages[0])["id"] != in["clientRequestId"] || row.Data["lastRequestId"] != in["clientRequestId"] {
+		t.Fatalf("the chat holds %v", row.Data)
+	}
+	// A device chat names its last request in the copy its client sends.
+	local := localInput("", priorThread())
+	obj(local["thread"])["lastRequestId"] = local["clientRequestId"]
+	if w := postRoute(h, "/v1/threads/turn", local, "alice"); w.Code != 409 || !strings.Contains(w.Body.String(), "ALREADY_APPLIED") {
+		t.Fatalf("a retried device chat turn: HTTP %d %s", w.Code, w.Body.String())
+	}
+}
+
+// A new chat's first turn creates its row under the id its client chose; an
+// id it did not make that way names a chat that must exist.
+func TestAFirstTurnCreatesItsChatUnderTheClientsID(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	in := sendInput(key)
+	events := finishedRun(t, h, "/v1/threads/turn", in)
+	if events[0].ThreadID != in["threadId"] {
+		t.Fatalf("the chat was stored as %s, not %s", events[0].ThreadID, in["threadId"])
+	}
+	if _, err := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", str(in["threadId"])); err != nil {
+		t.Fatal(err)
+	}
+	in = sendInput(key)
+	in["threadId"] = "not-a-new-chat-id"
+	if w := postRoute(h, "/v1/threads/turn", in, "alice"); w.Code != 404 {
+		t.Fatalf("a turn on a missing chat with a foreign id: HTTP %d %s", w.Code, w.Body.String())
+	}
+	delete(in, "threadId")
+	if w := postRoute(h, "/v1/threads/turn", in, "alice"); w.Code != 400 {
+		t.Fatalf("a turn without a chat id: HTTP %d %s", w.Code, w.Body.String())
+	}
+}

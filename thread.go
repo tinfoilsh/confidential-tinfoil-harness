@@ -135,11 +135,9 @@ func (h *harness) handleTurn(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, apiErr(401, "UNAUTHENTICATED", "Ask requires access to a stored thread"))
 		return
 	}
-	if id := str(in["threadId"]); id != "" {
-		if _, err := requiredID(object{"id": id}, "id"); err != nil {
-			respond(w, nil, err)
-			return
-		}
+	if _, err := requiredID(in, "threadId"); err != nil {
+		respond(w, nil, err)
+		return
 	}
 	if err := validateTurn(in); err != nil {
 		respond(w, nil, err)
@@ -224,6 +222,10 @@ func requestDigest(in object) string {
 	return hex.EncodeToString(digest[:])
 }
 
+// errAlreadyApplied answers a retried request whose turn its chat holds, once
+// the run it started is no longer live.
+var errAlreadyApplied = apiErr(409, "ALREADY_APPLIED", "This request was already applied; reload the chat")
+
 // maxQueuedTurns bounds the turns one chat holds behind its running reply.
 const maxQueuedTurns = 32
 
@@ -255,10 +257,15 @@ func (h *harness) acceptTurn(ctx context.Context, p *principal, key contentKey, 
 		if previous.digest != digest {
 			return nil, apiErr(409, "REVISION_CONFLICT", "The request nonce was already used")
 		}
+		// A run already accepted is followed even by a caller that has left.
 		select {
 		case <-previous.accepted:
-		case <-ctx.Done():
-			return nil, ctx.Err()
+		default:
+			select {
+			case <-previous.accepted:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
 		}
 		if previous.refused == nil {
 			if !previous.thread.keyless && previous.thread.keyHash != key.fingerprint() {
@@ -339,7 +346,7 @@ func (h *harness) admit(ctx context.Context, p *principal, key contentKey, in ob
 		}
 		id = ""
 	}
-	if id == "" && str(in["projectId"]) != "" {
+	if source == nil && str(in["projectId"]) != "" {
 		project, err := requiredID(in, "projectId")
 		if err != nil {
 			return err
@@ -347,19 +354,15 @@ func (h *harness) admit(ctx context.Context, p *principal, key contentKey, in ob
 		if p.Anonymous {
 			return apiErr(401, "UNAUTHENTICATED", "Sign in to use a project")
 		}
-		if _, err := h.storeRows.load(ctx, p, key, "project", project); err != nil {
-			return err
+		// A stored chat's project is read as its first turn starts.
+		if ephemeral {
+			if _, err := h.storeRows.load(ctx, p, key, "project", project); err != nil {
+				return err
+			}
 		}
 	}
 	if id == "" {
-		if !ephemeral {
-			id, err = h.reserveThreadID(ctx, p, key, r.nonce, r.digest)
-			if err != nil {
-				return err
-			}
-		} else {
-			id = rowID()
-		}
+		id = rowID()
 	}
 	// An idle local thread starts from the client's copy, which may have been
 	// edited since the last turn. A queued turn continues the active run's row.
@@ -367,6 +370,9 @@ func (h *harness) admit(ctx context.Context, p *principal, key contentKey, in ob
 	var seed *storedRow
 	if thread, ok := in["thread"]; ok && local && source == nil {
 		seed = localThread(id, obj(thread))
+		if seed.Data["lastRequestId"] == r.nonce {
+			return errAlreadyApplied
+		}
 	}
 	clean := clone(in)
 	delete(clean, "key")
@@ -378,7 +384,8 @@ func (h *harness) admit(ctx context.Context, p *principal, key contentKey, in ob
 	stopped, stop := context.WithCancel(context.Background())
 	r.log = newRun(token())
 	r.log.stop = stop
-	r.stopped, r.input, r.principal, r.key, r.messageID, r.credential, r.assembler = stopped, clean, p, key, "msg_"+token(), credential, newMessageAssembler()
+	// The user message a turn adds is named by the client's request.
+	r.stopped, r.input, r.principal, r.key, r.messageID, r.credential, r.assembler = stopped, clean, p, key, r.nonce, credential, newMessageAssembler()
 	if local {
 		r.profile = localProfile(obj(in["profile"]))
 	}
@@ -396,7 +403,7 @@ func (h *harness) admit(ctx context.Context, p *principal, key contentKey, in ob
 	if s != nil && s.active != nil && len(s.queue) >= maxQueuedTurns {
 		return apiErr(429, "QUOTA_EXHAUSTED", "The turn queue is full")
 	}
-	if (s == nil || s.active == nil) && local && source == nil && seed == nil && str(in["threadId"]) != "" {
+	if (s == nil || s.active == nil) && local && source == nil && seed == nil {
 		return apiErr(400, "BAD_REQUEST", "A local thread requires its transcript")
 	}
 	if s == nil {
@@ -476,16 +483,17 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 		if err != nil {
 			return err
 		}
+		// A new chat's first turn creates its row under the client's id.
 		row, err = h.storeRows.load(ctx, p, r.key, "chat", s.id)
-		if err != nil && (asAPIError(err).HTTP != 404 || str(r.input["threadId"]) != "") {
+		if err != nil && (asAPIError(err).HTTP != 404 || !rowIDPattern.MatchString(s.id)) {
 			return err
 		}
 		if err != nil {
 			row = newThreadRow(s.id, r.input, nil)
 		}
 		normalizeThread(row)
-		if saved := obj(obj(row.Data["harnessRequests"])[r.nonce]); len(saved) > 0 {
-			return apiErr(409, "REVISION_CONFLICT", "This request was already accepted")
+		if row.Data["lastRequestId"] == r.nonce {
+			return errAlreadyApplied
 		}
 		if id := str(row.Data["projectId"]); id != "" {
 			stored, err := h.storeRows.load(ctx, p, r.key, "project", id)
@@ -593,6 +601,10 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	if !s.ephemeral {
 		initial := row.Data
 		stored, err := h.mutate(ctx, p, r.key, "chat", s.id, row.ETag == "", nil, func(data object) error {
+			// Another attempt of this commit may have stored it already.
+			if data["lastRequestId"] == r.nonce && obj(data["activeRun"])["runId"] != r.log.id {
+				return errAlreadyApplied
+			}
 			if _, exists := data["messages"]; !exists {
 				for field, value := range initial {
 					data[field] = value
@@ -611,11 +623,9 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 			data["contextUsage"] = working["contextUsage"]
 			copyAttachmentDerivatives(working, data)
 			stripInlineAttachments(data)
-			data["activeRun"] = activeRun(r.log.id)
+			data["activeRun"], data["lastRequestId"] = activeRun(r.log.id), r.nonce
 			delete(data, "harnessRetry")
-			requests := obj(data["harnessRequests"])
-			requests[r.nonce] = object{"runId": r.log.id, "digest": r.digest}
-			data["harnessRequests"] = requests
+			delete(data, "harnessRequests")
 			return nil
 		})
 		if err != nil {
@@ -624,7 +634,7 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 		row = stored
 	} else {
 		row.Data = working
-		row.Data["activeRun"] = activeRun(r.log.id)
+		row.Data["activeRun"], row.Data["lastRequestId"] = activeRun(r.log.id), r.nonce
 	}
 	// A continuation streams into the reply it extends, which RUN_STARTED names.
 	if r.input["kind"] == "continue" {

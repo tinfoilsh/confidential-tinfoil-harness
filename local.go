@@ -12,7 +12,7 @@ const maxLocalMessages = 10000
 var serverThreadFields = []string{"activeRun", "harnessRequests", "harnessRetry", "harnessHiddenCount", "projectId", "contextUsage"}
 
 func validateLocalThread(thread object) error {
-	if err := validateFields(thread, "title titleState model", "pinned webSearchEnabled", "presetId"); err != nil {
+	if err := validateFields(thread, "title titleState model lastRequestId", "pinned webSearchEnabled", "presetId"); err != nil {
 		return err
 	}
 	value, ok := thread["messages"]

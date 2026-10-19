@@ -253,8 +253,10 @@ func postRoute(h *harness, path string, in object, user string) *httptest.Respon
 	h.routes().ServeHTTP(w, r)
 	return w
 }
+
+// sendInput is the first turn of a new chat, under an id its client chose.
 func sendInput(key contentKey) object {
-	return object{"key": key.base64(), "clientRequestId": uuid.NewString(), "content": "test message", "kind": "send", "options": object{"model": "kimi-k3", "webSearch": false}}
+	return object{"key": key.base64(), "threadId": rowID(), "clientRequestId": uuid.NewString(), "content": "test message", "kind": "send", "options": object{"model": "kimi-k3", "webSearch": false}}
 }
 func eventsIn(t *testing.T, w *httptest.ResponseRecorder) []event {
 	t.Helper()
@@ -306,10 +308,6 @@ func TestManagedTurnStoresV2AndKeepsKeyOutOfEvents(t *testing.T) {
 	assistant := obj(arr(row.Data["messages"])[1])
 	if assistant["content"] != "answer" || len(arr(assistant["timeline"])) != 2 {
 		t.Fatalf("v2 message not preserved: %v", assistant)
-	}
-	retry := postRoute(h, "/v1/threads/turn", in, "alice")
-	if row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID); retry.Code != 409 || len(arr(row.Data["messages"])) != 2 {
-		t.Fatalf("a retried request ran again: HTTP %d", retry.Code)
 	}
 	wrong := postRoute(h, "/v1/threads/follow", object{"key": key.base64(), "threadId": events[0].ThreadID, "runId": events[0].RunID}, "bob")
 	if wrong.Code != 404 {
