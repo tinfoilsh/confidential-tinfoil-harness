@@ -151,28 +151,24 @@ func TestLocalTitleIsGeneratedWithoutStorage(t *testing.T) {
 	}
 }
 
-func TestLocalUploadReturnsItsDescriptorWithoutAKey(t *testing.T) {
+func TestALocalTurnReadsTheUploadItSends(t *testing.T) {
 	var prompt string
 	h, rows, _ := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		prompt = string(b)
 		io.WriteString(w, "data: [DONE]\n\n")
 	})
-	if w := uploadRoute(h, "/v1/attachments/upload", "notes.txt", []byte("remember the blue door"), nil, "alice"); w.Code != 401 {
-		t.Fatalf("stored upload accepted without a key: %d", w.Code)
-	}
-	w := uploadRoute(h, "/v1/attachments/upload", "notes.txt", []byte("remember the blue door"), map[string]string{"local": "true"}, "alice")
+	uploader, _, _ := testChatHarness(t, nil)
+	w := uploadRoute(uploader, "/v1/attachments/upload", "notes.txt", []byte("remember the blue door"), nil, "alice")
 	if w.Code != 200 {
-		t.Fatalf("local upload failed: %d %s", w.Code, w.Body.String())
+		t.Fatalf("upload failed: %d %s", w.Code, w.Body.String())
 	}
-	var view object
-	json.Unmarshal(w.Body.Bytes(), &view)
-	descriptor := obj(view["descriptor"])
-	if str(view["id"]) == "" || descriptor["id"] != view["id"] || descriptor["textContent"] != "remember the blue door" || descriptor["fileName"] != "notes.txt" {
-		t.Fatalf("local upload did not return its descriptor: %v", view)
+	var body struct {
+		Attachment object `json:"attachment"`
 	}
-	in := localInput("", nil)
-	in["attachments"] = []any{view["id"]}
+	json.Unmarshal(w.Body.Bytes(), &body)
+	in := localInput("0000000000006_local", object{"messages": []any{}})
+	in["attachments"] = []any{body.Attachment}
 	events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice"))
 	if events[len(events)-1].Type != "RUN_FINISHED" || !strings.Contains(prompt, "remember the blue door") {
 		t.Fatalf("local turn did not read its upload: %s", prompt)

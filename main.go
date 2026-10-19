@@ -67,7 +67,6 @@ type harness struct {
 	threads       map[string]*threadSession
 	requests      map[string]*chatRun
 	starting      map[string]chan struct{}
-	attachments   map[string]*pendingAttachment
 }
 
 func main() {

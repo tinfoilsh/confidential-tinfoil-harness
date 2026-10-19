@@ -25,7 +25,7 @@ func (h *harness) apiRoutes() []routeSpec {
 		{"/v1/projects/create", false, true, h.createProject}, {"/v1/projects/update", false, true, h.updateProject},
 		{"/v1/projects/delete", false, true, h.deleteProject}, {"/v1/projects/documents/delete", false, true, h.deleteDocument},
 		{"/v1/projects/memory/get", false, true, h.getMemory}, {"/v1/projects/memory/update", false, true, h.updateMemory},
-		{"/v1/attachments/delete", false, true, h.deleteAttachment}, {"/v1/shares/open", true, false, h.openShare},
+		{"/v1/shares/open", true, false, h.openShare},
 		{"/v1/import/status", false, false, h.importStatus},
 		{"/v1/threads/delete-all", false, true, h.deleteAllThreads},
 		{"/v1/projects/delete-all", false, true, h.deleteAllProjects},

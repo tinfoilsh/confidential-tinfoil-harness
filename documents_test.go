@@ -19,6 +19,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 type fakeBlob struct {
@@ -131,22 +133,28 @@ func capturePrompt(prompt *string) http.HandlerFunc {
 	}
 }
 
+// An upload is converted and forgotten: the harness that runs the turn has
+// never seen it, and stores what the turn sends under the new chat.
 func TestStoredUploadIsOffloadedUnderItsThread(t *testing.T) {
 	var prompt string
 	h, rows, key := testChatHarness(t, capturePrompt(&prompt))
 	fake := newFakeSync(t, h)
-	upload := uploadRoute(h, "/v1/attachments/upload", "notes.txt", []byte("remember the blue door"), map[string]string{"key": key.base64()}, "alice")
+	uploader, _, _ := testChatHarness(t, nil)
+	upload := uploadRoute(uploader, "/v1/attachments/upload", "notes.txt", []byte("remember the blue door"), nil, "alice")
 	if upload.Code != 200 {
 		t.Fatalf("upload failed: %d %s", upload.Code, upload.Body.String())
 	}
-	var view object
-	json.Unmarshal(upload.Body.Bytes(), &view)
-	if fake.putCount() != 0 {
-		t.Fatal("an upload was stored before its thread existed")
+	var body struct {
+		Attachment object `json:"attachment"`
+	}
+	json.Unmarshal(upload.Body.Bytes(), &body)
+	sent := body.Attachment
+	if sent["kind"] != "document" || sent["fileName"] != "notes.txt" || sent["textContent"] != "remember the blue door" || integer(sent["size"]) != len("remember the blue door") || !strings.HasPrefix(str(sent["id"]), "att_") {
+		t.Fatalf("upload descriptor: %v", sent)
 	}
 	in := sendInput(key)
-	in["attachments"] = []any{view["id"]}
-	events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice"))
+	in["attachments"] = []any{sent}
+	events := finishedRun(t, h, "/v1/threads/turn", in)
 	thread := events[0].ThreadID
 	if !strings.Contains(prompt, "remember the blue door") {
 		t.Fatal("the document did not reach the model")
@@ -156,7 +164,7 @@ func TestStoredUploadIsOffloadedUnderItsThread(t *testing.T) {
 	}
 	put := fake.puts[0]
 	payload, _ := base64.StdEncoding.DecodeString(str(put["plaintext"]))
-	if put["chat_id"] != thread || string(payload) != `{"textContent":"remember the blue door"}` || put["idempotency_key"] != attachmentIdempotencyKey(thread, str(view["id"]), payload) {
+	if put["chat_id"] != thread || string(payload) != `{"textContent":"remember the blue door"}` || put["idempotency_key"] != attachmentIdempotencyKey(thread, str(sent["id"]), payload) {
 		t.Fatalf("blob is not the document payload under its thread: %v %s", put, payload)
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", thread)
@@ -168,6 +176,20 @@ func TestStoredUploadIsOffloadedUnderItsThread(t *testing.T) {
 		if _, ok := stored[field]; ok {
 			t.Fatalf("row kept %s: %v", field, stored)
 		}
+	}
+	// An edit names the attachment the chat stores by its id alone.
+	edit := continueInput(key, thread)
+	edit["kind"], edit["messageId"], edit["content"] = "edit", obj(arr(row.Data["messages"])[0])["id"], "look again"
+	edit["attachments"] = []any{object{"id": "att_unknown"}}
+	if w := postRoute(h, "/v1/threads/turn", edit, "alice"); w.Code != 404 {
+		t.Fatalf("an edit naming an unknown attachment: HTTP %d", w.Code)
+	}
+	edit["clientRequestId"], edit["attachments"] = uuid.NewString(), []any{object{"id": stored["id"]}}
+	finishedRun(t, h, "/v1/threads/turn", edit)
+	row, _ = rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", thread)
+	kept := obj(arr(obj(arr(row.Data["messages"])[0])["attachments"])[0])
+	if kept["id"] != stored["id"] || kept["encryptionKey"] != stored["encryptionKey"] || fake.putCount() != 1 {
+		t.Fatalf("the edit did not keep the stored attachment: %v after %d blobs", kept, fake.putCount())
 	}
 }
 

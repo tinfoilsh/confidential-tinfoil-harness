@@ -69,7 +69,6 @@ func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
 				return
 			case <-tick.C:
 				h.expireThreads()
-				h.expireAttachments()
 				refresh++
 				// Every minute until the gateway first offers a model, then every five.
 				if refresh%5 == 0 || len(h.offer.get()) == 0 {

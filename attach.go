@@ -33,7 +33,6 @@ import (
 const maxUploadBytes = 33 << 20
 const maxTextBytes = 50 << 20
 const maxImagePixels = 40_000_000
-const maxUploadCache = 256 << 20
 
 var imageExtensions = strings.Fields(".jpg .jpeg .png .gif .webp .bmp .tiff .tif")
 var documentExtensions = strings.Fields(".pdf .docx .pptx .xlsx")
@@ -48,13 +47,6 @@ func uploadAccept() []string {
 	return append(result, textExtensions...)
 }
 func randomBytes(n int) []byte { b := make([]byte, n); rand.Read(b); return b }
-
-type pendingAttachment struct {
-	owner, keyHash string
-	descriptor     object
-	bytes          []byte
-	expires        time.Time
-}
 
 func publicAttachment(a object) object {
 	out := object{"id": a["id"], "kind": firstString(a["kind"], a["type"]), "fileName": a["fileName"], "mimeType": a["mimeType"], "size": a["fileSize"], "thumbnail": a["thumbnailBase64"], "pages": nil, "status": "ready"}
@@ -142,23 +134,24 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 		respond(w, object{"text": text}, err)
 		return
 	}
-	// A local upload returns the whole descriptor, since its client stores it
-	// and sends it back with the transcript of later turns.
-	local := str(fields["local"]) == "true" && r.URL.Path == "/v1/attachments/upload"
-	var key contentKey
-	if !p.Anonymous && !local {
-		key, err = decodeContentKey(str(fields["key"]))
-		if err != nil {
-			respond(w, nil, err)
-			return
-		}
-	}
-	defer clear(key[:])
 	descriptor, err := h.preprocess(ctx, filename, file)
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
+	// An upload is only converted. Its client sends the descriptor back with
+	// the turn that attaches it, and that turn stores it with the chat.
+	if r.URL.Path == "/v1/attachments/upload" {
+		descriptor["id"] = "att_" + token()
+		respond(w, object{"attachment": uploadView(descriptor)}, nil)
+		return
+	}
+	key, err := decodeContentKey(str(fields["key"]))
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	defer clear(key[:])
 	if r.URL.Path == "/v1/projects/documents/upload" {
 		projectID, err := requiredID(fields, "projectId")
 		if err != nil {
@@ -187,35 +180,36 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 		respond(w, view, nil)
 		return
 	}
-	id := "att_" + token()
-	descriptor["id"] = id
-	// Sync deletes blobs filed under a chat that does not exist yet, so a
-	// stored chat's upload waits here until its turn stores it under the chat.
-	// A document's content is in its descriptor; only an image keeps bytes.
-	var kept []byte
-	if isImage(descriptor) {
-		kept = file
+}
+
+// uploadView is an upload's descriptor as its client holds it until a turn
+// sends it back: page images included, image bytes not.
+func uploadView(a object) object {
+	out := object{"id": a["id"], "kind": firstString(a["kind"], a["type"]), "fileName": a["fileName"], "mimeType": a["mimeType"], "size": a["fileSize"]}
+	for field, stored := range map[string]string{"thumbnail": "thumbnailBase64", "textContent": "textContent", "description": "description", "pages": "pages"} {
+		if value, ok := a[stored]; ok {
+			out[field] = value
+		}
 	}
-	h.chatMu.Lock()
-	if h.attachments == nil {
-		h.attachments = map[string]*pendingAttachment{}
+	return out
+}
+
+// sentAttachment is the stored form of an attachment a turn sends whole:
+// an upload's descriptor, and an image's bytes while its client holds them.
+func sentAttachment(d object) object {
+	a := object{"id": d["id"], "type": "document", "fileName": d["fileName"], "mimeType": d["mimeType"], "fileSize": d["size"]}
+	switch d["kind"] {
+	case "image":
+		a["type"] = "image"
+	case "audio":
+		a["kind"] = "audio"
 	}
-	cacheBytes := len(kept) + len(raw(descriptor))
-	for _, cached := range h.attachments {
-		cacheBytes += len(cached.bytes) + len(raw(cached.descriptor))
+	for field, sent := range map[string]string{"thumbnailBase64": "thumbnail", "textContent": "textContent", "description": "description", "pages": "pages", "base64": "base64"} {
+		if value, ok := d[sent]; ok && value != nil {
+			a[field] = value
+		}
 	}
-	if len(h.attachments) >= 256 || cacheBytes > maxUploadCache {
-		h.chatMu.Unlock()
-		respond(w, nil, apiErr(503, "UPSTREAM_REFUSED", "The upload cache is at capacity"))
-		return
-	}
-	h.attachments[p.scope()+"/"+id] = &pendingAttachment{owner: p.scope(), keyHash: key.fingerprint(), descriptor: clone(descriptor), bytes: bytes.Clone(kept), expires: nowUTC().Add(runTimeout)}
-	h.chatMu.Unlock()
-	view := publicAttachment(descriptor)
-	if local {
-		view["descriptor"] = descriptor
-	}
-	respond(w, view, nil)
+	return a
 }
 
 func (h *harness) preprocess(ctx context.Context, filename string, data []byte) (object, error) {
@@ -425,23 +419,10 @@ func (h *harness) transcribe(ctx context.Context, filename string, data []byte) 
 	return string(b), nil
 }
 
-// attachment finds an attachment a client may download: one it uploaded or
-// one in the named thread.
+// attachment finds an attachment of the named thread for its client to download.
 func (h *harness) attachment(ctx context.Context, p *principal, key contentKey, id, threadID string) (object, []byte, error) {
-	h.chatMu.Lock()
-	cached := h.attachments[p.scope()+"/"+id]
-	if cached != nil && cached.expires.After(nowUTC()) {
-		if !p.Anonymous && cached.keyHash != key.fingerprint() {
-			h.chatMu.Unlock()
-			return nil, nil, apiErr(409, "KEY_MISMATCH", "The attachment uses another key")
-		}
-		descriptor, data := clone(cached.descriptor), bytes.Clone(cached.bytes)
-		h.chatMu.Unlock()
-		return descriptor, data, nil
-	}
-	h.chatMu.Unlock()
 	if p.Anonymous {
-		return nil, nil, apiErr(404, "THREAD_NOT_FOUND", "The attachment expired")
+		return nil, nil, apiErr(404, "THREAD_NOT_FOUND", "The attachment was not found")
 	}
 	if key == (contentKey{}) {
 		return nil, nil, apiErr(401, "KEY_REQUIRED", "A content key is required")
@@ -621,66 +602,28 @@ func documentRequest(descriptor object, data []byte) bool {
 	return true
 }
 
-// Only an upload that no chat references yet can be deleted: sync refuses
-// every later push of a chat whose attachment was deleted.
-func (h *harness) deleteAttachment(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
-	id, err := requiredID(in, "id")
-	if err != nil {
-		return nil, err
-	}
-	h.chatMu.Lock()
-	defer h.chatMu.Unlock()
-	cached := h.attachments[p.scope()+"/"+id]
-	if cached == nil || cached.keyHash != key.fingerprint() {
-		return nil, apiErr(404, "THREAD_NOT_FOUND", "The upload was not found")
-	}
-	clear(cached.bytes)
-	delete(h.attachments, p.scope()+"/"+id)
-	return object{}, nil
-}
-
-// turnAttachments resolves the attachment ids a turn names. A new upload comes
-// from the cache; a stored thread may also reuse one of its own attachments,
-// as an edit does. A stored thread's image carries its bytes inline so they
-// can be stored under the thread.
-func (h *harness) turnAttachments(ctx context.Context, p *principal, key contentKey, in, thread object, ephemeral, keyless bool) ([]any, error) {
+// turnAttachments resolves the attachments a turn names: an upload sent
+// whole, or by id one the thread already holds, as an edit sends it.
+func turnAttachments(in, thread object) ([]any, error) {
 	result := []any{}
 	for _, value := range arr(in["attachments"]) {
-		var descriptor object
-		h.chatMu.Lock()
-		cached := h.attachments[p.scope()+"/"+str(value)]
-		if cached != nil && cached.expires.After(nowUTC()) && (keyless || cached.keyHash == key.fingerprint()) && (!isImage(cached.descriptor) || len(cached.bytes) > 0) {
-			descriptor = clone(cached.descriptor)
-			cached.expires = nowUTC().Add(runTimeout)
-			if !ephemeral && isImage(descriptor) {
-				descriptor["base64"] = base64.StdEncoding.EncodeToString(cached.bytes)
-			}
+		sent := obj(value)
+		if _, whole := sent["kind"]; whole {
+			result = append(result, sentAttachment(sent))
+			continue
 		}
-		h.chatMu.Unlock()
-		if descriptor == nil && !ephemeral {
-			descriptor = threadAttachment(thread, str(value))
-		}
+		descriptor := threadAttachment(thread, str(sent["id"]))
 		if descriptor == nil {
-			return nil, apiErr(404, "THREAD_NOT_FOUND", "The attachment expired; upload it again")
+			return nil, apiErr(404, "THREAD_NOT_FOUND", "The attachment was not found")
 		}
 		result = append(result, descriptor)
 	}
 	return result, nil
 }
-func (h *harness) expireAttachments() {
-	h.chatMu.Lock()
-	defer h.chatMu.Unlock()
-	for id, item := range h.attachments {
-		if !item.expires.After(nowUTC()) {
-			clear(item.bytes)
-			delete(h.attachments, id)
-		}
-	}
-}
 
 // A local transcript may omit older images' bytes to stay small. The model
 // then reads such an image through its description, or not at all.
-func (h *harness) hydrateContext(ctx context.Context, p *principal, key contentKey, thread object, ephemeral, local bool) error {
+func (h *harness) hydrateContext(ctx context.Context, p *principal, thread object, temporary bool) error {
 	name := str(thread["model"])
 	c := h.catalog.get()
 	if c == nil {
@@ -702,38 +645,16 @@ func (h *harness) hydrateContext(ctx context.Context, p *principal, key contentK
 			if !vision && str(a["description"]) != "" {
 				continue
 			}
-			var data []byte
-			var err error
-			if ephemeral && str(a["base64"]) != "" {
-				data, err = base64.StdEncoding.DecodeString(str(a["base64"]))
-				if err != nil {
-					return err
-				}
-			} else if ephemeral {
-				h.chatMu.Lock()
-				cached := h.attachments[p.scope()+"/"+str(a["id"])]
-				if cached != nil {
-					data = bytes.Clone(cached.bytes)
-					cached.expires = nowUTC().Add(runTimeout)
-				}
-				h.chatMu.Unlock()
-				if len(data) == 0 && local {
-					continue
-				}
-				if len(data) == 0 {
-					return apiErr(404, "THREAD_NOT_FOUND", "The temporary attachment expired")
-				}
-			} else {
-				if str(a["base64"]) == "" && attachmentKey(a) == "" {
-					continue // only its thumbnail was kept
-				}
-				data, err = h.attachmentBytes(ctx, p, a, false)
-				if unreachable(err) {
-					continue
-				}
-				if err != nil {
-					return err
-				}
+			// Without its bytes, only its thumbnail was kept.
+			if str(a["base64"]) == "" && (temporary || attachmentKey(a) == "") {
+				continue
+			}
+			data, err := h.attachmentBytes(ctx, p, a, false)
+			if unreachable(err) {
+				continue
+			}
+			if err != nil {
+				return err
 			}
 			resized, _, err := resizeImage(data)
 			clear(data)
@@ -761,18 +682,6 @@ func (h *harness) hydrateContext(ctx context.Context, p *principal, key contentK
 				return err
 			}
 			a["description"] = response
-			if ephemeral && str(a["base64"]) != "" {
-				data, err = base64.StdEncoding.DecodeString(str(a["base64"]))
-				if err != nil {
-					return err
-				}
-			} else if ephemeral {
-				h.chatMu.Lock()
-				if cached := h.attachments[p.scope()+"/"+str(a["id"])]; cached != nil {
-					cached.descriptor["description"] = response
-				}
-				h.chatMu.Unlock()
-			}
 		}
 	}
 	return nil

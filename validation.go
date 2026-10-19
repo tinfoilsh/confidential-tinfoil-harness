@@ -78,3 +78,36 @@ func validObject(value any) bool {
 	}
 	return false
 }
+
+// validateSentAttachment accepts an upload's descriptor, or the id alone of
+// an attachment the thread already holds.
+func validateSentAttachment(value any) error {
+	if !validObject(value) {
+		return apiErr(400, "BAD_REQUEST", "Each attachment must be an object")
+	}
+	a := obj(value)
+	if _, err := requiredID(a, "id"); err != nil {
+		return err
+	}
+	kind, whole := a["kind"]
+	if !whole {
+		return nil
+	}
+	if !slices.Contains([]string{"image", "document", "audio"}, str(kind)) {
+		return apiErr(400, "BAD_REQUEST", "An attachment kind must be image, document, or audio")
+	}
+	if err := validateFields(a, "fileName mimeType textContent description base64", "", "thumbnail"); err != nil {
+		return err
+	}
+	if size, ok := a["size"]; ok {
+		if _, ok := size.(float64); !ok {
+			return apiErr(400, "BAD_REQUEST", "size must be a number")
+		}
+	}
+	if pages, ok := a["pages"]; ok && pages != nil {
+		if _, ok := pages.([]any); !ok {
+			return apiErr(400, "BAD_REQUEST", "pages must be an array")
+		}
+	}
+	return nil
+}

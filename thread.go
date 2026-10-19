@@ -170,10 +170,10 @@ func validateTurn(in object) error {
 	}
 	if v, ok := in["attachments"]; ok {
 		if _, ok := v.([]any); !ok {
-			return apiErr(400, "BAD_REQUEST", "attachments must be an array of ids")
+			return apiErr(400, "BAD_REQUEST", "attachments must be an array")
 		}
-		for _, id := range arr(v) {
-			if _, err := requiredID(object{"id": id}, "id"); err != nil {
+		for _, item := range arr(v) {
+			if err := validateSentAttachment(item); err != nil {
 				return err
 			}
 		}
@@ -453,7 +453,7 @@ func (h *harness) beginChatRun(ctx context.Context, r *chatRun) error {
 		}
 	}
 	working := clone(s.row.Data)
-	attachments, err := h.turnAttachments(ctx, r.principal, r.key, r.input, working, s.ephemeral, s.keyless)
+	attachments, err := turnAttachments(r.input, working)
 	if err != nil {
 		return err
 	}
@@ -489,7 +489,7 @@ func (h *harness) beginChatRun(ctx context.Context, r *chatRun) error {
 	if err := preflightBudget(preview); err != nil {
 		return err
 	}
-	if err := h.hydrateContext(ctx, r.principal, r.key, working, temporary, s.local); err != nil {
+	if err := h.hydrateContext(ctx, r.principal, working, temporary); err != nil {
 		return err
 	}
 	titleText := titleSource(working)

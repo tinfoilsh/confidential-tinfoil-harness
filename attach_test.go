@@ -86,14 +86,16 @@ func TestDocumentConversionWaitsOutCapacityRejections(t *testing.T) {
 			})
 			response := uploadRoute(h, "/v1/attachments/upload", "report.pdf", []byte("%PDF-1.7 report"), nil, "")
 			var body struct {
-				TextContent string   `json:"textContent"`
-				Error       apiError `json:"error"`
+				Attachment struct {
+					TextContent string `json:"textContent"`
+				} `json:"attachment"`
+				Error apiError `json:"error"`
 			}
 			json.Unmarshal(response.Body.Bytes(), &body)
 			if int(calls.Load()) != tc.calls || body.Error.Code != tc.code || body.Error.Upstream != tc.upstream {
 				t.Fatalf("calls=%d HTTP %d %s", calls.Load(), response.Code, response.Body.String())
 			}
-			if tc.code == "" && (response.Code != 200 || body.TextContent != "converted") {
+			if tc.code == "" && (response.Code != 200 || body.Attachment.TextContent != "converted") {
 				t.Fatalf("retried conversion failed: HTTP %d %s", response.Code, response.Body.String())
 			}
 			if tc.code == "UPSTREAM_REFUSED" && body.Error.Message != "Could not extract content from the document. Try exporting it again or uploading a text version." {
