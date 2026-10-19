@@ -378,11 +378,10 @@ func TestForkCopiesAChatThroughItsMessage(t *testing.T) {
 	messages := []any{object{"id": "m1", "role": "user", "content": "plan a trip"}, object{"id": "m2", "role": "assistant", "content": "first, pack"}, object{"id": "m3", "role": "user", "content": "go on"}}
 	rows.rows[rowMapKey(p, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "4", Data: object{"title": "Trip", "titleState": "generated", "createdAt": "2026-01-01T00:00:00Z", "presetId": "builtin:tutor", "model": "kimi-k3", "webSearchEnabled": false,
 		"pinned": true, "contextUsage": object{"usedTokens": 900}, "harnessRequests": object{"nonce": object{"runId": "run", "digest": "digest"}}, "messages": messages}}
-	rows.rows[rowMapKey(p, "chat", "busy")] = storedRow{ID: "busy", ETag: "1", Data: object{"activeRun": object{"runId": "run"}, "messages": messages}}
 	for _, tc := range []struct {
 		in   object
 		code int
-	}{{object{"threadId": "busy", "messageId": "m1"}, 409}, {object{"threadId": "chat-1", "messageId": "m4"}, 404}, {object{"threadId": "chat-1"}, 400}} {
+	}{{object{"threadId": "chat-1", "messageId": "m4"}, 404}, {object{"threadId": "chat-1"}, 400}} {
 		tc.in["key"] = key.base64()
 		if w := postRoute(h, "/v1/threads/fork", tc.in, "alice"); w.Code != tc.code || len(fake.requests("/v1/sync/fork")) != 0 {
 			t.Fatalf("%v: HTTP %d, want %d without a fork", tc.in, w.Code, tc.code)

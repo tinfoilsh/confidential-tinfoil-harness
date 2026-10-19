@@ -535,9 +535,6 @@ func (h *harness) beginChatRun(ctx context.Context, r *chatRun) error {
 	working["contextUsage"] = requestContextUsage(request)
 	if !s.ephemeral {
 		row, err := h.mutate(ctx, r.principal, r.key, "chat", s.id, s.row.ETag == "", nil, func(data object) error {
-			if active := str(obj(data["activeRun"])["runId"]); active != "" && active != r.log.id {
-				return apiErr(409, "RUN_IN_FLIGHT", "Another harness owns the active run")
-			}
 			if _, exists := data["messages"]; !exists {
 				for field, value := range s.row.Data {
 					data[field] = value
@@ -556,11 +553,8 @@ func (h *harness) beginChatRun(ctx context.Context, r *chatRun) error {
 			data["contextUsage"] = working["contextUsage"]
 			copyAttachmentDerivatives(working, data)
 			stripInlineAttachments(data)
-			data["activeRun"] = object{"runId": r.log.id, "lastEventId": 0, "expiresAt": nowUTC().Add(runTimeout).Format(time.RFC3339Nano)}
+			data["activeRun"] = activeRun(r.log.id)
 			delete(data, "harnessRetry")
-			if r.retryTarget != nil {
-				data["harnessRetry"] = object{"runId": r.log.id, "messageId": r.retryTarget["parentId"], "toolCallId": r.input["toolCallId"], "arguments": r.retryTarget["arguments"]}
-			}
 			requests := obj(data["harnessRequests"])
 			requests[r.nonce] = object{"runId": r.log.id, "digest": r.digest}
 			data["harnessRequests"] = requests
@@ -572,7 +566,7 @@ func (h *harness) beginChatRun(ctx context.Context, r *chatRun) error {
 		s.row = row
 	} else {
 		s.row.Data = working
-		s.row.Data["activeRun"] = object{"runId": r.log.id, "lastEventId": 0, "expiresAt": nowUTC().Add(runTimeout).Format(time.RFC3339Nano)}
+		s.row.Data["activeRun"] = activeRun(r.log.id)
 	}
 	// A continuation streams into the reply it extends, which RUN_STARTED names.
 	if r.input["kind"] == "continue" {
@@ -623,6 +617,13 @@ func (h *harness) beginChatRun(ctx context.Context, r *chatRun) error {
 	}()
 	return nil
 }
+
+// activeRun tells clients a reply may be streaming, until the run's deadline.
+// It never locks the chat: a run whose process died leaves it behind.
+func activeRun(runID string) object {
+	return object{"runId": runID, "expiresAt": nowUTC().Add(runTimeout).Format(time.RFC3339Nano)}
+}
+
 func usageForRun(r *chatRun) usagereporting.Context {
 	return usagereporting.Context{ContextID: r.log.id, RootRequestID: r.log.id, ParentService: "harness", APIKeyHash: usagereporting.HashAPIKey(string(r.credential.Key)), Depth: 1}
 }
@@ -764,7 +765,6 @@ func (h *harness) finishChatRun(r *chatRun, runErr error) {
 			}
 			if obj(data["activeRun"])["runId"] == r.log.id {
 				data["activeRun"] = nil
-				delete(data, "harnessRetry")
 			}
 			return nil
 		}
@@ -780,7 +780,6 @@ func (h *harness) finishChatRun(r *chatRun, runErr error) {
 		data["messages"] = all
 		if obj(data["activeRun"])["runId"] == r.log.id {
 			data["activeRun"] = nil
-			delete(data, "harnessRetry")
 		}
 		return nil
 	}

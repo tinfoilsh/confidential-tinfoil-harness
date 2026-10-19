@@ -379,14 +379,13 @@ func TestDeletingAMessageRemovesOnlyThatMessage(t *testing.T) {
 		object{"role": "user", "content": "one", "imageData": []any{object{"base64": "aW1hZ2U=", "mimeType": "image/png"}}}, object{"role": "assistant", "content": "two"}, object{"role": "user", "content": "three"}, object{"role": "assistant", "content": "four"},
 	}}}
 	rows.rows[rowMapKey(p, "chat", "solo")] = storedRow{ID: "solo", ETag: "1", Data: object{"messages": []any{object{"id": "only", "role": "user", "content": "hi"}}}}
-	rows.rows[rowMapKey(p, "chat", "busy")] = storedRow{ID: "busy", ETag: "1", Data: object{"activeRun": object{"runId": "run"}, "messages": []any{object{"id": "a", "role": "user", "content": "hi"}, object{"id": "b", "role": "assistant", "content": "hey"}}}}
 	remove := func(thread, message string) *httptest.ResponseRecorder {
 		return postRoute(h, "/v1/threads/messages/delete", object{"key": key.base64(), "threadId": thread, "messageId": message}, "alice")
 	}
 	for _, tc := range []struct {
 		thread, message string
 		code            int
-	}{{"solo", "only", 400}, {"busy", "b", 409}, {"chat-1", "chat-1-message-9", 404}} {
+	}{{"solo", "only", 400}, {"chat-1", "chat-1-message-9", 404}} {
 		if w := remove(tc.thread, tc.message); w.Code != tc.code {
 			t.Fatalf("deleting %s from %s: HTTP %d, want %d", tc.message, tc.thread, w.Code, tc.code)
 		}
@@ -407,10 +406,68 @@ func TestDeletingAMessageRemovesOnlyThatMessage(t *testing.T) {
 	if _, ok := obj(messages[0])["attachments"]; ok {
 		t.Fatalf("a deletion rewrote a message's legacy fields: %v", messages[0])
 	}
-	for _, id := range []string{"solo", "busy"} {
-		if row, _ := rows.load(context.Background(), p, key, "chat", id); row.ETag != "1" {
-			t.Fatalf("a refused deletion changed %s", id)
+	if row, _ := rows.load(context.Background(), p, key, "chat", "solo"); row.ETag != "1" {
+		t.Fatal("a refused deletion changed the chat")
+	}
+}
+
+// A stored activeRun only tells clients a reply may be streaming. One left
+// by a process that died, expired or not, never locks its chat.
+func TestADeadRunNeverLocksItsChat(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	fake := newFakeSync(t, h)
+	p := &principal{ID: "alice"}
+	recent := nowUTC().Add(time.Hour).Format(time.RFC3339Nano)
+	runs := map[string]object{
+		"stale":     {"runId": "dead", "lastEventId": 7, "expiresAt": nowUTC().Add(-time.Minute).Format(time.RFC3339Nano)},
+		"recent":    {"runId": "dead", "lastEventId": 7, "expiresAt": recent},
+		"unstamped": {"runId": "dead"},
+	}
+	for id, run := range runs {
+		storedThread(rows, "alice", id)
+		row := rows.rows[rowMapKey(p, "chat", id)]
+		row.Data["activeRun"] = run
+		rows.rows[rowMapKey(p, "chat", id)] = row
+	}
+	var list struct {
+		Threads []object `json:"threads"`
+	}
+	json.Unmarshal(postRoute(h, "/v1/threads/list", object{"key": key.base64()}, "alice").Body.Bytes(), &list)
+	hints := map[string]any{}
+	for _, thread := range list.Threads {
+		hints[str(thread["id"])] = thread["activeRun"]
+	}
+	if len(hints) != 3 || hints["stale"] != nil || hints["unstamped"] != nil || !reflect.DeepEqual(hints["recent"], map[string]any{"runId": "dead", "expiresAt": recent}) {
+		t.Fatalf("summaries report %v", hints)
+	}
+	for _, id := range []string{"stale", "recent"} {
+		in := object{"key": key.base64(), "threadId": id, "messageId": "m2"}
+		if w := postRoute(h, "/v1/threads/messages/update", object{"key": key.base64(), "threadId": id, "messageId": "m2", "content": "edited"}, "alice"); w.Code != 200 {
+			t.Fatalf("%s: editing a reply: HTTP %d %s", id, w.Code, w.Body.String())
 		}
+		if w := postRoute(h, "/v1/threads/fork", in, "alice"); w.Code != 200 {
+			t.Fatalf("%s: forking: HTTP %d %s", id, w.Code, w.Body.String())
+		}
+		if w := postRoute(h, "/v1/threads/transcript", object{"key": key.base64(), "threadId": id}, "alice"); w.Code != 200 {
+			t.Fatalf("%s: moving to the device: HTTP %d %s", id, w.Code, w.Body.String())
+		}
+		edit := continueInput(key, id)
+		edit["kind"], edit["messageId"], edit["content"] = "edit", "m1", "look again"
+		finishedRun(t, h, "/v1/threads/turn", edit)
+		row, _ := rows.load(context.Background(), p, key, "chat", id)
+		if messages := arr(row.Data["messages"]); row.Data["activeRun"] != nil || len(messages) != 2 || obj(messages[0])["content"] != "look again" {
+			t.Fatalf("%s: the turn stored %v", id, row.Data)
+		}
+		finishedRun(t, h, "/v1/threads/turn", continueInput(key, id))
+		if w := postRoute(h, "/v1/threads/delete", object{"key": key.base64(), "id": id}, "alice"); w.Code != 200 {
+			t.Fatalf("%s: deleting: HTTP %d %s", id, w.Code, w.Body.String())
+		}
+		if _, err := rows.load(context.Background(), p, key, "chat", id); asAPIError(err).HTTP != 404 {
+			t.Fatalf("%s: the deleted chat remains: %v", id, err)
+		}
+	}
+	if forks := fake.requests("/v1/sync/fork"); len(forks) != 2 {
+		t.Fatalf("%d forks reached sync", len(forks))
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -136,8 +137,13 @@ func normalizeThread(row *storedRow) object {
 func jsonNumber(n int) string { return string(raw(n)) }
 func threadSummary(t object) object {
 	out := object{}
-	for _, key := range []string{"id", "title", "titleState", "createdAt", "updatedAt", "projectId", "model", "webSearchEnabled", "pinned", "activeRun", "contextUsage"} {
+	for _, key := range []string{"id", "title", "titleState", "createdAt", "updatedAt", "projectId", "model", "webSearchEnabled", "pinned", "contextUsage"} {
 		out[key] = t[key]
+	}
+	out["activeRun"] = nil
+	run := obj(t["activeRun"])
+	if expires, err := time.Parse(time.RFC3339Nano, str(run["expiresAt"])); err == nil && nowUTC().Before(expires) {
+		out["activeRun"] = object{"runId": run["runId"], "expiresAt": run["expiresAt"]}
 	}
 	out["messageCount"] = max(0, len(arr(t["messages"]))-integer(t["harnessHiddenCount"]))
 	return out
@@ -298,9 +304,6 @@ func (h *harness) forkThread(ctx context.Context, p *principal, key contentKey, 
 	}
 	title := forkTitle(str(row.Data["title"]))
 	t := normalizeThread(row)
-	if str(obj(t["activeRun"])["runId"]) != "" {
-		return nil, apiErr(409, "RUN_IN_FLIGHT", "The chat has a reply in progress")
-	}
 	count := 1 + slices.IndexFunc(arr(t["messages"]), func(m any) bool { return obj(m)["id"] == messageID })
 	if count == 0 {
 		return nil, apiErr(404, "THREAD_NOT_FOUND", "The message was not found")
@@ -356,9 +359,6 @@ func (h *harness) changeMessages(ctx context.Context, p *principal, key contentK
 		return nil, err
 	}
 	row, err := h.mutate(ctx, p, key, "chat", id, false, nil, func(data object) error {
-		if str(obj(data["activeRun"])["runId"]) != "" {
-			return apiErr(409, "RUN_IN_FLIGHT", "The chat has a reply in progress")
-		}
 		// Ids derived from a message's position are stored, so removing one
 		// message does not rename the messages after it.
 		messages := arr(data["messages"])

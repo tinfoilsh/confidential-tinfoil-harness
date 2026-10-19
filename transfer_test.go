@@ -57,13 +57,6 @@ func TestTranscriptRefusesToLoseContent(t *testing.T) {
 	if w := postRoute(h, "/v1/threads/transcript", object{"key": key.base64(), "threadId": "gone"}, "alice"); w.Code != 409 || !strings.Contains(w.Body.String(), "ATTACHMENTS_UNAVAILABLE") {
 		t.Fatalf("a chat with an unreadable attachment moved: %d %s", w.Code, w.Body.String())
 	}
-	storedThread(rows, "alice", "busy")
-	row := rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "busy")]
-	row.Data["activeRun"] = object{"runId": "run-1"}
-	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "busy")] = row
-	if w := postRoute(h, "/v1/threads/transcript", object{"key": key.base64(), "threadId": "busy"}, "alice"); w.Code != 409 || !strings.Contains(w.Body.String(), "RUN_IN_FLIGHT") {
-		t.Fatalf("a streaming chat moved: %d %s", w.Code, w.Body.String())
-	}
 }
 
 func TestImportStoresTheDeviceChatUnderItsID(t *testing.T) {

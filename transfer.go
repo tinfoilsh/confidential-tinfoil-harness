@@ -14,9 +14,8 @@ import (
 // no server keys, since deleting the cloud copy deletes its blobs.
 
 // threadTranscript is a stored chat in the form the device keeps: every
-// attachment's content inline and no server bookkeeping. It refuses while a
-// reply streams or when any attachment cannot be read, so moving the chat
-// never loses content.
+// attachment's content inline and no server bookkeeping. It refuses when any
+// attachment cannot be read, so moving the chat never loses content.
 func (h *harness) threadTranscript(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
 	id, err := requiredID(in, "threadId")
 	if err != nil {
@@ -27,9 +26,6 @@ func (h *harness) threadTranscript(ctx context.Context, p *principal, key conten
 		return nil, err
 	}
 	thread := normalizeThread(row)
-	if str(obj(thread["activeRun"])["runId"]) != "" {
-		return nil, apiErr(409, "RUN_IN_FLIGHT", "Wait for the reply to finish before moving this chat")
-	}
 	missing := 0
 	for _, item := range arr(thread["messages"]) {
 		for _, value := range arr(obj(item)["attachments"]) {
