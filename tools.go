@@ -20,13 +20,12 @@ import (
 // A family's tools are named here rather than discovered, so an enclave that
 // grows one does not widen what this harness offers.
 type family struct {
-	verifiedAt string
-	name       string
-	env        string
-	repo       string
-	enclave    string
-	tools      []tool
-	prompt     string
+	name    string
+	env     string
+	repo    string
+	enclave string
+	tools   []tool
+	prompt  string
 
 	client *http.Client
 }

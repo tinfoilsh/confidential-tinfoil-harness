@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -13,7 +12,6 @@ import (
 	"time"
 
 	tinfoil "github.com/tinfoilsh/tinfoil-go"
-	"github.com/tinfoilsh/tinfoil-go/verifier/client"
 )
 
 type discardedAttestationTransport struct{ closed chan struct{} }
@@ -99,7 +97,7 @@ func TestGatewayOfferFollowsTheCatalogAndKeepsTheLastGoodOne(t *testing.T) {
 	}`)
 	h.refreshOffer(context.Background())
 	offered := h.offer.get()
-	if len(offered) != 1 || *offered[0] != (model{name: "kimi-k3", repo: "tinfoilsh/confidential-kimi-k3", vision: true, context: 262144, client: sealing}) {
+	if len(offered) != 1 || *offered[0] != (model{name: "kimi-k3", vision: true, context: 262144, client: sealing}) {
 		t.Fatalf("offered models are not the pinned models the gateway routes: %+v", offered)
 	}
 	if want := (tinfoil.Catalog{"kimi-k3": {Repo: "tinfoilsh/confidential-kimi-k3", Hosts: []string{"kimi-1.example", "kimi-2.example"}}}); !reflect.DeepEqual(h.offer.sdk(), want) {
@@ -119,27 +117,5 @@ func TestGatewayOfferFollowsTheCatalogAndKeepsTheLastGoodOne(t *testing.T) {
 	h.refreshOffer(context.Background())
 	if served(h.offer.get()) != "gemma4-31b" || sdk.Serves("kimi-k3") || !sdk.Serves("gemma4-31b") {
 		t.Fatal("the gateway client did not follow the refreshed catalog")
-	}
-}
-
-func TestVerificationReportsUsedReplicasAndDirectEnclaves(t *testing.T) {
-	h, _, _ := testChatHarness(t, nil)
-	h.verified = func() []tinfoil.GatewayVerification {
-		return []tinfoil.GatewayVerification{{Models: []string{"kimi-k3"}, Reference: "tinfoilsh/confidential-kimi-k3", PinnedModel: "kimi-k3", Verification: &client.VerifiedDocumentV3{EnclaveHost: "kimi-1.example", VerifiedAt: "2026-10-14T00:00:00Z"}}}
-	}
-	h.services["router"] = &downstreamService{Role: "router", Repo: "tinfoilsh/confidential-model-router", Enclave: "inference.example", At: "2026-10-13T00:00:00Z"}
-	response := postRoute(h, "/v1/verify", object{}, "")
-	var body struct {
-		Verified []object `json:"verified"`
-	}
-	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || response.Code != 200 {
-		t.Fatalf("HTTP %d: %s", response.Code, response.Body.String())
-	}
-	want := []object{
-		{"role": "model", "name": "kimi-k3", "repo": "tinfoilsh/confidential-kimi-k3", "enclave": "kimi-1.example", "at": "2026-10-14T00:00:00Z"},
-		{"role": "router", "repo": "tinfoilsh/confidential-model-router", "enclave": "inference.example", "at": "2026-10-13T00:00:00Z"},
-	}
-	if !reflect.DeepEqual(body.Verified, want) {
-		t.Fatalf("verified = %v, want %v", body.Verified, want)
 	}
 }

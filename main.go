@@ -25,11 +25,10 @@ import (
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
-// repo is the trust anchor; the gateway's catalog supplies the rest.
+// The pinned repo is the trust anchor; the gateway's catalog supplies the rest.
 type model struct {
 	endpoint string
 	name     string
-	repo     string
 	vision   bool
 	context  int // usable prompt budget, in tokens
 
@@ -51,7 +50,6 @@ type harness struct {
 	gateway      string
 	offer        offerCache
 	modelClient  *http.Client
-	verified     func() []tinfoil.GatewayVerification
 	controlplane string
 	cpClient     *http.Client
 	storeRows    rowStore
@@ -156,7 +154,6 @@ func attestFamilies(ctx context.Context, usageSecret string) {
 			continue
 		}
 		f.client = client
-		f.verifiedAt = timestamp()
 		slog.Info("tool enclave verified", "family", f.name, "enclave", f.enclave)
 	}
 }
@@ -211,7 +208,7 @@ func offerModels(offered map[string]catalogEntry, client *http.Client) ([]*model
 			slog.Warn("gateway offers a pinned model from another repository", "model", p.name, "repo", entry.Repo)
 			continue
 		}
-		models = append(models, &model{name: p.name, repo: p.repo, vision: entry.Vision, context: entry.Context, client: client})
+		models = append(models, &model{name: p.name, vision: entry.Vision, context: entry.Context, client: client})
 		catalog[p.name] = tinfoil.CatalogEntry{Repo: entry.Repo, Hosts: slices.Clone(entry.Hosts)}
 	}
 	return models, catalog

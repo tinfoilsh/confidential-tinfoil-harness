@@ -13,7 +13,7 @@ import (
 
 func (h *harness) apiRoutes() []routeSpec {
 	routes := []routeSpec{
-		{"/v1/session", true, false, h.session}, {"/v1/verify", true, false, h.verification},
+		{"/v1/session", true, false, h.session},
 		{"/v1/threads/list", false, true, h.listThreads}, {"/v1/threads/get", false, true, h.getThread},
 		{"/v1/threads/update", false, true, h.updateThread}, {"/v1/threads/delete", false, true, h.deleteThread}, {"/v1/threads/fork", false, true, h.forkThread},
 		{"/v1/threads/messages/delete", false, true, h.deleteMessage}, {"/v1/threads/messages/update", false, true, h.updateMessage},
@@ -31,7 +31,7 @@ func (h *harness) apiRoutes() []routeSpec {
 		{"/v1/projects/delete-all", false, true, h.deleteAllProjects},
 		{"/v1/metadata/favicon", true, false, h.favicon},
 	}
-	for _, pair := range [][2]string{{"current", "/v1/key/current"}, {"register", "/v1/key/register"}, {"add-bundle", "/v1/key/add-bundle"}, {"remove-bundle", "/v1/key/remove-bundle"}, {"migrate", "/v1/blobs/migrate"}, {"migrate-all", "/v1/blobs/migrate-all"}, {"migrate-status", "/v1/blobs/migrate-status"}} {
+	for _, pair := range [][2]string{{"current", "/v1/key/current"}, {"register", "/v1/key/register"}, {"add-bundle", "/v1/key/add-bundle"}, {"remove-bundle", "/v1/key/remove-bundle"}, {"migrate-all", "/v1/blobs/migrate-all"}} {
 		routes = append(routes, routeSpec{"/v1/keys/" + pair[0], false, false, func(ctx context.Context, p *principal, _ contentKey, in object) (any, error) {
 			var out object
 			err := h.syncAPI.call(ctx, p, pair[1], in, &out)
