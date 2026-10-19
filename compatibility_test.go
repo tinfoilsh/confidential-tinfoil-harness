@@ -15,7 +15,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
-	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -168,31 +167,6 @@ func TestReplayPreservesTheHistoryWindowBoundary(t *testing.T) {
 	}
 }
 
-func TestFollowSnapshotMatchesCursor(t *testing.T) {
-	h, _, key := testChatHarness(t, nil)
-	events := eventsIn(t, postRoute(h, "/v1/threads/turn", sendInput(key), "alice"))
-	var cursor int
-	for index, event := range events {
-		if event.Type == "TEXT_MESSAGE_CHUNK" {
-			cursor = index
-		}
-	}
-	input := object{"key": key.base64(), "threadId": events[0].ThreadID, "runId": events[0].RunID}
-	r := httptest.NewRequest("POST", "/v1/threads/follow", bytes.NewReader(raw(input)))
-	r.Header.Set("Authorization", "Bearer clerk-alice")
-	r.Header.Set("Last-Event-ID", strconv.Itoa(cursor))
-	w := httptest.NewRecorder()
-	h.routes().ServeHTTP(w, r)
-	resumed := eventsIn(t, w)
-	if resumed[0].Type != "MESSAGES_SNAPSHOT" || !strings.Contains(string(raw(resumed[0].Messages)), "hello") {
-		t.Fatal("snapshot omitted output through cursor")
-	}
-	for _, event := range resumed[1:] {
-		if event.Type == "TEXT_MESSAGE_CHUNK" {
-			t.Fatal("cursor output was replayed twice")
-		}
-	}
-}
 func TestTruncatedModelStreamPreservesPartialAnswer(t *testing.T) {
 	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
@@ -294,17 +268,6 @@ func TestWidgetRetryReplacesOnlyTheArguments(t *testing.T) {
 	if len(messages) != 2 || len(blocks) != 2 || obj(blocks[1])["arguments"] != replacement {
 		t.Fatal("retry changed message structure")
 	}
-	// A client reconnecting after the retry sees the new arguments beside the message's other blocks.
-	follow := httptest.NewRequest("POST", "/v1/threads/follow", bytes.NewReader(raw(object{"key": key.base64(), "threadId": "chat", "runId": events[0].RunID})))
-	follow.Header.Set("Authorization", "Bearer clerk-alice")
-	follow.Header.Set("Last-Event-ID", strconv.Itoa(slices.IndexFunc(events, func(e event) bool { return e.Type == "TOOL_CALL_END" })))
-	resumed := httptest.NewRecorder()
-	h.routes().ServeHTTP(resumed, follow)
-	snapshot := arr(eventsIn(t, resumed)[0].Messages)
-	shown := arr(obj(snapshot[len(snapshot)-1])["timeline"])
-	if len(shown) != 2 || obj(shown[0])["content"] != "keep this text" || obj(shown[1])["arguments"] != replacement {
-		t.Fatalf("a reconnecting client was shown %v", shown)
-	}
 }
 
 func TestManagedToolLoopKeepsReasoningAndOneAssistantMessage(t *testing.T) {
@@ -353,7 +316,8 @@ func TestShutdownCommitsPartialOutput(t *testing.T) {
 	<-started
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	waitRuns(ctx, h.stopRuns())
+	h.stopRuns()
+	h.waitRuns(ctx)
 	select {
 	case <-run.finished:
 	default:

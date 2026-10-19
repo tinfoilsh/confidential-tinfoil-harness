@@ -18,14 +18,14 @@ var memorySchema json.RawMessage
 // Memory is opt-in at deployment and can be disabled for an individual project.
 // The timestamp is per thread, so a later turn in one project chat cannot skip
 // messages in another chat. Manual changes win over a concurrent extraction.
-func (h *harness) extractMemory(ctx context.Context, run *chatRun, thread *storedRow) {
+func (h *harness) extractMemory(ctx context.Context, p *principal, key contentKey, thread *storedRow) {
 	if !h.memoryEnabled || str(thread.Data["projectId"]) == "" {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	projectID := str(thread.Data["projectId"])
-	project, err := h.storeRows.load(ctx, run.principal, run.key, "project", projectID)
+	project, err := h.storeRows.load(ctx, p, key, "project", projectID)
 	if err != nil || !boolean(project.Data["memoryEnabled"], true) {
 		return
 	}
@@ -90,7 +90,7 @@ func (h *harness) extractMemory(ctx context.Context, run *chatRun, thread *store
 		return
 	}
 	updated := applyFacts(facts, arr(result["operations"]))
-	_, _ = h.mutate(ctx, run.principal, run.key, "project", projectID, false, nil, func(data object) error {
+	_, _ = h.mutate(ctx, p, key, "project", projectID, false, nil, func(data object) error {
 		if string(raw(data["memory"])) != string(raw(project.Data["memory"])) || str(obj(data["harnessMemoryCursors"])[thread.ID]) != checkpoint {
 			return apiErr(409, "REVISION_CONFLICT", "Project memory changed during extraction")
 		}

@@ -62,11 +62,7 @@ type harness struct {
 	services      map[string]*downstreamService
 	safeguards    *submitter // nil unless SAFEGUARDS_URL names the sidecar
 	memoryEnabled bool
-	chatMu        sync.Mutex
-	closing       bool
-	threads       map[string]*threadSession
-	requests      map[string]*chatRun
-	starting      map[string]chan struct{}
+	live          liveRuns
 }
 
 func main() {
@@ -102,11 +98,11 @@ func main() {
 	go func() {
 		<-stop
 		defer close(stopped)
-		active := h.stopRuns()
+		h.stopRuns()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		srv.Shutdown(ctx)
-		waitRuns(ctx, active)
+		h.waitRuns(ctx)
 		h.safeguards.close()
 	}()
 

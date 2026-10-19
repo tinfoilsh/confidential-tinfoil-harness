@@ -4,39 +4,36 @@ import "context"
 
 var errShutdown = apiErr(503, "UPSTREAM_REFUSED", "The service is shutting down")
 
-func (h *harness) stopRuns() []*chatRun {
-	h.chatMu.Lock()
-	h.closing = true
-	states := []*threadSession{}
-	for _, state := range h.threads {
-		states = append(states, state)
-	}
-	h.chatMu.Unlock()
-	active := []*chatRun{}
-	for _, state := range states {
-		state.mu.Lock()
-		if state.active != nil {
-			state.active.cancelled = true
-			state.active.log.stop()
-			active = append(active, state.active)
+// stopRuns refuses new turns, cancels every running reply, and ends every
+// queued turn.
+func (h *harness) stopRuns() {
+	h.live.mu.Lock()
+	defer h.live.mu.Unlock()
+	h.live.closing = true
+	e := asAPIError(errShutdown)
+	for _, s := range h.live.threads {
+		if s.active != nil {
+			s.active.cancelled = true
+			s.active.log.stop()
 		}
-		for _, run := range state.queue {
-			run.log.log.close(errShutdown)
-			clear(run.key[:])
-			run.input = nil
-			close(run.finished)
+		for _, r := range s.queue {
+			h.endQueued(r, event{Type: "RUN_ERROR", Message: e.Message, Code: e.Code})
 		}
-		state.queue = nil
-		state.mu.Unlock()
+		s.queue = nil
 	}
-	return active
 }
-func waitRuns(ctx context.Context, runs []*chatRun) {
-	for _, run := range runs {
-		select {
-		case <-run.finished:
-		case <-ctx.Done():
-			return
-		}
+
+// waitRuns waits until every started run has made its last write.
+func (h *harness) waitRuns(ctx context.Context) bool {
+	done := make(chan struct{})
+	go func() {
+		h.live.working.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }

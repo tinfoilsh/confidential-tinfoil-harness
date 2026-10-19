@@ -116,8 +116,9 @@ func TestAnonymousKeyValidationRefusesWorkBeforeAllocatingThreads(t *testing.T) 
 				Error apiError `json:"error"`
 			}
 			json.Unmarshal(response.Body.Bytes(), &refused)
-			if response.Code != tc.want || refused.Error.Code != tc.code || response.Header().Get("Retry-After") != tc.retryAfter || modelCalls.Load() != 0 || rows.calls != 0 || len(h.threads) != 0 {
-				t.Fatalf("validation did not refuse work: HTTP %d %s, models=%d, rows=%d, threads=%d", response.Code, response.Body.String(), modelCalls.Load(), rows.calls, len(h.threads))
+			threads, runs, requests := liveCount(h)
+			if response.Code != tc.want || refused.Error.Code != tc.code || response.Header().Get("Retry-After") != tc.retryAfter || modelCalls.Load() != 0 || rows.calls != 0 || threads+runs+requests != 0 {
+				t.Fatalf("validation did not refuse work: HTTP %d %s, models=%d, rows=%d, live=%d/%d/%d", response.Code, response.Body.String(), modelCalls.Load(), rows.calls, threads, runs, requests)
 			}
 			if tc.status == 429 {
 				session := postRoute(h, "/v1/session", object{}, "")
@@ -132,12 +133,17 @@ func TestAnonymousKeyValidationRefusesWorkBeforeAllocatingThreads(t *testing.T) 
 }
 
 func TestAnonymousReconnectUsesKeyPossessionInsteadOfIP(t *testing.T) {
-	h, _, key := testChatHarness(t, nil)
+	model, release := heldModel()
+	h, _, key := testChatHarness(t, model)
+	t.Cleanup(release)
 	in := sendInput(key)
 	delete(in, "key")
 	in["ephemeral"] = true
-	started := postRoute(h, "/v1/threads/turn", in, "")
-	events := eventsIn(t, started)
+	run, err := h.acceptTurn(context.Background(), &principal{Anonymous: true, AnonymousID: hashHex([]byte("free_anonymous-key")), InferenceKey: "free_anonymous-key"}, contentKey{}, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitFrame(t, run.log, "TEXT_MESSAGE_CHUNK")
 	for _, tc := range []struct {
 		key, ip string
 		want    int
@@ -146,14 +152,13 @@ func TestAnonymousReconnectUsesKeyPossessionInsteadOfIP(t *testing.T) {
 		{"free_other-client", "192.0.2.1:1234", 404},
 		{"", "192.0.2.1:1234", 404},
 	} {
-		body := raw(object{"threadId": events[0].ThreadID, "runId": events[0].RunID})
+		body := raw(object{"threadId": run.thread.id, "runId": run.log.id})
 		req := httptest.NewRequest(http.MethodPost, "/v1/threads/follow", bytes.NewReader(body))
 		req.RemoteAddr = tc.ip
 		if tc.key != "" {
 			req.Header.Set("Authorization", "Bearer "+tc.key)
 		}
-		response := httptest.NewRecorder()
-		h.routes().ServeHTTP(response, req)
+		response := replayOf(h, req)
 		if response.Code != tc.want {
 			t.Fatalf("incorrect reconnect authorization: want %d, got %d", tc.want, response.Code)
 		}

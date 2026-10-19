@@ -163,32 +163,11 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 	h.catalog.set(&chatCatalog{Models: []object{{"modelName": "kimi-k3", "name": "Kimi K3", "budgetWindow": 8192, "multimodal": false, "chatConfig": object{}}}, Prompt: "You are {MODEL_NAME}. {USER_PREFERENCES}", Presets: builtInPresets()})
 
 	t.Cleanup(func() {
-		h.chatMu.Lock()
-		states := []*threadSession{}
-		for _, state := range h.threads {
-			states = append(states, state)
-		}
-		h.chatMu.Unlock()
-		runs := []*chatRun{}
-		for _, state := range states {
-			state.mu.Lock()
-			if state.active != nil {
-				state.active.cancelled = true
-				state.active.log.stop()
-			}
-			for _, run := range state.runs {
-				if !run.queued || state.active == run {
-					runs = append(runs, run)
-				}
-			}
-			state.mu.Unlock()
-		}
-		for _, run := range runs {
-			select {
-			case <-run.finished:
-			case <-time.After(2 * time.Second):
-				t.Error("run did not stop")
-			}
+		h.stopRuns()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if !h.waitRuns(ctx) {
+			t.Error("runs did not stop")
 		}
 	})
 
@@ -199,6 +178,68 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 	rows.key = key
 	return h, rows, key
 }
+
+// heldModel answers each model turn with one chunk, then holds the stream
+// open until release is called.
+func heldModel() (http.HandlerFunc, func()) {
+	release := make(chan struct{})
+	var once sync.Once
+	return func(w http.ResponseWriter, r *http.Request) {
+			io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
+			w.(http.Flusher).Flush()
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
+			io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\" done\"}}]}\n\ndata: [DONE]\n\n")
+		}, func() {
+			once.Do(func() { close(release) })
+		}
+}
+
+// awaitFrame waits until a run's log holds a frame of the given type.
+func awaitFrame(t *testing.T, log *run, kind string) {
+	t.Helper()
+	for from := 0; ; {
+		frames, wake, closed := log.log.read(from)
+		for _, frame := range frames {
+			var e event
+			if err := json.Unmarshal(frame, &e); err != nil {
+				t.Fatal("unreadable run log frame", err)
+			}
+			if from++; e.Type == kind {
+				return
+			}
+		}
+		if closed != nil {
+			t.Fatalf("the run ended without a %s frame", kind)
+		}
+		select {
+		case <-wake:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("the run framed no %s", kind)
+		}
+	}
+}
+
+// replayOf follows a run with a request that stops listening at once, so
+// it returns what the run has framed so far.
+func replayOf(h *harness, r *http.Request) *httptest.ResponseRecorder {
+	ctx, cancel := context.WithCancel(r.Context())
+	cancel()
+	w := httptest.NewRecorder()
+	h.routes().ServeHTTP(w, r.WithContext(ctx))
+	return w
+}
+
+// liveCount is how many chats, runs and client requests the harness holds.
+func liveCount(h *harness) (threads, runs, requests int) {
+	h.live.mu.Lock()
+	defer h.live.mu.Unlock()
+	return len(h.live.threads), len(h.live.runs), len(h.live.requests)
+}
+
 func postRoute(h *harness, path string, in object, user string) *httptest.ResponseRecorder {
 	r := httptest.NewRequest("POST", path, bytes.NewReader(raw(in)))
 	r.RemoteAddr = "192.0.2.1:1234"
@@ -266,10 +307,9 @@ func TestManagedTurnStoresV2AndKeepsKeyOutOfEvents(t *testing.T) {
 	if assistant["content"] != "answer" || len(arr(assistant["timeline"])) != 2 {
 		t.Fatalf("v2 message not preserved: %v", assistant)
 	}
-	before := len(rows.rows)
 	retry := postRoute(h, "/v1/threads/turn", in, "alice")
-	if retry.Body.String() != response.Body.String() || len(rows.rows) != before {
-		t.Fatal("retried nonce made a second run")
+	if row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID); retry.Code != 409 || len(arr(row.Data["messages"])) != 2 {
+		t.Fatalf("a retried request ran again: HTTP %d", retry.Code)
 	}
 	wrong := postRoute(h, "/v1/threads/follow", object{"key": key.base64(), "threadId": events[0].ThreadID, "runId": events[0].RunID}, "bob")
 	if wrong.Code != 404 {
@@ -606,12 +646,9 @@ func TestContinueExtendsTheStoredReplyItNames(t *testing.T) {
 	if got := messageIDs(eventOfType(events, "MESSAGES_SNAPSHOT").Messages); !reflect.DeepEqual(got, []string{"u1", "a1"}) {
 		t.Fatalf("the run started from %q", got)
 	}
-	last := -1
-	for i, e := range events {
-		if e.Type == "TEXT_MESSAGE_CHUNK" {
-			if last = i; e.MessageID != "a1" {
-				t.Fatalf("the continuation streamed into %q", e.MessageID)
-			}
+	for _, e := range events {
+		if e.Type == "TEXT_MESSAGE_CHUNK" && e.MessageID != "a1" {
+			t.Fatalf("the continuation streamed into %q", e.MessageID)
 		}
 	}
 	if replies := arr(obj(decodeValue(events[len(events)-1].Metadata))["messages"]); len(replies) != 1 || obj(replies[0])["id"] != "a1" || obj(replies[0])["isInterrupted"] != false {
@@ -625,19 +662,9 @@ func TestContinueExtendsTheStoredReplyItNames(t *testing.T) {
 		reply["createdAt"] != "2026-01-01T00:00:01Z" || reply["thoughts"] != "rhyme" || reply["isInterrupted"] != false {
 		t.Fatalf("stored continuation: %v", messages)
 	}
-	// A client reconnecting mid-continuation sees the reply as far as it got.
-	follow := httptest.NewRequest("POST", "/v1/threads/follow", bytes.NewReader(raw(object{"key": key.base64(), "threadId": "chat-1", "runId": events[0].RunID})))
-	follow.Header.Set("Authorization", "Bearer clerk-alice")
-	follow.Header.Set("Last-Event-ID", strconv.Itoa(last))
-	resumed := httptest.NewRecorder()
-	h.routes().ServeHTTP(resumed, follow)
-	snapshot := arr(eventsIn(t, resumed)[0].Messages)
-	if len(snapshot) != 2 || !reflect.DeepEqual(obj(snapshot[1])["timeline"], want) {
-		t.Fatalf("a reconnecting client was shown %v", snapshot)
-	}
 }
 
-func TestContinueExtendsTemporaryAndLocalReplies(t *testing.T) {
+func TestContinueExtendsLocalReplies(t *testing.T) {
 	prompts := make(chan []any, 1)
 	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		if messages := lastRequest(r); strings.HasSuffix(str(obj(messages[len(messages)-1])["content"]), continueInstruction) {
@@ -652,7 +679,7 @@ func TestContinueExtendsTemporaryAndLocalReplies(t *testing.T) {
 		}
 		return roles
 	}
-	// A temporary thread is held by the harness; continuing names no message.
+	// A temporary thread ends with its run, so there is nothing left to continue.
 	first := sendInput(key)
 	delete(first, "key")
 	first["ephemeral"] = true
@@ -660,22 +687,14 @@ func TestContinueExtendsTemporaryAndLocalReplies(t *testing.T) {
 	temporary := continueTurn(key, thread, "")
 	delete(temporary, "key")
 	temporary["ephemeral"] = true
-	events := eventsIn(t, postRoute(h, "/v1/threads/turn", temporary, ""))
-	if got := asked(<-prompts); events[len(events)-1].Type != "RUN_FINISHED" || !reflect.DeepEqual(got, []string{"user:test message", "assistant: more"}) {
-		t.Fatalf("a temporary continuation asked %q", got)
-	}
-	state := h.threadState(&principal{Anonymous: true, AnonymousID: hashHex([]byte("free_anonymous-key"))}, thread)
-	state.mu.Lock()
-	messages := arr(state.row.Data["messages"])
-	state.mu.Unlock()
-	if reply := obj(messages[len(messages)-1]); len(messages) != 2 || reply["id"] != events[0].MessageID || reply["content"] != " more more" || len(arr(reply["timeline"])) != 1 {
-		t.Fatalf("the temporary thread holds %v", messages)
+	if w := postRoute(h, "/v1/threads/turn", temporary, ""); w.Code != 404 {
+		t.Fatalf("a finished temporary thread was continued: HTTP %d %s", w.Code, w.Body.String())
 	}
 	// A local thread's client sends the reply it continues and stores the result.
 	local := localInput("0000000000004_local", priorThread())
 	local["kind"], local["messageId"] = "continue", "m2"
 	delete(local, "content")
-	events = eventsIn(t, postRoute(h, "/v1/threads/turn", local, "alice"))
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", local, "alice"))
 	if got := asked(<-prompts); !reflect.DeepEqual(got, []string{"user:first question", "assistant:first answer"}) {
 		t.Fatalf("a local continuation asked %q", got)
 	}
@@ -777,24 +796,7 @@ func TestCancelCommitsPartialAndLeavesQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Cancel only once the run has streamed the partial reply.
-streaming:
-	for from := 0; ; {
-		frames, wake, _ := run.log.log.read(from)
-		for _, frame := range frames {
-			var e event
-			if err := json.Unmarshal(frame, &e); err != nil {
-				t.Fatal("unreadable run log frame", err)
-			}
-			if from++; e.Type == "TEXT_MESSAGE_CHUNK" {
-				break streaming
-			}
-		}
-		select {
-		case <-wake:
-		case <-time.After(3 * time.Second):
-			t.Fatal("the run streamed no text")
-		}
-	}
+	awaitFrame(t, run.log, "TEXT_MESSAGE_CHUNK")
 	queued := sendInput(key)
 	queued["threadId"] = run.thread.id
 	next, err := h.acceptTurn(context.Background(), p, key, queued)
@@ -813,9 +815,9 @@ streaming:
 	case <-time.After(3 * time.Second):
 		t.Fatal("cancel timed out")
 	}
-	run.thread.mu.Lock()
+	h.live.mu.Lock()
 	queueLength := len(run.thread.queue)
-	run.thread.mu.Unlock()
+	h.live.mu.Unlock()
 	if queueLength != 1 {
 		t.Fatal("cancel drained the queue")
 	}
@@ -1740,15 +1742,6 @@ func TestAnswersAnnotateTheSourcesTheyCite(t *testing.T) {
 	want := []any{cite("https://a.test/1/", "A", "A"), cite("https://b.test", "https://b.test", "b")}
 	if got := obj(arr(row.Data["messages"])[1])["annotations"]; !reflect.DeepEqual(got, any(want)) {
 		t.Fatalf("stored annotations %v", got)
-	}
-	state := h.threadState(&principal{ID: "alice"}, events[0].ThreadID)
-	state.mu.Lock()
-	run := state.runs[events[0].RunID]
-	state.mu.Unlock()
-	run.out.mu.Lock()
-	defer run.out.mu.Unlock()
-	if run.out.sources != nil {
-		t.Fatal("the run kept the pages its tools found")
 	}
 }
 

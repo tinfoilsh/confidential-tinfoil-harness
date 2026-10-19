@@ -341,7 +341,10 @@ func (h *harness) screening(req *request) *screening {
 // screen submits a run that completed with a reply, under a first-party chat
 // credential, for classification.
 func (h *harness) screen(r *chatRun, reply []object, runErr error) {
-	if r.screening == nil || runErr != nil || r.cancelled || r.thread.deleted || r.retryTarget != nil || r.principal.Anonymous || !isFirstPartyChatAccessJWT(string(r.credential.Key)) {
+	h.live.mu.Lock()
+	deleted := r.thread.deleted
+	h.live.mu.Unlock()
+	if r.screening == nil || runErr != nil || r.cancelled || deleted || r.retryTarget != nil || r.principal.Anonymous || !isFirstPartyChatAccessJWT(string(r.credential.Key)) {
 		return
 	}
 	var text []string
