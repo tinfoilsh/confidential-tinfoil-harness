@@ -86,12 +86,7 @@ func (h *harness) removeQueued(ctx context.Context, p *principal, _ contentKey, 
 	r.cancelled = true
 	h.endQueued(r, removedTurn)
 	queueChanged(s)
-	if s.active == nil && len(s.queue) == 0 {
-		if s.waiting != nil {
-			s.waiting.Stop()
-		}
-		delete(h.live.threads, s.owner+"/"+s.id)
-	}
+	h.dropIdle(s)
 	return object{}, nil
 }
 
@@ -113,10 +108,5 @@ func (h *harness) stopThread(p *principal, id string) {
 		h.endQueued(r, removedTurn)
 	}
 	s.queue = nil
-	if s.active == nil {
-		if s.waiting != nil {
-			s.waiting.Stop()
-		}
-		delete(h.live.threads, liveKey(p, id))
-	}
+	h.dropIdle(s)
 }

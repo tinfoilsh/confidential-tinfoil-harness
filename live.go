@@ -154,15 +154,26 @@ func (h *harness) advance(r *chatRun, goOn bool) *chatRun {
 		next, s.queue = s.queue[0], s.queue[1:]
 		h.makeActive(s, next)
 	}
-	switch {
-	case s.active == nil && len(s.queue) == 0:
-		if h.live.threads[s.owner+"/"+s.id] == s {
-			delete(h.live.threads, s.owner+"/"+s.id)
-		}
-	case s.active == nil && s.waiting == nil:
+	if s.active == nil && len(s.queue) > 0 && s.waiting == nil {
 		s.waiting = time.AfterFunc(runTimeout, func() { h.endWaitingQueue(s) })
 	}
+	h.dropIdle(s)
 	return next
+}
+
+// dropIdle removes a chat with nothing running or queued from the registry;
+// live.mu is held.
+func (h *harness) dropIdle(s *threadSession) {
+	if s.active != nil || len(s.queue) > 0 {
+		return
+	}
+	if s.waiting != nil {
+		s.waiting.Stop()
+		s.waiting = nil
+	}
+	if h.live.threads[s.owner+"/"+s.id] == s {
+		delete(h.live.threads, s.owner+"/"+s.id)
+	}
 }
 
 // endQueued ends a turn that never started with the frame that says why;
@@ -188,6 +199,6 @@ func (h *harness) endWaitingQueue(s *threadSession) {
 	for _, r := range s.queue {
 		h.endQueued(r, removedTurn)
 	}
-	s.queue, s.waiting = nil, nil
-	delete(h.live.threads, s.owner+"/"+s.id)
+	s.queue = nil
+	h.dropIdle(s)
 }
