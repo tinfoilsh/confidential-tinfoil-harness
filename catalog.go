@@ -32,7 +32,6 @@ type widget struct {
 	Description string          `json:"description"`
 	Schema      json.RawMessage `json:"schema"`
 	Hint        string          `json:"promptHint"`
-	Surface     string          `json:"surface"`
 }
 
 func widgetCatalog() []widget {

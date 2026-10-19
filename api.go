@@ -232,8 +232,6 @@ func downstreamError(status int, body []byte) *apiError {
 			// to a freshly pulled row, so retrying is safe.
 			e = apiErr(503, "SYNC_OUTCOME_UNKNOWN", "The sync service may not have stored the change")
 		}
-	case "PII_BLOCKED", "PII_DETECTED":
-		e = apiErr(422, "PII_BLOCKED", "The privacy screen refused the request")
 	default:
 		if refused := openAIRefusal(status, body); refused != nil {
 			if refused.RetryAfter == 0 {

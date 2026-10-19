@@ -3,7 +3,6 @@ package main
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"slices"
 	"strings"
 	"time"
@@ -43,9 +42,6 @@ func (h *harness) apiRoutes() []routeSpec {
 
 func (h *harness) session(ctx context.Context, p *principal, _ contentKey, _ object) (any, error) {
 	c := h.catalog.get()
-	if c == nil {
-		return nil, apiErr(503, "MODEL_UNAVAILABLE", "The catalog is unavailable")
-	}
 	credential, err := h.auth.inference(ctx, p)
 	if err != nil {
 		// A subscriber at the hourly cap still opens the app and sees when it resets.
@@ -60,16 +56,8 @@ func (h *harness) session(ctx context.Context, p *principal, _ contentKey, _ obj
 		d := clone(p)
 		presets = append(presets, d)
 	}
-	var auto any
-	defaultModel := ""
-	if len(c.Models) > 0 {
-		defaultModel = str(c.Models[0]["modelName"])
-	}
-	if h.autoModel != nil {
-		auto = object{"multimodal": false, "default": "high", "levels": intelligenceLevels}
-		defaultModel = "auto"
-	}
-	return object{"user": object{"id": p.ID, "anonymous": p.Anonymous}, "rateLimit": credential.Limit, "models": c.displayModels(), "auto": auto, "defaultModel": defaultModel, "widgets": c.EnabledWidgets, "presets": presets, "features": features}, nil
+	auto := object{"multimodal": false, "default": "high", "levels": intelligenceLevels}
+	return object{"user": object{"id": p.ID, "anonymous": p.Anonymous}, "rateLimit": credential.Limit, "models": c.displayModels(), "auto": auto, "defaultModel": "auto", "widgets": c.EnabledWidgets, "presets": presets, "features": features}, nil
 }
 
 func normalizeThread(row *storedRow) object {
@@ -185,13 +173,9 @@ func (h *harness) listThreads(ctx context.Context, p *principal, key contentKey,
 	}
 	list := []any{}
 	for _, row := range page.Rows {
-		t := normalizeThread(&row)
-		if pin, ok := in["pinned"].(bool); ok && pin != boolean(t["pinned"], false) {
-			continue
-		}
-		list = append(list, threadSummary(t))
+		list = append(list, threadSummary(normalizeThread(&row)))
 	}
-	return object{"threads": list, "nextCursor": page.Next, "unreadable": len(page.Unreadable)}, nil
+	return object{"threads": list, "nextCursor": page.Next}, nil
 }
 func (h *harness) getThread(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
 	id, err := requiredID(in, "id")
@@ -409,9 +393,6 @@ func (h *harness) profile(ctx context.Context, p *principal, key contentKey) (ob
 }
 func profileView(profile object) object {
 	out := selectFields(profile, strings.Join(profileFields, " ")+" updatedAt")
-	for _, f := range []string{"fieldClocks", "clockVersion", "version", "pinnedChatIds", "webSearchAvailable"} {
-		delete(out, f)
-	}
 	out["selectedModel"] = normalizeModel(str(out["selectedModel"]))
 	return out
 }
@@ -620,11 +601,7 @@ func (h *harness) searchThreads(ctx context.Context, p *principal, key contentKe
 			}
 			return nil, err
 		}
-		summary := threadSummary(normalizeThread(row))
-		summary["score"] = match["score"]
-		results = append(results, summary)
+		results = append(results, threadSummary(normalizeThread(row)))
 	}
 	return object{"results": results, "indexing": indexing}, nil
 }
-
-var _ = json.Valid

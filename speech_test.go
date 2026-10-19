@@ -25,17 +25,17 @@ func TestSpeechStreamsTheRoutersAudio(t *testing.T) {
 		w.Write(pcm[2:])
 	})
 	for _, tc := range []struct {
-		user, auth, voice string
-		in                object
+		user, auth string
+		in         object
 	}{
-		{"", "Bearer free_anonymous-key", speechVoice, object{"text": "  Hello there.  "}},
-		{"alice", "Bearer inference-alice", "serena", object{"text": "Hello there.", "voice": "serena"}},
+		{"", "Bearer free_anonymous-key", object{"text": "  Hello there.  "}},
+		{"alice", "Bearer inference-alice", object{"text": "Hello there."}},
 	} {
 		response := postRoute(h, "/v1/speech", tc.in, tc.user)
 		if response.Code != 200 || response.Header().Get("Content-Type") != "audio/pcm" || response.Header().Get("Cache-Control") != "no-store" || !bytes.Equal(response.Body.Bytes(), pcm) {
 			t.Fatalf("HTTP %d %q: %x", response.Code, response.Header().Get("Content-Type"), response.Body.Bytes())
 		}
-		want := object{"path": "/v1/audio/speech", "auth": tc.auth, "body": map[string]any{"model": "qwen3-tts", "voice": tc.voice, "instructions": speechInstructions, "input": "Hello there.", "response_format": "pcm", "stream_format": "audio"}}
+		want := object{"path": "/v1/audio/speech", "auth": tc.auth, "body": map[string]any{"model": "qwen3-tts", "voice": speechVoice, "instructions": speechInstructions, "input": "Hello there.", "response_format": "pcm", "stream_format": "audio"}}
 		if !reflect.DeepEqual(got.Load(), want) {
 			t.Fatalf("router got %v, want %v", got.Load(), want)
 		}
@@ -65,8 +65,6 @@ func TestSpeechRefusesWhatTheClientWouldNotSend(t *testing.T) {
 		{object{"text": " \n "}, 400},
 		{object{}, 400},
 		{object{"text": 42}, 400},
-		{object{"text": "Hello", "voice": strings.Repeat("v", 65)}, 400},
-		{object{"text": "Hello", "instructions": strings.Repeat("i", 1001)}, 400},
 	} {
 		if response := postRoute(h, "/v1/speech", tc.in, ""); response.Code != tc.want {
 			t.Errorf("%v: HTTP %d, want %d", tc.in, response.Code, tc.want)

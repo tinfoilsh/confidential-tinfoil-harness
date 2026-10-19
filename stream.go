@@ -23,7 +23,6 @@ type event struct {
 	Snapshot   any             `json:"snapshot,omitempty"`
 	Messages   any             `json:"messages,omitempty"`
 	HasOlder   *bool           `json:"hasOlder,omitempty"`
-	Queued     bool            `json:"queued,omitempty"`
 	Code       string          `json:"code,omitempty"`
 	Kind       string          `json:"kind,omitempty"`
 	ResetsAt   string          `json:"resetsAt,omitempty"`

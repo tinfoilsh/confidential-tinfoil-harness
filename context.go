@@ -147,9 +147,6 @@ func timeReminder(now time.Time, zone string) (string, error) {
 
 func (h *harness) buildRequest(thread, profile, project object, documents []object, in object, runID string) (*request, *model, error) {
 	c := h.catalog.get()
-	if c == nil {
-		return nil, nil, apiErr(503, "MODEL_UNAVAILABLE", "The model catalog is unavailable")
-	}
 	options := obj(in["options"])
 	name := normalizeModel(firstString(options["model"], thread["model"], profile["selectedModel"], "auto"))
 	req := &request{threadID: str(thread["id"]), runID: runID, model: name}

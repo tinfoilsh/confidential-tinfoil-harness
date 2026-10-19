@@ -34,14 +34,13 @@ func (h *harness) handleSpeech(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, err)
 		return
 	}
-	if err := validateFields(in, "text voice instructions", "", ""); err != nil {
+	if err := validateFields(in, "text", "", ""); err != nil {
 		respond(w, nil, err)
 		return
 	}
 	text := strings.TrimSpace(str(in["text"]))
-	voice, instructions := firstString(in["voice"], speechVoice), firstString(in["instructions"], speechInstructions)
-	if text == "" || utf8.RuneCountInString(text) > maxSpeechCharacters || len(voice) > 64 || utf8.RuneCountInString(instructions) > 1000 {
-		respond(w, nil, apiErr(400, "BAD_REQUEST", fmt.Sprintf("text must have 1 to %d characters, voice at most 64 bytes, and instructions at most 1000 characters", maxSpeechCharacters)))
+	if text == "" || utf8.RuneCountInString(text) > maxSpeechCharacters {
+		respond(w, nil, apiErr(400, "BAD_REQUEST", fmt.Sprintf("text must have 1 to %d characters", maxSpeechCharacters)))
 		return
 	}
 	router := h.services["router"]
@@ -56,7 +55,7 @@ func (h *harness) handleSpeech(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(context.WithValue(r.Context(), apiKeyKey{}, string(credential.Key)), speechTimeout)
 	defer cancel()
-	body := raw(object{"model": speechModel, "voice": voice, "instructions": instructions, "input": text, "response_format": "pcm", "stream_format": "audio"})
+	body := raw(object{"model": speechModel, "voice": speechVoice, "instructions": speechInstructions, "input": text, "response_format": "pcm", "stream_format": "audio"})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, router.URL+"/v1/audio/speech", bytes.NewReader(body))
 	if err != nil {
 		respond(w, nil, err)

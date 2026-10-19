@@ -619,9 +619,6 @@ func turnAttachments(in, thread object) ([]any, error) {
 func (h *harness) hydrateContext(ctx context.Context, p *principal, thread object, temporary bool) error {
 	name := str(thread["model"])
 	c := h.catalog.get()
-	if c == nil {
-		return apiErr(503, "MODEL_UNAVAILABLE", "The catalog is unavailable")
-	}
 	vision := boolean(c.definition(name)["multimodal"], false)
 	if name == "auto" {
 		vision = true
