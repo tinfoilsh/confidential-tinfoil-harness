@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/jsonschema-go/jsonschema"
 )
 
 //go:embed widgets.json
@@ -32,15 +34,26 @@ type widget struct {
 	Description string          `json:"description"`
 	Schema      json.RawMessage `json:"schema"`
 	Hint        string          `json:"promptHint"`
+
+	schema *jsonschema.Resolved // what a call's arguments are validated against
 }
 
-func widgetCatalog() []widget {
+// widgetCatalog is the compiled widget declarations, read once.
+var widgetCatalog = sync.OnceValue(func() []widget {
 	var widgets []widget
 	if json.Unmarshal(widgetJSON, &widgets) != nil {
 		panic("invalid compiled widgets")
 	}
+	for i := range widgets {
+		resolved, err := resolveSchema(widgets[i].Schema)
+		if err != nil {
+			panic("invalid compiled widget schema: " + err.Error())
+		}
+		widgets[i].schema = resolved
+	}
 	return widgets
-}
+})
+
 func (w widget) declaration() json.RawMessage {
 	return raw(object{"type": "function", "function": object{"name": w.Name, "description": w.Description, "parameters": w.Schema}})
 }

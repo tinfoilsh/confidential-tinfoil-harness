@@ -210,10 +210,10 @@ func TestWidgetSchemaBounds(t *testing.T) {
 	if !ok {
 		t.Fatal("render_clock is not in the widget catalog")
 	}
-	if err := validateSchema(clock.Schema, object{"durationSeconds": float64(1)}); err != nil {
+	if err := clock.schema.Validate(object{"durationSeconds": float64(1)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateSchema(clock.Schema, object{"durationSeconds": float64(0)}); err == nil {
+	if err := clock.schema.Validate(object{"durationSeconds": float64(0)}); err == nil {
 		t.Fatal("exclusive lower bound ignored")
 	}
 }

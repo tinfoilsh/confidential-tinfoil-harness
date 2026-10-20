@@ -109,7 +109,7 @@ func widgetFailure(w widget, args string) json.RawMessage {
 	var value any
 	problem := "arguments are not valid JSON"
 	if json.Unmarshal([]byte(cmp.Or(args, "{}")), &value) == nil {
-		err := validateSchema(w.Schema, value)
+		err := w.schema.Validate(value)
 		if err == nil {
 			return nil
 		}
@@ -118,28 +118,24 @@ func widgetFailure(w widget, args string) json.RawMessage {
 	return raw(object{"status": "error", "error": fmt.Sprintf("The arguments for %s did not match the tool's parameter schema and the component was not displayed: %s. Call %s again with corrected arguments that match the schema exactly.", w.Name, problem, w.Name)})
 }
 
-func validateSchema(raw json.RawMessage, value any) error {
+func resolveSchema(raw json.RawMessage) (*jsonschema.Resolved, error) {
 	var schema jsonschema.Schema
 	// zod-to-json-schema's OpenAPI target uses draft-4 exclusive bounds.
 	// Keep the advertised schema identical to the client reference and convert
 	// those bounds for the draft-2020 validator.
 	var normalized any
 	if err := json.Unmarshal(raw, &normalized); err != nil {
-		return err
+		return nil, err
 	}
 	normalizeSchema(normalized)
 	encoded, err := json.Marshal(normalized)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := json.Unmarshal(encoded, &schema); err != nil {
-		return err
+		return nil, err
 	}
-	resolved, err := schema.Resolve(nil)
-	if err != nil {
-		return err
-	}
-	return resolved.Validate(value)
+	return schema.Resolve(nil)
 }
 
 func normalizeSchema(value any) {
@@ -325,7 +321,7 @@ func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *
 	}
 	content = widgetArguments(strings.TrimSpace(content))
 	var value any
-	if json.Unmarshal([]byte(content), &value) != nil || validateSchema(declaration.Schema, value) != nil {
+	if json.Unmarshal([]byte(content), &value) != nil || declaration.schema.Validate(value) != nil {
 		return apiErr(502, "UPSTREAM_REFUSED", "The replacement widget arguments do not match the schema")
 	}
 	r.replacement = content
