@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -33,6 +34,9 @@ func TestResponseLanguageUsesTheDeviceUnlessTheProfileChoosesOne(t *testing.T) {
 		w := httptest.NewRecorder()
 		h.routes().ServeHTTP(w, r)
 		eventsIn(t, w)
+		if len(systems) != 1 {
+			t.Fatal("the turn never reached the model")
+		}
 		if system := <-systems; !strings.Contains(system, tc.want) {
 			t.Fatalf("%s/%s: %q", tc.selected, tc.locale, system)
 		}
@@ -76,9 +80,9 @@ func TestMergingDeviceSettingsPreservesBothPromptLibraries(t *testing.T) {
 	if first["nickname"] != "Sam" || len(presetsByID(first)) != 2 || first["defaultPromptPresetId"] != "user:same" {
 		t.Fatalf("first cloud settings: %v", first)
 	}
-	remote := object{"themeMode": "dark", "customPromptPresets": []any{object{"id": "user:same", "name": "Editor", "systemPrompt": "Cloud editing rules"}}}
+	remote := object{"nickname": "Cloud Sam", "themeMode": "dark", "customPromptPresets": []any{object{"id": "user:same", "name": "Editor", "systemPrompt": "Cloud editing rules"}}}
 	rows.rows[rowMapKey(p, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: raw(remote)}
-	merged := profileOf(t, postRoute(h, "/v1/profile/merge", object{"key": key.base64(), "profile": local}, "alice"))
+	merged := profileOf(t, postRoute(h, "/v1/profile/merge", object{"key": key.base64(), "profile": local, "changedFields": []string{"nickname"}}, "alice"))
 	presets := presetsByID(merged)
 	if merged["themeMode"] != "dark" || merged["nickname"] != "Sam" || len(presets) != 3 || presets["user:same"]["systemPrompt"] != "Cloud editing rules" || presets[str(merged["defaultPromptPresetId"])]["systemPrompt"] != "Local editing rules" {
 		t.Fatalf("merged settings: %v", merged)
@@ -103,6 +107,9 @@ func TestASelectionCanBeSentAloneAndAskedAbout(t *testing.T) {
 		in := localInput("", priorThread())
 		in["kind"], in["quote"], in["content"] = kind, "Selected passage", ""
 		finishedRun(t, h, "/v1/threads/turn", in)
+		if len(requests) != 1 {
+			t.Fatal("the selection never reached the model")
+		}
 		prompt := <-requests
 		if !strings.Contains(string(raw(prompt)), "Selected passage") || kind == "ask" && !strings.Contains(str(obj(prompt[0])["content"]), "clarify") {
 			t.Fatalf("%s: %s", kind, raw(prompt))
@@ -145,6 +152,9 @@ func TestAProjectImageBecomesContextForItsChats(t *testing.T) {
 	in := sendInput(key)
 	in["projectId"] = "plan"
 	finishedRun(t, h, "/v1/threads/turn", in)
+	if len(requests) != 1 {
+		t.Fatal("the project turn never reached the model")
+	}
 	if system := <-requests; descriptions.Load() != 1 || !strings.Contains(system, document.Content) {
 		t.Fatalf("project image was not reusable context: %q", system)
 	}
@@ -202,5 +212,68 @@ func TestACloudRunUsesItsStorageCredentialForTheFinalSave(t *testing.T) {
 	row, err := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", str(in["threadId"]))
 	if err != nil || grantCalls.Load() != 1 || eventOfType(events, "RUN_FINISHED") == nil || len(readThreadRow(row).Messages) != 2 || readThreadRow(row).Messages[1].Content != "hello" {
 		t.Fatalf("reply was not stored with the run credential: %v", err)
+	}
+}
+
+func TestRemoteChangesReadOnlyStorageMetadata(t *testing.T) {
+	h, rows, _ := testChatHarness(t, nil)
+	var mu sync.Mutex
+	revisions := map[string]string{"chat": "1", "profile": "1", "project": "1", "project_document": "1"}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.Header.Get("Authorization") != "Bearer clerk-alice" {
+			t.Errorf("missing caller identity")
+		}
+		if r.URL.Path == "/v1/sync/revision-summary" {
+			json.NewEncoder(w).Encode(object{"current_revision": revisions["chat"]})
+			return
+		}
+		var in object
+		json.NewDecoder(r.Body).Decode(&in)
+		if r.URL.Path != "/v1/sync/list-status" || in["limit"] != float64(1) || in["direction"] != "desc" {
+			t.Errorf("unexpected metadata request: %s %v", r.URL.Path, in)
+		}
+		scope := str(in["scope"])
+		json.NewEncoder(w).Encode(object{"updates": []object{{"id": scope, "etag": revisions[scope]}}})
+	}))
+	defer server.Close()
+	h.syncAPI = &syncClient{URL: server.URL, Client: server.Client()}
+	read := func() object {
+		t.Helper()
+		w := postRoute(h, "/v1/changes", object{}, "alice")
+		var result object
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &result) != nil || str(result["chats"]) == "" || str(result["profile"]) == "" {
+			t.Fatalf("change tokens: %d %s", w.Code, w.Body.String())
+		}
+		return result
+	}
+	first := read()
+	if !reflect.DeepEqual(first, read()) {
+		t.Fatal("unchanged metadata changed its tokens")
+	}
+	mu.Lock()
+	revisions["profile"] = "2"
+	mu.Unlock()
+	second := read()
+	if first["profile"] == second["profile"] || first["chats"] != second["chats"] || first["projects"] != second["projects"] {
+		t.Fatalf("profile changes: %v -> %v", first, second)
+	}
+	mu.Lock()
+	revisions["project_document"] = "2"
+	mu.Unlock()
+	third := read()
+	if third["projects"] == second["projects"] || rows.calls != 0 {
+		t.Fatal("document changes were missed or full rows were read")
+	}
+}
+
+func TestRenamingAChatPreservesItsConversationActivity(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	rows.rows["user:alice/chat/activity"] = storedRow{ID: "activity", ETag: "1", Data: raw(Thread{ID: "activity", CreatedAt: "2026-01-01T00:00:00Z", Messages: []Message{{ID: "latest", Role: "user", CreatedAt: "2026-03-01T00:00:00Z", Content: "Latest"}, {ID: "older", Role: "assistant", CreatedAt: "2026-02-01T00:00:00Z", Content: "Older"}}})}
+	w := postRoute(h, "/v1/threads/update", object{"id": "activity", "key": key.base64(), "title": "Renamed"}, "alice")
+	var summary threadSummary
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &summary) != nil || summary.Title != "Renamed" || summary.ActivityAt != "2026-03-01T00:00:00Z" || summary.UpdatedAt == nil || *summary.UpdatedAt == summary.ActivityAt {
+		t.Fatalf("rename activity: %d %s", w.Code, w.Body.String())
 	}
 }
