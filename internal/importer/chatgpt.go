@@ -221,17 +221,21 @@ func chatgptAttachments(msg *chatgptMessage, pointers []string, index *Index) []
 	return out
 }
 
-// chatgptThoughts is the reasoning ChatGPT recorded on the way to a reply.
+// chatgptThoughts is the reasoning ChatGPT recorded on the way to a reply:
+// the nearest it recorded since the user message that opened the turn.
 func chatgptThoughts(nodeID string, mapping map[string]chatgptNode) string {
 	seen := map[string]bool{}
-	thoughts := ""
 	for current := nodeID; current != "" && !seen[current]; {
 		seen[current] = true
 		node, ok := mapping[current]
 		if !ok {
 			break
 		}
-		if msg := node.Message; msg != nil && msg.Content.ContentType == "thoughts" {
+		msg := node.Message
+		if msg != nil && msg.Author.Role == "user" {
+			break
+		}
+		if msg != nil && msg.Content.ContentType == "thoughts" {
 			var texts []string
 			for _, t := range msg.Content.Thoughts {
 				if t.Content != "" {
@@ -240,11 +244,11 @@ func chatgptThoughts(nodeID string, mapping map[string]chatgptNode) string {
 					texts = append(texts, t.Summary)
 				}
 			}
-			if len(texts) > 0 && thoughts == "" {
-				thoughts = strings.Join(texts, "\n\n")
+			if len(texts) > 0 {
+				return strings.Join(texts, "\n\n")
 			}
 		}
 		current = node.Parent
 	}
-	return thoughts
+	return ""
 }

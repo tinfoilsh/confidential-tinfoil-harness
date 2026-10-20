@@ -558,6 +558,33 @@ func TestExportsImportAlikeToCloudAndDevice(t *testing.T) {
 	}
 }
 
+// A ChatGPT reply keeps the reasoning recorded nearest to it in its own
+// turn, and a reply without any keeps none of an earlier turn's.
+func TestChatGPTRepliesKeepTheirTurnsReasoning(t *testing.T) {
+	h, _, _ := testChatHarness(t, nil)
+	node := func(parent, role, kind string, content object) object {
+		content["content_type"] = kind
+		return object{"parent": parent, "message": object{"author": object{"role": role}, "content": content}}
+	}
+	thoughts := func(text string) object { return object{"thoughts": []object{{"content": text}}} }
+	text := func(text string) object { return object{"parts": []string{text}} }
+	conversation := object{"id": "turns", "title": "Two turns", "current_node": "a2", "mapping": object{
+		"u1":     node("", "user", "text", text("First question")),
+		"older":  node("u1", "assistant", "thoughts", thoughts("Older thought")),
+		"nearer": node("older", "assistant", "thoughts", thoughts("Nearer thought")),
+		"a1":     node("nearer", "assistant", "text", text("First answer")),
+		"u2":     node("a1", "user", "text", text("Second question")),
+		"a2":     node("u2", "assistant", "text", text("Second answer")),
+	}}
+	result := importOf(t, h, "", raw([]object{conversation}), "conversations.json", object{"target": "device"})
+	if len(result.threads) != 1 || len(result.threads[0].Messages) != 4 {
+		t.Fatalf("threads: %s", raw(result.threads))
+	}
+	if messages := result.threads[0].Messages; timelineText(messages[1].Timeline, "thinking") != "Nearer thought" || timelineText(messages[3].Timeline, "thinking") != "" {
+		t.Fatalf("reasoning: %s", raw(messages))
+	}
+}
+
 // Claude's projects go to the cloud with their documents' text; on the
 // device alone they cannot be imported.
 func TestClaudeProjectsRequireTheCloud(t *testing.T) {
