@@ -90,12 +90,14 @@ func TestANewChatTakesItsPresetsSettingsUnlessItsTurnSetsThem(t *testing.T) {
 // setting overrides.
 func TestANewChatTakesTheProfilesWebSearchSetting(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
+	serveWebsearch(t, nil)
 	for _, tc := range []struct {
 		profile bool
 		options object
 		want    bool
 	}{
 		{false, object{}, false},
+		{true, object{}, true},
 		{true, object{"webSearch": false}, false},
 	} {
 		rows.rows[rowMapKey(&principal{ID: "alice"}, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: raw(object{"webSearchEnabled": tc.profile})}
