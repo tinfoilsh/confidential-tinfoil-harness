@@ -547,6 +547,9 @@ func (in *turnRequest) validateContent() error {
 		if err := validateLocalThread(in.Thread); err != nil {
 			return err
 		}
+	} else if in.Local && in.Kind == "ask" {
+		// An ask about a device chat reads the conversation its client sends.
+		return apiErr(400, "BAD_REQUEST", "A local thread requires its transcript")
 	}
 	if in.Kind == "resolve" {
 		if !isObject(in.Resolution) {

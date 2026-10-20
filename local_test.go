@@ -226,6 +226,12 @@ func TestLocalAskHidesTheTranscriptItStartsFrom(t *testing.T) {
 	if len(prompt) < 4 || str(obj(prompt[1])["content"]) != "first question" {
 		t.Fatalf("the model lost the asked-about conversation: %v", prompt)
 	}
+	// Without the conversation there is nothing to ask about.
+	delete(in, "thread")
+	in["clientRequestId"] = uuid.NewString()
+	if w := postRoute(h, "/v1/threads/turn", in, "alice"); w.Code != 400 || !strings.Contains(w.Body.String(), "requires its transcript") {
+		t.Fatalf("an ask without its conversation: HTTP %d %s", w.Code, w.Body.String())
+	}
 }
 
 // endedThread posts a device chat's turn and returns the thread its run's
