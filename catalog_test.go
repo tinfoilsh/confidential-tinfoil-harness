@@ -7,7 +7,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
-	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -120,7 +120,7 @@ func TestHarnessStartsBeforeTheGatewayOffersAModel(t *testing.T) {
 		Models       []object `json:"models"`
 	}
 	response := postRoute(h, "/v1/session", object{}, "")
-	if err := json.Unmarshal(response.Body.Bytes(), &session); err != nil || response.Code != 200 || session.DefaultModel != "auto" || len(session.Models) != 0 {
+	if err := json.Unmarshal(response.Body.Bytes(), &session); err != nil || response.Code != 200 || session.DefaultModel != "auto" || len(session.Models) != 1 || session.Models[0]["auto"] != true {
 		t.Fatalf("session without offered models: HTTP %d %s", response.Code, response.Body.String())
 	}
 	turn := localInput("", object{})
@@ -134,30 +134,33 @@ func TestHarnessStartsBeforeTheGatewayOffersAModel(t *testing.T) {
 	}
 }
 
+// The session lists Auto first and every model in the fields a client shows,
+// and nothing else of the control plane's configuration.
 func TestSessionModelsAreReadyToDisplay(t *testing.T) {
 	h, _, _ := testChatHarness(t, nil)
 	c := h.catalog.get()
 	c.Models = []object{
-		{"modelName": "kimi-k3", "name": "Kimi K3", "paid": true, "experimental": true, "chatConfig": object{"reasoningConfig": object{"supportsToggle": true}}},
+		{"modelName": "kimi-k3", "name": "Kimi K3", "image": "moonshot.png", "description": "A long description", "multimodal": true, "paid": true, "experimental": true,
+			"chatConfig": object{"descriptionShort": "Thinks deeply", "attributes": []any{"reasoning"}, "reasoningConfig": object{"supportsToggle": true}}},
 		{"modelName": "gpt-oss-120b", "name": "Free", "paid": false},
 	}
 	c.Deprecated = []object{{"modelName": "old", "name": "Old", "nameShort": "O", "deprecated": true, "deprecationDate": "2026-12-01"}}
 	var session struct {
-		Models []sessionModel `json:"models"`
-		Auto   autoView       `json:"auto"`
+		Models json.RawMessage `json:"models"`
+		Auto   json.RawMessage `json:"auto"`
 	}
 	json.Unmarshal(postRoute(h, "/v1/session", object{}, "").Body.Bytes(), &session)
-	if len(session.Models) != 2 || session.Models[0].ID != "kimi-k3" || session.Models[1].ID != "old" {
-		t.Fatalf("the session offers %+v", session.Models)
+	want := `[{"id":"auto","label":"Auto","shortLabel":"Auto","icon":"","description":"","badges":[],"reasoning":null,"deprecated":false,"auto":true},` +
+		`{"id":"kimi-k3","label":"Kimi K3","shortLabel":"Kimi K3","icon":"moonshot.png","description":"Thinks deeply","badges":[{"kind":"experimental","label":"Experimental","tooltip":"` + experimentalTooltip + `"}],"reasoning":{"toggle":true,"effort":false,"defaultEnabled":true},"deprecated":false},` +
+		`{"id":"old","label":"Old","shortLabel":"O","icon":"","description":"","badges":[{"kind":"deprecated","label":"Deprecated","tooltip":"This model will be taken offline on 2026-12-01."}],"reasoning":null,"deprecated":true}]`
+	if string(session.Models) != want {
+		t.Fatalf("the session offers\n%s\nwant\n%s", session.Models, want)
 	}
-	kimi, old := session.Models[0], session.Models[1]
-	if kimi.NameShort != "Kimi K3" || kimi.Attributes == nil || kimi.Reasoning == nil || !kimi.Reasoning.Toggle || !kimi.Reasoning.DefaultEnabled || len(kimi.Badges) != 1 || kimi.Badges[0].Kind != "experimental" {
-		t.Fatalf("kimi-k3 is offered as %+v", kimi)
+	levels := []string{}
+	for _, level := range [][2]string{{"instant", "Instant"}, {"low", "Low"}, {"medium", "Med"}, {"high", "High"}, {"extra", "Extra"}, {"max", "Max"}} {
+		levels = append(levels, `{"id":"`+level[0]+`","label":"`+level[1]+`","displayLabel":"Auto · `+level[1]+`"}`)
 	}
-	if old.NameShort != "O" || len(old.Badges) != 1 || old.Badges[0].Tooltip != "This model will be taken offline on 2026-12-01." {
-		t.Fatalf("the deprecated model is offered as %+v", old)
-	}
-	if level := session.Auto.Levels[slices.IndexFunc(session.Auto.Levels, func(l intelligenceLevel) bool { return l.ID == "high" })]; level.Label != "High" || level.DisplayLabel != "Auto · High" {
-		t.Fatalf("Auto's high level reads %+v", level)
+	if want := `{"default":"high","levels":[` + strings.Join(levels, ",") + `]}`; string(session.Auto) != want {
+		t.Fatalf("Auto is offered as %s, want %s", session.Auto, want)
 	}
 }

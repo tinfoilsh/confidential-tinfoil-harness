@@ -297,9 +297,9 @@ type sessionUser struct {
 	Anonymous bool   `json:"anonymous"`
 }
 
-// autoView is how a client offers Auto.
+// autoView is how hard Auto works: its default level, and each level's
+// labels.
 type autoView struct {
-	Multimodal bool                `json:"multimodal"`
-	Default    string              `json:"default"`
-	Levels     []intelligenceLevel `json:"levels"`
+	Default string              `json:"default"`
+	Levels  []intelligenceLevel `json:"levels"`
 }

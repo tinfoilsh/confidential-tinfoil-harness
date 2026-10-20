@@ -230,7 +230,7 @@ var reasoningEfforts = []string{"low", "medium", "high"}
 type intelligenceLevel struct {
 	ID           string `json:"id"`
 	Label        string `json:"label"`
-	DisplayLabel string `json:"displayLabel,omitempty"`
+	DisplayLabel string `json:"displayLabel"`
 }
 
 var intelligenceLevels = []intelligenceLevel{{ID: "instant", Label: "Instant"}, {ID: "low", Label: "Low"}, {ID: "medium", Label: "Med"}, {ID: "high", Label: "High"}, {ID: "extra", Label: "Extra"}, {ID: "max", Label: "Max"}}
@@ -272,16 +272,13 @@ type modelConfig struct {
 	ModelName       string  `json:"modelName"`
 	Name            string  `json:"name"`
 	NameShort       string  `json:"nameShort"`
-	Description     string  `json:"description"`
 	Image           string  `json:"image"`
-	Multimodal      bool    `json:"multimodal"`
 	Paid            *bool   `json:"paid"`
 	Experimental    bool    `json:"experimental"`
 	Deprecated      bool    `json:"deprecated"`
 	DeprecationDate *string `json:"deprecationDate"`
 	ChatConfig      struct {
-		DescriptionShort string   `json:"descriptionShort"`
-		Attributes       []string `json:"attributes"`
+		DescriptionShort string `json:"descriptionShort"`
 		ReasoningConfig  *struct {
 			SupportsToggle bool  `json:"supportsToggle"`
 			SupportsEffort bool  `json:"supportsEffort"`
@@ -291,22 +288,17 @@ type modelConfig struct {
 }
 
 // sessionModel is a chat model as a client offers it, every field ready to
-// show.
+// show. Auto is the entry that has the router choose a model for each turn.
 type sessionModel struct {
-	ID               string           `json:"id"`
-	Name             string           `json:"name"`
-	NameShort        string           `json:"nameShort"`
-	Description      string           `json:"description"`
-	DescriptionShort string           `json:"descriptionShort"`
-	Image            string           `json:"image"`
-	Attributes       []string         `json:"attributes"`
-	Multimodal       bool             `json:"multimodal"`
-	Paid             *bool            `json:"paid,omitempty"`
-	Experimental     bool             `json:"experimental"`
-	Deprecated       bool             `json:"deprecated"`
-	DeprecationDate  *string          `json:"deprecationDate"`
-	Reasoning        *reasoningView   `json:"reasoning"`
-	Badges           []lifecycleBadge `json:"badges"`
+	ID          string           `json:"id"`
+	Label       string           `json:"label"`
+	ShortLabel  string           `json:"shortLabel"`
+	Icon        string           `json:"icon"`
+	Description string           `json:"description"`
+	Badges      []lifecycleBadge `json:"badges"`
+	Reasoning   *reasoningView   `json:"reasoning"`
+	Deprecated  bool             `json:"deprecated"`
+	Auto        bool             `json:"auto,omitempty"`
 }
 
 type reasoningView struct {
@@ -328,22 +320,18 @@ const (
 	deprecatedDateTooltip = "This model will be taken offline on %s."
 )
 
-// displayModels are the models a client offers. A model configured as not
-// paid serves free keys behind Auto and is never offered.
+// displayModels are the models a client offers, Auto first. A model
+// configured as not paid serves free keys behind Auto and is never offered.
 func (c *chatCatalog) displayModels() []sessionModel {
-	models := []sessionModel{}
+	models := []sessionModel{{ID: autoModelName, Label: autoLabel, ShortLabel: autoLabel, Badges: []lifecycleBadge{}, Auto: true}}
 	for _, m := range append(slices.Clone(c.Models), c.Deprecated...) {
 		var config modelConfig
 		readLenient(raw(m), &config)
 		if config.Paid != nil && !*config.Paid {
 			continue
 		}
-		display := sessionModel{ID: config.ModelName, Name: config.Name, NameShort: cmp.Or(config.NameShort, config.Name), Description: config.Description, DescriptionShort: config.ChatConfig.DescriptionShort,
-			Image: config.Image, Attributes: config.ChatConfig.Attributes, Multimodal: config.Multimodal, Paid: config.Paid, Experimental: config.Experimental, Deprecated: config.Deprecated,
-			DeprecationDate: config.DeprecationDate, Badges: []lifecycleBadge{}}
-		if display.Attributes == nil {
-			display.Attributes = []string{}
-		}
+		display := sessionModel{ID: config.ModelName, Label: config.Name, ShortLabel: cmp.Or(config.NameShort, config.Name), Icon: config.Image, Description: config.ChatConfig.DescriptionShort,
+			Deprecated: config.Deprecated, Badges: []lifecycleBadge{}}
 		if reason := config.ChatConfig.ReasoningConfig; reason != nil {
 			display.Reasoning = &reasoningView{Toggle: reason.SupportsToggle, Effort: reason.SupportsEffort, DefaultEnabled: valueOr(reason.DefaultEnabled, true)}
 		}
