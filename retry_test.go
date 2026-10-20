@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -40,7 +41,13 @@ func TestARetryRepeatsWhatTheChatLeftUnfinished(t *testing.T) {
 			t.Fatalf("%s: retried as %q (continued %v) into %+v", tc.name, chat.LastRequestKind, continued, chat.Messages)
 		}
 	}
-	if w := postRoute(h, "/v1/threads/turn", object{"threadId": rowID(), "clientRequestId": "6f1c4a8e-0d55-4b8f-9a8e-2f0c7b9d1e11", "kind": "retry", "local": true}, ""); w.Code == 200 {
-		t.Fatal("a chat without messages was retried")
+	// A device chat's first turn starts it without messages.
+	w := postRoute(h, "/v1/threads/turn", object{"threadId": rowID(), "clientRequestId": "6f1c4a8e-0d55-4b8f-9a8e-2f0c7b9d1e11", "kind": "retry", "local": true}, "")
+	var refused struct {
+		Error apiError `json:"error"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &refused)
+	if w.Code != 400 || refused.Error.Message != "The chat has nothing to retry" {
+		t.Fatalf("a chat without messages was retried: HTTP %d %s", w.Code, w.Body.String())
 	}
 }
