@@ -399,6 +399,30 @@ func TestFirstTurnUsesProjectAndPreset(t *testing.T) {
 	}
 }
 
+// A question asked about a stored chat is prompted as the chat is: with
+// the user's settings and the chat's project.
+func TestACloudAskReadsTheChatsSettingsAndProject(t *testing.T) {
+	systems := make(chan string, 1)
+	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		systems <- str(obj(lastRequest(r)[0])["content"])
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"side answer\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	p := &principal{ID: "alice"}
+	rows.rows[rowMapKey(p, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: raw(object{"nickname": "Sam"})}
+	rows.rows[rowMapKey(p, "project", "project-1")] = storedRow{ID: "project-1", ETag: "1", Data: raw(object{"name": "Research", "systemInstructions": "Cite the lab notebook"})}
+	storedThread(rows, "alice", "chat-1")
+	row := rows.rows[rowMapKey(p, "chat", "chat-1")]
+	editRow(&row, func(data object) { data["projectId"] = "project-1" })
+	rows.rows[rowMapKey(p, "chat", "chat-1")] = row
+	ask := continueInput(key, "chat-1")
+	ask["kind"], ask["quote"] = "ask", "ok"
+	delete(ask, "content")
+	finishedRun(t, h, "/v1/threads/turn", ask)
+	if system := <-systems; !strings.Contains(system, "<nickname>Sam</nickname>") || !strings.Contains(system, "Cite the lab notebook") {
+		t.Fatalf("the ask was prompted with %q", system)
+	}
+}
+
 // A project update leaves out what it does not name, and a null color
 // clears the project's.
 func TestAProjectUpdateClearsItsColorWithNull(t *testing.T) {

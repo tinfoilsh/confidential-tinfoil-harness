@@ -42,10 +42,15 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *principal, cre
 	var profile Profile
 	var project *Project
 	var docs []ProjectDocument
+	// The run holds a device chat's row and an ask's. A device chat's
+	// settings are the ones its client sends; an ask about a stored chat
+	// reads the user's and the chat's project, as the chat does.
 	if s.local {
 		h.live.mu.Lock()
 		row = &threadRow{Thread: s.row.clone()}
 		h.live.mu.Unlock()
+	}
+	if r.input.Local {
 		if r.profile != nil {
 			profile = *r.profile
 		}
@@ -55,16 +60,18 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *principal, cre
 		if err != nil {
 			return nil, err
 		}
-		// A new chat's first turn creates its row under the client's id.
-		row, err = h.loadThread(ctx, p, r.key, s.id)
-		if err != nil && (asAPIError(err).HTTP != 404 || !rowIDPattern.MatchString(s.id) || !create) {
-			return nil, err
-		}
-		if err != nil {
-			row = &threadRow{Thread: newThread(s.id, r.input.ProjectID, r.input.PresetID.value)}
-		}
-		if row.LastRequestID == r.nonce {
-			return nil, errAlreadyApplied
+		if !s.local {
+			// A new chat's first turn creates its row under the client's id.
+			row, err = h.loadThread(ctx, p, r.key, s.id)
+			if err != nil && (asAPIError(err).HTTP != 404 || !rowIDPattern.MatchString(s.id) || !create) {
+				return nil, err
+			}
+			if err != nil {
+				row = &threadRow{Thread: newThread(s.id, r.input.ProjectID, r.input.PresetID.value)}
+			}
+			if row.LastRequestID == r.nonce {
+				return nil, errAlreadyApplied
+			}
 		}
 		if id := valueOr(row.ProjectID, ""); id != "" {
 			stored, err := h.loadProject(ctx, p, r.key, id)
