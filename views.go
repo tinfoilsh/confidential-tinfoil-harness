@@ -1,7 +1,6 @@
 package main
 
 import (
-	"cmp"
 	"encoding/json"
 	"time"
 )
@@ -87,19 +86,19 @@ func window(row *threadRow, before string, limit int) threadWindow {
 // messageView is a message as a client shows it: a question's text or a
 // reply's timeline, and its attachments without their content.
 type messageView struct {
-	ID               string           `json:"id"`
-	Role             string           `json:"role"`
-	CreatedAt        string           `json:"createdAt"`
-	Quote            string           `json:"quote,omitempty"`
-	Model            string           `json:"model,omitempty"`
-	ModelDisplayName string           `json:"modelDisplayName,omitempty"`
-	IsError          *bool            `json:"isError,omitempty"`
-	IsInterrupted    *bool            `json:"isInterrupted,omitempty"`
-	Usage            json.RawMessage  `json:"usage,omitempty"`
-	Annotations      []Annotation     `json:"annotations,omitzero"`
-	Timeline         []Block          `json:"timeline,omitzero"`
-	Content          *string          `json:"content,omitempty"`
-	Attachments      []attachmentView `json:"attachments,omitempty"`
+	ID               string          `json:"id"`
+	Role             string          `json:"role"`
+	CreatedAt        string          `json:"createdAt"`
+	Quote            string          `json:"quote,omitempty"`
+	Model            string          `json:"model,omitempty"`
+	ModelDisplayName string          `json:"modelDisplayName,omitempty"`
+	IsError          *bool           `json:"isError,omitempty"`
+	IsInterrupted    *bool           `json:"isInterrupted,omitempty"`
+	Usage            json.RawMessage `json:"usage,omitempty"`
+	Annotations      []Annotation    `json:"annotations,omitzero"`
+	Timeline         []Block         `json:"timeline,omitzero"`
+	Content          *string         `json:"content,omitempty"`
+	Attachments      []Attachment    `json:"attachments,omitempty"`
 }
 
 func viewMessage(m *Message) messageView {
@@ -119,49 +118,11 @@ func viewMessage(m *Message) messageView {
 	return view
 }
 
-// attachmentView is an attachment as a client lists it.
-type attachmentView struct {
-	ID          string  `json:"id"`
-	Kind        string  `json:"kind"`
-	FileName    *string `json:"fileName"`
-	MimeType    *string `json:"mimeType"`
-	Size        *int64  `json:"size"`
-	Thumbnail   *string `json:"thumbnail"`
-	Pages       *int    `json:"pages"`
-	Status      string  `json:"status"`
-	TextContent string  `json:"textContent,omitempty"`
-	// A text-only model reads an image through this. Local clients keep it,
-	// so later turns do not ask a vision model to describe the image again.
-	Description string `json:"description,omitempty"`
-}
-
-func viewAttachment(a *Attachment) attachmentView {
-	view := attachmentView{ID: a.ID, Kind: cmp.Or(a.Kind, a.Type), FileName: present(a.FileName), MimeType: present(a.MimeType), Size: a.FileSize, Thumbnail: present(a.ThumbnailBase64),
-		Status: "ready", TextContent: a.TextContent, Description: a.Description}
-	if len(a.Pages) > 0 {
-		view.Pages = new(len(a.Pages))
-	} else if a.PageCount > 0 {
-		view.Pages = new(a.PageCount)
-	}
-	return view
-}
-
-// uploadedAttachment is an upload's descriptor as its client holds it until
-// a turn sends it back: page images included, image bytes not.
-type uploadedAttachment struct {
-	ID          string         `json:"id"`
-	Kind        string         `json:"kind"`
-	FileName    string         `json:"fileName"`
-	MimeType    string         `json:"mimeType"`
-	Size        *int64         `json:"size"`
-	Thumbnail   string         `json:"thumbnail,omitempty"`
-	TextContent string         `json:"textContent,omitempty"`
-	Description string         `json:"description,omitempty"`
-	Pages       []DocumentPage `json:"pages,omitempty"`
-}
-
-func viewUpload(a *Attachment) uploadedAttachment {
-	return uploadedAttachment{ID: a.ID, Kind: cmp.Or(a.Kind, a.Type), FileName: a.FileName, MimeType: a.MimeType, Size: a.FileSize, Thumbnail: a.ThumbnailBase64, TextContent: a.TextContent, Description: a.Description, Pages: a.Pages}
+// viewAttachment is an attachment as a client lists it: its metadata,
+// thumbnail and any text it holds inline, without its blob's key or its
+// bytes. A text-only model reads an image through its description.
+func viewAttachment(a *Attachment) Attachment {
+	return Attachment{ID: a.ID, Kind: a.Kind, FileName: a.FileName, MimeType: a.MimeType, Size: a.Size, Thumbnail: a.Thumbnail, TextContent: a.TextContent, Description: a.Description}
 }
 
 // deviceTranscript is a stored chat as its device keeps it, without the
@@ -185,25 +146,14 @@ type sharePayload struct {
 }
 
 type shareMessage struct {
-	Role             string            `json:"role"`
-	Content          string            `json:"content"`
-	Timestamp        int64             `json:"timestamp"`
-	Timeline         []Block           `json:"timeline"`
-	ModelDisplayName string            `json:"modelDisplayName,omitempty"`
-	IsError          *bool             `json:"isError,omitempty"`
-	Quote            string            `json:"quote,omitempty"`
-	Attachments      []shareAttachment `json:"attachments,omitempty"`
-}
-
-type shareAttachment struct {
-	ID              string `json:"id,omitempty"`
-	Type            string `json:"type,omitempty"`
-	FileName        string `json:"fileName,omitempty"`
-	MimeType        string `json:"mimeType,omitempty"`
-	ThumbnailBase64 string `json:"thumbnailBase64,omitempty"`
-	EncryptionKey   string `json:"encryptionKey,omitempty"`
-	TextContent     string `json:"textContent,omitempty"`
-	Description     string `json:"description,omitempty"`
+	Role             string       `json:"role"`
+	Content          string       `json:"content"`
+	Timestamp        int64        `json:"timestamp"`
+	Timeline         []Block      `json:"timeline"`
+	ModelDisplayName string       `json:"modelDisplayName,omitempty"`
+	IsError          *bool        `json:"isError,omitempty"`
+	Quote            string       `json:"quote,omitempty"`
+	Attachments      []Attachment `json:"attachments,omitempty"`
 }
 
 // sharedThread is an opened share, whose attachments name the key that
@@ -220,7 +170,7 @@ type sharedMessage struct {
 }
 
 type sharedAttachment struct {
-	attachmentView
+	Attachment
 	AttKey *string `json:"attKey"`
 }
 

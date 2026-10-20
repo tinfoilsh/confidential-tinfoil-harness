@@ -299,7 +299,7 @@ func TestMissingAttachmentsAreRepairedBeforeRetrying(t *testing.T) {
 	if doc.ID == docID || doc.StorageThreadID != "chat-1" || fake.blobs[doc.ID].chat != "chat-1" {
 		t.Fatalf("the document was not stored under its chat: %+v", doc)
 	}
-	if image.EncryptionKey != "" || image.ThumbnailBase64 != "thumb" || chat.Title != "Renamed" {
+	if image.EncryptionKey != "" || image.Thumbnail != "thumb" || chat.Title != "Renamed" {
 		t.Fatalf("the unreachable image was not retired to its thumbnail: %+v", image)
 	}
 }
@@ -469,8 +469,8 @@ func TestALocalChatIsSharedFromItsTranscript(t *testing.T) {
 	plaintext, _ := base64.StdEncoding.DecodeString(str(seals[0]["plaintext"]))
 	want := object{"v": 1, "title": "Local chat", "createdAt": 1767225600000, "messages": []any{
 		object{"role": "user", "content": "what is this?", "timestamp": 1767225601000, "timeline": nil, "quote": "earlier", "attachments": []any{
-			object{"id": "img", "type": "image", "fileName": "photo.png", "mimeType": "image/png", "thumbnailBase64": "dGh1bWI="},
-			object{"id": "doc", "type": "document", "fileName": "notes.pdf", "mimeType": "application/pdf", "textContent": "the notes"},
+			object{"id": "img", "kind": "image", "fileName": "photo.png", "mimeType": "image/png", "thumbnail": "dGh1bWI="},
+			object{"id": "doc", "kind": "document", "fileName": "notes.pdf", "mimeType": "application/pdf", "textContent": "the notes"},
 		}},
 		object{"role": "assistant", "content": "a photo", "timestamp": 1767225602000, "timeline": []any{object{"id": "b1", "type": "content", "content": "a photo"}}, "modelDisplayName": "Kimi K3"},
 	}}

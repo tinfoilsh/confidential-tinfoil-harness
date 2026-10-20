@@ -124,23 +124,25 @@ func searchDisplay(name, args string, result json.RawMessage) *ToolDisplay {
 	return display
 }
 
-// Attachment is a file a message carries, in the form sync protocol 3
-// stores it: metadata and the key of its blob, with its content inline
-// only while no blob holds it.
+// Attachment is a file a message carries, in the one form an upload returns
+// it, a turn sends it, a chat stores it and a view shows it. A stored chat
+// keeps the key of its blob, with its content inline only while no blob
+// holds it; a chat on a device keeps its content.
 type Attachment struct {
-	ID              string         `json:"id"`
-	Type            string         `json:"type,omitempty"`
-	Kind            string         `json:"kind,omitempty"`
-	FileName        string         `json:"fileName,omitempty"`
-	MimeType        string         `json:"mimeType,omitempty"`
-	FileSize        *int64         `json:"fileSize,omitempty"`
-	ThumbnailBase64 string         `json:"thumbnailBase64,omitempty"`
-	TextContent     string         `json:"textContent,omitempty"`
-	Description     string         `json:"description,omitempty"`
-	Pages           []DocumentPage `json:"pages,omitempty"`
-	PageCount       int            `json:"pageCount,omitempty"`
-	Base64          string         `json:"base64,omitempty"`
-	EncryptionKey   string         `json:"encryptionKey,omitempty"`
+	ID          string         `json:"id"`
+	Kind        string         `json:"kind"` // image, document or audio
+	FileName    string         `json:"fileName"`
+	MimeType    string         `json:"mimeType"`
+	Size        *int64         `json:"size,omitempty"`
+	Thumbnail   string         `json:"thumbnail,omitempty"`
+	TextContent string         `json:"textContent,omitempty"`
+	Description string         `json:"description,omitempty"`
+	Pages       []DocumentPage `json:"pages,omitempty"`
+	// Base64 is an image's copy that models read.
+	Base64 string `json:"base64,omitempty"`
+	// EncryptionKey opens the attachment's blob. Sync reads it by this name
+	// to copy a forked chat's blobs.
+	EncryptionKey string `json:"encryptionKey,omitempty"`
 	// Key is the control plane key of an image stored before sync existed.
 	Key             string `json:"key,omitempty"`
 	StorageThreadID string `json:"storageThreadId,omitempty"`
@@ -279,11 +281,7 @@ func (b *Block) callID() string {
 	return b.ID
 }
 
-func (a *Attachment) isImage() bool { return a.fileKind() == "image" }
-
-// fileKind is whether an attachment is an image or a document, which old
-// rows name in either field.
-func (a *Attachment) fileKind() string { return cmp.Or(a.Type, a.Kind) }
+func (a *Attachment) isImage() bool { return a.Kind == "image" }
 
 // storageKey opens the attachment's blob: a sync key, or a control plane
 // key from before sync.

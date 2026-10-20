@@ -71,7 +71,7 @@ func TestDeviceAndStoredChatsChangeTheSameWay(t *testing.T) {
 	}
 	messages := arr(device["messages"])
 	image := obj(arr(obj(messages[0])["attachments"])[0])
-	if device["model"] != "gemma4-31b" || device["titleState"] != "manual" || len(messages) != 3 || image["base64"] != nil || image["thumbnailBase64"] != "dGh1bWI=" {
+	if device["model"] != "gemma4-31b" || device["titleState"] != "manual" || len(messages) != 3 || image["base64"] != nil || image["thumbnail"] != "dGh1bWI=" {
 		t.Fatalf("the device chat was answered as %v", device)
 	}
 	// The harness names a fork, which keeps its attachments' ids.

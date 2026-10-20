@@ -41,7 +41,7 @@ func (h *harness) threadTranscript(ctx context.Context, p *principal, key conten
 		if err != nil {
 			return err
 		}
-		a.EncryptionKey, a.Key, a.StorageThreadID, a.PageCount = "", "", "", 0
+		a.EncryptionKey, a.Key, a.StorageThreadID = "", "", ""
 		return nil
 	})
 	if err != nil {

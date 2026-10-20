@@ -60,17 +60,45 @@ type legacyThread struct {
 // replies had timelines and attachments had their own records.
 type legacyMessage struct {
 	Message
-	Timestamp               looseTime        `json:"timestamp"`
-	Timeline                []legacyBlock    `json:"timeline"`
-	Thoughts                string           `json:"thoughts"`
-	WebSearch               *legacySearch    `json:"webSearch"`
-	WebSearchBeforeThinking bool             `json:"webSearchBeforeThinking"`
-	URLFetches              []legacyFetch    `json:"urlFetches"`
-	CodeExecCalls           []legacyCodeCall `json:"codeExecCalls"`
-	ToolCalls               []Block          `json:"toolCalls"`
-	DocumentContent         string           `json:"documentContent"`
-	MultimodalText          string           `json:"multimodalText"`
-	ImageData               []legacyImage    `json:"imageData"`
+	Timestamp               looseTime          `json:"timestamp"`
+	Timeline                []legacyBlock      `json:"timeline"`
+	Thoughts                string             `json:"thoughts"`
+	WebSearch               *legacySearch      `json:"webSearch"`
+	WebSearchBeforeThinking bool               `json:"webSearchBeforeThinking"`
+	URLFetches              []legacyFetch      `json:"urlFetches"`
+	CodeExecCalls           []legacyCodeCall   `json:"codeExecCalls"`
+	ToolCalls               []Block            `json:"toolCalls"`
+	DocumentContent         string             `json:"documentContent"`
+	MultimodalText          string             `json:"multimodalText"`
+	ImageData               []legacyImage      `json:"imageData"`
+	Attachments             []legacyAttachment `json:"attachments"`
+}
+
+// legacyAttachment is an attachment under the names the web and iOS apps
+// stored it with: its kind as type, and its size and thumbnail.
+type legacyAttachment struct {
+	Attachment
+	Type            string `json:"type"`
+	FileSize        *int64 `json:"fileSize"`
+	ThumbnailBase64 string `json:"thumbnailBase64"`
+}
+
+// upgrade is the attachment in the current form. Old rows name only images
+// and documents, by type; a row the harness wrote names audio by kind too.
+func (a legacyAttachment) upgrade() Attachment {
+	upgraded := a.Attachment
+	switch {
+	case slices.Contains(attachmentKinds, a.Kind):
+	case a.Type == "image":
+		upgraded.Kind = "image"
+	default:
+		upgraded.Kind = "document"
+	}
+	if upgraded.Size == nil {
+		upgraded.Size = a.FileSize
+	}
+	upgraded.Thumbnail = cmp.Or(upgraded.Thumbnail, a.ThumbnailBase64)
+	return upgraded
 }
 
 // legacyBlock is a timeline block, including the kinds the web client wrote
@@ -258,14 +286,20 @@ func (c legacyCodeCall) arguments() string {
 // attachments are a message's attachments, made from the document text and
 // image bytes the apps once kept on the message itself. Each has an id.
 func (m *legacyMessage) attachments(messageID string) []Attachment {
-	attachments := m.Attachments
+	var attachments []Attachment
+	if m.Attachments != nil {
+		attachments = make([]Attachment, len(m.Attachments))
+		for i, a := range m.Attachments {
+			attachments[i] = a.upgrade()
+		}
+	}
 	if len(attachments) == 0 {
 		if content := cmp.Or(m.DocumentContent, m.MultimodalText); content != "" {
-			attachments = append(attachments, Attachment{Type: "document", FileName: "Attached document", TextContent: content})
+			attachments = append(attachments, Attachment{Kind: "document", FileName: "Attached document", TextContent: content})
 		}
 		for i, image := range m.ImageData {
 			if image.Base64 != "" {
-				attachments = append(attachments, Attachment{Type: "image", FileName: "image-" + strconv.Itoa(i), MimeType: cmp.Or(image.MimeType, "image/png"), Base64: image.Base64})
+				attachments = append(attachments, Attachment{Kind: "image", FileName: "image-" + strconv.Itoa(i), MimeType: cmp.Or(image.MimeType, "image/png"), Base64: image.Base64})
 			}
 		}
 	}

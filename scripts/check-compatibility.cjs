@@ -1,5 +1,6 @@
 // Replay Go-produced run events through the web client's harness reducer and
-// compare the messages it builds with the ones the harness stored.
+// compare the messages it builds with the ones the harness stored, and read
+// attachments through the web client's chat view.
 const fs = require('node:fs')
 const path = require('node:path')
 const vm = require('node:vm')
@@ -26,4 +27,8 @@ input.events.forEach((event, id) => { state = reduceEvent(state, { event, id }) 
 const fields = ['id', 'type', 'content', 'toolCallId', 'name', 'arguments', 'result', 'progress', 'resolution', 'resolvedAt', 'complete', 'display']
 const messages = value => value.map(m => ({ id: m.id, role: m.role, ...(m.role === 'user' ? { content: m.content } : {}), timeline: (m.timeline ?? []).map(b => Object.fromEntries(fields.filter(f => b[f] !== undefined).map(f => [f, b[f]]))) }))
 assert.deepEqual(messages(state.messages), messages(input.expectedMessages))
+if (input.attachments) {
+  const { attachmentView } = load(path.join(root, 'src/services/harness/view-model.ts'))
+  assert.deepEqual(JSON.parse(JSON.stringify(input.attachments.map(attachmentView))), input.expectedViews)
+}
 process.stdout.write('Reference compatibility checks passed.\n')

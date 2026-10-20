@@ -267,7 +267,7 @@ func TestADeviceChatRunReturnsItsUpdatedThread(t *testing.T) {
 	}
 	question, reply := obj(messages[0]), obj(messages[1])
 	photo := obj(arr(question["attachments"])[0])
-	if question["id"] != in["clientRequestId"] || question["content"] != "what is this?" || photo["id"] != "att_photo" || photo["description"] != "a cat" || photo["thumbnailBase64"] != "dGh1bWI=" || photo["base64"] != nil {
+	if question["id"] != in["clientRequestId"] || question["content"] != "what is this?" || photo["id"] != "att_photo" || photo["description"] != "a cat" || photo["thumbnail"] != "dGh1bWI=" || photo["base64"] != nil {
 		t.Fatalf("the question was returned as %v", question)
 	}
 	// The client puts page images back by attachment id and page.
@@ -345,8 +345,8 @@ func TestOldDeviceChatsUpgradeIntoThreads(t *testing.T) {
 		"createdAt": "2026-03-01T10:00:00Z", "updatedAt": "2026-03-01T10:05:00Z", "projectId": nil, "presetId": nil, "activeRun": nil,
 		"messages": []any{
 			object{"id": m(0), "role": "user", "content": "What is in this picture?", "createdAt": "2026-03-01T10:00:01Z", "attachments": []any{
-				object{"id": "a1b2", "type": "image", "fileName": "cat.png", "mimeType": "image/png", "base64": "iVBORw0KGgo=", "thumbnailBase64": "dGh1bWI=", "fileSize": 8},
-				object{"id": "d3e4", "type": "document", "fileName": "notes.pdf", "mimeType": "application/pdf", "textContent": "Cats sleep a lot.", "fileSize": 1234},
+				object{"id": "a1b2", "kind": "image", "fileName": "cat.png", "mimeType": "image/png", "base64": "iVBORw0KGgo=", "thumbnail": "dGh1bWI=", "size": 8},
+				object{"id": "d3e4", "kind": "document", "fileName": "notes.pdf", "mimeType": "application/pdf", "textContent": "Cats sleep a lot.", "size": 1234},
 			}},
 			object{"id": m(1), "role": "assistant", "content": "A cat [Cats](https://cats.example).", "createdAt": "2026-03-01T09:00:05Z", "modelDisplayName": "Kimi K3",
 				"annotations": []any{object{"type": "url_citation", "url_citation": object{"url": "https://cats.example", "title": "Cats", "start_index": 3, "end_index": 7}}},
@@ -358,8 +358,8 @@ func TestOldDeviceChatsUpgradeIntoThreads(t *testing.T) {
 					object{"id": m(1) + "-content", "type": "content", "content": "A cat [Cats](https://cats.example)."},
 				}},
 			object{"id": m(2), "role": "user", "content": "And this?", "createdAt": "2026-03-01T10:01:00Z", "attachments": []any{
-				object{"id": m(2) + "-attachment-0", "type": "document", "fileName": "Attached document", "textContent": "legacy doc text"},
-				object{"id": m(2) + "-attachment-1", "type": "image", "fileName": "image-0", "mimeType": "image/gif", "base64": "R0lGODlh"},
+				object{"id": m(2) + "-attachment-0", "kind": "document", "fileName": "Attached document", "mimeType": "", "textContent": "legacy doc text"},
+				object{"id": m(2) + "-attachment-1", "kind": "image", "fileName": "image-0", "mimeType": "image/gif", "base64": "R0lGODlh"},
 			}},
 		},
 	}

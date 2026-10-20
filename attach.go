@@ -166,8 +166,8 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/v1/attachments/upload" {
 		descriptor.ID = "att_" + token()
 		respond(w, struct {
-			Attachment uploadedAttachment `json:"attachment"`
-		}{viewUpload(&descriptor)}, nil)
+			Attachment Attachment `json:"attachment"`
+		}{descriptor}, nil)
 		return
 	}
 	key, err := decodeContentKey(fields["key"])
@@ -200,19 +200,12 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 // stores: an upload's descriptor, and an image's bytes while its client
 // holds them.
 func (d *sentAttachment) stored() Attachment {
-	a := Attachment{ID: d.ID, Type: "document", FileName: d.FileName, MimeType: d.MimeType, FileSize: d.Size, ThumbnailBase64: valueOr(d.Thumbnail, ""), TextContent: d.TextContent, Description: d.Description, Pages: d.Pages, Base64: d.Base64}
-	switch d.Kind {
-	case "image":
-		a.Type = "image"
-	case "audio":
-		a.Kind = "audio"
-	}
-	return a
+	return Attachment{ID: d.ID, Kind: d.Kind, FileName: d.FileName, MimeType: d.MimeType, Size: d.Size, Thumbnail: valueOr(d.Thumbnail, ""), TextContent: d.TextContent, Description: d.Description, Pages: d.Pages, Base64: d.Base64}
 }
 
 func (h *harness) preprocess(ctx context.Context, filename string, data []byte) (Attachment, error) {
 	ext := strings.ToLower(filepath.Ext(filename))
-	descriptor := Attachment{Type: "document", FileName: filename, MimeType: http.DetectContentType(data), FileSize: new(int64(len(data)))}
+	descriptor := Attachment{Kind: "document", FileName: filename, MimeType: http.DetectContentType(data), Size: new(int64(len(data)))}
 	switch {
 	case slices.Contains(textExtensions, ext) || strings.EqualFold(filename, "Dockerfile") || strings.EqualFold(filename, "Makefile"):
 		if !utf8.Valid(data) || bytes.ContainsRune(data, 0) {
@@ -226,11 +219,11 @@ func (h *harness) preprocess(ctx context.Context, filename string, data []byte) 
 		if len(data) > maxUploadBytes {
 			return Attachment{}, apiErr(413, "ATTACHMENT_TOO_LARGE", "The image exceeds the size limit")
 		}
-		_, thumb, err := resizeImage(data)
+		resized, thumb, err := resizeImage(data)
 		if err != nil {
 			return Attachment{}, err
 		}
-		descriptor.Type, descriptor.ThumbnailBase64 = "image", base64.StdEncoding.EncodeToString(thumb)
+		descriptor.Kind, descriptor.Base64, descriptor.Thumbnail = "image", base64.StdEncoding.EncodeToString(resized), base64.StdEncoding.EncodeToString(thumb)
 	case slices.Contains(documentExtensions, ext):
 		if len(data) > maxUploadBytes {
 			return Attachment{}, apiErr(413, "ATTACHMENT_TOO_LARGE", "The document exceeds the size limit")
@@ -528,7 +521,7 @@ func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// A share's client names the attachment and the key its link carries.
-		descriptor = &Attachment{ID: in.ID, EncryptionKey: in.AttKey, Type: in.Type, Kind: in.Kind, FileName: in.FileName, MimeType: in.MimeType, TextContent: in.TextContent, Pages: in.Pages}
+		descriptor = &Attachment{ID: in.ID, EncryptionKey: in.AttKey, Kind: cmp.Or(in.Kind, in.Type), FileName: in.FileName, MimeType: in.MimeType, TextContent: in.TextContent, Pages: in.Pages}
 		data, err = h.attachmentBytes(r.Context(), &principal{Anonymous: true}, descriptor, true)
 	} else {
 		key, keyErr := requestKey(in.Key)
@@ -568,7 +561,7 @@ func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 // A shared chat's client may not say what an attachment is. A document blob is
 // JSON, and no supported image format starts with a brace.
 func documentRequest(a *Attachment, data []byte) bool {
-	switch a.fileKind() {
+	switch a.Kind {
 	case "image":
 		return false
 	case "":

@@ -114,6 +114,17 @@ func TestManagedModelRefreshesRejectedInferenceCredentialOnce(t *testing.T) {
 // reducer, found in TINFOIL_WEBAPP or ../tinfoil-webapp with its node_modules.
 func referenceCheck(t *testing.T, events []event, expectedMessages any) {
 	t.Helper()
+	runReference(t, object{"events": events, "expectedMessages": expectedMessages})
+}
+
+// referenceViews reads attachments as the web client's chat view shows them.
+func referenceViews(t *testing.T, attachments, expectedViews any) {
+	t.Helper()
+	runReference(t, object{"events": []event{}, "expectedMessages": []any{}, "attachments": attachments, "expectedViews": expectedViews})
+}
+
+func runReference(t *testing.T, input object) {
+	t.Helper()
 	reference := cmp.Or(os.Getenv("TINFOIL_WEBAPP"), "../tinfoil-webapp")
 	if _, err := os.Stat(reference + "/node_modules/typescript"); err != nil {
 		t.Skip("reference webapp dependencies are not installed")
@@ -126,7 +137,7 @@ func referenceCheck(t *testing.T, events []event, expectedMessages any) {
 		t.Skip("Node is not installed")
 	}
 	cmd := exec.Command(node, "scripts/check-compatibility.cjs", reference)
-	cmd.Stdin = bytes.NewReader(raw(object{"events": events, "expectedMessages": expectedMessages}))
+	cmd.Stdin = bytes.NewReader(raw(input))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("reference validation: %v\n%s", err, output)

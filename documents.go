@@ -134,9 +134,6 @@ func (h *harness) placeAttachment(ctx context.Context, p *principal, threadID st
 		return err
 	}
 	a.ID, a.EncryptionKey, a.StorageThreadID, a.Key = storedID, key, threadID, ""
-	if len(a.Pages) > 0 {
-		a.PageCount = len(a.Pages)
-	}
 	return nil
 }
 

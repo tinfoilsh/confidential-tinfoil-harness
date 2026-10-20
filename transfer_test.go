@@ -32,11 +32,11 @@ func TestTranscriptInlinesAttachmentsAndDetachesKeys(t *testing.T) {
 	json.Unmarshal(w.Body.Bytes(), &out)
 	attachments := arr(obj(arr(out.Thread["messages"])[0])["attachments"])
 	image, doc := obj(attachments[0]), obj(attachments[1])
-	if image["base64"] != base64.StdEncoding.EncodeToString([]byte("png bytes")) || image["thumbnailBase64"] != "thumb" || doc["textContent"] != "the plan" {
+	if image["base64"] != base64.StdEncoding.EncodeToString([]byte("png bytes")) || image["thumbnail"] != "thumb" || doc["textContent"] != "the plan" {
 		t.Fatalf("content not inlined: %v", attachments)
 	}
 	for _, a := range []object{image, doc} {
-		for _, field := range []string{"encryptionKey", "key", "storageThreadId", "pageCount"} {
+		for _, field := range []string{"encryptionKey", "key", "storageThreadId"} {
 			if _, ok := a[field]; ok {
 				t.Fatalf("a device copy kept %s: %v", field, a)
 			}

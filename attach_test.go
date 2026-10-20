@@ -1,11 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"image"
+	"image/png"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -161,4 +167,55 @@ func TestTheComposerOffersWhatUploadsAccept(t *testing.T) {
 			t.Errorf("uploads refuse %s, which the composer offers", ext)
 		}
 	}
+}
+
+// An image keeps one form from its upload to every place a chat holds or
+// shows it: the upload's descriptor carries the copy models read, a stored
+// chat keeps that copy in its blob, and views and device chats name the
+// same fields without the bytes or the blob's key.
+func TestAnImageKeepsOneFormFromUploadToView(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	fake := newFakeSync(t, h)
+	var source bytes.Buffer
+	png.Encode(&source, image.NewRGBA(image.Rect(0, 0, 2000, 10)))
+	upload := uploadRoute(h, "/v1/attachments/upload", "photo.png", source.Bytes(), nil, "alice")
+	var uploaded struct {
+		Attachment object `json:"attachment"`
+	}
+	json.Unmarshal(upload.Body.Bytes(), &uploaded)
+	sent := uploaded.Attachment
+	shown := []string{"fileName", "id", "kind", "mimeType", "size", "thumbnail"}
+	if got := slices.Sorted(maps.Keys(sent)); upload.Code != 200 || !slices.Equal(got, slices.Sorted(slices.Values(append(shown, "base64")))) || sent["kind"] != "image" || integer(sent["size"]) != source.Len() {
+		t.Fatalf("upload: HTTP %d %v", upload.Code, sent)
+	}
+	modelCopy, _ := base64.StdEncoding.DecodeString(str(sent["base64"]))
+	if config, format, err := image.DecodeConfig(bytes.NewReader(modelCopy)); err != nil || format != "jpeg" || config.Width != 1536 {
+		t.Fatalf("the upload's copy for models is %s %+v: %v", format, config, err)
+	}
+	fieldsOf := func(a any) []string { return slices.Sorted(maps.Keys(obj(a))) }
+	in := sendInput(key)
+	obj(in["options"])["model"] = "auto"
+	in["attachments"] = []any{sent}
+	events := finishedRun(t, h, "/v1/threads/turn", in)
+	thread := events[0].ThreadID
+	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", thread)
+	stored := obj(arr(obj(arr(rowJSON(row)["messages"])[0])["attachments"])[0])
+	if got := fieldsOf(stored); !slices.Equal(got, []string{"encryptionKey", "fileName", "id", "kind", "mimeType", "size", "storageThreadId", "thumbnail"}) || stored["thumbnail"] != sent["thumbnail"] || !bytes.Equal(fake.blobs[str(stored["id"])].data, modelCopy) {
+		t.Fatalf("the chat stored %v", stored)
+	}
+	var window struct {
+		Messages []object `json:"messages"`
+	}
+	json.Unmarshal(postRoute(h, "/v1/threads/get", object{"key": key.base64(), "id": thread}, "alice").Body.Bytes(), &window)
+	views := []any{arr(obj(arr(eventOfType(events, "MESSAGES_SNAPSHOT").Messages)[0])["attachments"])[0], arr(window.Messages[0]["attachments"])[0]}
+	local := localInput("", nil)
+	obj(local["options"])["model"] = "auto"
+	local["attachments"] = []any{sent}
+	views = append(views, arr(obj(arr(endedThread(t, h, local, "RUN_FINISHED")["messages"])[0])["attachments"])[0])
+	for _, view := range views {
+		if got := fieldsOf(view); !slices.Equal(got, shown) || obj(view)["thumbnail"] != sent["thumbnail"] || obj(view)["fileName"] != "photo.png" {
+			t.Fatalf("an attachment is shown as %v", view)
+		}
+	}
+	referenceViews(t, views[1:2], []any{object{"id": stored["id"], "type": "image", "fileName": "photo.png", "mimeType": "image/png", "fileSize": source.Len(), "thumbnailBase64": sent["thumbnail"]}})
 }

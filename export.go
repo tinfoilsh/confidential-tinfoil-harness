@@ -54,7 +54,9 @@ func (h *harness) shareThread(ctx context.Context, p *principal, _ contentKey, i
 	for _, m := range t.Messages {
 		shared := shareMessage{Role: m.Role, Content: m.Content, Timestamp: millis(m.CreatedAt), Timeline: m.Timeline, ModelDisplayName: m.ModelDisplayName, IsError: m.IsError, Quote: m.Quote}
 		for _, a := range m.Attachments {
-			shared.Attachments = append(shared.Attachments, shareAttachment{ID: a.ID, Type: a.Type, FileName: a.FileName, MimeType: a.MimeType, ThumbnailBase64: a.ThumbnailBase64, EncryptionKey: a.EncryptionKey, TextContent: a.TextContent, Description: a.Description})
+			view := viewAttachment(&a)
+			view.EncryptionKey = a.EncryptionKey
+			shared.Attachments = append(shared.Attachments, view)
 		}
 		payload.Messages = append(payload.Messages, shared)
 	}
@@ -130,7 +132,7 @@ func sharedThreadView(id string, payload []byte) sharedThread {
 		m := &t.Messages[i]
 		view := sharedMessage{messageView: viewMessage(m)}
 		for j, a := range view.messageView.Attachments {
-			view.Attachments = append(view.Attachments, sharedAttachment{attachmentView: a, AttKey: present(m.Attachments[j].EncryptionKey)})
+			view.Attachments = append(view.Attachments, sharedAttachment{Attachment: a, AttKey: present(m.Attachments[j].EncryptionKey)})
 		}
 		shared.Messages = append(shared.Messages, view)
 	}
@@ -428,8 +430,11 @@ func (h *harness) writeBackup(ctx context.Context, p *principal, key contentKey,
 					a = asObject(stored)
 				}
 				if !archiveAttachment(a).isImage() {
-					document := selectFields(a, "id fileName mimeType textContent description fileSize")
+					document := selectFields(a, "id fileName mimeType textContent description")
 					document["type"] = "document"
+					if size, ok := a["size"]; ok {
+						document["fileSize"] = size
+					}
 					pages := []any{}
 					for _, value := range arr(a["pages"]) {
 						page := obj(value)
