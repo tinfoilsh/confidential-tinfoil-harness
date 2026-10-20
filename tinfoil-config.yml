@@ -42,10 +42,11 @@ containers:
       /tmp: rw,noexec,nosuid,nodev,size=1100m
     restart: always
 
-  # Acceptable-use classifier for first-party chats on gateway models; the
-  # router classifies the Auto turns it serves. Reachable only from the
-  # harness over the enclave network. No healthcheck: one that fails at boot
-  # fails the whole enclave, and the harness tolerates the sidecar being down.
+  # Acceptable-use classifier for every first-party chat, Auto included. The
+  # router is not given the chat id, so its own report is ignored. Reachable
+  # only from the harness over the enclave network. No healthcheck: one that
+  # fails at boot fails the whole enclave, and the harness tolerates the
+  # sidecar being down.
   # The release workflow does not rewrite this digest; pin it by hand to a
   # published confidential-safeguards release.
   - name: "safeguards"
