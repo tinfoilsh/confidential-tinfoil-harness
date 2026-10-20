@@ -57,14 +57,15 @@ const (
 // uploadGroup is a kind of file uploads accept, named by extension, and the
 // largest file of that kind. Clients pick a file's group by its extension.
 type uploadGroup struct {
-	Accept   []string `json:"accept"`
-	MaxBytes int      `json:"maxBytes"`
-	kind     string   // the kind of attachment an upload of the group makes
+	Accept       []string `json:"accept"`
+	MaxBytes     int      `json:"maxBytes"`
+	ImageMaxSide int      `json:"imageMaxSide,omitempty"`
+	kind         string   // the kind of attachment an upload of the group makes
 }
 
 var (
 	textUploads     = uploadGroup{Accept: strings.Fields(".txt .md .py .js .jsx .ts .tsx .css .json .xml .yaml .yml .toml .sh .bash .rb .java .cpp .c .h .hpp .go .rs .swift .kt .kts .r .sql .lua .pl .php .cs .csx .vb .fs .fsx .scala .dart .ex .exs .erl .hs .ml .mli .clj .cljs .groovy .gradle .m .mm .zig .nim .jl .ps1 .psm1 .bat .cmd .asm .s .proto .graphql .gql .tf .tfvars .dockerfile .makefile .cmake .tex .bib .svg .properties .lock .diff .patch .env .ini .cfg .conf .log .rtf .html .htm .xhtml .csv .tsv .qfx .qif .ofx .ifs .qbo .qbx .bai .bai2 .mt940 .sta .ics .vcf"), MaxBytes: maxTextBytes, kind: "document"}
-	imageUploads    = uploadGroup{Accept: strings.Fields(".jpg .jpeg .png .gif .webp .bmp .tiff .tif"), MaxBytes: maxUploadBytes, kind: "image"}
+	imageUploads    = uploadGroup{Accept: strings.Fields(".jpg .jpeg .png .gif .webp .bmp .tiff .tif"), MaxBytes: maxUploadBytes, ImageMaxSide: modelImageSide, kind: "image"}
 	documentUploads = uploadGroup{Accept: strings.Fields(".pdf .docx .pptx .xlsx"), MaxBytes: maxUploadBytes, kind: "document"}
 	audioUploads    = uploadGroup{Accept: strings.Fields(".mp3 .wav .ogg .m4a .aac .flac .webm .wma"), MaxBytes: maxUploadBytes, kind: "audio"}
 )
@@ -73,7 +74,7 @@ var (
 // documents, which images do not have.
 var (
 	attachmentGroups      = []*uploadGroup{&textUploads, &imageUploads, &documentUploads, &audioUploads}
-	projectDocumentGroups = []*uploadGroup{&textUploads, &documentUploads}
+	projectDocumentGroups = []*uploadGroup{&textUploads, &documentUploads, &imageUploads, &audioUploads}
 )
 
 func (g *uploadGroup) accepts(filename string) bool {
@@ -229,6 +230,13 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 		if _, err := h.loadProject(ctx, p, key, projectID); err != nil {
 			respond(w, nil, err)
 			return
+		}
+		if descriptor.isImage() {
+			descriptor.TextContent, err = h.describeImage(ctx, descriptor.Base64)
+			if err != nil {
+				respond(w, nil, h.withQuota(p, cred.Limit, err))
+				return
+			}
 		}
 		if descriptor.TextContent == "" {
 			respond(w, nil, apiErr(415, "ATTACHMENT_UNSUPPORTED", "Project documents require extracted text"))
@@ -725,21 +733,22 @@ func (h *harness) hydrateContext(ctx context.Context, p *principal, t *Thread, k
 			a.Base64, a.inferenceMimeType = encoded, "image/jpeg"
 			return nil
 		}
-		var model *model
-		for _, m := range h.offer.get() {
-			if m.vision {
-				model = m
-				break
-			}
-		}
-		if model == nil {
-			return apiErr(404, "MODEL_UNAVAILABLE", "No vision model can describe the image")
-		}
-		response, err := h.completion(ctx, model, object{"model": model.name, "messages": []object{{"role": "user", "content": []object{{"type": "text", "text": "Describe this image faithfully for a text-only assistant. Include visible text and details relevant to understanding it."}, {"type": "image_url", "image_url": object{"url": "data:image/jpeg;base64," + encoded}}}}}, "max_tokens": 2048})
+		response, err := h.describeImage(ctx, encoded)
 		if err != nil {
 			return err
 		}
 		a.Description = response
 		return nil
 	})
+}
+
+const imageDescriptionTokens = 2048
+
+func (h *harness) describeImage(ctx context.Context, encoded string) (string, error) {
+	for _, m := range h.offer.get() {
+		if m.vision {
+			return h.completion(ctx, m, object{"model": m.name, "messages": []object{{"role": "user", "content": []object{{"type": "text", "text": "Describe this image faithfully for a text-only assistant. Include visible text and details relevant to understanding it."}, {"type": "image_url", "image_url": object{"url": "data:image/jpeg;base64," + encoded}}}}}, "max_tokens": imageDescriptionTokens})
+		}
+	}
+	return "", apiErr(404, "MODEL_UNAVAILABLE", "No vision model can describe the image")
 }
