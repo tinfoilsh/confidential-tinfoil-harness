@@ -95,6 +95,8 @@ func newFakeSync(t *testing.T, h *harness) *fakeSync {
 			json.NewEncoder(w).Encode(object{"ok": true, "plaintext": base64.StdEncoding.EncodeToString(blob.data)})
 		case "/v1/share/seal":
 			json.NewEncoder(w).Encode(object{"ok": true, "share_key": strings.Repeat("ab", 32), "ciphertext": base64.StdEncoding.EncodeToString([]byte("sealed"))})
+		case "/v1/import/status":
+			json.NewEncoder(w).Encode(object{"status": "failed", "imported": 0, "failed": 1, "total": 1, "job_id": in["job_id"], "failure_reason": "invalid_archive", "failure_detail": "Not a zip archive"})
 		default:
 			w.WriteHeader(404)
 		}

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -96,6 +97,23 @@ func TestImportStoresTheDeviceChatUnderItsID(t *testing.T) {
 	}
 	if w := postRoute(h, "/v1/threads/import", in, "alice"); w.Code != 409 || !strings.Contains(w.Body.String(), "THREAD_EXISTS") {
 		t.Fatalf("an import overwrote a cloud chat: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// An archive import's status names its job and its failure as the client
+// reads them.
+func TestImportStatusReadsAsTheClientNamesIt(t *testing.T) {
+	h, _, _ := testChatHarness(t, nil)
+	newFakeSync(t, h)
+	w := postRoute(h, "/v1/import/status", object{"jobId": "job-1"}, "alice")
+	if w.Code != 200 {
+		t.Fatalf("HTTP %d: %s", w.Code, w.Body.String())
+	}
+	var status object
+	json.Unmarshal(w.Body.Bytes(), &status)
+	want := object{"status": "failed", "imported": float64(0), "failed": float64(1), "total": float64(1), "jobId": "job-1", "failureReason": "invalid_archive", "failureDetail": "Not a zip archive"}
+	if !reflect.DeepEqual(status, want) {
+		t.Fatalf("the status reads as %v, want %v", status, want)
 	}
 }
 

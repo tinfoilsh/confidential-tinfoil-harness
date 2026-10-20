@@ -236,7 +236,6 @@ func (h *harness) importStatus(ctx context.Context, p *principal, _ contentKey, 
 	if err != nil {
 		return nil, err
 	}
-	// The client names the job it asked about.
 	for snake, camel := range map[string]string{"failure_reason": "failureReason", "failure_detail": "failureDetail"} {
 		if value, ok := result[snake]; ok {
 			result[camel] = value
@@ -244,6 +243,7 @@ func (h *harness) importStatus(ctx context.Context, p *principal, _ contentKey, 
 		}
 	}
 	delete(result, "job_id")
+	result["jobId"] = in.JobID
 	return result, nil
 }
 
