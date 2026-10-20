@@ -31,6 +31,8 @@ import (
 	_ "golang.org/x/image/webp"
 )
 
+// Text is read whole into a chat, so a text file may be larger than the
+// files the harness converts. No upload is read past maxTextBytes.
 const maxUploadBytes = 33 << 20
 const maxTextBytes = 50 << 20
 const maxImagePixels = 40_000_000
@@ -41,10 +43,32 @@ const (
 	maxFormField = 8 << 10
 )
 
-var imageExtensions = strings.Fields(".jpg .jpeg .png .gif .webp .bmp .tiff .tif")
-var documentExtensions = strings.Fields(".pdf .docx .pptx .xlsx")
-var audioExtensions = strings.Fields(".mp3 .wav .ogg .m4a .aac .flac .webm .wma")
-var textExtensions = strings.Fields(".txt .md .py .js .jsx .ts .tsx .css .json .xml .yaml .yml .toml .sh .bash .rb .java .cpp .c .h .hpp .go .rs .swift .kt .kts .r .sql .lua .pl .php .cs .csx .vb .fs .fsx .scala .dart .ex .exs .erl .hs .ml .mli .clj .cljs .groovy .gradle .m .mm .zig .nim .jl .ps1 .psm1 .bat .cmd .asm .s .proto .graphql .gql .tf .tfvars .dockerfile .makefile .cmake .tex .bib .svg .properties .lock .diff .patch .env .ini .cfg .conf .log .rtf .html .htm .xhtml .csv .tsv .qfx .qif .ofx .ifs .qbo .qbx .bai .bai2 .mt940 .sta .ics .vcf")
+// uploadGroup is a kind of file uploads accept, named by extension, and the
+// largest file of that kind. Clients pick a file's group by its extension.
+type uploadGroup struct {
+	Accept   []string `json:"accept"`
+	MaxBytes int      `json:"maxBytes"`
+	// names are files without an extension the group also accepts.
+	names []string
+}
+
+var (
+	textUploads     = uploadGroup{Accept: strings.Fields(".txt .md .py .js .jsx .ts .tsx .css .json .xml .yaml .yml .toml .sh .bash .rb .java .cpp .c .h .hpp .go .rs .swift .kt .kts .r .sql .lua .pl .php .cs .csx .vb .fs .fsx .scala .dart .ex .exs .erl .hs .ml .mli .clj .cljs .groovy .gradle .m .mm .zig .nim .jl .ps1 .psm1 .bat .cmd .asm .s .proto .graphql .gql .tf .tfvars .dockerfile .makefile .cmake .tex .bib .svg .properties .lock .diff .patch .env .ini .cfg .conf .log .rtf .html .htm .xhtml .csv .tsv .qfx .qif .ofx .ifs .qbo .qbx .bai .bai2 .mt940 .sta .ics .vcf"), MaxBytes: maxTextBytes, names: []string{"Dockerfile", "Makefile"}}
+	imageUploads    = uploadGroup{Accept: strings.Fields(".jpg .jpeg .png .gif .webp .bmp .tiff .tif"), MaxBytes: maxUploadBytes}
+	documentUploads = uploadGroup{Accept: strings.Fields(".pdf .docx .pptx .xlsx"), MaxBytes: maxUploadBytes}
+	audioUploads    = uploadGroup{Accept: strings.Fields(".mp3 .wav .ogg .m4a .aac .flac .webm .wma"), MaxBytes: maxUploadBytes}
+)
+
+// A message attaches files of any group; a project keeps the text of its
+// documents, which images do not have.
+var (
+	attachmentGroups      = []*uploadGroup{&textUploads, &imageUploads, &documentUploads, &audioUploads}
+	projectDocumentGroups = []*uploadGroup{&textUploads, &documentUploads}
+)
+
+func (g *uploadGroup) accepts(filename string) bool {
+	return slices.Contains(g.Accept, strings.ToLower(filepath.Ext(filename))) || slices.ContainsFunc(g.names, func(name string) bool { return strings.EqualFold(name, filename) })
+}
 
 // What a client's composer does before anything reaches the harness: a
 // paste longer than pasteAsFileChars becomes a text file, and dictation
@@ -54,32 +78,26 @@ const (
 	dictationMaxSeconds = 10 * 60
 )
 
-// composerView is what a client's composer accepts, read from the types
-// and limits uploads are checked against.
+// composerView is what a client's composer accepts: the groups of files
+// uploads take, for a message and for a project.
 type composerView struct {
-	Attachments         attachmentLimits `json:"attachments"`
-	ProjectDocuments    documentLimits   `json:"projectDocuments"`
-	PasteAsFileChars    int              `json:"pasteAsFileChars"`
-	DictationMaxSeconds int              `json:"dictationMaxSeconds"`
+	Attachments         []uploadGroup `json:"attachments"`
+	ProjectDocuments    []uploadGroup `json:"projectDocuments"`
+	PasteAsFileChars    int           `json:"pasteAsFileChars"`
+	DictationMaxSeconds int           `json:"dictationMaxSeconds"`
 }
 
-type attachmentLimits struct {
-	Accept       []string `json:"accept"`
-	MaxBytes     int      `json:"maxBytes"`
-	MaxTextBytes int      `json:"maxTextBytes"`
-}
-
-type documentLimits struct {
-	Accept   []string `json:"accept"`
-	MaxBytes int      `json:"maxBytes"`
-}
-
-// composer is what uploads accept. A project document is read for its
-// text, which images do not have.
 func composer() composerView {
+	shown := func(groups []*uploadGroup) []uploadGroup {
+		out := []uploadGroup{}
+		for _, g := range groups {
+			out = append(out, *g)
+		}
+		return out
+	}
 	return composerView{
-		Attachments:         attachmentLimits{Accept: slices.Concat(imageExtensions, documentExtensions, audioExtensions, textExtensions), MaxBytes: maxUploadBytes, MaxTextBytes: maxTextBytes},
-		ProjectDocuments:    documentLimits{Accept: slices.Concat(documentExtensions, textExtensions), MaxBytes: maxUploadBytes},
+		Attachments:         shown(attachmentGroups),
+		ProjectDocuments:    shown(projectDocumentGroups),
 		PasteAsFileChars:    pasteAsFileChars,
 		DictationMaxSeconds: dictationMaxSeconds,
 	}
@@ -206,8 +224,21 @@ func (d *sentAttachment) stored() Attachment {
 func (h *harness) preprocess(ctx context.Context, filename string, data []byte) (Attachment, error) {
 	ext := strings.ToLower(filepath.Ext(filename))
 	descriptor := Attachment{Kind: "document", FileName: filename, MimeType: http.DetectContentType(data), Size: new(int64(len(data)))}
-	switch {
-	case slices.Contains(textExtensions, ext) || strings.EqualFold(filename, "Dockerfile") || strings.EqualFold(filename, "Makefile"):
+	var group *uploadGroup
+	for _, candidate := range attachmentGroups {
+		if candidate.accepts(filename) {
+			group = candidate
+			break
+		}
+	}
+	if group == nil {
+		return Attachment{}, apiErr(415, "ATTACHMENT_UNSUPPORTED", "Unsupported file type")
+	}
+	if len(data) > group.MaxBytes {
+		return Attachment{}, apiErr(413, "ATTACHMENT_TOO_LARGE", "The file exceeds the size limit for its type")
+	}
+	switch group {
+	case &textUploads:
 		if !utf8.Valid(data) || bytes.ContainsRune(data, 0) {
 			return Attachment{}, apiErr(415, "ATTACHMENT_UNSUPPORTED", "Text uploads must contain UTF-8 text")
 		}
@@ -215,19 +246,13 @@ func (h *harness) preprocess(ctx context.Context, filename string, data []byte) 
 		if m := mime.TypeByExtension(ext); m != "" {
 			descriptor.MimeType = m
 		}
-	case slices.Contains(imageExtensions, ext):
-		if len(data) > maxUploadBytes {
-			return Attachment{}, apiErr(413, "ATTACHMENT_TOO_LARGE", "The image exceeds the size limit")
-		}
+	case &imageUploads:
 		resized, thumb, err := resizeImage(data)
 		if err != nil {
 			return Attachment{}, err
 		}
 		descriptor.Kind, descriptor.Base64, descriptor.Thumbnail = "image", base64.StdEncoding.EncodeToString(resized), base64.StdEncoding.EncodeToString(thumb)
-	case slices.Contains(documentExtensions, ext):
-		if len(data) > maxUploadBytes {
-			return Attachment{}, apiErr(413, "ATTACHMENT_TOO_LARGE", "The document exceeds the size limit")
-		}
+	case &documentUploads:
 		if ext == ".pdf" && !bytes.HasPrefix(data, []byte("%PDF-")) || ext != ".pdf" && !bytes.HasPrefix(data, []byte("PK\x03\x04")) {
 			return Attachment{}, apiErr(415, "ATTACHMENT_UNSUPPORTED", "The file contents do not match the document type")
 		}
@@ -256,14 +281,12 @@ func (h *harness) preprocess(ctx context.Context, filename string, data []byte) 
 		if len(document.Pages) > 0 {
 			descriptor.Pages = document.Pages
 		}
-	case slices.Contains(audioExtensions, ext):
+	case &audioUploads:
 		text, err := h.transcribe(ctx, filename, data)
 		if err != nil {
 			return Attachment{}, err
 		}
 		descriptor.Kind, descriptor.TextContent = "audio", text
-	default:
-		return Attachment{}, apiErr(415, "ATTACHMENT_UNSUPPORTED", "Unsupported file type")
 	}
 	return descriptor, nil
 }
@@ -384,10 +407,10 @@ func multipartCall(ctx context.Context, service *downstreamService, path, fileFi
 	return b, nil
 }
 func (h *harness) transcribe(ctx context.Context, filename string, data []byte) (string, error) {
-	if len(data) > maxUploadBytes {
+	if len(data) > audioUploads.MaxBytes {
 		return "", apiErr(413, "ATTACHMENT_TOO_LARGE", "The recording exceeds the size limit")
 	}
-	if !slices.Contains(audioExtensions, strings.ToLower(filepath.Ext(filename))) {
+	if !audioUploads.accepts(filename) {
 		return "", apiErr(415, "ATTACHMENT_UNSUPPORTED", "Unsupported recording type")
 	}
 	// The router reads the model from the form, as the web client's SDK sends it.

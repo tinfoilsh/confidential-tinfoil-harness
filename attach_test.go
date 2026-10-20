@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -144,27 +143,59 @@ func TestRecordingsTranscribeThroughTheRouter(t *testing.T) {
 	}
 }
 
-// Every file type the session's composer offers is one uploads convert.
+// Each group of files the session's composer offers is what uploads take,
+// up to the group's size, and text, which is read whole, has its own.
 func TestTheComposerOffersWhatUploadsAccept(t *testing.T) {
 	h := routerHarness(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) })
+	// Small limits stand in for the real ones, which take tens of MiB to reach.
+	for i, g := range attachmentGroups {
+		saved := g.MaxBytes
+		g.MaxBytes = 16 * (i + 1)
+		t.Cleanup(func() { g.MaxBytes = saved })
+	}
 	var session struct {
-		Composer composerView `json:"composer"`
+		Composer struct {
+			Attachments, ProjectDocuments []uploadGroup
+			PasteAsFileChars              int
+			DictationMaxSeconds           int
+		} `json:"composer"`
 	}
 	json.Unmarshal(postRoute(h, "/v1/session", object{}, "").Body.Bytes(), &session)
 	offered := session.Composer
-	if offered.Attachments.MaxBytes != maxUploadBytes || offered.Attachments.MaxTextBytes != maxTextBytes || offered.PasteAsFileChars == 0 || offered.DictationMaxSeconds == 0 || len(offered.ProjectDocuments.Accept) == 0 {
+	limitOf := func(groups []uploadGroup, ext string) int {
+		for _, g := range groups {
+			if slices.Contains(g.Accept, ext) {
+				return g.MaxBytes
+			}
+		}
+		return 0
+	}
+	if slices.Contains([]int{limitOf(offered.Attachments, ".png"), limitOf(offered.Attachments, ".pdf"), limitOf(offered.Attachments, ".mp3"), limitOf(offered.ProjectDocuments, ".pdf"), limitOf(offered.ProjectDocuments, ".txt")}, 0) ||
+		limitOf(offered.Attachments, ".txt") == limitOf(offered.Attachments, ".png") || limitOf(offered.ProjectDocuments, ".png") != 0 || offered.PasteAsFileChars == 0 || offered.DictationMaxSeconds == 0 {
 		t.Fatalf("the composer offers %+v", offered)
 	}
-	refusedAsUnknown := func(name string) bool {
-		w := uploadRoute(h, "/v1/attachments/upload", name, []byte("x"), nil, "alice")
-		return strings.Contains(w.Body.String(), "Unsupported file type")
+	refusal := func(name string, size int) apiError {
+		w := uploadRoute(h, "/v1/attachments/upload", name, bytes.Repeat([]byte("x"), size), nil, "alice")
+		var body struct {
+			Error apiError `json:"error"`
+		}
+		json.Unmarshal(w.Body.Bytes(), &body)
+		return body.Error
 	}
-	if !refusedAsUnknown("file.exe") {
+	const unknownType = "Unsupported file type"
+	if refusal("file.exe", 1).Message != unknownType {
 		t.Fatal("an unknown file type was not refused as one")
 	}
-	for _, ext := range append(offered.Attachments.Accept, offered.ProjectDocuments.Accept...) {
-		if refusedAsUnknown("file" + ext) {
-			t.Errorf("uploads refuse %s, which the composer offers", ext)
+	for _, groups := range [][]uploadGroup{offered.Attachments, offered.ProjectDocuments} {
+		for _, g := range groups {
+			for _, ext := range g.Accept {
+				if e := refusal("file"+ext, g.MaxBytes); e.Code == "ATTACHMENT_TOO_LARGE" || e.Message == unknownType {
+					t.Errorf("uploads refuse a %s of %d bytes: %s", ext, g.MaxBytes, e.Message)
+				}
+				if e := refusal("file"+ext, g.MaxBytes+1); e.Code != "ATTACHMENT_TOO_LARGE" {
+					t.Errorf("uploads take a %s over its %d bytes: %s", ext, g.MaxBytes, e.Code)
+				}
+			}
 		}
 	}
 }
