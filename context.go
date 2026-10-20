@@ -20,6 +20,7 @@ type request struct {
 	system, widgetHint, policy string
 	window                     int
 	groups                     [][]json.RawMessage
+	costs                      []int // each group's tokens, counted once a turn
 	reminder                   json.RawMessage
 	threadID                   string
 	conversation               string // the chat the run is classified under: an ask's source thread
@@ -45,11 +46,8 @@ var encoder = sync.OnceValue(func() tokenizer.Codec {
 	}
 	return enc
 })
-var tokenizerMu sync.Mutex
 
 func tokenCount(s string) int {
-	tokenizerMu.Lock()
-	defer tokenizerMu.Unlock()
 	count, err := encoder().Count(s)
 	if err != nil {
 		return len([]byte(s))
@@ -342,6 +340,20 @@ func messageTokens(message json.RawMessage) int {
 	}
 	return count
 }
+
+// groupCosts counts each history group's tokens the first time a turn asks.
+func (req *request) groupCosts() []int {
+	if req.costs == nil {
+		req.costs = make([]int, len(req.groups))
+		for i, group := range req.groups {
+			for _, message := range group {
+				req.costs[i] += messageTokens(message)
+			}
+		}
+	}
+	return req.costs
+}
+
 func budgetConversation(req *request, searching bool, definitions json.RawMessage) ([]json.RawMessage, error) {
 	system := req.system
 	if searching {
@@ -354,12 +366,9 @@ func budgetConversation(req *request, searching bool, definitions json.RawMessag
 	if budget < 0 {
 		return nil, apiErr(413, "CONTEXT_TOO_LARGE", "The system and tools exceed the context window")
 	}
-	start := len(req.groups)
+	start, costs := len(req.groups), req.groupCosts()
 	for i := len(req.groups) - 1; i >= 0; i-- {
-		cost := 0
-		for _, message := range req.groups[i] {
-			cost += messageTokens(message)
-		}
+		cost := costs[i]
 		if cost > budget {
 			if i == len(req.groups)-1 {
 				return nil, apiErr(413, "CONTEXT_TOO_LARGE", "The latest message exceeds the context window")
@@ -453,10 +462,8 @@ func requestContextUsage(req *request) object {
 		system += "\n\n" + searchInstructions
 	}
 	used := tokenCount(system) + tokenCount(string(raw(req.rendered))) + messageTokens(req.reminder) + 8
-	for _, group := range req.groups {
-		for _, message := range group {
-			used += messageTokens(message)
-		}
+	for _, cost := range req.groupCosts() {
+		used += cost
 	}
 	limit := req.window * 4 / 5
 	return object{"usedTokens": used, "limitTokens": limit, "percentage": float64(used) * 100 / float64(max(1, limit))}
