@@ -51,7 +51,7 @@ var markdownLinkPattern = regexp.MustCompile(`\[([^\]]+)\]\((https?://(?:[^\s()]
 // tools showed the model, as chat completions url_citation annotations over
 // the link's label, in code points. A source without a title is named by its
 // URL; the model's own spelling of the URL is kept.
-func citationAnnotations(text string, sources []citationSource) []any {
+func citationAnnotations(text string, sources []citationSource) []Annotation {
 	byURL := map[string]citationSource{}
 	for _, source := range sources {
 		key := normalizeURL(source.url)
@@ -59,7 +59,7 @@ func citationAnnotations(text string, sources []citationSource) []any {
 			byURL[key] = source
 		}
 	}
-	var annotations []any
+	var annotations []Annotation
 	for _, match := range markdownLinkPattern.FindAllStringSubmatchIndex(text, -1) {
 		link := text[match[4]:match[5]]
 		source, ok := byURL[normalizeURL(link)]
@@ -70,8 +70,8 @@ func citationAnnotations(text string, sources []citationSource) []any {
 		if strings.TrimSpace(title) == "" {
 			title = link
 		}
-		annotations = append(annotations, object{"type": "url_citation", "url_citation": object{"url": link, "title": title,
-			"start_index": utf8.RuneCountInString(text[:match[2]]), "end_index": utf8.RuneCountInString(text[:match[3]])}})
+		annotations = append(annotations, Annotation{Type: "url_citation", URLCitation: &URLCitation{URL: link, Title: title,
+			StartIndex: utf8.RuneCountInString(text[:match[2]]), EndIndex: utf8.RuneCountInString(text[:match[3]])}})
 	}
 	return annotations
 }

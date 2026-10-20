@@ -109,7 +109,7 @@ func widgetFailure(w widget, args string) json.RawMessage {
 	var value any
 	problem := "arguments are not valid JSON"
 	if json.Unmarshal([]byte(cmp.Or(args, "{}")), &value) == nil {
-		err := validateSchema(w.Schema, value)
+		err := w.schema.Validate(value)
 		if err == nil {
 			return nil
 		}
@@ -118,28 +118,51 @@ func widgetFailure(w widget, args string) json.RawMessage {
 	return raw(object{"status": "error", "error": fmt.Sprintf("The arguments for %s did not match the tool's parameter schema and the component was not displayed: %s. Call %s again with corrected arguments that match the schema exactly.", w.Name, problem, w.Name)})
 }
 
-func validateSchema(raw json.RawMessage, value any) error {
+// checkedWidgets is a copy of a timeline for its client, in which each widget
+// call is marked when its stored arguments fail the check new ones pass
+// before they are sent.
+func checkedWidgets(timeline []Block) []Block {
+	checked := clonedSlice(timeline)
+	for i := range checked {
+		b := &checked[i]
+		b.InvalidArguments = false
+		if b.Type != "tool_call" {
+			continue
+		}
+		for _, w := range widgetCatalog() {
+			if w.Name == b.Name {
+				b.InvalidArguments = widgetFailure(w, b.Arguments) != nil
+			}
+		}
+	}
+	return checked
+}
+
+// checkWidgets marks the widget calls of a thread its client is sent.
+func (t *Thread) checkWidgets() {
+	for i := range t.Messages {
+		t.Messages[i].Timeline = checkedWidgets(t.Messages[i].Timeline)
+	}
+}
+
+func resolveSchema(raw json.RawMessage) (*jsonschema.Resolved, error) {
 	var schema jsonschema.Schema
 	// zod-to-json-schema's OpenAPI target uses draft-4 exclusive bounds.
 	// Keep the advertised schema identical to the client reference and convert
 	// those bounds for the draft-2020 validator.
 	var normalized any
 	if err := json.Unmarshal(raw, &normalized); err != nil {
-		return err
+		return nil, err
 	}
 	normalizeSchema(normalized)
 	encoded, err := json.Marshal(normalized)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := json.Unmarshal(encoded, &schema); err != nil {
-		return err
+		return nil, err
 	}
-	resolved, err := schema.Resolve(nil)
-	if err != nil {
-		return err
-	}
-	return resolved.Validate(value)
+	return schema.Resolve(nil)
 }
 
 func normalizeSchema(value any) {
@@ -302,12 +325,12 @@ func piiReport(result object) object {
 func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *model) error {
 	var declaration widget
 	for _, w := range widgetCatalog() {
-		if w.Name == str(r.retryTarget["name"]) {
+		if w.Name == r.retryTarget.block.Name {
 			declaration = w
 			break
 		}
 	}
-	conversation, err := budgetConversation(req, &toolset{}, nil)
+	conversation, err := budgetConversation(req, false, nil)
 	if err != nil {
 		return err
 	}
@@ -325,13 +348,36 @@ func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *
 	}
 	content = widgetArguments(strings.TrimSpace(content))
 	var value any
-	if json.Unmarshal([]byte(content), &value) != nil || validateSchema(declaration.Schema, value) != nil {
+	if json.Unmarshal([]byte(content), &value) != nil || declaration.schema.Validate(value) != nil {
 		return apiErr(502, "UPSTREAM_REFUSED", "The replacement widget arguments do not match the schema")
 	}
 	r.replacement = content
-	id := str(r.input["toolCallId"])
-	r.out.callStart(id, declaration.Name, str(r.retryTarget["parentId"]))
+	id := r.input.ToolCallID
+	r.out.callStart(id, declaration.Name, r.retryTarget.parentID)
 	r.out.callArgs(id, content)
 	r.out.callEnd(id)
 	return nil
+}
+
+// A retry must not revive a deleted widget or overwrite a concurrent writer.
+// expected is the widget's arguments when the retry started.
+func replaceWidget(t *Thread, messageID, callID, expected, replacement string) error {
+	for i := range t.Messages {
+		m := &t.Messages[i]
+		if m.ID != messageID {
+			continue
+		}
+		for j := range m.Timeline {
+			block := &m.Timeline[j]
+			if block.callID() != callID {
+				continue
+			}
+			if block.Arguments != expected && block.Arguments != replacement {
+				return apiErr(409, "REVISION_CONFLICT", "The widget changed during its retry")
+			}
+			block.Arguments = replacement
+			return nil
+		}
+	}
+	return apiErr(409, "REVISION_CONFLICT", "The widget was removed during its retry")
 }

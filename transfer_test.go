@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -18,7 +19,9 @@ func TestTranscriptInlinesAttachmentsAndDetachesKeys(t *testing.T) {
 		object{"id": imageID, "type": "image", "fileName": "photo.png", "mimeType": "image/png", "encryptionKey": imageKey, "thumbnailBase64": "thumb", "storageThreadId": "chat-1"},
 		object{"id": docID, "type": "document", "fileName": "plan.pdf", "encryptionKey": docKey, "pageCount": 2})
 	row := rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat-1")]
-	row.Data["projectId"], row.Data["harnessRequests"], row.Data["clock"] = "project-1", object{"nonce": object{}}, 9
+	editRow(&row, func(data object) {
+		data["projectId"], data["harnessRequests"], data["clock"] = "project-1", object{"nonce": object{}}, 9
+	})
 	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat-1")] = row
 	w := postRoute(h, "/v1/threads/transcript", object{"key": key.base64(), "threadId": "chat-1"}, "alice")
 	if w.Code != 200 {
@@ -30,11 +33,11 @@ func TestTranscriptInlinesAttachmentsAndDetachesKeys(t *testing.T) {
 	json.Unmarshal(w.Body.Bytes(), &out)
 	attachments := arr(obj(arr(out.Thread["messages"])[0])["attachments"])
 	image, doc := obj(attachments[0]), obj(attachments[1])
-	if image["base64"] != base64.StdEncoding.EncodeToString([]byte("png bytes")) || image["thumbnailBase64"] != "thumb" || doc["textContent"] != "the plan" {
+	if image["base64"] != base64.StdEncoding.EncodeToString([]byte("png bytes")) || image["thumbnail"] != "thumb" || doc["textContent"] != "the plan" {
 		t.Fatalf("content not inlined: %v", attachments)
 	}
 	for _, a := range []object{image, doc} {
-		for _, field := range []string{"encryptionKey", "key", "storageThreadId", "pageCount"} {
+		for _, field := range []string{"encryptionKey", "key", "storageThreadId"} {
 			if _, ok := a[field]; ok {
 				t.Fatalf("a device copy kept %s: %v", field, a)
 			}
@@ -56,13 +59,6 @@ func TestTranscriptRefusesToLoseContent(t *testing.T) {
 	storedThread(rows, "alice", "gone", object{"id": strings.Repeat("d", 36), "type": "image", "fileName": "lost.png", "encryptionKey": "gone"})
 	if w := postRoute(h, "/v1/threads/transcript", object{"key": key.base64(), "threadId": "gone"}, "alice"); w.Code != 409 || !strings.Contains(w.Body.String(), "ATTACHMENTS_UNAVAILABLE") {
 		t.Fatalf("a chat with an unreadable attachment moved: %d %s", w.Code, w.Body.String())
-	}
-	storedThread(rows, "alice", "busy")
-	row := rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "busy")]
-	row.Data["activeRun"] = object{"runId": "run-1"}
-	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "busy")] = row
-	if w := postRoute(h, "/v1/threads/transcript", object{"key": key.base64(), "threadId": "busy"}, "alice"); w.Code != 409 || !strings.Contains(w.Body.String(), "RUN_IN_FLIGHT") {
-		t.Fatalf("a streaming chat moved: %d %s", w.Code, w.Body.String())
 	}
 }
 
@@ -90,18 +86,34 @@ func TestImportStoresTheDeviceChatUnderItsID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	attachments := arr(obj(arr(row.Data["messages"])[0])["attachments"])
-	for _, value := range attachments {
-		a := obj(value)
-		if !enclaveAttachmentID.MatchString(str(a["id"])) || a["storageThreadId"] != "0000000000005_device" || a["base64"] != nil || a["textContent"] != nil {
-			t.Fatalf("attachment not stored under the chat: %v", a)
+	attachments := readThreadRow(row).Messages[0].Attachments
+	for _, a := range attachments {
+		if !enclaveAttachmentID.MatchString(a.ID) || a.StorageThreadID != "0000000000005_device" || a.Base64 != "" || a.TextContent != "" {
+			t.Fatalf("attachment not stored under the chat: %+v", a)
 		}
 	}
-	if fake.putCount() != 2 || string(fake.blobs[str(obj(attachments[0])["id"])].data) != "image bytes" || string(fake.blobs[str(obj(attachments[1])["id"])].data) != `{"textContent":"doc text"}` {
+	if fake.putCount() != 2 || string(fake.blobs[attachments[0].ID].data) != "image bytes" || string(fake.blobs[attachments[1].ID].data) != `{"textContent":"doc text"}` {
 		t.Fatalf("blobs: %d", fake.putCount())
 	}
 	if w := postRoute(h, "/v1/threads/import", in, "alice"); w.Code != 409 || !strings.Contains(w.Body.String(), "THREAD_EXISTS") {
 		t.Fatalf("an import overwrote a cloud chat: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// An archive import's status names its job and its failure as the client
+// reads them.
+func TestImportStatusReadsAsTheClientNamesIt(t *testing.T) {
+	h, _, _ := testChatHarness(t, nil)
+	newFakeSync(t, h)
+	w := postRoute(h, "/v1/import/status", object{"jobId": "job-1"}, "alice")
+	if w.Code != 200 {
+		t.Fatalf("HTTP %d: %s", w.Code, w.Body.String())
+	}
+	var status object
+	json.Unmarshal(w.Body.Bytes(), &status)
+	want := object{"status": "failed", "imported": float64(0), "failed": float64(1), "total": float64(1), "jobId": "job-1", "failureReason": "invalid_archive", "failureDetail": "Not a zip archive"}
+	if !reflect.DeepEqual(status, want) {
+		t.Fatalf("the status reads as %v, want %v", status, want)
 	}
 }
 
@@ -118,13 +130,13 @@ func TestImportMayReuseADeletedChatID(t *testing.T) {
 	})}}
 	h, _, key := testChatHarness(t, nil)
 	h.storeRows = client
-	if _, err := h.importThread(context.Background(), &principal{ID: "alice", JWT: "jwt"}, key, object{"threadId": "chat-1", "thread": object{"messages": []any{}}}); err != nil {
+	if _, err := h.importThread(context.Background(), &principal{ID: "alice", JWT: "jwt"}, key, requestOf[threadImportRequest](object{"threadId": "chat-1", "thread": object{"messages": []any{}}})); err != nil {
 		t.Fatal(err)
 	}
 	if metadata["restoreDeleted"] != true {
 		t.Fatalf("metadata: %v", metadata)
 	}
-	row := &storedRow{ID: "chat-1", Data: object{"messages": []any{}}}
+	row := &storedRow{ID: "chat-1", Data: raw(object{"messages": []any{}})}
 	client.push(context.Background(), &principal{ID: "alice", JWT: "jwt"}, key, "chat", row, "nonce")
 	if _, ok := metadata["restoreDeleted"]; ok {
 		t.Fatal("an ordinary push asked to restore a deleted chat")

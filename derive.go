@@ -1,15 +1,12 @@
 package main
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/hkdf"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"regexp"
 
 	"github.com/google/uuid"
 )
@@ -33,38 +30,12 @@ func decodeContentKey(value string) (contentKey, error) {
 	return key, nil
 }
 
-func (k contentKey) base64() string { return base64.StdEncoding.EncodeToString(k[:]) }
-func (k contentKey) derive(info string) []byte {
-	b, err := hkdf.Key(sha256.New, k[:], nil, info, 32)
-	if err != nil {
-		panic("invalid HKDF length")
-	}
-	return b
-}
+func (k contentKey) base64() string      { return base64.StdEncoding.EncodeToString(k[:]) }
 func (k contentKey) fingerprint() string { b := sha256.Sum256(k[:]); return hex.EncodeToString(b[:]) }
-func (k contentKey) codeKey() string {
-	return hex.EncodeToString(k.derive("tinfoil-code-execution-encryption-key-v1"))
-}
-func (k contentKey) containerToken(id string) string {
-	return hex.EncodeToString(k.derive("tinfoil-code-execution-v1:" + id))
-}
 
-func randomKey() contentKey { var k contentKey; rand.Read(k[:]); return k }
+// rowIDPattern is the id a client gives a chat it creates, as rowID makes it.
+var rowIDPattern = regexp.MustCompile(`^\d{13}_[0-9a-f-]{36}$`)
+
 func rowID() string {
 	return fmt.Sprintf("%013d_%s", int64(9999999999999)-nowUTC().UnixMilli(), uuid.NewString())
-}
-
-func newContentRun(id string, key contentKey) (*run, error) {
-	material := key.derive("confidential-tinfoil-harness run log v2:" + id)
-	defer clear(material)
-	block, err := aes.NewCipher(material)
-	if err != nil {
-		return nil, err
-	}
-	aead, err := cipher.NewGCMWithRandomNonce(block)
-	if err != nil {
-		return nil, err
-	}
-	idle := func() {}
-	return &run{id: id, aead: aead, log: newRunlog(), begin: idle, stop: idle, abandon: idle}, nil
 }

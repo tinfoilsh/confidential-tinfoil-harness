@@ -1,6 +1,6 @@
 # Confidential Tinfoil Harness
 
-Tinfoil's chat harness is the enclave that runs conversations for [Tinfoil Chat](https://chat.tinfoil.sh). It owns prompt construction, tool calls, model turns, and encrypted persistence through the [sync enclave](https://github.com/tinfoilsh/confidential-sync), so clients only need to send user input and hold their own encryption key. The harness never logs or persists that key and discards it with the plaintext transcript when a run completes. Anonymous turns are never persisted.
+Tinfoil's chat harness is the enclave that runs conversations for [Tinfoil Chat](https://docs.tinfoil.sh/chat/overview). It builds prompts and runs tool calls and model turns. Cloud chats are stored encrypted through the [sync enclave](https://github.com/tinfoilsh/confidential-sync); a chat kept on a device is sent with each turn and returned when the run ends. The harness never logs or persists a client's key, and it keeps no chat state once a run ends.
 
 ## Development
 
@@ -12,22 +12,22 @@ GOWORK=off go vet ./...
 GOWORK=off go build ./...
 ```
 
-With `../tinfoil-webapp/node_modules` installed, the tests also check Go-produced rows and archives against the web validators in [scripts/fixtures](scripts/fixtures). `node scripts/check-widgets.cjs ../tinfoil-webapp` checks the web widget renderers against [widgets.json](widgets.json).
+With a web client checkout and its `node_modules` in `TINFOIL_WEBAPP` (or `../tinfoil-webapp`), the tests also replay run events through its harness reducer and read attachments through its chat view.
 
-Anonymous chat works only from a deployed harness, because the control plane accepts `free_` key validation only from registered Tinfoil hosts.
+Anonymous chat works only from a deployed harness, because Tinfoil validates `free_` keys only for registered Tinfoil hosts.
 
 ## Deployment
 
-[tinfoil-config.yml](tinfoil-config.yml) is the measured configuration. It provides:
+[tinfoil-config.yml](tinfoil-config.yml) is the measured configuration and the only place the harness reads its hosts from. It provides:
 
-- `USAGE_CONTEXT_SECRET`: required secret, shared with the gateway for usage accounting
+- `USAGE_CONTEXT_SECRET`: required secret for usage accounting
 - `TINFOIL_API_KEY`: secret for the safeguards sidecar
-- `CLERK_ISSUER`: issuer for signed-in Clerk sessions
-- `TINFOIL_SYNC_ENCLAVE` and `TINFOIL_ROUTER_ENCLAVE`: must attest at boot
+- `TINFOIL_GATEWAY_URL`, `TINFOIL_CONTROLPLANE_URL` and `CLERK_ISSUER`: required
+- `TINFOIL_SYNC_ENCLAVE` and `TINFOIL_ROUTER_ENCLAVE`: required, and must attest at boot
 - The other `TINFOIL_*_ENCLAVE` hosts: used once their attestation succeeds
 - `SAFEGUARDS_URL`: the [safeguards](https://github.com/tinfoilsh/confidential-safeguards) sidecar that classifies completed first-party chats
 
-A chat model is offered only when the control plane lists it, its repository is pinned in [main.go](main.go), and the gateway's catalog offers it.
+A chat model is offered only when Tinfoil's model catalog lists it, its repository is pinned in [main.go](main.go), and a replica serving it is available.
 
 ## Reporting Vulnerabilities
 

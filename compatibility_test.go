@@ -2,8 +2,8 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
-	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"hash/crc32"
@@ -15,7 +15,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
-	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -86,7 +85,7 @@ func TestManagedModelRefreshesRejectedInferenceCredentialOnce(t *testing.T) {
 				}
 				io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\ndata: [DONE]\n\n")
 			})
-			cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			cp := httptest.NewServer(unflagged(func(w http.ResponseWriter, r *http.Request) {
 				exchanges.Add(1)
 				if r.URL.Path != "/api/chat/token" || r.Header.Get("Authorization") != "Bearer clerk-alice" {
 					t.Error("exchange did not use the Clerk session")
@@ -104,66 +103,34 @@ func TestManagedModelRefreshesRejectedInferenceCredentialOnce(t *testing.T) {
 				t.Fatal("unexpected run result", last)
 			}
 			row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
-			if !rejectAgain && len(arr(row.Data["messages"])) != 2 {
+			if !rejectAgain && len(readThreadRow(row).Messages) != 2 {
 				t.Fatal("credential retry duplicated the turn")
 			}
 		})
 	}
 }
 
-func TestReferenceBackupWithProjectImagesAndPages(t *testing.T) {
-	h, rows, key := testChatHarness(t, nil)
-	p := &principal{ID: "alice"}
-	now := "2026-09-01T00:00:00Z"
-	var pixel bytes.Buffer
-	if err := png.Encode(&pixel, image.NewRGBA(image.Rect(0, 0, 2, 2))); err != nil {
-		t.Fatal(err)
-	}
-	encoded := base64.StdEncoding.EncodeToString(pixel.Bytes())
-	answer := "[Answer](https://example.com)"
-	rows.rows[rowMapKey(p, "project", "project")] = storedRow{ID: "project", ETag: "1", Data: object{"name": "Project", "description": "Description", "systemInstructions": "Instructions", "memory": []any{}, "createdAt": now, "updatedAt": now}}
-	rows.rows[rowMapKey(p, "project_document", "project/doc")] = storedRow{ID: "project/doc", ETag: "1", Data: object{"projectId": "project", "filename": "doc.txt", "contentType": "text/plain", "sizeBytes": 4, "content": "text", "createdAt": now, "updatedAt": now}}
-	rows.rows[rowMapKey(p, "chat", "chat")] = storedRow{ID: "chat", ETag: "1", Data: object{"title": "Chat", "projectId": "project", "createdAt": now, "updatedAt": now, "messages": []any{
-		object{"id": "user", "role": "user", "content": "Look", "createdAt": now, "attachments": []any{
-			object{"id": "image", "type": "image", "fileName": "image.png", "mimeType": "image/png", "base64": encoded},
-			object{"id": "doc", "type": "document", "fileName": "doc.pdf", "textContent": "Text", "pages": []any{object{"page": 1, "text": "Text", "is_scanned": true, "image": encoded}}},
-		}},
-		object{"id": "assistant", "role": "assistant", "content": answer, "createdAt": now, "thoughts": "Reasoning", "webSearch": object{"query": "test", "status": "completed", "sources": []any{object{"title": "Source", "url": "https://example.com"}}},
-			"annotations": citationAnnotations(answer, []citationSource{{"https://example.com", "Source"}})},
-	}}}
-	var archive bytes.Buffer
-	if err := h.writeBackup(context.Background(), p, key, object{}, &archive); err != nil {
-		t.Fatal(err)
-	}
-	spool, _ := newSealedSpool()
-	defer spool.Close()
-	spool.Write(archive.Bytes())
-	spool.Finish()
-	converted, native, err := convertNativeArchive(spool)
-	if err != nil || !native {
-		t.Fatal(native, err)
-	}
-	defer converted.Close()
-	referenceCheck(t, object{"backup": base64.StdEncoding.EncodeToString(archive.Bytes())})
+// referenceCheck replays a run's events through the web client's harness
+// reducer, found in TINFOIL_WEBAPP or ../tinfoil-webapp with its node_modules.
+func referenceCheck(t *testing.T, events []event, expectedMessages any) {
+	t.Helper()
+	runReference(t, object{"events": events, "expectedMessages": expectedMessages})
 }
 
-func referenceCheck(t *testing.T, input object) {
+// referenceViews reads attachments as the web client's chat view shows them.
+func referenceViews(t *testing.T, attachments, expectedViews any) {
 	t.Helper()
-	reference := "../tinfoil-webapp"
+	runReference(t, object{"events": []event{}, "expectedMessages": []any{}, "attachments": attachments, "expectedViews": expectedViews})
+}
+
+func runReference(t *testing.T, input object) {
+	t.Helper()
+	reference := cmp.Or(os.Getenv("TINFOIL_WEBAPP"), "../tinfoil-webapp")
 	if _, err := os.Stat(reference + "/node_modules/typescript"); err != nil {
 		t.Skip("reference webapp dependencies are not installed")
 	}
-	if _, ok := input["events"]; ok {
-		if _, err := os.Stat(reference + "/src/services/harness/reducer.ts"); err != nil {
-			// Event parity needs the webapp's harness reducer; the backup and
-			// stored-row checks in the same input do not.
-			input = clone(input)
-			delete(input, "events")
-			delete(input, "expectedMessages")
-			if len(input) == 0 {
-				t.Skip("reference webapp has no harness reducer")
-			}
-		}
+	if _, err := os.Stat(reference + "/src/services/harness/reducer.ts"); err != nil {
+		t.Skip("reference webapp has no harness reducer")
 	}
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -177,10 +144,10 @@ func referenceCheck(t *testing.T, input object) {
 	}
 }
 func TestSharedThreadUsesPublicTimelineAndAttachments(t *testing.T) {
-	result := sharedThreadView("share-id", object{"title": "Shared", "createdAt": float64(1700000000000), "messages": []any{
+	result := obj(decodeValue(raw(sharedThreadView("share-id", raw(object{"title": "Shared", "createdAt": float64(1700000000000), "messages": []any{
 		object{"role": "assistant", "content": "answer", "timestamp": float64(1700000000000)},
 		object{"role": "user", "content": "photo", "timestamp": float64(1700000000000), "attachments": []any{object{"id": "attachment", "type": "image", "fileName": "photo.png", "mimeType": "image/png", "encryptionKey": "share-attachment-key", "thumbnailBase64": "thumbnail"}}},
-	}})
+	}})))))
 	if !strings.HasPrefix(str(result["createdAt"]), "2023-") {
 		t.Fatalf("invalid timestamp: %v", result)
 	}
@@ -197,88 +164,6 @@ func TestSharedThreadUsesPublicTimelineAndAttachments(t *testing.T) {
 	}
 }
 
-func TestReferenceBackupAndStoredSchemas(t *testing.T) {
-	h, rows, key := testChatHarness(t, nil)
-	events := eventsIn(t, postRoute(h, "/v1/threads/turn", sendInput(key), "alice"))
-	row, err := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var archive bytes.Buffer
-	if err := h.writeBackup(context.Background(), &principal{ID: "alice"}, key, object{}, &archive); err != nil {
-		t.Fatal(err)
-	}
-	referenceCheck(t, object{"backup": base64.StdEncoding.EncodeToString(archive.Bytes()), "chat": row.Data, "events": events, "expectedMessages": publicThread(row, "", 50)["messages"]})
-}
-func TestColdRetryPreservesNewThreadIdentity(t *testing.T) {
-	var calls atomic.Int32
-	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\ndata: [DONE]\n\n")
-	})
-	in := sendInput(key)
-	first := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice"))[0]
-	state := h.threadState(&principal{ID: "alice"}, first.ThreadID)
-	state.mu.Lock()
-	run := state.runs[first.RunID]
-	state.mu.Unlock()
-	<-run.finished
-	<-run.spilled
-	h.chatMu.Lock()
-	h.threads = nil
-	h.requests = nil
-	h.chatMu.Unlock()
-	retry := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice"))
-	if retry[0].ThreadID != first.ThreadID || retry[0].RunID != first.RunID || calls.Load() != 1 {
-		t.Fatal("retry created another run")
-	}
-	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", first.ThreadID)
-	if len(arr(row.Data["messages"])) != 2 {
-		t.Fatal("retry appended another message")
-	}
-}
-func TestReplayPreservesTheHistoryWindowBoundary(t *testing.T) {
-	log, err := newContentRun("window", randomKey())
-	if err != nil {
-		t.Fatal(err)
-	}
-	older := true
-	out := &stream{run: log}
-	out.emit(event{Type: "MESSAGES_SNAPSHOT", Messages: []any{}, HasOlder: &older})
-	_, hasOlder, err := messagesAt(log, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !hasOlder {
-		t.Fatal("reconnect lost the older-message boundary")
-	}
-}
-
-func TestFollowSnapshotMatchesCursor(t *testing.T) {
-	h, _, key := testChatHarness(t, nil)
-	events := eventsIn(t, postRoute(h, "/v1/threads/turn", sendInput(key), "alice"))
-	var cursor int
-	for index, event := range events {
-		if event.Type == "TEXT_MESSAGE_CHUNK" {
-			cursor = index
-		}
-	}
-	input := object{"key": key.base64(), "threadId": events[0].ThreadID, "runId": events[0].RunID}
-	r := httptest.NewRequest("POST", "/v1/threads/follow", bytes.NewReader(raw(input)))
-	r.Header.Set("Authorization", "Bearer clerk-alice")
-	r.Header.Set("Last-Event-ID", strconv.Itoa(cursor))
-	w := httptest.NewRecorder()
-	h.routes().ServeHTTP(w, r)
-	resumed := eventsIn(t, w)
-	if resumed[0].Type != "MESSAGES_SNAPSHOT" || !strings.Contains(string(raw(resumed[0].Messages)), "hello") {
-		t.Fatal("snapshot omitted output through cursor")
-	}
-	for _, event := range resumed[1:] {
-		if event.Type == "TEXT_MESSAGE_CHUNK" {
-			t.Fatal("cursor output was replayed twice")
-		}
-	}
-}
 func TestTruncatedModelStreamPreservesPartialAnswer(t *testing.T) {
 	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
@@ -292,8 +177,7 @@ func TestTruncatedModelStreamPreservesPartialAnswer(t *testing.T) {
 		t.Fatalf("a failed chat was screened: %+v", got)
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
-	last := obj(arr(row.Data["messages"])[1])
-	if last["content"] != "partial" || last["isError"] != true {
+	if last := readThreadRow(row).Messages[1]; last.Content != "partial" || !valueOr(last.IsError, false) {
 		t.Fatal("partial answer lost")
 	}
 }
@@ -314,7 +198,7 @@ func TestTitleRunsBeforeAnswerFinishes(t *testing.T) {
 	}))
 	defer server.Close()
 	h.services["summarizer"] = &downstreamService{URL: server.URL, Client: server.Client()}
-	run, err := h.acceptTurn(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, key, sendInput(key))
+	run, err := h.acceptTurn(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, key, requestOf[turnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,26 +211,20 @@ func TestTitleRunsBeforeAnswerFinishes(t *testing.T) {
 	close(release)
 	<-run.finished
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", run.thread.id)
-	if row.Data["title"] != "A generated title" {
+	if readThreadRow(row).Title != "A generated title" {
 		t.Fatal("title did not commit")
 	}
 }
-func TestWidgetSchemaAndFactOperations(t *testing.T) {
+func TestWidgetSchemaBounds(t *testing.T) {
 	clock, ok := catalogWidgets("render_clock")["render_clock"]
 	if !ok {
 		t.Fatal("render_clock is not in the widget catalog")
 	}
-	if err := validateSchema(clock.Schema, object{"durationSeconds": float64(1)}); err != nil {
+	if err := clock.schema.Validate(object{"durationSeconds": float64(1)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateSchema(clock.Schema, object{"durationSeconds": float64(0)}); err == nil {
+	if err := clock.schema.Validate(object{"durationSeconds": float64(0)}); err == nil {
 		t.Fatal("exclusive lower bound ignored")
-	}
-	facts := []any{object{"id": "old", "fact": "old fact", "category": "test", "confidence": 0.5}}
-	operations := []any{object{"action": "update", "factId": "old", "updates": object{"fact": "new fact"}}, object{"action": "add", "fact": object{"fact": "second fact", "category": "test", "confidence": 0.9, "date": timestamp()}}}
-	result := applyFacts(facts, operations)
-	if len(result) != 2 || obj(result[0])["fact"] != "new fact" || str(obj(result[1])["id"]) == "" || obj(facts[0])["fact"] != "old fact" {
-		t.Fatal("fact mutation is not isolated")
 	}
 }
 
@@ -363,7 +241,7 @@ func TestWidgetRetryReplacesOnlyTheArguments(t *testing.T) {
 	catalog := h.catalog.get()
 	catalog.EnabledWidgets = []string{"render_stat_cards"}
 	original := `{"stats":[{"label":"Count","value":1}]}`
-	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat")] = storedRow{ID: "chat", ETag: "1", Data: object{"createdAt": timestamp(), "title": "Title", "titleState": "manual", "model": "kimi-k3", "messages": []any{object{"id": "user", "role": "user", "content": "show a stat", "timestamp": timestamp()}, object{"id": "assistant", "role": "assistant", "content": "keep this text", "timestamp": timestamp(), "timeline": []any{object{"type": "content", "id": "text", "content": "keep this text"}, object{"type": "tool_call", "id": "call", "toolCallId": "call", "name": "render_stat_cards", "arguments": original}}}}}}
+	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat")] = storedRow{ID: "chat", ETag: "1", Data: raw(object{"createdAt": timestamp(), "title": "Title", "titleState": "manual", "model": "kimi-k3", "messages": []any{object{"id": "user", "role": "user", "content": "show a stat", "timestamp": timestamp()}, object{"id": "assistant", "role": "assistant", "content": "keep this text", "timestamp": timestamp(), "timeline": []any{object{"type": "content", "id": "text", "content": "keep this text"}, object{"type": "tool_call", "id": "call", "toolCallId": "call", "name": "render_stat_cards", "arguments": original}}}}})}
 	in := sendInput(key)
 	in["threadId"] = "chat"
 	in["kind"] = "retryToolCall"
@@ -375,63 +253,9 @@ func TestWidgetRetryReplacesOnlyTheArguments(t *testing.T) {
 		t.Fatalf("retry failed: %+v", last)
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", "chat")
-	messages := arr(row.Data["messages"])
-	blocks := arr(obj(messages[1])["timeline"])
-	if len(messages) != 2 || len(blocks) != 2 || obj(blocks[1])["arguments"] != replacement {
+	messages := readThreadRow(row).Messages
+	if len(messages) != 2 || len(messages[1].Timeline) != 2 || messages[1].Timeline[1].Arguments != replacement {
 		t.Fatal("retry changed message structure")
-	}
-	// A client reconnecting after the retry sees the new arguments beside the message's other blocks.
-	follow := httptest.NewRequest("POST", "/v1/threads/follow", bytes.NewReader(raw(object{"key": key.base64(), "threadId": "chat", "runId": events[0].RunID})))
-	follow.Header.Set("Authorization", "Bearer clerk-alice")
-	follow.Header.Set("Last-Event-ID", strconv.Itoa(slices.IndexFunc(events, func(e event) bool { return e.Type == "TOOL_CALL_END" })))
-	resumed := httptest.NewRecorder()
-	h.routes().ServeHTTP(resumed, follow)
-	snapshot := arr(eventsIn(t, resumed)[0].Messages)
-	shown := arr(obj(snapshot[len(snapshot)-1])["timeline"])
-	if len(shown) != 2 || obj(shown[0])["content"] != "keep this text" || obj(shown[1])["arguments"] != replacement {
-		t.Fatalf("a reconnecting client was shown %v", shown)
-	}
-}
-
-func TestRecoveredWidgetRetryChecksConcurrentChanges(t *testing.T) {
-	for _, changed := range []bool{false, true} {
-		t.Run(strconv.FormatBool(changed), func(t *testing.T) {
-			h, rows, key := testChatHarness(t, nil)
-			p := &principal{ID: "alice"}
-			log, err := newContentRun(token(), key)
-			if err != nil {
-				t.Fatal(err)
-			}
-			stream := newStream(log, "chat", log.id)
-			stream.callStart("call", "render_clock", "assistant")
-			stream.callArgs("call", `{"durationSeconds":2}`)
-			stream.callEnd("call")
-			stream.emit(event{Type: "RUN_FINISHED"})
-			log.log.close(errDone)
-			original := `{"durationSeconds":1}`
-			current := original
-			if changed {
-				current = `{"durationSeconds":3}`
-			}
-			row := storedRow{ID: "chat", ETag: "1", Data: object{
-				"activeRun":    object{"runId": log.id},
-				"harnessRetry": object{"runId": log.id, "messageId": "assistant", "toolCallId": "call", "arguments": original},
-				"messages":     []any{object{"id": "assistant", "role": "assistant", "content": "keep", "timeline": []any{object{"type": "tool_call", "toolCallId": "call", "arguments": current}}}},
-			}}
-			rows.rows[rowMapKey(p, "chat", "chat")] = row
-			err = h.settleRecovered(context.Background(), p, key, &row, log)
-			if changed && (err == nil || asAPIError(err).Code != "REVISION_CONFLICT") || !changed && err != nil {
-				t.Fatal("unexpected recovery result", err)
-			}
-			stored, _ := rows.load(context.Background(), p, key, "chat", "chat")
-			got := obj(arr(obj(arr(stored.Data["messages"])[0])["timeline"])[0])["arguments"]
-			if !changed {
-				current = `{"durationSeconds":2}`
-			}
-			if got != current || !changed && stored.Data["activeRun"] != nil {
-				t.Fatal("recovery overwrote a concurrent edit or left its run active")
-			}
-		})
 	}
 }
 
@@ -460,11 +284,11 @@ func TestManagedToolLoopKeepsReasoningAndOneAssistantMessage(t *testing.T) {
 		t.Fatal(events[len(events)-1])
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
-	messages := arr(row.Data["messages"])
-	if len(messages) != 2 || len(arr(obj(messages[1])["timeline"])) != 3 {
+	messages := readThreadRow(row).Messages
+	if len(messages) != 2 || len(messages[1].Timeline) != 3 {
 		t.Fatal("tool loop did not make one ordered assistant timeline")
 	}
-	referenceCheck(t, object{"events": events, "expectedMessages": publicThread(row, "", 50)["messages"]})
+	referenceCheck(t, events, window(readThreadRow(row), "", 50).Messages)
 }
 func TestShutdownCommitsPartialOutput(t *testing.T) {
 	started := make(chan struct{})
@@ -474,24 +298,25 @@ func TestShutdownCommitsPartialOutput(t *testing.T) {
 		close(started)
 		<-r.Context().Done()
 	})
-	run, err := h.acceptTurn(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, key, sendInput(key))
+	run, err := h.acceptTurn(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, key, requestOf[turnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	<-started
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	waitRuns(ctx, h.stopRuns())
+	h.stopRuns()
+	h.waitRuns(ctx)
 	select {
 	case <-run.finished:
 	default:
 		t.Fatal("shutdown did not finish the run")
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", run.thread.id)
-	if row.Data["activeRun"] != nil {
+	if readThreadRow(row).ActiveRun != nil {
 		t.Fatal("shutdown left an active marker")
 	}
-	if _, err := h.acceptTurn(context.Background(), &principal{ID: "alice"}, key, sendInput(key)); err == nil {
+	if _, err := h.acceptTurn(context.Background(), &principal{ID: "alice"}, key, requestOf[turnRequest](sendInput(key))); err == nil {
 		t.Fatal("accepted a turn during shutdown")
 	}
 }

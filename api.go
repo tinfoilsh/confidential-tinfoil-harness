@@ -8,22 +8,15 @@ import (
 	"io"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 )
 
-// object preserves fields written by newer web or iOS clients on CAS retries.
+// object is JSON whose shape the harness does not own: tool output, model
+// messages, downstream errors, the model catalog, and archives.
 type object map[string]any
 
 func raw(v any) json.RawMessage { b, _ := json.Marshal(v); return b }
-func clone(v object) object {
-	var copy object
-	json.Unmarshal(raw(v), &copy)
-	if copy == nil {
-		copy = object{}
-	}
-	return copy
-}
+
 func str(v any) string { s, _ := v.(string); return s }
 func obj(v any) object {
 	switch m := v.(type) {
@@ -67,6 +60,7 @@ func integer(v any) int {
 	}
 	return 0
 }
+
 func nowUTC() time.Time { return time.Now().UTC() }
 func timestamp() string { return nowUTC().Format(time.RFC3339Nano) }
 func firstString(values ...any) string {
@@ -88,6 +82,8 @@ type apiError struct {
 	Status     int    `json:"status,omitempty"`
 	KeyID      string `json:"keyId,omitempty"`
 	Upstream   string `json:"upstreamCode,omitempty"`
+	// RateLimit is the caller's quota as an exhausted one's refusal leaves it.
+	RateLimit *rateLimit `json:"rateLimit,omitempty"`
 
 	missing []string // attachment ids sync did not find under the pushed chat
 }
@@ -100,9 +96,6 @@ func asAPIError(err error) *apiError {
 	var a *apiError
 	if errors.As(err, &a) {
 		return a
-	}
-	if errors.Is(err, errTooLong) {
-		return apiErr(413, "RUN_LOG_FULL", "The run log is full")
 	}
 	var refusal *refusal
 	if errors.As(err, &refusal) {
@@ -131,27 +124,33 @@ func respond(w http.ResponseWriter, result any, err error) {
 	json.NewEncoder(w).Encode(result)
 }
 
-func decodeJSON(w http.ResponseWriter, r *http.Request) (object, error) {
-	return decodeJSONWithin(w, r, maxRequestBody)
+const maxRequestBody = 8 << 20
+
+// maxResponseBody bounds a downstream answer: a pull of sync's largest batch,
+// or an attachment, base64 encoded.
+const maxResponseBody = 96 << 20
+
+type jsonEndpoint func(context.Context, *principal, contentKey, json.RawMessage) (any, error)
+
+// validated is a request that checks itself once decoded.
+type validated interface{ validate() error }
+
+// decoded is a route whose handler takes its request decoded and checked.
+func decoded[T any](handle func(context.Context, *principal, contentKey, *T) (any, error)) jsonEndpoint {
+	return func(ctx context.Context, p *principal, key contentKey, body json.RawMessage) (any, error) {
+		in := new(T)
+		if err := decodeRequest(body, in); err != nil {
+			return nil, err
+		}
+		if check, ok := any(in).(validated); ok {
+			if err := check.validate(); err != nil {
+				return nil, err
+			}
+		}
+		return handle(ctx, p, key, in)
+	}
 }
 
-func decodeJSONWithin(w http.ResponseWriter, r *http.Request, limit int64) (object, error) {
-	r.Body = http.MaxBytesReader(w, r.Body, limit)
-	decoder := json.NewDecoder(r.Body)
-	var in object
-	if err := decoder.Decode(&in); err != nil {
-		return nil, apiErr(400, "BAD_REQUEST", "Expected a JSON object within the request size limit")
-	}
-	if in == nil {
-		return nil, apiErr(400, "BAD_REQUEST", "Expected a JSON object")
-	}
-	if err := decoder.Decode(new(any)); err != io.EOF {
-		return nil, apiErr(400, "BAD_REQUEST", "Expected one JSON object")
-	}
-	return in, nil
-}
-
-type jsonEndpoint func(context.Context, *principal, contentKey, object) (any, error)
 type routeSpec struct {
 	path        string
 	public, key bool
@@ -161,12 +160,9 @@ type routeSpec struct {
 func (h *harness) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { respond(w, object{"ok": true}, nil) })
-	// /agui remains available for the shadow and client transition phases.
-	mux.HandleFunc("POST /agui", h.agui)
-	mux.HandleFunc("DELETE /agui", h.drop)
 	for _, spec := range h.apiRoutes() {
 		mux.HandleFunc("POST "+spec.path, func(w http.ResponseWriter, r *http.Request) {
-			in, err := decodeJSON(w, r)
+			body, err := readBody(w, r, maxRequestBody)
 			if err != nil {
 				respond(w, nil, err)
 				return
@@ -178,20 +174,29 @@ func (h *harness) routes() http.Handler {
 			}
 			var key contentKey
 			if spec.key {
-				key, err = decodeContentKey(str(in["key"]))
+				var keyed struct {
+					Key any `json:"key"`
+				}
+				json.Unmarshal(body, &keyed)
+				text, _ := keyed.Key.(string)
+				key, err = decodeContentKey(text)
 				if err != nil {
 					respond(w, nil, err)
 					return
 				}
 				defer clear(key[:])
 			}
-			result, err := spec.handler(r.Context(), p, key, in)
-			respond(w, result, err)
+			result, err := spec.handler(r.Context(), p, key, body)
+			respond(w, result, h.withQuota(p, rateLimit{}, err))
 		})
+	}
+	for path, handler := range h.threadOperations() {
+		mux.HandleFunc("POST "+path, h.threadOperation(handler))
 	}
 	mux.HandleFunc("POST /v1/threads/turn", h.handleTurn)
 	mux.HandleFunc("POST /v1/threads/import", h.handleThreadImport)
 	mux.HandleFunc("POST /v1/threads/follow", h.handleFollow)
+	mux.HandleFunc("POST /v1/threads/upgrade", h.handleUpgrade)
 	mux.HandleFunc("POST /v1/speech", h.handleSpeech)
 	for _, path := range []string{"/v1/attachments/upload", "/v1/projects/documents/upload", "/v1/transcriptions", "/v1/import"} {
 		mux.HandleFunc("POST "+path, boundedHandler(uploadSlots, h.handleUpload))
@@ -202,6 +207,46 @@ func (h *harness) routes() http.Handler {
 	}
 	return mux
 }
+
+// threadOperation serves a route that changes a stored chat, named by id
+// with the content key, or a device chat, which its client sends as a turn
+// sends it, and which needs no account.
+func (h *harness) threadOperation(handler jsonEndpoint) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		p, err := h.auth.authenticate(r, true)
+		if err != nil {
+			respond(w, nil, err)
+			return
+		}
+		body, err := readBody(w, r, maxTurnBody)
+		if err != nil {
+			respond(w, nil, err)
+			return
+		}
+		var target struct {
+			Key   string `json:"key"`
+			Local bool   `json:"local"`
+		}
+		json.Unmarshal(body, &target)
+		var key contentKey
+		if !target.Local {
+			if p.Anonymous {
+				respond(w, nil, errAnonymousCloud)
+				return
+			}
+			if key, err = decodeContentKey(target.Key); err != nil {
+				respond(w, nil, err)
+				return
+			}
+			defer clear(key[:])
+		}
+		result, err := handler(r.Context(), p, key, body)
+		respond(w, result, h.withQuota(p, rateLimit{}, err))
+	}
+}
+
+// errAnonymousCloud refuses a signed-out caller a stored chat.
+var errAnonymousCloud = apiErr(401, "UNAUTHENTICATED", "Anonymous chats are kept on the device")
 
 func downstreamError(status int, body []byte) *apiError {
 	var in object
@@ -233,8 +278,6 @@ func downstreamError(status int, body []byte) *apiError {
 			// to a freshly pulled row, so retrying is safe.
 			e = apiErr(503, "SYNC_OUTCOME_UNKNOWN", "The sync service may not have stored the change")
 		}
-	case "PII_BLOCKED", "PII_DETECTED":
-		e = apiErr(422, "PII_BLOCKED", "The privacy screen refused the request")
 	default:
 		if refused := openAIRefusal(status, body); refused != nil {
 			if refused.RetryAfter == 0 {
@@ -289,15 +332,7 @@ func postJSONWithHeaders(ctx context.Context, client *http.Client, url, auth str
 		_, err = io.Copy(io.Discard, io.LimitReader(resp.Body, maxRequestBody))
 		return err
 	}
-	return json.NewDecoder(io.LimitReader(resp.Body, 96<<20)).Decode(out)
-}
-
-func requiredID(in object, field string) (string, error) {
-	id := str(in[field])
-	if id == "" || !identifier(id) || strings.ContainsAny(id, "/\\?#") {
-		return "", apiErr(400, "BAD_REQUEST", field+" must be a valid identifier")
-	}
-	return id, nil
+	return json.NewDecoder(io.LimitReader(resp.Body, maxResponseBody)).Decode(out)
 }
 
 var uploadSlots = make(chan struct{}, 4)

@@ -1,20 +1,29 @@
 package main
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"image"
+	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/google/uuid"
 )
 
 func localInput(threadID string, thread object) object {
-	in := object{"clientRequestId": uuid.NewString(), "kind": "send", "local": true, "content": "second question", "options": object{"model": "kimi-k3", "webSearch": false}}
-	if threadID != "" {
-		in["threadId"] = threadID
+	in := object{"threadId": threadID, "clientRequestId": uuid.NewString(), "kind": "send", "local": true, "content": "second question", "options": object{"model": "kimi-k3", "webSearch": false}}
+	if threadID == "" {
+		in["threadId"] = rowID()
 	}
 	if thread != nil {
 		in["thread"] = thread
@@ -131,7 +140,7 @@ func TestLocalTitleIsGeneratedWithoutStorage(t *testing.T) {
 	}))
 	defer summarizer.Close()
 	h.services["summarizer"] = &downstreamService{URL: summarizer.URL, Client: summarizer.Client()}
-	events := eventsIn(t, postRoute(h, "/v1/threads/turn", localInput("", nil), "alice"))
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", localInput("", object{"messages": []any{}}), "alice"))
 	if rows.calls != 0 {
 		t.Fatalf("local title used storage %d times", rows.calls)
 	}
@@ -151,28 +160,24 @@ func TestLocalTitleIsGeneratedWithoutStorage(t *testing.T) {
 	}
 }
 
-func TestLocalUploadReturnsItsDescriptorWithoutAKey(t *testing.T) {
+func TestALocalTurnReadsTheUploadItSends(t *testing.T) {
 	var prompt string
 	h, rows, _ := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		prompt = string(b)
 		io.WriteString(w, "data: [DONE]\n\n")
 	})
-	if w := uploadRoute(h, "/v1/attachments/upload", "notes.txt", []byte("remember the blue door"), nil, "alice"); w.Code != 401 {
-		t.Fatalf("stored upload accepted without a key: %d", w.Code)
-	}
-	w := uploadRoute(h, "/v1/attachments/upload", "notes.txt", []byte("remember the blue door"), map[string]string{"local": "true"}, "alice")
+	uploader, _, _ := testChatHarness(t, nil)
+	w := uploadRoute(uploader, "/v1/attachments/upload", "notes.txt", []byte("remember the blue door"), nil, "alice")
 	if w.Code != 200 {
-		t.Fatalf("local upload failed: %d %s", w.Code, w.Body.String())
+		t.Fatalf("upload failed: %d %s", w.Code, w.Body.String())
 	}
-	var view object
-	json.Unmarshal(w.Body.Bytes(), &view)
-	descriptor := obj(view["descriptor"])
-	if str(view["id"]) == "" || descriptor["id"] != view["id"] || descriptor["textContent"] != "remember the blue door" || descriptor["fileName"] != "notes.txt" {
-		t.Fatalf("local upload did not return its descriptor: %v", view)
+	var body struct {
+		Attachment object `json:"attachment"`
 	}
-	in := localInput("", nil)
-	in["attachments"] = []any{view["id"]}
+	json.Unmarshal(w.Body.Bytes(), &body)
+	in := localInput("0000000000006_local", object{"messages": []any{}})
+	in["attachments"] = []any{body.Attachment}
 	events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice"))
 	if events[len(events)-1].Type != "RUN_FINISHED" || !strings.Contains(prompt, "remember the blue door") {
 		t.Fatalf("local turn did not read its upload: %s", prompt)
@@ -203,7 +208,7 @@ func TestLocalAskHidesTheTranscriptItStartsFrom(t *testing.T) {
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"side answer\"}}]}\n\ndata: [DONE]\n\n")
 	})
 	in := localInput("0000000000004_local", priorThread())
-	in["kind"], in["quote"] = "ask", "first answer"
+	in["kind"], in["quote"], in["ephemeral"] = "ask", "first answer", true
 	delete(in, "content")
 	events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice"))
 	if rows.calls != 0 || events[0].ThreadID == "0000000000004_local" {
@@ -220,5 +225,227 @@ func TestLocalAskHidesTheTranscriptItStartsFrom(t *testing.T) {
 	// The model still reads the conversation the question refers to.
 	if len(prompt) < 4 || str(obj(prompt[1])["content"]) != "first question" {
 		t.Fatalf("the model lost the asked-about conversation: %v", prompt)
+	}
+	// Without the conversation there is nothing to ask about.
+	delete(in, "thread")
+	in["clientRequestId"] = uuid.NewString()
+	if w := postRoute(h, "/v1/threads/turn", in, "alice"); w.Code != 400 || !strings.Contains(w.Body.String(), "requires its transcript") {
+		t.Fatalf("an ask without its conversation: HTTP %d %s", w.Code, w.Body.String())
+	}
+}
+
+// endedThread posts a device chat's turn and returns the thread its run's
+// terminal event carries.
+func endedThread(t *testing.T, h *harness, in object, terminal string) object {
+	t.Helper()
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice"))
+	last := events[len(events)-1]
+	if last.Type != terminal {
+		t.Fatalf("the run ended with %+v", last)
+	}
+	return obj(obj(decodeValue(last.Metadata))["thread"])
+}
+
+// A device chat's run ends with the whole thread its client stores, which
+// the client sends back to continue the chat.
+func TestADeviceChatRunReturnsItsUpdatedThread(t *testing.T) {
+	var down atomic.Bool
+	h, rows, _ := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if down.Load() {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"an answer\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	summarizer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(object{"summary": "Device title"})
+	}))
+	defer summarizer.Close()
+	h.services["summarizer"] = &downstreamService{URL: summarizer.URL, Client: summarizer.Client()}
+	in := localInput("", object{"messages": []any{}})
+	id := str(in["threadId"])
+	in["content"] = "what is this?"
+	var picture bytes.Buffer
+	png.Encode(&picture, image.NewRGBA(image.Rect(0, 0, 4, 4)))
+	in["attachments"] = []any{object{"id": "att_photo", "kind": "image", "fileName": "photo.png", "mimeType": "image/png", "size": picture.Len(), "thumbnail": "dGh1bWI=", "description": "a cat", "base64": base64.StdEncoding.EncodeToString(picture.Bytes())},
+		object{"id": "att_scan", "kind": "document", "fileName": "scan.pdf", "mimeType": "application/pdf", "size": 3, "pages": []any{object{"page": 1, "text": "page text", "image": "cGFnZQ==", "is_scanned": true}}}}
+	thread := endedThread(t, h, in, "RUN_FINISHED")
+	messages := arr(thread["messages"])
+	if thread["id"] != id || thread["title"] != "Device title" || thread["titleState"] != "generated" || thread["lastRequestId"] != in["clientRequestId"] || thread["activeRun"] != nil || len(messages) != 2 {
+		t.Fatalf("the run returned %v", thread)
+	}
+	question, reply := obj(messages[0]), obj(messages[1])
+	photo := obj(arr(question["attachments"])[0])
+	if question["id"] != in["clientRequestId"] || question["content"] != "what is this?" || photo["id"] != "att_photo" || photo["description"] != "a cat" || photo["thumbnail"] != "dGh1bWI=" || photo["base64"] != nil {
+		t.Fatalf("the question was returned as %v", question)
+	}
+	// The client puts page images back by attachment id and page.
+	if page := obj(arr(obj(arr(question["attachments"])[1])["pages"])[0]); page["image"] != "" || page["text"] != "page text" {
+		t.Fatalf("the scanned page was returned as %v", page)
+	}
+	if reply["role"] != "assistant" || reply["content"] != "an answer" || reply["model"] != "kimi-k3" || reply["isError"] != false {
+		t.Fatalf("the reply was returned as %v", reply)
+	}
+	next := localInput(id, thread)
+	next["content"] = "and now?"
+	thread = endedThread(t, h, next, "RUN_FINISHED")
+	if messages := arr(thread["messages"]); len(messages) != 4 || obj(messages[2])["id"] != next["clientRequestId"] || obj(arr(obj(messages[0])["attachments"])[0])["description"] != "a cat" {
+		t.Fatalf("the continued thread is %v", messages)
+	}
+	// A failed run's error carries the thread with the question it added.
+	down.Store(true)
+	failed := localInput(id, thread)
+	thread = endedThread(t, h, failed, "RUN_ERROR")
+	if messages := arr(thread["messages"]); len(messages) != 5 || obj(messages[4])["id"] != failed["clientRequestId"] {
+		t.Fatalf("the failed run returned %v", messages)
+	}
+	if rows.calls != 0 {
+		t.Fatalf("a device chat used storage %d times", rows.calls)
+	}
+}
+
+// oldDeviceChat is a chat as the previous web client kept it in IndexedDB,
+// serialized as it sends it: dates as ISO strings, image bytes and document
+// text inline, and its bookkeeping.
+func oldDeviceChat(id string) object {
+	return object{
+		"id": id, "title": "Cats", "titleState": "generated", "model": "auto-smart", "webSearchEnabled": false,
+		"createdAt": "2026-03-01T10:00:00.000Z", "updatedAt": "2026-03-01T10:05:00.000Z",
+		"isLocalOnly": true, "lastAccessedAt": 1772359500000, "syncedAt": 0, "locallyModified": true, "pendingRecoveries": []any{},
+		"messages": []any{
+			object{"role": "user", "content": "What is in this picture?", "timestamp": "2026-03-01T10:00:01.000Z", "attachments": []any{
+				object{"id": "a1b2", "type": "image", "fileName": "cat.png", "mimeType": "image/png", "base64": "iVBORw0KGgo=", "thumbnailBase64": "dGh1bWI=", "fileSize": 8},
+				object{"id": "d3e4", "type": "document", "fileName": "notes.pdf", "mimeType": "application/pdf", "textContent": "Cats sleep a lot.", "fileSize": 1234},
+			}},
+			object{"role": "assistant", "content": "A cat [Cats](https://cats.example).", "timestamp": "2026-03-01T10:00:05.000+01:00", "modelDisplayName": "Kimi K3",
+				"thoughts": "Looks like a cat", "thinkingDuration": 2, "isThinking": false, "webSearchBeforeThinking": false,
+				"webSearch":   object{"query": "cat", "status": "completed", "sources": []any{object{"url": "https://cats.example", "title": "Cats", "snippet": "about cats"}}},
+				"annotations": []any{object{"type": "url_citation", "url_citation": object{"url": "https://cats.example", "title": "Cats", "start_index": 3, "end_index": 7}}}},
+			object{"role": "user", "content": "And this?", "timestamp": "2026-03-01T10:01:00.000Z", "documentContent": "legacy doc text", "imageData": []any{object{"base64": "R0lGODlh", "mimeType": "image/gif"}}},
+		},
+	}
+}
+
+func upgraded(t *testing.T, h *harness, user string, rows ...any) []any {
+	t.Helper()
+	w := postRoute(h, "/v1/threads/upgrade", object{"threads": rows}, user)
+	if w.Code != 200 {
+		t.Fatalf("upgrade: HTTP %d %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Threads []any `json:"threads"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &body)
+	return body.Threads
+}
+
+// The web client upgrades the chats its previous version kept on the device
+// through the harness's one reader of old chats, and stores what it returns.
+func TestOldDeviceChatsUpgradeIntoThreads(t *testing.T) {
+	h, rows, _ := testChatHarness(t, nil)
+	id := "8207544722379_4fe58a7b-eece-4f57-b098-d0c3cec90006"
+	threads := upgraded(t, h, "", oldDeviceChat(id), object{"id": "second", "messages": []any{}})
+	if len(threads) != 2 || obj(threads[1])["id"] != "second" {
+		t.Fatalf("the threads came back as %v", threads)
+	}
+	m := func(index int) string { return id + "-message-" + strconv.Itoa(index) }
+	want := object{
+		"id": id, "title": "Cats", "titleState": "generated", "model": "auto", "webSearchEnabled": false, "pinned": false,
+		"createdAt": "2026-03-01T10:00:00Z", "updatedAt": "2026-03-01T10:05:00Z", "projectId": nil, "presetId": nil, "activeRun": nil,
+		"messages": []any{
+			object{"id": m(0), "role": "user", "content": "What is in this picture?", "createdAt": "2026-03-01T10:00:01Z", "attachments": []any{
+				object{"id": "a1b2", "kind": "image", "fileName": "cat.png", "mimeType": "image/png", "thumbnail": "dGh1bWI=", "size": 8},
+				object{"id": "d3e4", "kind": "document", "fileName": "notes.pdf", "mimeType": "application/pdf", "textContent": "Cats sleep a lot.", "size": 1234},
+			}},
+			object{"id": m(1), "role": "assistant", "content": "A cat [Cats](https://cats.example).", "createdAt": "2026-03-01T09:00:05Z", "modelDisplayName": "Kimi K3",
+				"annotations": []any{object{"type": "url_citation", "url_citation": object{"url": "https://cats.example", "title": "Cats", "start_index": 3, "end_index": 7}}},
+				"timeline": []any{
+					object{"id": m(1) + "-thinking", "type": "thinking", "content": "Looks like a cat"},
+					object{"id": m(1) + "-search", "toolCallId": m(1) + "-search", "type": "tool_call", "name": "web_search", "arguments": `{"query":"cat"}`, "complete": true,
+						"result":  object{"query": "cat", "results": []any{object{"url": "https://cats.example", "title": "Cats", "snippet": "about cats"}}},
+						"display": object{"query": "cat", "status": "completed", "sources": []any{object{"url": "https://cats.example", "title": "Cats", "snippet": "about cats"}}}},
+					object{"id": m(1) + "-content", "type": "content", "content": "A cat [Cats](https://cats.example)."},
+				}},
+			object{"id": m(2), "role": "user", "content": "And this?", "createdAt": "2026-03-01T10:01:00Z", "attachments": []any{
+				object{"id": m(2) + "-attachment-0", "kind": "document", "fileName": "Attached document", "mimeType": "", "textContent": "legacy doc text"},
+				object{"id": m(2) + "-attachment-1", "kind": "image", "fileName": "image-0", "mimeType": "image/gif"},
+			}},
+		},
+	}
+	if !reflect.DeepEqual(threads[0], decodeValue(raw(want))) {
+		t.Fatalf("upgraded\n%s\nwant\n%s", raw(threads[0]), raw(want))
+	}
+	if rows.calls != 0 {
+		t.Fatalf("the upgrade made %d storage calls", rows.calls)
+	}
+	// The thread continues as a device chat. Images that do not decode come
+	// back without bytes, which no model could read.
+	next := localInput(id, obj(threads[0]))
+	if events := eventsIn(t, postRoute(h, "/v1/threads/turn", next, "alice")); events[len(events)-1].Type != "RUN_FINISHED" {
+		t.Fatalf("the upgraded thread did not continue: %+v", events[len(events)-1])
+	}
+	// A chat the harness cannot read is refused with its batch, so its
+	// client can find it by sending the rest alone.
+	for _, row := range []any{object{"messages": []any{}}, object{"id": "bad", "messages": []any{object{"role": "system", "content": "x"}}}, "not a chat"} {
+		if w := postRoute(h, "/v1/threads/upgrade", object{"threads": []any{oldDeviceChat(id), row}}, "alice"); w.Code != 400 {
+			t.Fatalf("a batch holding %v: HTTP %d", row, w.Code)
+		}
+	}
+	// A batch is read up to the size of a turn, past the limit of other
+	// requests, and an image comes back as the copy and thumbnail an upload
+	// makes, not the original its client keeps.
+	var original bytes.Buffer
+	(&png.Encoder{CompressionLevel: png.NoCompression}).Encode(&original, image.NewRGBA(image.Rect(0, 0, 2048, 1024)))
+	large := oldDeviceChat(id)
+	obj(arr(obj(arr(large["messages"])[0])["attachments"])[0])["base64"] = base64.StdEncoding.EncodeToString(original.Bytes())
+	if original.Len() <= maxRequestBody {
+		t.Fatalf("the large image holds only %d bytes", original.Len())
+	}
+	got := obj(arr(obj(arr(obj(upgraded(t, h, "alice", large)[0])["messages"])[0])["attachments"])[0])
+	dimensions := func(field string) string {
+		data, _ := base64.StdEncoding.DecodeString(str(got[field]))
+		config, format, err := image.DecodeConfig(bytes.NewReader(data))
+		return fmt.Sprintf("%s %dx%d %v", format, config.Width, config.Height, err)
+	}
+	if resized, thumbnail := dimensions("base64"), dimensions("thumbnail"); resized != "jpeg 1536x768 <nil>" || thumbnail != "jpeg 256x128 <nil>" {
+		t.Fatalf("the large image came back as %s with a thumbnail of %s", resized, thumbnail)
+	}
+}
+
+// The router sends an Auto turn with images to a multimodal model, so Auto
+// reads an image itself; a named text-only model reads its description.
+func TestAutoReadsImagesAndTextModelsReadTheirDescriptions(t *testing.T) {
+	var source bytes.Buffer
+	png.Encode(&source, image.NewRGBA(image.Rect(0, 0, 8, 8)))
+	var mu sync.Mutex
+	var requests []object
+	h, _, _ := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		var body object
+		json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		requests = append(requests, body)
+		mu.Unlock()
+		if body["stream"] == false {
+			json.NewEncoder(w).Encode(object{"choices": []object{{"message": object{"content": "a small square"}}}})
+			return
+		}
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	h.offer.models = append(h.offer.models, &model{name: "gemma4-31b", vision: true, context: 8192, client: h.offer.models[0].client})
+	for _, name := range []string{"auto", "kimi-k3"} {
+		requests = nil
+		in := localInput("", object{})
+		obj(in["options"])["model"] = name
+		in["attachments"] = []any{object{"id": "att_photo", "kind": "image", "fileName": "photo.png", "mimeType": "image/png", "size": source.Len(), "base64": base64.StdEncoding.EncodeToString(source.Bytes())}}
+		if events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice")); events[len(events)-1].Type != "RUN_FINISHED" {
+			t.Fatalf("%s: the run ended with %+v", name, events[len(events)-1])
+		}
+		turn := arr(requests[len(requests)-1]["messages"])
+		question := obj(turn[len(turn)-2])["content"]
+		read := strings.Contains(string(raw(question)), `"type":"image_url"`)
+		described := strings.Contains(str(question), "a small square")
+		if name == "auto" && (!read || len(requests) != 1) || name != "auto" && (read || !described || len(requests) != 2) {
+			t.Fatalf("%s: the model was asked %v after %d requests", name, question, len(requests))
+		}
 	}
 }

@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -35,7 +37,7 @@ func TestCatalogRefreshAcceptsControlplaneArray(t *testing.T) {
 			case 1:
 				response = object{"models": definitions}
 			case 2:
-				changed := clone(definitions[1])
+				changed := maps.Clone(definitions[1])
 				changed["repo"] = "untrusted/model"
 				response = []object{changed}
 			case 3:
@@ -43,8 +45,6 @@ func TestCatalogRefreshAcceptsControlplaneArray(t *testing.T) {
 			}
 		case "/api/config/system-prompt":
 			response = object{"systemPrompt": "Test prompt", "rules": "Test rules", "genUI": object{"enabledWidgets": []string{"render_chart"}}}
-		case "/api/config/memory-prompt":
-			response = object{"memoryPrompt": "Test memory prompt"}
 		default:
 			http.NotFound(w, r)
 			return
@@ -71,7 +71,7 @@ func TestCatalogRefreshAcceptsControlplaneArray(t *testing.T) {
 	if catalog.Fallback != 65536 || len(catalog.Deprecated) != 1 {
 		t.Fatal("lost the configured fallback window or deprecated model metadata")
 	}
-	if catalog.Prompt != "Test prompt" || catalog.MemoryPrompt != "Test memory prompt" || len(catalog.EnabledWidgets) != 1 {
+	if catalog.Prompt != "Test prompt" || len(catalog.EnabledWidgets) != 1 {
 		t.Fatal("lost prompt configuration")
 	}
 	for i, name := range []string{"wrong response shape", "untrusted repository", "no active models"} {
@@ -120,17 +120,47 @@ func TestHarnessStartsBeforeTheGatewayOffersAModel(t *testing.T) {
 		Models       []object `json:"models"`
 	}
 	response := postRoute(h, "/v1/session", object{}, "")
-	if err := json.Unmarshal(response.Body.Bytes(), &session); err != nil || response.Code != 200 || session.DefaultModel != "auto" || len(session.Models) != 0 {
+	if err := json.Unmarshal(response.Body.Bytes(), &session); err != nil || response.Code != 200 || session.DefaultModel != "auto" || len(session.Models) != 1 || session.Models[0]["auto"] != true {
 		t.Fatalf("session without offered models: HTTP %d %s", response.Code, response.Body.String())
 	}
-	turn := sendInput(contentKey{})
-	delete(turn, "key")
-	turn["ephemeral"], turn["options"] = true, object{"model": "auto", "webSearch": false}
+	turn := localInput("", object{})
+	turn["options"] = object{"model": "auto", "webSearch": false}
 	if events := eventsIn(t, postRoute(h, "/v1/threads/turn", turn, "")); events[len(events)-1].Type != "RUN_FINISHED" {
 		t.Fatalf("Auto did not run within the configured window: %+v", events[len(events)-1])
 	}
 	offered.Store(true)
 	if err := h.refreshCatalog(context.Background()); err != nil || h.catalog.get().definition("kimi-k3") == nil {
 		t.Fatalf("a model the gateway now offers was not advertised: %v", err)
+	}
+}
+
+// The session lists Auto first and every model in the fields a client shows,
+// and nothing else of the control plane's configuration.
+func TestSessionModelsAreReadyToDisplay(t *testing.T) {
+	h, _, _ := testChatHarness(t, nil)
+	c := h.catalog.get()
+	c.Models = []object{
+		{"modelName": "kimi-k3", "name": "Kimi K3", "image": "moonshot.png", "description": "A long description", "multimodal": true, "paid": true, "experimental": true,
+			"chatConfig": object{"descriptionShort": "Thinks deeply", "attributes": []any{"reasoning"}, "reasoningConfig": object{"supportsToggle": true}}},
+		{"modelName": "gpt-oss-120b", "name": "Free", "paid": false},
+	}
+	c.Deprecated = []object{{"modelName": "old", "name": "Old", "nameShort": "O", "deprecated": true, "deprecationDate": "2026-12-01"}}
+	var session struct {
+		Models json.RawMessage `json:"models"`
+		Auto   json.RawMessage `json:"auto"`
+	}
+	json.Unmarshal(postRoute(h, "/v1/session", object{}, "").Body.Bytes(), &session)
+	want := `[{"id":"auto","label":"Auto","shortLabel":"Auto","icon":"","description":"","badges":[],"reasoning":null,"deprecated":false,"auto":true},` +
+		`{"id":"kimi-k3","label":"Kimi K3","shortLabel":"Kimi K3","icon":"moonshot.png","description":"Thinks deeply","badges":[{"kind":"experimental","label":"Experimental","tooltip":"` + experimentalTooltip + `"}],"reasoning":{"toggle":true,"effort":false,"defaultEnabled":true},"deprecated":false},` +
+		`{"id":"old","label":"Old","shortLabel":"O","icon":"","description":"","badges":[{"kind":"deprecated","label":"Deprecated","tooltip":"This model will be taken offline on 2026-12-01."}],"reasoning":null,"deprecated":true}]`
+	if string(session.Models) != want {
+		t.Fatalf("the session offers\n%s\nwant\n%s", session.Models, want)
+	}
+	levels := []string{}
+	for _, level := range [][2]string{{"instant", "Instant"}, {"low", "Low"}, {"medium", "Med"}, {"high", "High"}, {"extra", "Extra"}, {"max", "Max"}} {
+		levels = append(levels, `{"id":"`+level[0]+`","label":"`+level[1]+`","displayLabel":"Auto · `+level[1]+`"}`)
+	}
+	if want := `{"default":"high","levels":[` + strings.Join(levels, ",") + `]}`; string(session.Auto) != want {
+		t.Fatalf("Auto is offered as %s, want %s", session.Auto, want)
 	}
 }

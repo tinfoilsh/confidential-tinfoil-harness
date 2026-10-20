@@ -101,8 +101,8 @@ func TestModelRefusalsReachTheRunWithTheirMeaning(t *testing.T) {
 			}
 			if tc.status == 200 {
 				row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
-				if reply := obj(arr(row.Data["messages"])[1]); reply["content"] != "partial" || reply["isError"] != true {
-					t.Fatalf("the streamed answer was lost: %v", reply)
+				if reply := readThreadRow(row).Messages[1]; reply.Content != "partial" || !valueOr(reply.IsError, false) {
+					t.Fatalf("the streamed answer was lost: %+v", reply)
 				}
 			}
 		})
@@ -117,7 +117,7 @@ func TestServiceRefusalsKeepTheirRetryDelay(t *testing.T) {
 		io.WriteString(w, `{"error":{"message":"The model 'voxtral-small-24b' is temporarily unavailable. Please try again later.","type":"service_unavailable_error","code":"model_unavailable"}}`)
 	}))
 	defer router.Close()
-	h.services["router"] = &downstreamService{Role: "router", URL: router.URL, Client: router.Client()}
+	h.services["router"] = &downstreamService{URL: router.URL, Client: router.Client()}
 	response := uploadRoute(h, "/v1/transcriptions", "memo.mp3", []byte("ID3 audio"), nil, "")
 	var body struct {
 		Error apiError `json:"error"`

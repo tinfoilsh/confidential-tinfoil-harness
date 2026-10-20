@@ -2,14 +2,21 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestSpeechStreamsTheRoutersAudio(t *testing.T) {
@@ -25,17 +32,17 @@ func TestSpeechStreamsTheRoutersAudio(t *testing.T) {
 		w.Write(pcm[2:])
 	})
 	for _, tc := range []struct {
-		user, auth, voice string
-		in                object
+		user, auth string
+		in         object
 	}{
-		{"", "Bearer free_anonymous-key", speechVoice, object{"text": "  Hello there.  "}},
-		{"alice", "Bearer inference-alice", "serena", object{"text": "Hello there.", "voice": "serena"}},
+		{"", "Bearer free_anonymous-key", object{"text": "  Hello there.  "}},
+		{"alice", "Bearer inference-alice", object{"text": "Hello there."}},
 	} {
 		response := postRoute(h, "/v1/speech", tc.in, tc.user)
 		if response.Code != 200 || response.Header().Get("Content-Type") != "audio/pcm" || response.Header().Get("Cache-Control") != "no-store" || !bytes.Equal(response.Body.Bytes(), pcm) {
 			t.Fatalf("HTTP %d %q: %x", response.Code, response.Header().Get("Content-Type"), response.Body.Bytes())
 		}
-		want := object{"path": "/v1/audio/speech", "auth": tc.auth, "body": map[string]any{"model": "qwen3-tts", "voice": tc.voice, "instructions": speechInstructions, "input": "Hello there.", "response_format": "pcm", "stream_format": "audio"}}
+		want := object{"path": "/v1/audio/speech", "auth": tc.auth, "body": map[string]any{"model": "qwen3-tts", "voice": speechVoice, "instructions": speechInstructions, "input": "Hello there.", "response_format": "pcm", "stream_format": "audio"}}
 		if !reflect.DeepEqual(got.Load(), want) {
 			t.Fatalf("router got %v, want %v", got.Load(), want)
 		}
@@ -60,13 +67,15 @@ func TestSpeechRefusesWhatTheClientWouldNotSend(t *testing.T) {
 		in   object
 		want int
 	}{
-		{object{"text": strings.Repeat("é", maxSpeechCharacters)}, 200},
-		{object{"text": strings.Repeat("é", maxSpeechCharacters+1)}, 400},
+		{object{"text": strings.Repeat("a", maxSpeechText+1)}, 413},
 		{object{"text": " \n "}, 400},
 		{object{}, 400},
 		{object{"text": 42}, 400},
-		{object{"text": "Hello", "voice": strings.Repeat("v", 65)}, 400},
-		{object{"text": "Hello", "instructions": strings.Repeat("i", 1001)}, 400},
+		{object{"messageId": "m1"}, 400},
+		{object{"threadId": "chat-1", "messageId": "m1", "key": randomKey().base64()}, 401},
+		{object{"threadId": "chat-1", "messageId": "m1", "local": true}, 400},
+		{object{"threadId": "chat-1", "messageId": "m9", "local": true, "thread": priorThread()}, 404},
+		{object{"threadId": "chat-1", "messageId": "m2", "local": true, "thread": object{"messages": []any{object{"id": "m2", "role": "assistant", "content": "```\ncode\n```"}}}}, 400},
 	} {
 		if response := postRoute(h, "/v1/speech", tc.in, ""); response.Code != tc.want {
 			t.Errorf("%v: HTTP %d, want %d", tc.in, response.Code, tc.want)
@@ -75,7 +84,7 @@ func TestSpeechRefusesWhatTheClientWouldNotSend(t *testing.T) {
 	r := httptest.NewRequest("POST", "/v1/speech", bytes.NewReader(raw(object{"text": "Hello"})))
 	w := httptest.NewRecorder()
 	h.routes().ServeHTTP(w, r)
-	if w.Code != 401 || calls.Load() != 1 {
+	if w.Code != 401 || calls.Load() != 0 {
 		t.Fatalf("speech without a credential: HTTP %d, router calls %d", w.Code, calls.Load())
 	}
 }
@@ -109,4 +118,124 @@ func TestSpeechPassesOnRefusalsWithTheirDelay(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A message is read aloud from its markdown as it is spoken: its pieces are
+// synthesized two at a time and stream back in order as one response, and
+// its code never reaches the speech model.
+func TestAMessageIsReadAloudInOrderWithoutItsCode(t *testing.T) {
+	var mu sync.Mutex
+	var asked []string
+	second := make(chan struct{})
+	another := sync.OnceFunc(func() { close(second) })
+	var overlapped atomic.Bool
+	h := routerHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Input string `json:"input"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		asked = append(asked, body.Input)
+		mu.Unlock()
+		if strings.HasPrefix(body.Input, "Sentence 1 ") {
+			// The first piece answers only once another is asked for.
+			select {
+			case <-second:
+				overlapped.Store(true)
+			case <-time.After(5 * time.Second):
+			}
+		} else if strings.HasPrefix(body.Input, "Sentence ") {
+			another()
+		}
+		w.Header().Set("Content-Type", "audio/pcm")
+		io.WriteString(w, "<"+body.Input+">")
+	})
+	rows := h.storeRows.(*memoryRows)
+	key := rows.key
+	reply := "# Trip plan\n\nPack light, see [the guide](https://guide.test) and [1](https://cite.test). More at https://bare.test.\n\n" +
+		"```python\nprint(\"never read\")\n```\n\n![a map](https://img.test/map.png)\n\nUse `rsync` and compute $x^2$ steps.[^1]\n\n[^1]: A footnote nobody hears.\n"
+	var long strings.Builder
+	for i := 1; i <= 12; i++ {
+		fmt.Fprintf(&long, "Sentence %d walks through the plan in enough detail to fill a piece. ", i)
+	}
+	thread := object{"title": "Trip", "messages": []any{object{"id": "q", "role": "user", "content": "Plan it"}, object{"id": "short", "role": "assistant", "content": reply}, object{"id": "long", "role": "assistant", "content": long.String()}}}
+	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: raw(thread)}
+	read := func(in object, user string) (string, []string) {
+		t.Helper()
+		mu.Lock()
+		asked = nil
+		mu.Unlock()
+		w := postRoute(h, "/v1/speech", in, user)
+		if w.Code != 200 || w.Header().Get("Content-Type") != "audio/pcm" {
+			t.Fatalf("HTTP %d %s", w.Code, w.Body.String())
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		return w.Body.String(), asked
+	}
+	// Text a client selected reads by the same rules, without an account.
+	for _, tc := range []struct {
+		in   object
+		user string
+	}{{object{"key": key.base64(), "threadId": "chat-1", "messageId": "short"}, "alice"}, {object{"text": reply}, ""}} {
+		audio, pieces := read(tc.in, tc.user)
+		if want := "Trip plan\nPack light, see the guide and . More at . Use rsync and compute x^2 steps."; len(pieces) != 1 || pieces[0] != want || audio != "<"+want+">" {
+			t.Fatalf("%v was read as %q", tc.in, pieces)
+		}
+	}
+	for _, in := range []object{{"key": key.base64(), "threadId": "chat-1", "messageId": "long"}, {"text": long.String()}} {
+		audio, pieces := read(in, "alice")
+		slices.SortFunc(pieces, func(a, b string) int { return cmp.Compare(leadingNumber(a), leadingNumber(b)) })
+		inOrder := ""
+		for _, piece := range pieces {
+			inOrder += "<" + piece + ">"
+		}
+		if len(pieces) < 2 || strings.Join(pieces, " ") != strings.TrimSpace(long.String()) || audio != inOrder || !overlapped.Load() {
+			t.Fatalf("%v was asked as %q (overlapping %v) and streamed as %q", in["messageId"], pieces, overlapped.Load(), audio)
+		}
+	}
+	// A device chat's message reads the same, without an account.
+	if device, _ := read(object{"local": true, "threadId": "chat-1", "thread": thread, "messageId": "short"}, ""); !strings.HasPrefix(device, "<Trip plan\n") {
+		t.Fatalf("the device chat's reply was read as %q", device)
+	}
+}
+
+// A piece that fails once audio has streamed cuts the response short, so
+// its client does not take the audio for the whole message.
+func TestSpeechThatFailsPartwayEndsIncomplete(t *testing.T) {
+	h := routerHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Input string `json:"input"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		if !strings.HasPrefix(body.Input, "Sentence 1 ") {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "audio/pcm")
+		io.WriteString(w, "<first>")
+	})
+	server := httptest.NewServer(h.routes())
+	t.Cleanup(server.Close)
+	var long strings.Builder
+	for i := 1; i <= 12; i++ {
+		fmt.Fprintf(&long, "Sentence %d walks through the plan in enough detail to fill a piece. ", i)
+	}
+	req, _ := http.NewRequest("POST", server.URL+"/v1/speech", bytes.NewReader(raw(object{"text": long.String()})))
+	req.Header.Set("Authorization", "Bearer clerk-alice")
+	resp, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	audio, err := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 || string(audio) != "<first>" || !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("HTTP %d streamed %q and ended with %v", resp.StatusCode, audio, err)
+	}
+}
+
+// leadingNumber is the number a test sentence starts with.
+func leadingNumber(piece string) int {
+	n, _ := strconv.Atoi(strings.Fields(piece)[1])
+	return n
 }

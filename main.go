@@ -1,5 +1,5 @@
-// Command confidential-tinfoil-harness serves an AG-UI endpoint whose model
-// turns and tool calls all go to enclaves it attests against a pinned repo.
+// Command confidential-tinfoil-harness runs Tinfoil Chat conversations whose
+// model turns and tool calls all go to enclaves it attests against a pinned repo.
 package main
 
 import (
@@ -7,7 +7,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -25,11 +24,10 @@ import (
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
-// repo is the trust anchor; the gateway's catalog supplies the rest.
+// The pinned repo is the trust anchor; the gateway's catalog supplies the rest.
 type model struct {
 	endpoint string
 	name     string
-	repo     string
 	vision   bool
 	context  int // usable prompt budget, in tokens
 
@@ -48,86 +46,70 @@ var pinned = []struct{ name, repo string }{
 }
 
 type harness struct {
-	gateway       string
-	offer         offerCache
-	modelClient   *http.Client
-	verified      func() []tinfoil.GatewayVerification
-	controlplane  string
-	cpClient      *http.Client
-	storeRows     rowStore
-	syncAPI       *syncClient
-	auth          *authenticator
-	catalog       catalogCache
-	autoModel     *model
-	services      map[string]*downstreamService
-	safeguards    *submitter // nil unless SAFEGUARDS_URL names the sidecar
-	memoryEnabled bool
-	chatMu        sync.Mutex
-	closing       bool
-	threads       map[string]*threadSession
-	requests      map[string]*chatRun
-	starting      map[string]chan struct{}
-	attachments   map[string]*pendingAttachment
-
-	mu   sync.Mutex
-	runs map[string]*run
+	gateway      string
+	offer        offerCache
+	modelClient  *http.Client
+	controlplane string
+	cpClient     *http.Client
+	storeRows    rowStore
+	syncAPI      *syncClient
+	auth         *authenticator
+	catalog      catalogCache
+	autoModel    *model
+	services     map[string]*downstreamService
+	safeguards   *submitter // nil unless SAFEGUARDS_URL names the sidecar
+	live         liveRuns
 }
 
-func main() {
-	addr := flag.String("addr", ":8081", "listen address")
-	gateway := flag.String("gateway", env("TINFOIL_GATEWAY_URL", "https://inference-gateway.tinfoil.sh"), "tinfoil-gateway base URL")
-	controlplane := flag.String("controlplane", env("TINFOIL_CONTROLPLANE_URL", "https://api.tinfoil.sh"), "base URL of the store a detached run spills its sealed log to")
-	flag.Parse()
+// listenAddr is the shim's upstream port in tinfoil-config.yml, which also
+// sets every host this harness reaches.
+const listenAddr = ":8081"
 
+func main() {
 	usageSecret := os.Getenv("USAGE_CONTEXT_SECRET")
 	if usageSecret == "" {
 		slog.Error("USAGE_CONTEXT_SECRET is required: without it every turn of a run bills as its own request")
 		os.Exit(1)
 	}
+	gw, controlplane := strings.TrimRight(os.Getenv("TINFOIL_GATEWAY_URL"), "/"), strings.TrimRight(os.Getenv("TINFOIL_CONTROLPLANE_URL"), "/")
+	if gw == "" || controlplane == "" {
+		slog.Error("TINFOIL_GATEWAY_URL and TINFOIL_CONTROLPLANE_URL are required")
+		os.Exit(1)
+	}
 
 	ctx, shutdown := context.WithCancel(context.Background())
 	defer shutdown()
-	gw := strings.TrimRight(*gateway, "/")
-	attestFamilies(ctx, usageSecret)
+	attestWebSearch(ctx, usageSecret)
 	h := &harness{gateway: gw,
-		controlplane: strings.TrimRight(*controlplane, "/"),
+		controlplane: controlplane,
 		cpClient:     &http.Client{Transport: &callerAuth{inner: http.DefaultTransport}},
-		safeguards:   newSubmitter(os.Getenv("SAFEGUARDS_URL")),
-		runs:         map[string]*run{}}
+		safeguards:   newSubmitter(os.Getenv("SAFEGUARDS_URL"))}
 
 	if err := h.bootChat(ctx, usageSecret); err != nil {
 		slog.Error("initialize chat service", "error", err)
 		os.Exit(1)
 	}
 
-	srv := &http.Server{Addr: *addr, Handler: h.routes(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: time.Minute}
+	srv := &http.Server{Addr: listenAddr, Handler: h.routes(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: time.Minute}
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	stopped := make(chan struct{})
 	go func() {
 		<-stop
 		defer close(stopped)
-		active := h.stopRuns()
+		h.stopRuns()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		srv.Shutdown(ctx)
-		waitRuns(ctx, active)
-		h.safeguards.close()
+		h.waitRuns(ctx)
 	}()
 
-	slog.Info("listening", "addr", *addr, "gateway", gw, "models", served(h.offer.get()), "safeguards", h.safeguards != nil)
+	slog.Info("listening", "addr", listenAddr, "gateway", gw, "models", served(h.offer.get()), "safeguards", h.safeguards != nil)
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		slog.Error("serve", "error", err)
 		os.Exit(1)
 	}
 	<-stopped
-}
-
-func env(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }
 
 // Requests without a caller's own cache secret fall back to this one, so the
@@ -157,19 +139,21 @@ func newGateway(gateway string, catalog func() tinfoil.Catalog) (*tinfoil.Gatewa
 	return tinfoil.NewGateway(gateway+"/v1/", catalog, tinfoil.GatewayOptions{ClientOptions: []tinfoil.ClientOption{cacheFallback}, ModelPins: pins, PinnedModelsOnly: true})
 }
 
-// A family is opt-in per run, so one that does not verify is skipped, not fatal.
-func attestFamilies(ctx context.Context, usageSecret string) {
-	for _, f := range families {
-		f.enclave = env(f.env, f.enclave)
-		client, err := attest(ctx, f.enclave, f.repo, usageSecret)
-		if err != nil {
-			slog.Warn("tool enclave did not verify", "family", f.name, "enclave", f.enclave, "error", err)
-			continue
-		}
-		f.client = client
-		f.verifiedAt = timestamp()
-		slog.Info("tool enclave verified", "family", f.name, "enclave", f.enclave)
+// Web search is opt-in per run, so an enclave that is not configured or does
+// not verify is skipped, not fatal.
+func attestWebSearch(ctx context.Context, usageSecret string) {
+	webSearch.enclave = os.Getenv("TINFOIL_TOOLS_ENCLAVE")
+	if webSearch.enclave == "" {
+		slog.Warn("no web search enclave is configured")
+		return
 	}
+	client, err := attest(ctx, webSearch.enclave, webSearch.repo, usageSecret)
+	if err != nil {
+		slog.Warn("tool enclave did not verify", "enclave", webSearch.enclave, "error", err)
+		return
+	}
+	webSearch.client = client
+	slog.Info("tool enclave verified", "enclave", webSearch.enclave)
 }
 
 // offerCache holds the pinned models the gateway last offered. The SDK reads
@@ -222,7 +206,7 @@ func offerModels(offered map[string]catalogEntry, client *http.Client) ([]*model
 			slog.Warn("gateway offers a pinned model from another repository", "model", p.name, "repo", entry.Repo)
 			continue
 		}
-		models = append(models, &model{name: p.name, repo: p.repo, vision: entry.Vision, context: entry.Context, client: client})
+		models = append(models, &model{name: p.name, vision: entry.Vision, context: entry.Context, client: client})
 		catalog[p.name] = tinfoil.CatalogEntry{Repo: entry.Repo, Hosts: slices.Clone(entry.Hosts)}
 	}
 	return models, catalog
@@ -264,30 +248,6 @@ func served(models []*model) string {
 		names[i] = m.name
 	}
 	return strings.Join(names, ", ")
-}
-
-func (h *harness) pick(req *request) *model {
-	named := req.model != "" && req.model != "auto"
-	for _, m := range h.offer.get() {
-		if named {
-			if m.name == req.model {
-				return m
-			}
-			continue
-		}
-		if (req.images && !m.vision) || req.tokens > m.context {
-			continue
-		}
-		return m
-	}
-	return nil
-}
-
-func (h *harness) unserved(req *request) string {
-	if req.model != "" && req.model != "auto" {
-		return fmt.Sprintf("unknown model %q: this agent serves %s and \"auto\"", req.model, served(h.offer.get()))
-	}
-	return fmt.Sprintf("no pinned model fits this run (about %d tokens, images: %t)", req.tokens, req.images)
 }
 
 type apiKeyKey struct{}

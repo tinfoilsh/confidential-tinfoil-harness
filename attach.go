@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -30,49 +31,110 @@ import (
 	_ "golang.org/x/image/webp"
 )
 
+// Text is read whole into a chat, so a text file may be larger than the
+// files the harness converts. No upload is read past maxTextBytes.
 const maxUploadBytes = 33 << 20
 const maxTextBytes = 50 << 20
 const maxImagePixels = 40_000_000
-const maxUploadCache = 256 << 20
 
-var imageExtensions = strings.Fields(".jpg .jpeg .png .gif .webp .bmp .tiff .tif")
-var documentExtensions = strings.Fields(".pdf .docx .pptx .xlsx")
-var audioExtensions = strings.Fields(".mp3 .wav .ogg .m4a .aac .flac .webm .wma")
-var textExtensions = strings.Fields(".txt .md .py .js .jsx .ts .tsx .css .json .xml .yaml .yml .toml .sh .bash .rb .java .cpp .c .h .hpp .go .rs .swift .kt .kts .r .sql .lua .pl .php .cs .csx .vb .fs .fsx .scala .dart .ex .exs .erl .hs .ml .mli .clj .cljs .groovy .gradle .m .mm .zig .nim .jl .ps1 .psm1 .bat .cmd .asm .s .proto .graphql .gql .tf .tfvars .dockerfile .makefile .cmake .tex .bib .svg .properties .lock .diff .patch .env .ini .cfg .conf .log .rtf .html .htm .xhtml .csv .tsv .qfx .qif .ofx .ifs .qbo .qbx .bai .bai2 .mt940 .sta .ics .vcf")
+// An image is kept as the copy models read, no longer on either side than
+// modelImageSide, with a thumbnail no longer than thumbnailSide.
+const (
+	modelImageSide = 1536
+	thumbnailSide  = 256
+)
 
-func uploadAccept() []string {
-	result := []string{}
-	result = append(result, documentExtensions...)
-	result = append(result, imageExtensions...)
-	result = append(result, audioExtensions...)
-	return append(result, textExtensions...)
+// Resizing decodes an image whole, so the images a turn sends larger than
+// the copy models read hold together no more pixels than one image may.
+const maxTurnResizePixels = maxImagePixels
+
+// An upload's form holds its file and a few short fields.
+const (
+	maxFormParts = 12
+	maxFormField = 8 << 10
+)
+
+// uploadGroup is a kind of file uploads accept, named by extension, and the
+// largest file of that kind. Clients pick a file's group by its extension.
+type uploadGroup struct {
+	Accept   []string `json:"accept"`
+	MaxBytes int      `json:"maxBytes"`
+	kind     string   // the kind of attachment an upload of the group makes
 }
+
+var (
+	textUploads     = uploadGroup{Accept: strings.Fields(".txt .md .py .js .jsx .ts .tsx .css .json .xml .yaml .yml .toml .sh .bash .rb .java .cpp .c .h .hpp .go .rs .swift .kt .kts .r .sql .lua .pl .php .cs .csx .vb .fs .fsx .scala .dart .ex .exs .erl .hs .ml .mli .clj .cljs .groovy .gradle .m .mm .zig .nim .jl .ps1 .psm1 .bat .cmd .asm .s .proto .graphql .gql .tf .tfvars .dockerfile .makefile .cmake .tex .bib .svg .properties .lock .diff .patch .env .ini .cfg .conf .log .rtf .html .htm .xhtml .csv .tsv .qfx .qif .ofx .ifs .qbo .qbx .bai .bai2 .mt940 .sta .ics .vcf"), MaxBytes: maxTextBytes, kind: "document"}
+	imageUploads    = uploadGroup{Accept: strings.Fields(".jpg .jpeg .png .gif .webp .bmp .tiff .tif"), MaxBytes: maxUploadBytes, kind: "image"}
+	documentUploads = uploadGroup{Accept: strings.Fields(".pdf .docx .pptx .xlsx"), MaxBytes: maxUploadBytes, kind: "document"}
+	audioUploads    = uploadGroup{Accept: strings.Fields(".mp3 .wav .ogg .m4a .aac .flac .webm .wma"), MaxBytes: maxUploadBytes, kind: "audio"}
+)
+
+// A message attaches files of any group; a project keeps the text of its
+// documents, which images do not have.
+var (
+	attachmentGroups      = []*uploadGroup{&textUploads, &imageUploads, &documentUploads, &audioUploads}
+	projectDocumentGroups = []*uploadGroup{&textUploads, &documentUploads}
+)
+
+func (g *uploadGroup) accepts(filename string) bool {
+	return slices.Contains(g.Accept, strings.ToLower(filepath.Ext(filename)))
+}
+
+// attachmentGroup is the group a message's file belongs to, if any.
+func attachmentGroup(filename string) *uploadGroup {
+	for _, g := range attachmentGroups {
+		if g.accepts(filename) {
+			return g
+		}
+	}
+	return nil
+}
+
+// maxContent is the most an upload of the group holds: a text file's text
+// and an image's bytes are the file, and a converted file's content is what
+// the converter answers with.
+func (g *uploadGroup) maxContent() int {
+	if g == &textUploads || g == &imageUploads {
+		return g.MaxBytes
+	}
+	return maxTextBytes
+}
+
+// What a client's composer does before anything reaches the harness: a
+// paste longer than pasteAsFileChars becomes a text file, and dictation
+// stops after dictationMaxSeconds.
+const (
+	pasteAsFileChars    = 3000
+	dictationMaxSeconds = 10 * 60
+)
+
+// composerView is what a client's composer accepts: the groups of files
+// uploads take, for a message and for a project.
+type composerView struct {
+	Attachments         []uploadGroup `json:"attachments"`
+	ProjectDocuments    []uploadGroup `json:"projectDocuments"`
+	PasteAsFileChars    int           `json:"pasteAsFileChars"`
+	DictationMaxSeconds int           `json:"dictationMaxSeconds"`
+}
+
+func composer() composerView {
+	shown := func(groups []*uploadGroup) []uploadGroup {
+		out := []uploadGroup{}
+		for _, g := range groups {
+			out = append(out, *g)
+		}
+		return out
+	}
+	return composerView{
+		Attachments:         shown(attachmentGroups),
+		ProjectDocuments:    shown(projectDocumentGroups),
+		PasteAsFileChars:    pasteAsFileChars,
+		DictationMaxSeconds: dictationMaxSeconds,
+	}
+}
+
 func randomBytes(n int) []byte { b := make([]byte, n); rand.Read(b); return b }
 
-type pendingAttachment struct {
-	owner, keyHash string
-	descriptor     object
-	bytes          []byte
-	expires        time.Time
-}
-
-func publicAttachment(a object) object {
-	out := object{"id": a["id"], "kind": firstString(a["kind"], a["type"]), "fileName": a["fileName"], "mimeType": a["mimeType"], "size": a["fileSize"], "thumbnail": a["thumbnailBase64"], "pages": nil, "status": "ready"}
-	if text := str(a["textContent"]); text != "" {
-		out["textContent"] = text
-	}
-	// A text-only model reads an image through this. Local clients keep it,
-	// so later turns do not ask a vision model to describe the image again.
-	if text := str(a["description"]); text != "" {
-		out["description"] = text
-	}
-	if pages := arr(a["pages"]); len(pages) > 0 {
-		out["pages"] = len(pages)
-	} else if count := integer(a["pageCount"]); count > 0 {
-		out["pages"] = count
-	}
-	return out
-}
 func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 	p, err := h.auth.authenticate(r, r.URL.Path == "/v1/transcriptions" || r.URL.Path == "/v1/attachments/upload")
 	if err != nil {
@@ -89,7 +151,7 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, apiErr(400, "BAD_REQUEST", "Expected multipart form data"))
 		return
 	}
-	fields := object{}
+	fields := map[string]string{}
 	var file []byte
 	filename := ""
 	for count := 0; ; count++ {
@@ -97,7 +159,7 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 		if err == io.EOF {
 			break
 		}
-		if err != nil || count >= 12 {
+		if err != nil || count >= maxFormParts {
 			respond(w, nil, apiErr(400, "BAD_REQUEST", "Invalid multipart upload"))
 			return
 		}
@@ -113,8 +175,8 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		} else {
-			value, err := io.ReadAll(io.LimitReader(part, 8193))
-			if err != nil || len(value) > 8192 {
+			value, err := io.ReadAll(io.LimitReader(part, maxFormField+1))
+			if err != nil || len(value) > maxFormField {
 				respond(w, nil, apiErr(400, "BAD_REQUEST", "Multipart field is too large"))
 				return
 			}
@@ -133,148 +195,180 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	cred, err := h.auth.inference(r.Context(), p)
 	if err != nil {
-		respond(w, nil, err)
+		respond(w, nil, h.withQuota(p, cred.Limit, err))
 		return
 	}
 	ctx := context.WithValue(r.Context(), apiKeyKey{}, string(cred.Key))
 	if r.URL.Path == "/v1/transcriptions" {
 		text, err := h.transcribe(ctx, filename, file)
-		respond(w, object{"text": text}, err)
+		respond(w, object{"text": text}, h.withQuota(p, cred.Limit, err))
 		return
 	}
-	// A local upload returns the whole descriptor, since its client stores it
-	// and sends it back with the transcript of later turns.
-	local := str(fields["local"]) == "true" && r.URL.Path == "/v1/attachments/upload"
-	var key contentKey
-	if !p.Anonymous && !local {
-		key, err = decodeContentKey(str(fields["key"]))
-		if err != nil {
-			respond(w, nil, err)
-			return
-		}
-	}
-	defer clear(key[:])
 	descriptor, err := h.preprocess(ctx, filename, file)
+	if err != nil {
+		respond(w, nil, h.withQuota(p, cred.Limit, err))
+		return
+	}
+	// An upload is only converted. Its client sends the descriptor back with
+	// the turn that attaches it, and that turn stores it with the chat.
+	if r.URL.Path == "/v1/attachments/upload" {
+		descriptor.ID = "att_" + token()
+		respond(w, struct {
+			Attachment Attachment `json:"attachment"`
+		}{descriptor}, nil)
+		return
+	}
+	key, err := decodeContentKey(fields["key"])
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
+	defer clear(key[:])
 	if r.URL.Path == "/v1/projects/documents/upload" {
-		projectID, err := requiredID(fields, "projectId")
-		if err != nil {
+		projectID := fields["projectId"]
+		if err := requireID("projectId", projectID); err != nil {
 			respond(w, nil, err)
 			return
 		}
-		if _, err := h.storeRows.load(ctx, p, key, "project", projectID); err != nil {
+		if _, err := h.loadProject(ctx, p, key, projectID); err != nil {
 			respond(w, nil, err)
 			return
 		}
-		if str(descriptor["textContent"]) == "" {
+		if descriptor.TextContent == "" {
 			respond(w, nil, apiErr(415, "ATTACHMENT_UNSUPPORTED", "Project documents require extracted text"))
 			return
 		}
-		id := rowID()
-		row, err := h.mutate(ctx, p, key, "project_document", projectID+"/"+id, true, nil, func(data object) error {
-			data["projectId"], data["filename"], data["contentType"], data["sizeBytes"], data["content"] = projectID, filename, descriptor["mimeType"], len(file), descriptor["textContent"]
-			return nil
-		})
-		if err != nil {
-			respond(w, nil, err)
-			return
-		}
-		view := projectView(row)
-		view["id"] = id
-		respond(w, view, nil)
+		doc, err := h.createProjectDocument(ctx, p, key, ProjectDocument{ID: rowID(), ProjectID: projectID, Filename: filename, ContentType: descriptor.MimeType, SizeBytes: len(file), Content: descriptor.TextContent})
+		respond(w, doc, err)
 		return
 	}
-	id := "att_" + token()
-	descriptor["id"] = id
-	// Sync deletes blobs filed under a chat that does not exist yet, so a
-	// stored chat's upload waits here until its turn stores it under the chat.
-	// A document's content is in its descriptor; only an image keeps bytes.
-	var kept []byte
-	if isImage(descriptor) {
-		kept = file
-	}
-	h.chatMu.Lock()
-	if h.attachments == nil {
-		h.attachments = map[string]*pendingAttachment{}
-	}
-	cacheBytes := len(kept) + len(raw(descriptor))
-	for _, cached := range h.attachments {
-		cacheBytes += len(cached.bytes) + len(raw(cached.descriptor))
-	}
-	if len(h.attachments) >= 256 || cacheBytes > maxUploadCache {
-		h.chatMu.Unlock()
-		respond(w, nil, apiErr(503, "UPSTREAM_REFUSED", "The upload cache is at capacity"))
-		return
-	}
-	h.attachments[p.scope()+"/"+id] = &pendingAttachment{owner: p.scope(), keyHash: key.fingerprint(), descriptor: clone(descriptor), bytes: bytes.Clone(kept), expires: nowUTC().Add(runTimeout)}
-	h.chatMu.Unlock()
-	view := publicAttachment(descriptor)
-	if local {
-		view["descriptor"] = descriptor
-	}
-	respond(w, view, nil)
 }
 
-func (h *harness) preprocess(ctx context.Context, filename string, data []byte) (object, error) {
+var errUnsupportedType = apiErr(415, "ATTACHMENT_UNSUPPORTED", "Unsupported file type")
+
+// fitsUpload refuses a descriptor no upload makes: one of a file uploads do
+// not take, an image without its bytes, or holding more than an upload of
+// its file's group. A turn names an image its chat holds by id alone.
+func (d *sentAttachment) fitsUpload() error {
+	group := attachmentGroup(d.FileName)
+	if group == nil || group.kind != d.Kind {
+		return errUnsupportedType
+	}
+	if group == &imageUploads && d.Base64 == "" {
+		return apiErr(400, "BAD_REQUEST", "An image attachment requires its bytes")
+	}
+	content := len(d.TextContent) + base64.StdEncoding.DecodedLen(len(d.Base64))
+	for _, page := range d.Pages {
+		content += len(page.Text) + len(page.Image)
+	}
+	if content > group.maxContent() {
+		return apiErr(413, "ATTACHMENT_TOO_LARGE", "The attachment exceeds the size limit for its type")
+	}
+	return nil
+}
+
+// stored is the form of an attachment a turn sends whole that its chat
+// stores: an upload's descriptor, and an image's bytes no larger than the
+// copy an upload makes for models.
+func (d *sentAttachment) stored() (Attachment, error) {
+	a := Attachment{ID: d.ID, Kind: d.Kind, FileName: d.FileName, MimeType: d.MimeType, Size: d.Size, Thumbnail: valueOr(d.Thumbnail, ""), TextContent: d.TextContent, Description: d.Description, Pages: d.Pages, Base64: d.Base64}
+	if !a.isImage() {
+		return a, nil
+	}
+	data, err := base64.StdEncoding.DecodeString(a.Base64)
+	if err != nil {
+		return Attachment{}, apiErr(415, "ATTACHMENT_UNSUPPORTED", "The image could not be decoded")
+	}
+	defer clear(data)
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return Attachment{}, apiErr(415, "ATTACHMENT_UNSUPPORTED", "The image could not be decoded")
+	}
+	// An image within the bounds, as the copy an upload makes is, is kept.
+	if max(cfg.Width, cfg.Height) <= modelImageSide {
+		return a, nil
+	}
+	resized, thumb, err := resizeImage(data)
+	if err != nil {
+		return Attachment{}, err
+	}
+	a.Base64, a.Thumbnail = base64.StdEncoding.EncodeToString(resized), base64.StdEncoding.EncodeToString(thumb)
+	return a, nil
+}
+
+// resizePixels is how many pixels storing the attachment decodes to resize
+// it: an image's, when it is larger than the copy models read.
+func (d *sentAttachment) resizePixels() int64 {
+	if d.Kind != "image" || d.Base64 == "" {
+		return 0
+	}
+	cfg, _, err := image.DecodeConfig(base64.NewDecoder(base64.StdEncoding, strings.NewReader(d.Base64)))
+	if err != nil || max(cfg.Width, cfg.Height) <= modelImageSide {
+		return 0
+	}
+	return int64(cfg.Width) * int64(cfg.Height)
+}
+
+func (h *harness) preprocess(ctx context.Context, filename string, data []byte) (Attachment, error) {
 	ext := strings.ToLower(filepath.Ext(filename))
-	detected := http.DetectContentType(data)
-	descriptor := object{"type": "document", "fileName": filename, "mimeType": detected, "fileSize": len(data)}
-	switch {
-	case slices.Contains(textExtensions, ext) || strings.EqualFold(filename, "Dockerfile") || strings.EqualFold(filename, "Makefile"):
+	group := attachmentGroup(filename)
+	if group == nil {
+		return Attachment{}, errUnsupportedType
+	}
+	descriptor := Attachment{Kind: group.kind, FileName: filename, MimeType: http.DetectContentType(data), Size: new(int64(len(data)))}
+	if len(data) > group.MaxBytes {
+		return Attachment{}, apiErr(413, "ATTACHMENT_TOO_LARGE", "The file exceeds the size limit for its type")
+	}
+	switch group {
+	case &textUploads:
 		if !utf8.Valid(data) || bytes.ContainsRune(data, 0) {
-			return nil, apiErr(415, "ATTACHMENT_UNSUPPORTED", "Text uploads must contain UTF-8 text")
+			return Attachment{}, apiErr(415, "ATTACHMENT_UNSUPPORTED", "Text uploads must contain UTF-8 text")
 		}
-		descriptor["textContent"] = string(data)
+		descriptor.TextContent = string(data)
 		if m := mime.TypeByExtension(ext); m != "" {
-			descriptor["mimeType"] = m
+			descriptor.MimeType = m
 		}
-	case slices.Contains(imageExtensions, ext):
-		if len(data) > maxUploadBytes {
-			return nil, apiErr(413, "ATTACHMENT_TOO_LARGE", "The image exceeds the size limit")
-		}
-		_, thumb, err := resizeImage(data)
+	case &imageUploads:
+		resized, thumb, err := resizeImage(data)
 		if err != nil {
-			return nil, err
+			return Attachment{}, err
 		}
-		descriptor["type"], descriptor["thumbnailBase64"] = "image", base64.StdEncoding.EncodeToString(thumb)
-	case slices.Contains(documentExtensions, ext):
-		if len(data) > maxUploadBytes {
-			return nil, apiErr(413, "ATTACHMENT_TOO_LARGE", "The document exceeds the size limit")
-		}
+		descriptor.Base64, descriptor.Thumbnail = base64.StdEncoding.EncodeToString(resized), base64.StdEncoding.EncodeToString(thumb)
+	case &documentUploads:
 		if ext == ".pdf" && !bytes.HasPrefix(data, []byte("%PDF-")) || ext != ".pdf" && !bytes.HasPrefix(data, []byte("PK\x03\x04")) {
-			return nil, apiErr(415, "ATTACHMENT_UNSUPPORTED", "The file contents do not match the document type")
+			return Attachment{}, apiErr(415, "ATTACHMENT_UNSUPPORTED", "The file contents do not match the document type")
 		}
 		result, err := h.convert(ctx, filename, data)
 		if err != nil {
-			return nil, err
+			return Attachment{}, err
 		}
-		var converted object
-		if json.Unmarshal(result, &converted) != nil {
-			return nil, apiErr(502, "UPSTREAM_REFUSED", "Invalid document response")
+		// The converter answers with the document, or with it nested.
+		type conversion struct {
+			Markdown string         `json:"md_content"`
+			Pages    []DocumentPage `json:"pages"`
 		}
-		if results := arr(converted["results"]); len(results) > 0 {
-			converted = obj(results[0])
+		var converted struct {
+			conversion
+			Document *conversion `json:"document"`
 		}
-		if document := obj(converted["document"]); len(document) > 0 {
-			converted = document
+		var mistyped *json.UnmarshalTypeError
+		if err := json.Unmarshal(result, &converted); err != nil && !errors.As(err, &mistyped) {
+			return Attachment{}, apiErr(502, "UPSTREAM_REFUSED", "Invalid document response")
 		}
-		if text := str(converted["md_content"]); text != "" {
-			descriptor["textContent"] = text
+		document := converted.conversion
+		if converted.Document != nil {
+			document = *converted.Document
 		}
-		if pages := arr(converted["pages"]); len(pages) > 0 {
-			descriptor["pages"] = pages
+		descriptor.TextContent = document.Markdown
+		if len(document.Pages) > 0 {
+			descriptor.Pages = document.Pages
 		}
-	case slices.Contains(audioExtensions, ext):
+	case &audioUploads:
 		text, err := h.transcribe(ctx, filename, data)
 		if err != nil {
-			return nil, err
+			return Attachment{}, err
 		}
-		descriptor["type"], descriptor["kind"], descriptor["textContent"] = "document", "audio", text
-	default:
-		return nil, apiErr(415, "ATTACHMENT_UNSUPPORTED", "Unsupported file type")
+		descriptor.TextContent = text
 	}
 	return descriptor, nil
 }
@@ -305,30 +399,22 @@ func resizeImage(data []byte) ([]byte, []byte, error) {
 		err := jpeg.Encode(&b, dst, &jpeg.Options{Quality: 85})
 		return b.Bytes(), err
 	}
-	resized, err := encode(1536)
+	resized, err := encode(modelImageSide)
 	if err != nil {
 		return nil, nil, err
 	}
-	thumb, err := encode(256)
+	thumb, err := encode(thumbnailSide)
 	return resized, thumb, err
 }
 
-// The document service converts four files at once and queues sixteen for
-// every user, so conversions take two slots and wait out capacity rejections
-// while the retry still fits a deadline that starts once a slot is free.
-var conversionSlots = make(chan struct{}, 2)
+// The document service queues conversions itself and answers a full queue
+// with a delay, which a conversion waits out while it fits the deadline.
 var conversionDeadline = 10 * time.Minute
 
 func (h *harness) convert(ctx context.Context, filename string, data []byte) ([]byte, error) {
 	router := h.services["router"]
 	if router == nil {
 		return nil, apiErr(503, "TOOL_UNAVAILABLE", "Document conversion is unavailable")
-	}
-	select {
-	case conversionSlots <- struct{}{}:
-		defer func() { <-conversionSlots }()
-	case <-ctx.Done():
-		return nil, ctx.Err()
 	}
 	ctx, cancel := context.WithTimeout(ctx, conversionDeadline)
 	defer cancel()
@@ -359,11 +445,11 @@ func capacityDelay(err error) time.Duration {
 	return time.Duration(e.RetryAfter) * time.Second
 }
 
-func multipartCall(ctx context.Context, service *downstreamService, path, fileField, name string, data []byte, fields object) ([]byte, error) {
+func multipartCall(ctx context.Context, service *downstreamService, path, fileField, name string, data []byte, fields map[string]string) ([]byte, error) {
 	var buffer bytes.Buffer
 	writer := multipart.NewWriter(&buffer)
 	for key, value := range fields {
-		if err := writer.WriteField(key, str(value)); err != nil {
+		if err := writer.WriteField(key, value); err != nil {
 			return nil, err
 		}
 	}
@@ -403,10 +489,10 @@ func multipartCall(ctx context.Context, service *downstreamService, path, fileFi
 	return b, nil
 }
 func (h *harness) transcribe(ctx context.Context, filename string, data []byte) (string, error) {
-	if len(data) > maxUploadBytes {
+	if len(data) > audioUploads.MaxBytes {
 		return "", apiErr(413, "ATTACHMENT_TOO_LARGE", "The recording exceeds the size limit")
 	}
-	if !slices.Contains(audioExtensions, strings.ToLower(filepath.Ext(filename))) {
+	if !audioUploads.accepts(filename) {
 		return "", apiErr(415, "ATTACHMENT_UNSUPPORTED", "Unsupported recording type")
 	}
 	// The router reads the model from the form, as the web client's SDK sends it.
@@ -414,82 +500,53 @@ func (h *harness) transcribe(ctx context.Context, filename string, data []byte) 
 	if router == nil {
 		return "", apiErr(503, "TOOL_UNAVAILABLE", "Transcription is unavailable")
 	}
-	b, err := multipartCall(ctx, router, "/v1/audio/transcriptions", "file", filename, data, object{"model": "voxtral-small-24b", "response_format": "text"})
+	b, err := multipartCall(ctx, router, "/v1/audio/transcriptions", "file", filename, data, map[string]string{"model": "voxtral-small-24b", "response_format": "text"})
 	if err != nil {
 		return "", err
 	}
-	var response object
+	var response struct {
+		Text string `json:"text"`
+	}
 	if json.Unmarshal(b, &response) == nil {
-		return str(response["text"]), nil
+		return response.Text, nil
 	}
 	return string(b), nil
 }
 
-// attachment finds an attachment a client may download: one it uploaded or
-// one in the named thread.
-func (h *harness) attachment(ctx context.Context, p *principal, key contentKey, id, threadID string) (object, []byte, error) {
-	h.chatMu.Lock()
-	cached := h.attachments[p.scope()+"/"+id]
-	if cached != nil && cached.expires.After(nowUTC()) {
-		if !p.Anonymous && cached.keyHash != key.fingerprint() {
-			h.chatMu.Unlock()
-			return nil, nil, apiErr(409, "KEY_MISMATCH", "The attachment uses another key")
-		}
-		descriptor, data := clone(cached.descriptor), bytes.Clone(cached.bytes)
-		h.chatMu.Unlock()
-		return descriptor, data, nil
-	}
-	h.chatMu.Unlock()
+// attachment finds an attachment of the named thread for its client to download.
+func (h *harness) attachment(ctx context.Context, p *principal, key contentKey, id, threadID string) (*Attachment, []byte, error) {
 	if p.Anonymous {
-		return nil, nil, apiErr(404, "THREAD_NOT_FOUND", "The attachment expired")
+		return nil, nil, apiErr(404, "THREAD_NOT_FOUND", "The attachment was not found")
 	}
 	if key == (contentKey{}) {
 		return nil, nil, apiErr(401, "KEY_REQUIRED", "A content key is required")
 	}
-	var descriptor object
+	var descriptor *Attachment
 	if threadID != "" {
-		row, err := h.storeRows.load(ctx, p, key, "chat", threadID)
+		row, err := h.loadThread(ctx, p, key, threadID)
 		if err != nil {
 			return nil, nil, err
 		}
-		descriptor = threadAttachment(normalizeThread(row), id)
+		descriptor = row.attachment(id)
 	}
-	if len(descriptor) == 0 {
+	if descriptor == nil {
 		return nil, nil, apiErr(404, "THREAD_NOT_FOUND", "The attachment was not found")
 	}
 	b, err := h.attachmentBytes(ctx, p, descriptor, false)
 	return descriptor, b, err
 }
 
-func threadAttachment(thread object, id string) object {
-	for _, message := range arr(thread["messages"]) {
-		for _, item := range arr(obj(message)["attachments"]) {
-			if a := obj(item); a["id"] == id {
-				return clone(a)
-			}
-		}
+func (h *harness) attachmentBytes(ctx context.Context, p *principal, a *Attachment, public bool) ([]byte, error) {
+	if a.Base64 != "" {
+		return base64.StdEncoding.DecodeString(a.Base64)
 	}
-	return nil
-}
-
-func (h *harness) attachmentBytes(ctx context.Context, p *principal, descriptor object, public bool) ([]byte, error) {
-	if value := str(descriptor["base64"]); value != "" {
-		return base64.StdEncoding.DecodeString(value)
+	data, err := h.getAttachment(ctx, p, a.ID, a.storageKey(), public)
+	// Sync moves an image that only has a legacy key into its own storage
+	// under the same id and key, after which the control plane refuses it.
+	if err != nil && asAPIError(err).HTTP == http.StatusNotFound && !public && a.EncryptionKey == "" && a.Key != "" {
+		return h.legacyAttachmentBytes(ctx, a.ID, a.Key)
 	}
-	id := str(descriptor["id"])
-	if !public && str(descriptor["encryptionKey"]) == "" && str(descriptor["key"]) != "" {
-		return h.legacyAttachmentBytes(ctx, id, str(descriptor["key"]))
-	}
-	path := "/v1/attachment/get"
-	if public {
-		path += "-public"
-	}
-	var result object
-	err := h.syncAPI.call(ctx, p, path, object{"id": id, "att_key": firstString(descriptor["encryptionKey"], descriptor["attKey"], descriptor["key"])}, &result)
-	if err != nil {
-		return nil, err
-	}
-	return base64.StdEncoding.DecodeString(str(result["plaintext"]))
+	return data, err
 }
 
 var legacyAttachments = &http.Client{Timeout: 5 * time.Minute}
@@ -541,7 +598,7 @@ func (h *harness) legacyAttachmentBytes(ctx context.Context, id, encodedKey stri
 }
 
 func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
-	in, err := decodeJSON(w, r)
+	body, err := readBody(w, r, maxRequestBody)
 	if err != nil {
 		respond(w, nil, err)
 		return
@@ -552,46 +609,44 @@ func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, err)
 		return
 	}
-	id, err := requiredID(in, "id")
-	if err != nil {
+	var in attachmentRequest
+	if err := decodeRequest(body, &in); err != nil {
 		respond(w, nil, err)
 		return
 	}
-	threadID := str(in["threadId"])
-	if threadID != "" {
-		if _, err := requiredID(in, "threadId"); err != nil {
-			respond(w, nil, err)
-			return
-		}
+	if err := in.validate(); err != nil {
+		respond(w, nil, err)
+		return
 	}
-	var descriptor object
+	var descriptor *Attachment
 	var data []byte
 	if public {
-		if _, err := decodeContentKey(str(in["attKey"])); err != nil {
+		if _, err := decodeContentKey(in.AttKey); err != nil {
 			respond(w, nil, err)
 			return
 		}
-		descriptor = in
+		// A share's client names the attachment and the key its link carries.
+		descriptor = &Attachment{ID: in.ID, EncryptionKey: in.AttKey, Kind: cmp.Or(in.Kind, in.Type), FileName: in.FileName, MimeType: in.MimeType, TextContent: in.TextContent, Pages: in.Pages}
 		data, err = h.attachmentBytes(r.Context(), &principal{Anonymous: true}, descriptor, true)
 	} else {
-		key, keyErr := requestKey(in)
+		key, keyErr := requestKey(in.Key)
 		if keyErr != nil {
 			respond(w, nil, keyErr)
 			return
 		}
 		defer clear(key[:])
-		descriptor, data, err = h.attachment(r.Context(), p, key, id, threadID)
+		descriptor, data, err = h.attachment(r.Context(), p, key, in.ID, in.ThreadID)
 	}
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
 	defer clear(data)
-	contentType, fileName := firstString(descriptor["mimeType"], http.DetectContentType(data)), firstString(descriptor["fileName"], "attachment")
+	contentType, fileName := cmp.Or(descriptor.MimeType, http.DetectContentType(data)), cmp.Or(descriptor.FileName, "attachment")
 	if documentRequest(descriptor, data) {
 		// A stored document keeps its extracted content, not the uploaded file.
-		content := object{"textContent": descriptor["textContent"], "pages": descriptor["pages"]}
-		if !documentContent(content) {
+		content := descriptor.content()
+		if content.empty() {
 			if content, err = decodeDocument(data); err != nil {
 				respond(w, nil, err)
 				return
@@ -610,8 +665,8 @@ func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 
 // A shared chat's client may not say what an attachment is. A document blob is
 // JSON, and no supported image format starts with a brace.
-func documentRequest(descriptor object, data []byte) bool {
-	switch firstString(descriptor["type"], descriptor["kind"]) {
+func documentRequest(a *Attachment, data []byte) bool {
+	switch a.Kind {
 	case "image":
 		return false
 	case "":
@@ -621,159 +676,74 @@ func documentRequest(descriptor object, data []byte) bool {
 	return true
 }
 
-// Only an upload that no chat references yet can be deleted: sync refuses
-// every later push of a chat whose attachment was deleted.
-func (h *harness) deleteAttachment(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
-	id, err := requiredID(in, "id")
-	if err != nil {
-		return nil, err
-	}
-	h.chatMu.Lock()
-	defer h.chatMu.Unlock()
-	cached := h.attachments[p.scope()+"/"+id]
-	if cached == nil || cached.keyHash != key.fingerprint() {
-		return nil, apiErr(404, "THREAD_NOT_FOUND", "The upload was not found")
-	}
-	clear(cached.bytes)
-	delete(h.attachments, p.scope()+"/"+id)
-	return object{}, nil
-}
-
-// turnAttachments resolves the attachment ids a turn names. A new upload comes
-// from the cache; a stored thread may also reuse one of its own attachments,
-// as an edit does. A stored thread's image carries its bytes inline so they
-// can be stored under the thread.
-func (h *harness) turnAttachments(ctx context.Context, p *principal, key contentKey, in, thread object, ephemeral, keyless bool) ([]any, error) {
-	result := []any{}
-	for _, value := range arr(in["attachments"]) {
-		var descriptor object
-		h.chatMu.Lock()
-		cached := h.attachments[p.scope()+"/"+str(value)]
-		if cached != nil && cached.expires.After(nowUTC()) && (keyless || cached.keyHash == key.fingerprint()) && (!isImage(cached.descriptor) || len(cached.bytes) > 0) {
-			descriptor = clone(cached.descriptor)
-			cached.expires = nowUTC().Add(runTimeout)
-			if !ephemeral && isImage(descriptor) {
-				descriptor["base64"] = base64.StdEncoding.EncodeToString(cached.bytes)
+// turnAttachments resolves the attachments a turn names: an upload sent
+// whole, or by id one the thread already holds, as an edit sends it.
+func turnAttachments(in *turnRequest, t *Thread) ([]Attachment, error) {
+	result := []Attachment{}
+	for i := range in.Attachments {
+		sent := &in.Attachments[i]
+		if sent.whole() {
+			stored, err := sent.stored()
+			if err != nil {
+				return nil, err
 			}
+			result = append(result, stored)
+			continue
 		}
-		h.chatMu.Unlock()
-		if descriptor == nil && !ephemeral {
-			descriptor = threadAttachment(thread, str(value))
+		held := t.attachment(sent.ID)
+		if held == nil {
+			return nil, apiErr(404, "THREAD_NOT_FOUND", "The attachment was not found")
 		}
-		if descriptor == nil {
-			return nil, apiErr(404, "THREAD_NOT_FOUND", "The attachment expired; upload it again")
-		}
-		result = append(result, descriptor)
+		result = append(result, *held)
 	}
 	return result, nil
-}
-func (h *harness) expireAttachments() {
-	h.chatMu.Lock()
-	defer h.chatMu.Unlock()
-	for id, item := range h.attachments {
-		if !item.expires.After(nowUTC()) {
-			clear(item.bytes)
-			delete(h.attachments, id)
-		}
-	}
 }
 
 // A local transcript may omit older images' bytes to stay small. The model
 // then reads such an image through its description, or not at all.
-func (h *harness) hydrateContext(ctx context.Context, p *principal, key contentKey, thread object, ephemeral, local bool) error {
-	name := str(thread["model"])
-	c := h.catalog.get()
-	if c == nil {
-		return apiErr(503, "MODEL_UNAVAILABLE", "The catalog is unavailable")
-	}
-	vision := boolean(c.definition(name)["multimodal"], false)
-	if name == "auto" {
-		vision = true
-		for _, candidate := range c.Models {
-			vision = vision && boolean(candidate["multimodal"], false)
+func (h *harness) hydrateContext(ctx context.Context, p *principal, t *Thread, keyless bool) error {
+	vision := h.catalog.get().vision(t.Model)
+	return t.eachAttachment(func(a *Attachment) error {
+		if !a.isImage() || !vision && a.Description != "" {
+			return nil
 		}
-	}
-	for _, message := range arr(thread["messages"]) {
-		for _, value := range arr(obj(message)["attachments"]) {
-			a := obj(value)
-			if !isImage(a) {
-				continue
-			}
-			if !vision && str(a["description"]) != "" {
-				continue
-			}
-			var data []byte
-			var err error
-			if ephemeral && str(a["base64"]) != "" {
-				data, err = base64.StdEncoding.DecodeString(str(a["base64"]))
-				if err != nil {
-					return err
-				}
-			} else if ephemeral {
-				h.chatMu.Lock()
-				cached := h.attachments[p.scope()+"/"+str(a["id"])]
-				if cached != nil {
-					data = bytes.Clone(cached.bytes)
-					cached.expires = nowUTC().Add(runTimeout)
-				}
-				h.chatMu.Unlock()
-				if len(data) == 0 && local {
-					continue
-				}
-				if len(data) == 0 {
-					return apiErr(404, "THREAD_NOT_FOUND", "The temporary attachment expired")
-				}
-			} else {
-				if str(a["base64"]) == "" && attachmentKey(a) == "" {
-					continue // only its thumbnail was kept
-				}
-				data, err = h.attachmentBytes(ctx, p, a, false)
-				if unreachable(err) {
-					continue
-				}
-				if err != nil {
-					return err
-				}
-			}
-			resized, _, err := resizeImage(data)
-			clear(data)
-			if err != nil {
-				return err
-			}
-			encoded := base64.StdEncoding.EncodeToString(resized)
-			clear(resized)
-			if vision {
-				a["base64"], a["inferenceMimeType"] = encoded, "image/jpeg"
-				continue
-			}
-			var model *model
-			for _, m := range h.offer.get() {
-				if m.vision {
-					model = m
-					break
-				}
-			}
-			if model == nil {
-				return apiErr(404, "MODEL_UNAVAILABLE", "No vision model can describe the image")
-			}
-			response, err := h.completion(ctx, model, object{"model": model.name, "messages": []object{{"role": "user", "content": []object{{"type": "text", "text": "Describe this image faithfully for a text-only assistant. Include visible text and details relevant to understanding it."}, {"type": "image_url", "image_url": object{"url": "data:image/jpeg;base64," + encoded}}}}}, "max_tokens": 2048})
-			if err != nil {
-				return err
-			}
-			a["description"] = response
-			if ephemeral && str(a["base64"]) != "" {
-				data, err = base64.StdEncoding.DecodeString(str(a["base64"]))
-				if err != nil {
-					return err
-				}
-			} else if ephemeral {
-				h.chatMu.Lock()
-				if cached := h.attachments[p.scope()+"/"+str(a["id"])]; cached != nil {
-					cached.descriptor["description"] = response
-				}
-				h.chatMu.Unlock()
+		// Without its bytes, only its thumbnail was kept.
+		if a.Base64 == "" && (keyless || a.storageKey() == "") {
+			return nil
+		}
+		data, err := h.attachmentBytes(ctx, p, a, false)
+		if unreachable(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		resized, _, err := resizeImage(data)
+		clear(data)
+		if err != nil {
+			return err
+		}
+		encoded := base64.StdEncoding.EncodeToString(resized)
+		clear(resized)
+		if vision {
+			a.Base64, a.inferenceMimeType = encoded, "image/jpeg"
+			return nil
+		}
+		var model *model
+		for _, m := range h.offer.get() {
+			if m.vision {
+				model = m
+				break
 			}
 		}
-	}
-	return nil
+		if model == nil {
+			return apiErr(404, "MODEL_UNAVAILABLE", "No vision model can describe the image")
+		}
+		response, err := h.completion(ctx, model, object{"model": model.name, "messages": []object{{"role": "user", "content": []object{{"type": "text", "text": "Describe this image faithfully for a text-only assistant. Include visible text and details relevant to understanding it."}, {"type": "image_url", "image_url": object{"url": "data:image/jpeg;base64," + encoded}}}}}, "max_tokens": 2048})
+		if err != nil {
+			return err
+		}
+		a.Description = response
+		return nil
+	})
 }

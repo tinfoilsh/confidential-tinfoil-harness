@@ -63,18 +63,17 @@ func (h *harness) completion(ctx context.Context, m *model, payload object) (str
 // titleSource is the text a title summarizes: the first user message, or the
 // content of its documents. It is read from the prompt's copy of the thread,
 // since a stored row keeps no document content.
-func titleSource(thread object) string {
-	for _, item := range arr(thread["messages"]) {
-		m := obj(item)
-		if m["role"] != "user" {
+func titleSource(t *Thread) string {
+	for _, m := range t.Messages {
+		if m.Role != "user" {
 			continue
 		}
-		text := str(m["content"])
+		text := m.Content
 		if text == "" {
-			for _, value := range arr(m["attachments"]) {
+			for i := range m.Attachments {
 				// A document whose blob is gone must not name the chat.
-				if a := obj(value); documentText(a) != unavailableDocument(a) {
-					text += documentText(a) + " "
+				if a := &m.Attachments[i]; documentText(a.content()) != unavailableDocument(a) {
+					text += documentText(a.content()) + " "
 				}
 			}
 		}
@@ -83,8 +82,8 @@ func titleSource(thread object) string {
 	return ""
 }
 
-func (h *harness) generateTitle(ctx context.Context, r *chatRun, row *storedRow, text string) {
-	if !h.serviceReady("summarizer") || row.Data["titleState"] != "placeholder" {
+func (h *harness) generateTitle(ctx context.Context, r *chatRun, p *principal, titleState string, text string) {
+	if !h.serviceReady("summarizer") || titleState != "placeholder" {
 		return
 	}
 	words := strings.Fields(text)
@@ -92,42 +91,38 @@ func (h *harness) generateTitle(ctx context.Context, r *chatRun, row *storedRow,
 		return
 	}
 	text = strings.Join(words[:min(len(words), 100)], " ")
-	var result object
+	var result struct {
+		Summary string `json:"summary"`
+	}
 	if err := h.serviceCall(ctx, "summarizer", "/summarize", object{"content": text, "style": "title_summary"}, &result); err != nil {
 		return
 	}
-	title := strings.Trim(strings.TrimSpace(str(result["summary"])), "\"'")
+	title := strings.Trim(strings.TrimSpace(result.Summary), "\"'")
 	if title == "" {
 		return
 	}
-	name := func(data object) error {
-		if data["titleState"] == "placeholder" {
-			data["title"], data["titleState"] = title, "generated"
+	name := func(t *Thread) error {
+		if t.TitleState == "placeholder" {
+			t.Title, t.TitleState = title, "generated"
 		}
 		return nil
 	}
 	// A local thread's row lives only in this run, and its client stores the
 	// title it reads from the event below.
 	if r.thread.local {
-		r.thread.mu.Lock()
-		defer r.thread.mu.Unlock()
-		if r.thread.row == nil {
-			return
-		}
-		name(r.thread.row.Data)
-		r.out.emit(event{Type: "STATE_DELTA", Delta: titleDelta(r.thread.row.Data)})
+		h.live.mu.Lock()
+		defer h.live.mu.Unlock()
+		name(&r.row.Thread)
+		r.out.emit(event{Type: "STATE_DELTA", Delta: titleDelta(&r.row.Thread)})
 		return
 	}
-	updated, err := h.mutate(ctx, r.principal, r.key, "chat", row.ID, false, nil, name)
+	updated, err := h.mutateThread(ctx, p, r.key, r.thread.id, name)
 	if err != nil {
 		return
 	}
-	r.thread.mu.Lock()
-	defer r.thread.mu.Unlock()
-	r.thread.row = updated
-	r.out.emit(event{Type: "STATE_DELTA", Delta: titleDelta(updated.Data)})
+	r.out.emit(event{Type: "STATE_DELTA", Delta: titleDelta(&updated.Thread)})
 }
 
-func titleDelta(data object) []object {
-	return []object{{"op": "replace", "path": "/thread/title", "value": data["title"]}, {"op": "replace", "path": "/thread/titleState", "value": data["titleState"]}}
+func titleDelta(t *Thread) []statePatch {
+	return []statePatch{{"replace", "/thread/title", t.Title}, {"replace", "/thread/titleState", t.TitleState}}
 }

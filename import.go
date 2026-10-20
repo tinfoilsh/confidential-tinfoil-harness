@@ -16,6 +16,7 @@ import (
 	"os"
 	"path"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -167,8 +168,8 @@ func (h *harness) handleImport(w http.ResponseWriter, r *http.Request, p *princi
 				return
 			}
 		} else {
-			b, err := io.ReadAll(io.LimitReader(part, 8193))
-			if err != nil || len(b) > 8192 {
+			b, err := io.ReadAll(io.LimitReader(part, maxFormField+1))
+			if err != nil || len(b) > maxFormField {
 				respond(w, nil, apiErr(400, "IMPORT_INVALID", "Invalid multipart field"))
 				return
 			}
@@ -210,7 +211,7 @@ func (h *harness) stageImport(ctx context.Context, p *principal, key contentKey,
 	}
 	var created object
 	chunks := (archive.Size() + importChunk - 1) / importChunk
-	err := h.syncAPI.call(ctx, p, "/v1/import/create", object{"source": source, "total_bytes": archive.Size(), "total_chunks": chunks, "archive_sha256": hex.EncodeToString(hash.Sum(nil))}, &created)
+	err := h.syncImport(ctx, p, "create", object{"source": source, "total_bytes": archive.Size(), "total_chunks": chunks, "archive_sha256": hex.EncodeToString(hash.Sum(nil))}, &created)
 	if err != nil {
 		return nil, err
 	}
@@ -219,33 +220,30 @@ func (h *harness) stageImport(ctx context.Context, p *principal, key contentKey,
 		if _, err := archive.ReadAt(data, i*importChunk); err != nil {
 			return nil, err
 		}
-		err := h.syncAPI.call(ctx, p, "/v1/import/upload", object{"upload_id": created["upload_id"], "chunk_index": i, "chunk_sha256": hashHex(data), "data": base64.StdEncoding.EncodeToString(data)}, nil)
+		err := h.syncImport(ctx, p, "upload", object{"upload_id": created["upload_id"], "chunk_index": i, "chunk_sha256": hashHex(data), "data": base64.StdEncoding.EncodeToString(data)}, nil)
 		clear(data)
 		if err != nil {
 			return nil, err
 		}
 	}
 	var result object
-	err = h.syncAPI.call(ctx, p, "/v1/import/start", object{"job_id": created["job_id"], "key": key.base64()}, &result)
+	err = h.syncImport(ctx, p, "start", object{"job_id": created["job_id"], "key": key.base64()}, &result)
 	return object{"jobId": created["job_id"]}, err
 }
-func (h *harness) importStatus(ctx context.Context, p *principal, _ contentKey, in object) (any, error) {
-	id, err := requiredID(in, "jobId")
-	if err != nil {
-		return nil, err
-	}
+func (h *harness) importStatus(ctx context.Context, p *principal, _ contentKey, in *importStatusRequest) (any, error) {
 	var result object
-	err = h.syncAPI.call(ctx, p, "/v1/import/status", object{"job_id": id}, &result)
+	err := h.syncImport(ctx, p, "status", object{"job_id": in.JobID}, &result)
 	if err != nil {
 		return nil, err
 	}
-	if value, ok := result["failure_reason"]; ok {
-		result["failureReason"] = value
+	for snake, camel := range map[string]string{"failure_reason": "failureReason", "failure_detail": "failureDetail"} {
+		if value, ok := result[snake]; ok {
+			result[camel] = value
+			delete(result, snake)
+		}
 	}
-	if value, ok := result["failure_detail"]; ok {
-		result["failureDetail"] = value
-	}
-	result["jobId"] = result["job_id"]
+	delete(result, "job_id")
+	result["jobId"] = in.JobID
 	return result, nil
 }
 
@@ -421,7 +419,7 @@ func convertNativeArchive(input *sealedSpool) (*sealedSpool, bool, error) {
 			return nil, true, apiErr(400, "IMPORT_INVALID", "Unknown backup entity kind")
 		}
 		encoded := raw(payload)
-		outputPath := "entities/" + entityKind + "/" + jsonNumber(len(entities)) + ".json"
+		outputPath := "entities/" + entityKind + "/" + strconv.Itoa(len(entities)) + ".json"
 		if err := write(outputPath, encoded); err != nil {
 			return nil, true, err
 		}

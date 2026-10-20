@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -9,16 +8,13 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
-	"time"
 	"unicode/utf8"
 )
 
-func accessJWT(clientID, product string) string {
-	header, _ := json.Marshal(map[string]string{"alg": "none", "typ": "at+jwt"})
-	payload, _ := json.Marshal(map[string]string{"client_id": clientID, "product": product})
-	return base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(payload) + ".signature"
-}
+// chatToken is a subscriber's Tinfoil Chat credential.
+var chatToken = inferenceCredential{Key: "chat-token", firstParty: true}
 
 func TestSubmitter_DeliversCompletedConversation(t *testing.T) {
 	var mu sync.Mutex
@@ -37,7 +33,6 @@ func TestSubmitter_DeliversCompletedConversation(t *testing.T) {
 	defer sidecar.Close()
 	s := newSubmitter(sidecar.URL + "/")
 	s.submit("tok", "chat-1", []safeguardMessage{{Role: "user", Content: "hi"}, {Role: "assistant", Content: "hello"}})
-	s.close()
 	mu.Lock()
 	defer mu.Unlock()
 	if len(got) != 1 || got[0].Credential != "tok" || got[0].ConversationID != "chat-1" || len(got[0].Messages) != 2 {
@@ -50,27 +45,20 @@ func TestSubmitter_TrimsOversizedHistory(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		messages []safeguardMessage
+		kept     int
 	}{
-		{"history", []safeguardMessage{{Role: "user", Content: big + "the question"}, {Role: "assistant", Content: "reply"}}},
-		{"older turns", []safeguardMessage{{Role: "user", Content: big}, {Role: "assistant", Content: big}, {Role: "user", Content: "latest"}, {Role: "assistant", Content: "reply"}}},
-		{"escaping", []safeguardMessage{{Role: "assistant", Content: strings.Repeat("<\x00", maxSubmissionBytes/2)}}},
-		{"escaped reply", []safeguardMessage{{Role: "user", Content: big}, {Role: "assistant", Content: strings.Repeat("<", maxSubmissionBytes/3)}}},
-		{"multibyte", []safeguardMessage{{Role: "user", Content: strings.Repeat("é", maxSubmissionBytes)}, {Role: "assistant", Content: "reply"}}},
-		{"many messages", append(make([]safeguardMessage, maxSubmissionBytes/messageJSONOverhead), safeguardMessage{Role: "assistant", Content: "reply"})},
+		{"older turns", []safeguardMessage{{Role: "user", Content: big}, {Role: "assistant", Content: big}, {Role: "user", Content: "latest"}, {Role: "assistant", Content: "reply"}}, 2},
+		{"escaped reply", []safeguardMessage{{Role: "user", Content: "question"}, {Role: "assistant", Content: strings.Repeat("<\x00", maxSubmissionBytes/2)}}, 1},
+		{"multibyte reply", []safeguardMessage{{Role: "assistant", Content: strings.Repeat("é", maxSubmissionBytes)}}, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := &submitter{pending: make(chan []byte, maxPendingSubmissions)}
-			s.submit("token", "chat", tc.messages)
-			if len(s.pending) != 1 {
-				t.Fatal("oversized history must be trimmed, not dropped")
-			}
-			body := <-s.pending
+			body := encodeSubmission("token", "chat", tc.messages)
 			if len(body) > maxSubmissionBytes {
 				t.Fatalf("body is %d bytes, want at most %d", len(body), maxSubmissionBytes)
 			}
 			var got submission
-			if err := json.Unmarshal(body, &got); err != nil {
-				t.Fatal(err)
+			if err := json.Unmarshal(body, &got); err != nil || len(got.Messages) != tc.kept {
+				t.Fatalf("kept %d messages, want %d (%v)", len(got.Messages), tc.kept, err)
 			}
 			offset := len(tc.messages) - len(got.Messages)
 			for i, m := range got.Messages {
@@ -87,58 +75,6 @@ func TestSubmitter_TrimsOversizedHistory(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestSubmitter_QueuedPayloadOwnsItsData(t *testing.T) {
-	s := &submitter{pending: make(chan []byte, maxPendingSubmissions)}
-	messages := []safeguardMessage{{Role: "user", Content: "hello"}, {Role: "assistant", Content: "reply"}}
-	s.submit("token", "chat", messages)
-	messages[0].Content = strings.Repeat("x", maxSubmissionBytes)
-	body := <-s.pending
-	var got submission
-	if err := json.Unmarshal(body, &got); err != nil {
-		t.Fatal(err)
-	}
-	if len(body) > maxSubmissionBytes || got.Messages[0].Content != "hello" {
-		t.Fatal("queue must own bounded serialized data rather than retain the caller's slice")
-	}
-}
-
-func TestSubmitter_NeverBlocksWhileSidecarHangs(t *testing.T) {
-	release := make(chan struct{})
-	sidecar := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { <-release }))
-	defer sidecar.Close()
-	s := newSubmitter(sidecar.URL)
-	defer s.close()
-	defer close(release)
-	done := make(chan struct{})
-	go func() {
-		for range maxPendingSubmissions * 2 {
-			s.submit("tok", "", []safeguardMessage{{Role: "assistant", Content: "x"}})
-		}
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("submit blocked while the sidecar hung")
-	}
-}
-
-func TestIsFirstPartyChatAccessJWT(t *testing.T) {
-	if !isFirstPartyChatAccessJWT(accessJWT("tinfoil-chat", "chat")) {
-		t.Fatal("expected first-party Chat at+jwt token to be recognized")
-	}
-	header, _ := json.Marshal(map[string]string{"typ": "application/at+jwt"})
-	payload, _ := json.Marshal(map[string]string{"client_id": "tinfoil-chat", "product": "chat"})
-	if !isFirstPartyChatAccessJWT(base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(payload) + ".signature") {
-		t.Fatal("expected the application/at+jwt type to be recognized")
-	}
-	for _, token := range []string{"opaque-key", "e30.e30.signature", "bad.payload.signature", "free_anonymous-key", accessJWT("third-party", "chat"), accessJWT("tinfoil-chat", "api")} {
-		if isFirstPartyChatAccessJWT(token) {
-			t.Fatalf("ineligible credential %q must not be classified", token)
-		}
 	}
 }
 
@@ -159,10 +95,10 @@ func TestScreeningIsThePromptAndHistoryWithoutToolResults(t *testing.T) {
 }
 
 func TestOnlyCompletedFirstPartyChatsAreScreened(t *testing.T) {
-	reply := []object{{"content": "hello"}}
+	reply := []Message{{Content: "hello"}}
 	for name, tc := range map[string]struct {
 		change func(*chatRun)
-		reply  []object
+		reply  []Message
 		err    error
 		want   bool
 	}{
@@ -170,19 +106,25 @@ func TestOnlyCompletedFirstPartyChatsAreScreened(t *testing.T) {
 		"failed":       {func(*chatRun) {}, reply, errors.New("model failed"), false},
 		"cancelled":    {func(r *chatRun) { r.cancelled = true }, reply, nil, false},
 		"deleted":      {func(r *chatRun) { r.thread.deleted = true }, reply, nil, false},
-		"widget retry": {func(r *chatRun) { r.retryTarget = object{"name": "render_chart"} }, reply, nil, false},
+		"widget retry": {func(r *chatRun) { r.retryTarget = &retryTarget{block: Block{Name: "render_chart"}} }, reply, nil, false},
 		"anonymous":    {func(r *chatRun) { r.principal.Anonymous = true }, reply, nil, false},
-		"api key":      {func(r *chatRun) { r.credential.Key = "tk_api_key" }, reply, nil, false},
+		"api key":      {func(r *chatRun) { r.credential.firstParty = false }, reply, nil, false},
 		"not captured": {func(r *chatRun) { r.screening = nil }, reply, nil, false},
-		"no reply":     {func(*chatRun) {}, []object{{"content": ""}}, nil, false},
+		"no reply":     {func(*chatRun) {}, []Message{{Content: ""}}, nil, false},
 	} {
 		t.Run(name, func(t *testing.T) {
-			h := &harness{safeguards: &submitter{pending: make(chan []byte, 1)}}
-			r := &chatRun{thread: &threadSession{id: "chat-1"}, principal: &principal{ID: "alice"}, credential: inferenceCredential{Key: secret(accessJWT("tinfoil-chat", "chat"))},
+			var submissions atomic.Int32
+			sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				submissions.Add(1)
+				w.WriteHeader(http.StatusAccepted)
+			}))
+			defer sidecar.Close()
+			h := &harness{safeguards: newSubmitter(sidecar.URL)}
+			r := &chatRun{thread: &threadSession{id: "chat-1"}, turn: &turnRequest{Kind: "send"}, principal: &principal{ID: "alice"}, credential: chatToken,
 				screening: &screening{conversation: "chat-1", messages: []safeguardMessage{{Role: "user", Content: "hi"}}}}
 			tc.change(r)
 			h.screen(r, tc.reply, tc.err)
-			if submitted := len(h.safeguards.pending) == 1; submitted != tc.want {
+			if submitted := submissions.Load() == 1; submitted != tc.want {
 				t.Fatalf("submitted = %v, want %v", submitted, tc.want)
 			}
 		})

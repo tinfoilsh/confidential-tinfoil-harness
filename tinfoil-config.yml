@@ -1,16 +1,12 @@
 # Release automation replaces the image digest before measuring this workload.
 cvm-version: 0.11.0
 cpus: 2
-memory: 8192
+memory: 65536
 
 shim:
   upstream-port: 8081
-  authenticated: true
-  # The legacy route uses Tinfoil API keys. /v1/* validates Clerk inside Go.
-  authenticated-endpoints:
-    - /agui
+  # /v1/* validates Clerk sessions and anonymous chat keys inside Go.
   paths:
-    - /agui
     - /healthz
     - /v1/*
 
@@ -31,7 +27,6 @@ containers:
       - TINFOIL_ROUTER_ENCLAVE: inference.tinfoil.sh
       - TINFOIL_SUMMARIZER_ENCLAVE: summarizer.tinfoil.sh
       - TINFOIL_METADATA_ENCLAVE: opengraph-metadata.tinfoil.sh
-      - TINFOIL_MEMORY_ENABLED: "false"
       - SAFEGUARDS_URL: "http://safeguards:8090"
     secrets:
       - USAGE_CONTEXT_SECRET

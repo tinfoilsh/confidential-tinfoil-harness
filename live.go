@@ -1,0 +1,204 @@
+package main
+
+import (
+	"context"
+	"sync"
+	"time"
+)
+
+// liveRuns holds what this instance is executing: each chat's running reply
+// and the turns queued behind it, and nothing once they end. A run is found
+// by its chat, by its own id, and by the client request that started it. mu
+// guards these maps and every field of the sessions and runs they hold that
+// changes after the run is published, and is never held across I/O.
+type liveRuns struct {
+	mu       sync.Mutex
+	closing  bool
+	threads  map[string]*threadSession
+	runs     map[string]*chatRun
+	requests map[string]*chatRun
+	// working counts the runs that have started until their last write.
+	working sync.WaitGroup
+}
+
+func liveKey(p *principal, id string) string { return p.scope() + "/" + id }
+
+// forget unregisters a run that is ending.
+func (l *liveRuns) forget(r *chatRun) {
+	if key := r.thread.owner + "/" + r.log.id; l.runs[key] == r {
+		delete(l.runs, key)
+	}
+	if key := r.thread.owner + "/" + r.nonce; l.requests[key] == r {
+		delete(l.requests, key)
+	}
+}
+
+type threadSession struct {
+	id, owner, keyHash string
+	deleted            bool
+	// A local thread is stored by its client, which sends its transcript
+	// with each turn; an ask is stored by nobody. The run holds either's
+	// row. A keyless thread, local or anonymous, never uses the content key.
+	local, keyless bool
+	// row is a local thread's transcript, which a queued turn continues from.
+	row    *threadRow
+	active *chatRun
+	queue  []*chatRun
+	// waiting ends the queue a stopped run leaves if its client never sends it.
+	waiting *time.Timer
+}
+
+type chatRun struct {
+	thread                   *threadSession
+	log                      *run
+	out                      *stream
+	input                    *turnRequest
+	turn                     *turnRequest // the turn as carried out, once started
+	received                 string       // when the turn's request arrived
+	principal                *principal
+	key                      contentKey
+	credential               inferenceCredential
+	nonce, digest, messageID string
+	queued, cancelled        bool
+	running                  bool            // its RUN_STARTED is framed
+	ending                   bool            // finishing what it produced; too late to cancel
+	stopped                  context.Context // done once the run is cancelled
+	accepted                 chan struct{}   // closed once the turn is queued, started, or refused
+	refused                  error
+	finished                 chan struct{}
+	titleDone                chan struct{}
+	row                      *threadRow // the thread as the run started and committed it
+	assembler                *messageAssembler
+	retryTarget              *retryTarget
+	replacement              string
+	profile                  *Profile // a local thread's settings, sent by its client
+	screening                *screening
+
+	// yielded marks an active run stopped so a queued turn starts now.
+	yielded bool
+}
+
+// release drops what a run holds of its caller once nothing reads it.
+func (r *chatRun) release() {
+	clear(r.key[:])
+	r.input, r.turn, r.retryTarget, r.assembler, r.screening, r.profile = nil, nil, nil, nil, nil, nil
+	r.replacement = ""
+	r.principal = &principal{ID: r.principal.ID, AnonymousID: r.principal.AnonymousID, Anonymous: r.principal.Anonymous}
+	r.credential.Key = ""
+}
+
+func (h *harness) authorizedRun(p *principal, key contentKey, id, runID string) (*chatRun, error) {
+	if err := requireID("threadId", id); err != nil {
+		return nil, err
+	}
+	if err := requireID("runId", runID); err != nil {
+		return nil, err
+	}
+	h.live.mu.Lock()
+	defer h.live.mu.Unlock()
+	r := h.live.runs[liveKey(p, runID)]
+	if r == nil || r.thread.id != id {
+		return nil, apiErr(404, "RUN_NOT_FOUND", "The run is not live on this instance")
+	}
+	if !r.thread.keyless && r.thread.keyHash != key.fingerprint() {
+		return nil, apiErr(409, "KEY_MISMATCH", "The run uses another key")
+	}
+	return r, nil
+}
+
+// makeActive gives a chat's running slot to a turn about to start; live.mu is held.
+func (h *harness) makeActive(s *threadSession, r *chatRun) {
+	s.active = r
+	if s.waiting != nil {
+		s.waiting.Stop()
+		s.waiting = nil
+	}
+}
+
+// queueChanged tells a chat's running reply its queue; live.mu is held. A
+// reply that has not started is told by its first state snapshot.
+func queueChanged(s *threadSession) {
+	if s.active != nil && s.active.running {
+		s.active.out.emit(event{Type: "STATE_DELTA", Delta: []statePatch{{"replace", "/queue", queueItems(s)}}})
+	}
+}
+
+func (r *chatRun) queueItem() queueItem {
+	attachments := []queuedAttachment{}
+	for _, a := range r.input.Attachments {
+		attachments = append(attachments, queuedAttachment{ID: a.ID, Kind: a.Kind, FileName: a.FileName, MimeType: a.MimeType, Size: a.Size, Thumbnail: a.Thumbnail})
+	}
+	return queueItem{QueueID: r.log.id, Kind: r.input.Kind, Content: r.input.Content, Quote: r.input.Quote, Attachments: attachments, CreatedAt: r.received}
+}
+
+func queueItems(s *threadSession) []queueItem {
+	out := []queueItem{}
+	for _, r := range s.queue {
+		out = append(out, r.queueItem())
+	}
+	return out
+}
+
+// advance retires a run from its chat and returns the queued turn to start
+// next, if the chat goes on; live.mu is held. A chat with nothing running or
+// queued leaves the registry. A queue a stopped run leaves waits for its
+// client to send or remove a turn, as long as a run may last.
+func (h *harness) advance(r *chatRun, goOn bool) *chatRun {
+	s := r.thread
+	h.live.forget(r)
+	if s.active == r {
+		s.active = nil
+	}
+	var next *chatRun
+	if goOn && !s.deleted && !h.live.closing && len(s.queue) > 0 {
+		next, s.queue = s.queue[0], s.queue[1:]
+		h.makeActive(s, next)
+	}
+	if s.active == nil && len(s.queue) > 0 && s.waiting == nil {
+		s.waiting = time.AfterFunc(runTimeout, func() { h.endWaitingQueue(s) })
+	}
+	h.dropIdle(s)
+	return next
+}
+
+// dropIdle removes a chat with nothing running or queued from the registry;
+// live.mu is held.
+func (h *harness) dropIdle(s *threadSession) {
+	if s.active != nil || len(s.queue) > 0 {
+		return
+	}
+	if s.waiting != nil {
+		s.waiting.Stop()
+		s.waiting = nil
+	}
+	if h.live.threads[s.owner+"/"+s.id] == s {
+		delete(h.live.threads, s.owner+"/"+s.id)
+	}
+}
+
+// endQueued ends a turn that never started with the frame that says why;
+// live.mu is held.
+func (h *harness) endQueued(r *chatRun, end event) {
+	h.live.forget(r)
+	end.ThreadID, end.RunID = r.thread.id, r.log.id
+	r.out.emit(end)
+	r.log.log.close(errDone)
+	r.release()
+	close(r.finished)
+}
+
+var removedTurn = event{Type: "RUN_FINISHED", Metadata: raw(runMetadata{Cancelled: new(true)})}
+
+// endWaitingQueue ends the queue of a stopped run that nobody came back to.
+func (h *harness) endWaitingQueue(s *threadSession) {
+	h.live.mu.Lock()
+	defer h.live.mu.Unlock()
+	if s.active != nil || h.live.threads[s.owner+"/"+s.id] != s {
+		return
+	}
+	for _, r := range s.queue {
+		h.endQueued(r, removedTurn)
+	}
+	s.queue = nil
+	h.dropIdle(s)
+}

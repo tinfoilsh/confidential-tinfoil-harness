@@ -10,7 +10,7 @@ Prefer an end-to-end test through `postRoute`/`eventsIn` or the handler over a u
 
 Use these instead of building new fakes:
 
-- `testChatHarness`: a harness wired to a fake model server, a control plane stub and `memoryRows`.
+- `testChatHarness`: a harness wired to a fake model server, a stub of the Tinfoil API and `memoryRows`.
 - `memoryRows`: the in-memory sync row store. Like sync, it refuses to load or push a row with a key other than the one that sealed it (409 `KEY_MISMATCH`), and deletes without checking the key. Rows a test seeds directly count as sealed with the harness's test key.
 - `newFakeSync` and `storedThread`: attachment blobs and stored chats.
 - `routerHarness`, `serveWebsearch`, `toolTurns`, `screenedBy`: the model router, the websearch enclave, a scripted tool turn, and the safeguards sidecar.
@@ -25,4 +25,4 @@ Use these instead of building new fakes:
 ## Things that only fail in CI
 
 - Waiting on a fake's flush instead of on the harness: a cancel test that waited for the fake model to write its chunk failed every run with `-cpu=1`. Wait for the run log to contain the frame you need.
-- The reference checks in `compatibility_test.go` need `../tinfoil-webapp` with `node_modules` and skip without it, as in CI. Keep each test's Go assertions before its skip.
+- The reference checks in `compatibility_test.go` use the web client in `TINFOIL_WEBAPP` or `../tinfoil-webapp`, with its harness reducer and `node_modules`, and skip without it, as in CI. Keep each test's Go assertions before its skip.
