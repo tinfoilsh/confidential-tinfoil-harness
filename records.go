@@ -173,7 +173,15 @@ func (h *harness) pinnedThreads(ctx context.Context, p *principal, key contentKe
 	if err != nil {
 		return nil, err
 	}
+	byID := make(map[string]*threadRow, len(rows))
 	for _, row := range rows {
+		byID[row.ID] = row
+	}
+	for _, id := range ids {
+		row := byID[id]
+		if row == nil {
+			continue
+		}
 		row.Pinned = true
 		flags.mark(&row.Thread)
 		threads = append(threads, summarize(&row.Thread))

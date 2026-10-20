@@ -26,6 +26,9 @@ func (h *harness) threadTranscript(ctx context.Context, p *principal, key conten
 	if err != nil {
 		return nil, err
 	}
+	if err := h.applyPins(ctx, p, key, []*threadRow{row}); err != nil {
+		return nil, err
+	}
 	missing := 0
 	err = row.eachAttachment(func(a *Attachment) error {
 		if a.storageKey() == "" {
@@ -131,6 +134,11 @@ func (h *harness) importThread(ctx context.Context, p *principal, key contentKey
 			return nil, apiErr(409, "THREAD_EXISTS", "This chat is already in the cloud")
 		}
 		return nil, err
+	}
+	if row.Pinned {
+		if err := h.setPin(ctx, p, key, id, true); err != nil {
+			return nil, err
+		}
 	}
 	return summarize(&row.Thread), nil
 }
