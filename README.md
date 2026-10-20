@@ -14,20 +14,20 @@ GOWORK=off go build ./...
 
 With a web client checkout and its `node_modules` in `TINFOIL_WEBAPP` (or `../tinfoil-webapp`), the tests also replay run events through its harness reducer and read attachments through its chat view.
 
-Anonymous chat works only from a deployed harness, because the control plane accepts `free_` key validation only from registered Tinfoil hosts.
+Anonymous chat works only from a deployed harness, because Tinfoil validates `free_` keys only for registered Tinfoil hosts.
 
 ## Deployment
 
 [tinfoil-config.yml](tinfoil-config.yml) is the measured configuration and the only place the harness reads its hosts from. It provides:
 
-- `USAGE_CONTEXT_SECRET`: required secret, shared with the gateway for usage accounting
+- `USAGE_CONTEXT_SECRET`: required secret for usage accounting
 - `TINFOIL_API_KEY`: secret for the safeguards sidecar
 - `TINFOIL_GATEWAY_URL`, `TINFOIL_CONTROLPLANE_URL` and `CLERK_ISSUER`: required
 - `TINFOIL_SYNC_ENCLAVE` and `TINFOIL_ROUTER_ENCLAVE`: required, and must attest at boot
 - The other `TINFOIL_*_ENCLAVE` hosts: used once their attestation succeeds
 - `SAFEGUARDS_URL`: the [safeguards](https://github.com/tinfoilsh/confidential-safeguards) sidecar that classifies completed first-party chats
 
-A chat model is offered only when the control plane lists it, its repository is pinned in [main.go](main.go), and the gateway's catalog offers it.
+A chat model is offered only when Tinfoil's model catalog lists it, its repository is pinned in [main.go](main.go), and a replica serving it is available.
 
 ## Reporting Vulnerabilities
 

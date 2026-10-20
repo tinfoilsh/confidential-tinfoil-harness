@@ -10,7 +10,7 @@ Prefer an end-to-end test through `postRoute`/`eventsIn` or the handler over a u
 
 Use these instead of building new fakes:
 
-- `testChatHarness`: a harness wired to a fake model server, a control plane stub and `memoryRows`.
+- `testChatHarness`: a harness wired to a fake model server, a stub of the Tinfoil API and `memoryRows`.
 - `memoryRows`: the in-memory sync row store. Like sync, it refuses to load or push a row with a key other than the one that sealed it (409 `KEY_MISMATCH`), and deletes without checking the key. Rows a test seeds directly count as sealed with the harness's test key.
 - `newFakeSync` and `storedThread`: attachment blobs and stored chats.
 - `routerHarness`, `serveWebsearch`, `toolTurns`, `screenedBy`: the model router, the websearch enclave, a scripted tool turn, and the safeguards sidecar.
