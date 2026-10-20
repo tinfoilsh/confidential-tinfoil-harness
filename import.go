@@ -16,6 +16,7 @@ import (
 	"os"
 	"path"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -421,7 +422,7 @@ func convertNativeArchive(input *sealedSpool) (*sealedSpool, bool, error) {
 			return nil, true, apiErr(400, "IMPORT_INVALID", "Unknown backup entity kind")
 		}
 		encoded := raw(payload)
-		outputPath := "entities/" + entityKind + "/" + jsonNumber(len(entities)) + ".json"
+		outputPath := "entities/" + entityKind + "/" + strconv.Itoa(len(entities)) + ".json"
 		if err := write(outputPath, encoded); err != nil {
 			return nil, true, err
 		}

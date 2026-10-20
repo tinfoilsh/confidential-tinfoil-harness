@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -46,7 +47,7 @@ func normalizeThread(row *storedRow) object {
 	for i, item := range arr(row.Data["messages"]) {
 		m := obj(item)
 		if str(m["id"]) == "" {
-			m["id"] = row.ID + "-message-" + jsonNumber(i)
+			m["id"] = row.ID + "-message-" + strconv.Itoa(i)
 		}
 		if str(m["createdAt"]) == "" {
 			m["createdAt"] = firstString(isoTime(m["timestamp"]), isoTime(t["createdAt"]))
@@ -160,7 +161,7 @@ func upgradeTimeline(message object) {
 	}
 	for index, item := range source {
 		block := obj(item)
-		blockID := firstString(block["id"], id+"-block-"+jsonNumber(index))
+		blockID := firstString(block["id"], id+"-block-"+strconv.Itoa(index))
 		switch block["type"] {
 		case "web_search":
 			state := obj(block["state"])
@@ -173,7 +174,7 @@ func upgradeTimeline(message object) {
 		case "url_fetches":
 			for i, value := range arr(block["fetches"]) {
 				fetch := obj(value)
-				call(firstString(fetch["id"], blockID+"-"+jsonNumber(i)), "web_fetch", string(raw(object{"url": fetch["url"]})), object{"url": fetch["url"], "title": str(fetch["title"]), "text": str(fetch["text"])})
+				call(firstString(fetch["id"], blockID+"-"+strconv.Itoa(i)), "web_fetch", string(raw(object{"url": fetch["url"]})), object{"url": fetch["url"], "title": str(fetch["title"]), "text": str(fetch["text"])})
 			}
 		case "code_exec":
 			for i, value := range arr(block["calls"]) {
@@ -182,7 +183,7 @@ func upgradeTimeline(message object) {
 				if args == "" {
 					args = string(raw(obj(c["arguments"])))
 				}
-				call(firstString(c["id"], blockID+"-"+jsonNumber(i)), str(c["toolName"]), args, normalizeToolResult(toolCall{name: str(c["toolName"]), args: args}, str(c["output"])))
+				call(firstString(c["id"], blockID+"-"+strconv.Itoa(i)), str(c["toolName"]), args, normalizeToolResult(toolCall{name: str(c["toolName"]), args: args}, str(c["output"])))
 			}
 		default:
 			block["id"] = blockID
@@ -201,14 +202,14 @@ func upgradeAttachments(message object) {
 		for i, item := range arr(message["imageData"]) {
 			image := obj(item)
 			if str(image["base64"]) != "" {
-				attachments = append(attachments, object{"type": "image", "fileName": "image-" + jsonNumber(i), "mimeType": firstString(image["mimeType"], "image/png"), "base64": image["base64"]})
+				attachments = append(attachments, object{"type": "image", "fileName": "image-" + strconv.Itoa(i), "mimeType": firstString(image["mimeType"], "image/png"), "base64": image["base64"]})
 			}
 		}
 	}
 	for index, item := range attachments {
 		attachment := obj(item)
 		if str(attachment["id"]) == "" {
-			attachment["id"] = str(message["id"]) + "-attachment-" + jsonNumber(index)
+			attachment["id"] = str(message["id"]) + "-attachment-" + strconv.Itoa(index)
 		}
 	}
 	if len(attachments) > 0 {

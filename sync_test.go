@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -159,7 +160,7 @@ func TestSyncListPreservesChatProjectFilter(t *testing.T) {
 func TestListPullsInBatchesAndListsUnreadableRows(t *testing.T) {
 	ids := []string{}
 	for i := range pullBatch + 5 {
-		ids = append(ids, "row-"+jsonNumber(i))
+		ids = append(ids, "row-"+strconv.Itoa(i))
 	}
 	batches, retried := []int{}, 0
 	client := &syncClient{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {

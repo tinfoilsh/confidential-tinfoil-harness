@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -546,7 +547,7 @@ func (h *harness) backupImage(ctx context.Context, p *principal, b *backupWriter
 		defer clear(data)
 		contentType = "image/png"
 	}
-	imageID := chatID + "/" + jsonNumber(index) + "/" + jsonNumber(integer(b.counts["images"]))
+	imageID := chatID + "/" + strconv.Itoa(index) + "/" + strconv.Itoa(integer(b.counts["images"]))
 	meta := object{"id": imageID, "chatId": chatID, "messageIndex": index, "attachmentId": attachment["id"], "fileName": firstString(descriptor["fileName"], "image"), "mimeType": contentType, "sizeBytes": len(data)}
 	if page != nil {
 		meta["page"] = integer(page)

@@ -60,7 +60,6 @@ func (h *harness) session(ctx context.Context, p *principal, _ contentKey, _ obj
 	return object{"user": object{"id": p.ID, "anonymous": p.Anonymous}, "rateLimit": credential.Limit, "models": c.displayModels(), "auto": auto, "defaultModel": "auto", "widgets": c.EnabledWidgets, "presets": presets, "features": features}, nil
 }
 
-func jsonNumber(n int) string { return string(raw(n)) }
 func threadSummary(t object) object {
 	out := object{}
 	for _, key := range []string{"id", "title", "titleState", "createdAt", "updatedAt", "projectId", "model", "webSearchEnabled", "pinned", "contextUsage"} {

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
@@ -248,7 +249,7 @@ func (h *harness) repairAttachments(ctx context.Context, p *principal, row *stor
 	for _, item := range arr(row.Data["messages"]) {
 		for _, value := range arr(obj(item)["attachments"]) {
 			a := obj(value)
-			if !containsString(missing, str(a["id"])) {
+			if !slices.Contains(missing, str(a["id"])) {
 				continue
 			}
 			a["storageThreadId"] = "elsewhere"
@@ -269,15 +270,6 @@ func retireAttachment(a object) {
 	delete(a, "encryptionKey")
 	delete(a, "key")
 	delete(a, "storageThreadId")
-}
-
-func containsString(values []string, value string) bool {
-	for _, v := range values {
-		if v == value {
-			return true
-		}
-	}
-	return false
 }
 
 // stripInlineAttachments keeps only metadata and keys in a row that is about
