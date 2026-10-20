@@ -18,11 +18,11 @@ import (
 	"github.com/google/uuid"
 )
 
-func millis(value any) int64 {
-	if t, err := time.Parse(time.RFC3339Nano, str(value)); err == nil {
+func millis(value string) int64 {
+	if t, err := time.Parse(time.RFC3339Nano, value); err == nil {
 		return t.UnixMilli()
 	}
-	return int64(integer(value))
+	return 0
 }
 
 // chatURL is where a share link opens.
