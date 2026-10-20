@@ -1,14 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"image"
+	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -388,5 +392,43 @@ func TestOldDeviceChatsUpgradeIntoThreads(t *testing.T) {
 	obj(arr(obj(arr(large["messages"])[0])["attachments"])[0])["base64"] = image
 	if got := upgraded(t, h, "alice", large); str(obj(arr(obj(arr(obj(got[0])["messages"])[0])["attachments"])[0])["base64"]) != image {
 		t.Fatal("a large image did not pass through")
+	}
+}
+
+// The router sends an Auto turn with images to a multimodal model, so Auto
+// reads an image itself; a named text-only model reads its description.
+func TestAutoReadsImagesAndTextModelsReadTheirDescriptions(t *testing.T) {
+	var source bytes.Buffer
+	png.Encode(&source, image.NewRGBA(image.Rect(0, 0, 8, 8)))
+	var mu sync.Mutex
+	var requests []object
+	h, _, _ := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		var body object
+		json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		requests = append(requests, body)
+		mu.Unlock()
+		if body["stream"] == false {
+			json.NewEncoder(w).Encode(object{"choices": []object{{"message": object{"content": "a small square"}}}})
+			return
+		}
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	h.offer.models = append(h.offer.models, &model{name: "gemma4-31b", vision: true, context: 8192, client: h.offer.models[0].client})
+	for _, name := range []string{"auto", "kimi-k3"} {
+		requests = nil
+		in := localInput("", object{})
+		obj(in["options"])["model"] = name
+		in["attachments"] = []any{object{"id": "att_photo", "kind": "image", "fileName": "photo.png", "mimeType": "image/png", "size": source.Len(), "base64": base64.StdEncoding.EncodeToString(source.Bytes())}}
+		if events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice")); events[len(events)-1].Type != "RUN_FINISHED" {
+			t.Fatalf("%s: the run ended with %+v", name, events[len(events)-1])
+		}
+		turn := arr(requests[len(requests)-1]["messages"])
+		question := obj(turn[len(turn)-2])["content"]
+		read := strings.Contains(string(raw(question)), `"type":"image_url"`)
+		described := strings.Contains(str(question), "a small square")
+		if name == "auto" && (!read || len(requests) != 1) || name != "auto" && (read || !described || len(requests) != 2) {
+			t.Fatalf("%s: the model was asked %v after %d requests", name, question, len(requests))
+		}
 	}
 }

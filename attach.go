@@ -619,15 +619,7 @@ func turnAttachments(in, thread object) ([]any, error) {
 // A local transcript may omit older images' bytes to stay small. The model
 // then reads such an image through its description, or not at all.
 func (h *harness) hydrateContext(ctx context.Context, p *principal, thread object, keyless bool) error {
-	name := str(thread["model"])
-	c := h.catalog.get()
-	vision := boolean(c.definition(name)["multimodal"], false)
-	if name == "auto" {
-		vision = true
-		for _, candidate := range c.Models {
-			vision = vision && boolean(candidate["multimodal"], false)
-		}
-	}
+	vision := h.catalog.get().vision(str(thread["model"]))
 	for _, message := range arr(thread["messages"]) {
 		for _, value := range arr(obj(message)["attachments"]) {
 			a := obj(value)

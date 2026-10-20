@@ -56,7 +56,7 @@ func (h *harness) session(ctx context.Context, p *principal, _ contentKey, _ obj
 		d := clone(p)
 		presets = append(presets, d)
 	}
-	auto := object{"multimodal": false, "default": "high", "levels": intelligenceLevels}
+	auto := object{"multimodal": true, "default": "high", "levels": intelligenceLevels}
 	return object{"user": object{"id": p.ID, "anonymous": p.Anonymous}, "rateLimit": credential.Limit, "models": c.displayModels(), "auto": auto, "defaultModel": "auto", "widgets": c.EnabledWidgets, "presets": presets, "features": features}, nil
 }
 

@@ -142,6 +142,13 @@ func (c *chatCatalog) definition(name string) object {
 	}
 	return nil
 }
+
+// vision reports whether a model reads images. The router gives an Auto turn
+// that carries images to a multimodal model.
+func (c *chatCatalog) vision(name string) bool {
+	return name == "auto" || boolean(c.definition(name)["multimodal"], false)
+}
+
 func normalizeModel(name string) string {
 	if name == "" || name == "auto-smart" || name == "auto-fast" {
 		return "auto"

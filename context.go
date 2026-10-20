@@ -222,13 +222,7 @@ func (h *harness) buildRequest(thread, profile, project object, documents []obje
 			req.widgetHint += "\n- " + w.Name + ": " + w.Hint
 		}
 	}
-	vision := boolean(def["multimodal"], false)
-	if name == "auto" {
-		vision = true
-		for _, candidate := range c.Models {
-			vision = vision && boolean(candidate["multimodal"], false)
-		}
-	}
+	vision := c.vision(name)
 	for _, item := range arr(thread["messages"]) {
 		req.groups = append(req.groups, renderMessage(obj(item), vision, policy))
 	}
