@@ -240,13 +240,14 @@ func (h *harness) importStatus(ctx context.Context, p *principal, _ contentKey, 
 	if err != nil {
 		return nil, err
 	}
-	if value, ok := result["failure_reason"]; ok {
-		result["failureReason"] = value
+	// The client names the job it asked about.
+	for snake, camel := range map[string]string{"failure_reason": "failureReason", "failure_detail": "failureDetail"} {
+		if value, ok := result[snake]; ok {
+			result[camel] = value
+			delete(result, snake)
+		}
 	}
-	if value, ok := result["failure_detail"]; ok {
-		result["failureDetail"] = value
-	}
-	result["jobId"] = result["job_id"]
+	delete(result, "job_id")
 	return result, nil
 }
 
