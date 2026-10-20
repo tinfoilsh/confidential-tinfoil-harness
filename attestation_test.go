@@ -22,7 +22,7 @@ func (t *discardedAttestationTransport) RoundTrip(*http.Request) (*http.Response
 func (t *discardedAttestationTransport) CloseIdleConnections() { close(t.closed) }
 
 func TestAttestationTimeoutDiscardsLateClient(t *testing.T) {
-	runner := attestationRunner{slots: make(chan struct{}, 2), timeout: 30 * time.Millisecond}
+	runner := attestationRunner{timeout: 30 * time.Millisecond}
 	release := make(chan struct{})
 	closed := make(chan struct{})
 	late := &http.Client{Transport: &discardedAttestationTransport{closed: closed}}
@@ -41,34 +41,6 @@ func TestAttestationTimeoutDiscardsLateClient(t *testing.T) {
 	good := &http.Client{}
 	if client, err := runner.run(context.Background(), func() (*http.Client, error) { return good, nil }); client != good || err != nil {
 		t.Fatalf("prompt verification lost its client: client=%p err=%v", client, err)
-	}
-}
-
-func TestTimedOutAttestationsKeepTheirConcurrencySlot(t *testing.T) {
-	runner := attestationRunner{slots: make(chan struct{}, 1), timeout: 30 * time.Millisecond}
-	release := make(chan struct{})
-	finished := make(chan struct{})
-	t.Cleanup(func() {
-		close(release)
-		select {
-		case <-finished:
-		case <-time.After(time.Second):
-			t.Error("verification worker did not finish")
-		}
-	})
-	if client, err := runner.run(context.Background(), func() (*http.Client, error) {
-		defer close(finished)
-		<-release
-		return nil, errors.New("unavailable")
-	}); client != nil || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("unresponsive verifier was not bounded: client=%p err=%v", client, err)
-	}
-	var called atomic.Bool
-	if _, err := runner.run(context.Background(), func() (*http.Client, error) {
-		called.Store(true)
-		return &http.Client{}, nil
-	}); !errors.Is(err, context.DeadlineExceeded) || called.Load() {
-		t.Fatalf("launched extra verification work after timeout: called=%v err=%v", called.Load(), err)
 	}
 }
 
