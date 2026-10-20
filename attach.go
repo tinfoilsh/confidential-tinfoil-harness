@@ -247,11 +247,15 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 var errUnsupportedType = apiErr(415, "ATTACHMENT_UNSUPPORTED", "Unsupported file type")
 
 // fitsUpload refuses a descriptor no upload makes: one of a file uploads do
-// not take, or holding more than an upload of its file's group.
+// not take, an image without its bytes, or holding more than an upload of
+// its file's group. A turn names an image its chat holds by id alone.
 func (d *sentAttachment) fitsUpload() error {
 	group := attachmentGroup(d.FileName)
 	if group == nil || group.kind != d.Kind {
 		return errUnsupportedType
+	}
+	if group == &imageUploads && d.Base64 == "" {
+		return apiErr(400, "BAD_REQUEST", "An image attachment requires its bytes")
 	}
 	content := len(d.TextContent) + base64.StdEncoding.DecodedLen(len(d.Base64))
 	for _, page := range d.Pages {
@@ -264,11 +268,11 @@ func (d *sentAttachment) fitsUpload() error {
 }
 
 // stored is the form of an attachment a turn sends whole that its chat
-// stores: an upload's descriptor, and an image's bytes while its client
-// holds them, no larger than the copy an upload makes for models.
+// stores: an upload's descriptor, and an image's bytes no larger than the
+// copy an upload makes for models.
 func (d *sentAttachment) stored() (Attachment, error) {
 	a := Attachment{ID: d.ID, Kind: d.Kind, FileName: d.FileName, MimeType: d.MimeType, Size: d.Size, Thumbnail: valueOr(d.Thumbnail, ""), TextContent: d.TextContent, Description: d.Description, Pages: d.Pages, Base64: d.Base64}
-	if !a.isImage() || a.Base64 == "" {
+	if !a.isImage() {
 		return a, nil
 	}
 	data, err := base64.StdEncoding.DecodeString(a.Base64)

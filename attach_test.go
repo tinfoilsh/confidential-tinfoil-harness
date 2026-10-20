@@ -206,8 +206,8 @@ func TestTheComposerOffersWhatUploadsAccept(t *testing.T) {
 
 // An upload a turn sends back is held to what uploads make: a file of a
 // type they take, of a kind its type makes, no larger than they take, and an
-// image no larger than the copy an upload makes for models. A copy already
-// within it is kept as it is.
+// image with its bytes, no larger than the copy an upload makes for models. A
+// copy already within it is kept as it is.
 func TestATurnsUploadIsHeldToWhatUploadsMake(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	fake := newFakeSync(t, h)
@@ -258,6 +258,7 @@ func TestATurnsUploadIsHeldToWhatUploadsMake(t *testing.T) {
 		{"long text", object{"kind": "document", "fileName": "notes.txt", "textContent": strings.Repeat("x", 65)}, "ATTACHMENT_TOO_LARGE"},
 		{"large image", object{"kind": "image", "fileName": "small.png", "base64": base64.StdEncoding.EncodeToString(small)}, "ATTACHMENT_TOO_LARGE"},
 		{"not an image", object{"kind": "image", "fileName": "photo.png", "base64": base64.StdEncoding.EncodeToString([]byte("not an image"))}, "ATTACHMENT_UNSUPPORTED"},
+		{"image without its bytes", object{"kind": "image", "fileName": "photo.png", "thumbnail": "dGh1bWI="}, "BAD_REQUEST"},
 	} {
 		tc.attachment["id"] = "att_refused"
 		w := turn(tc.attachment)
