@@ -28,15 +28,19 @@ func (h *harness) readLegacyPins(ctx context.Context, p *principal, key contentK
 	return nil
 }
 
-// unpinLegacy takes a chat the user unpins off the profile's list, which
-// would otherwise keep showing it pinned.
-func (h *harness) unpinLegacy(ctx context.Context, p *principal, key contentKey, id string) error {
+// setPin updates the encrypted favorites index so favorites can be fetched
+// without reading every page of chat history.
+func (h *harness) setPin(ctx context.Context, p *principal, key contentKey, id string, pinned bool) error {
 	pins, err := h.legacyPins(ctx, p, key)
-	if err != nil || !slices.Contains(pins, id) {
+	if err != nil || slices.Contains(pins, id) == pinned {
 		return err
 	}
-	_, err = h.mutateProfile(ctx, p, key, func(profile *storedProfile) {
+	_, err = h.mutateProfile(ctx, p, key, func(profile *storedProfile) error {
 		profile.PinnedChatIDs = slices.DeleteFunc(profile.PinnedChatIDs, func(pin string) bool { return pin == id })
+		if pinned {
+			profile.PinnedChatIDs = append(profile.PinnedChatIDs, id)
+		}
+		return nil
 	})
 	return err
 }

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"reflect"
 	"slices"
+
+	"github.com/google/uuid"
 )
 
 // Profile is a user's settings: what the clients show and a prompt reads.
@@ -156,6 +158,48 @@ func (p *Profile) apply(patch Profile) {
 			to.Field(i).Set(from.Field(i))
 		}
 	}
+}
+
+// mergeDeviceProfile keeps the account's settings and imports the device's
+// missing settings and prompts. Conflicting prompt text gets its own copy.
+func mergeDeviceProfile(remote, local Profile) Profile {
+	merged := local
+	merged.apply(remote)
+	presets := slices.Clone(remote.CustomPromptPresets)
+	remapped := map[string]string{}
+	for _, preset := range local.CustomPromptPresets {
+		index := slices.IndexFunc(presets, func(p CustomPreset) bool { return p.ID == preset.ID })
+		if index >= 0 {
+			kept, incoming := presets[index], preset
+			kept.CreatedAt, kept.UpdatedAt, incoming.CreatedAt, incoming.UpdatedAt = nil, nil, nil, nil
+			if reflect.DeepEqual(kept, incoming) {
+				continue
+			}
+			preset.ID = "user:" + uuid.NewSHA1(uuid.NameSpaceURL, raw(incoming)).String()
+			preset.Name += " (from this device)"
+			remapped[incoming.ID] = preset.ID
+			if slices.ContainsFunc(presets, func(p CustomPreset) bool { return p.ID == preset.ID }) {
+				continue
+			}
+		}
+		presets = append(presets, preset)
+	}
+	merged.CustomPromptPresets = presets
+	merged.FavoritePromptPresetIDs = slices.Clone(remote.FavoritePromptPresetIDs)
+	for _, id := range local.FavoritePromptPresetIDs {
+		if replacement := remapped[id]; replacement != "" {
+			id = replacement
+		}
+		if !slices.Contains(merged.FavoritePromptPresetIDs, id) {
+			merged.FavoritePromptPresetIDs = append(merged.FavoritePromptPresetIDs, id)
+		}
+	}
+	if remote.DefaultPromptPresetID == nil && local.DefaultPromptPresetID != nil {
+		if replacement := remapped[*local.DefaultPromptPresetID]; replacement != "" {
+			merged.DefaultPromptPresetID = &replacement
+		}
+	}
+	return merged
 }
 
 // personalized reports whether the prompt carries the user's preferences.

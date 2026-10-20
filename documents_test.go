@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"regexp"
 	"strings"
 	"sync"
@@ -517,12 +518,19 @@ func TestAChatTheProfileListsReadsAsPinned(t *testing.T) {
 		}
 	}
 	update("chat-2", true)
-	if rows.rows[rowMapKey(p, "profile", "profile")].ETag != "1" {
-		t.Fatal("pinning a chat wrote the profile's old list")
+	if pins := readProfile(rows.rows[rowMapKey(p, "profile", "profile")].Data).PinnedChatIDs; !slices.Contains(pins, "chat-2") {
+		t.Fatal("pinning a chat did not update the complete favorites index")
 	}
 	update("chat-1", false)
 	if got := pinned(); got["chat-1"] != false || got["chat-2"] != true {
 		t.Fatalf("after pinning chat-2 and unpinning chat-1 the list shows %v", got)
+	}
+	var page struct {
+		Pinned []threadSummary `json:"pinned"`
+	}
+	json.Unmarshal(postRoute(h, "/v1/threads/list", object{"key": key.base64()}, "alice").Body.Bytes(), &page)
+	if len(page.Pinned) != 1 || page.Pinned[0].ID != "chat-2" {
+		t.Fatalf("favorites: %+v", page.Pinned)
 	}
 }
 

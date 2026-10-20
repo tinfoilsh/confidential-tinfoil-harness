@@ -14,6 +14,7 @@ type threadSummary struct {
 	TitleState       string        `json:"titleState"`
 	CreatedAt        *string       `json:"createdAt"`
 	UpdatedAt        *string       `json:"updatedAt"`
+	ActivityAt       string        `json:"activityAt"`
 	ProjectID        *string       `json:"projectId"`
 	Model            string        `json:"model"`
 	WebSearchEnabled bool          `json:"webSearchEnabled"`
@@ -27,6 +28,7 @@ type threadSummary struct {
 func summarize(t *Thread) threadSummary {
 	s := threadSummary{ID: t.ID, Title: t.Title, TitleState: t.TitleState, CreatedAt: present(t.CreatedAt), UpdatedAt: present(t.UpdatedAt), ProjectID: t.ProjectID, Model: t.Model,
 		WebSearchEnabled: t.WebSearchEnabled, Pinned: t.Pinned, ContextUsage: t.ContextUsage, MessageCount: max(0, len(t.Messages)-t.HiddenCount), Flagged: t.Flagged}
+	s.ActivityAt = t.activityAt()
 	// The hint lapses with the run's deadline.
 	if run := t.ActiveRun; run != nil {
 		if expires, err := time.Parse(time.RFC3339Nano, run.ExpiresAt); err == nil && nowUTC().Before(expires) {
@@ -34,6 +36,19 @@ func summarize(t *Thread) threadSummary {
 		}
 	}
 	return s
+}
+
+func (t *Thread) activityAt() string {
+	latest, _ := time.Parse(time.RFC3339Nano, t.CreatedAt)
+	for _, message := range t.Messages {
+		if at, err := time.Parse(time.RFC3339Nano, message.CreatedAt); err == nil && at.After(latest) {
+			latest = at
+		}
+	}
+	if latest.IsZero() {
+		return t.CreatedAt
+	}
+	return latest.Format(time.RFC3339Nano)
 }
 
 // present is a text field a view shows as null when it is empty.

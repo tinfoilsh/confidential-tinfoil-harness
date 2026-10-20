@@ -212,14 +212,16 @@ func (h *harness) loadProfile(ctx context.Context, p *principal, key contentKey)
 	return &profile, nil
 }
 
-func (h *harness) mutateProfile(ctx context.Context, p *principal, key contentKey, change func(*storedProfile)) (storedProfile, error) {
+func (h *harness) mutateProfile(ctx context.Context, p *principal, key contentKey, change func(*storedProfile) error) (storedProfile, error) {
 	var profile storedProfile
 	err := h.commitRow(ctx, p, key, "profile", "profile", true, func(row *storedRow, exists bool) error {
 		profile = storedProfile{}
 		if exists {
 			profile = readProfile(row.Data)
 		}
-		change(&profile)
+		if err := change(&profile); err != nil {
+			return err
+		}
 		profile.UpdatedAt = timestamp()
 		row.Data = raw(profile)
 		return nil
