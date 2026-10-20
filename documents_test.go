@@ -164,7 +164,7 @@ func TestStoredUploadIsOffloadedUnderItsThread(t *testing.T) {
 	}
 	put := fake.puts[0]
 	payload, _ := base64.StdEncoding.DecodeString(str(put["plaintext"]))
-	if put["chat_id"] != thread || string(payload) != `{"textContent":"remember the blue door"}` || put["idempotency_key"] != attachmentIdempotencyKey(thread, str(sent["id"]), payload) {
+	if put["chat_id"] != thread || string(payload) != `{"textContent":"remember the blue door"}` || put["idempotency_key"] != sent["id"] {
 		t.Fatalf("blob is not the document payload under its thread: %v %s", put, payload)
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", thread)
@@ -507,20 +507,6 @@ func TestAStoredChatIsSharedFromItsRow(t *testing.T) {
 	}
 	if messages := arr(shared["messages"]); shared["title"] != "Old" || len(messages) != 2 || obj(messages[0])["content"] != "look at this" || obj(messages[1])["content"] != "ok" {
 		t.Fatalf("shared %v", shared)
-	}
-}
-
-func TestDeleteAllIncludesRowsTheKeyCannotOpen(t *testing.T) {
-	h, rows, key := testChatHarness(t, nil)
-	storedThread(rows, "alice", "readable")
-	storedThread(rows, "alice", "sealed-to-a-retired-key")
-	rows.sealed[rowMapKey(&principal{ID: "alice"}, "chat", "sealed-to-a-retired-key")] = randomKey()
-	result, err := h.deleteAllThreads(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, key, object{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if obj(result)["deleted"] != 2 || len(rows.rows) != 0 {
-		t.Fatalf("delete-all left %d rows: %v", len(rows.rows), result)
 	}
 }
 

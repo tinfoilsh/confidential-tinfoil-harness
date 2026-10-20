@@ -110,18 +110,22 @@ func (s *memoryRows) push(_ context.Context, p *principal, key contentKey, scope
 	s.rows[name], s.sealed[name] = storedRow{ID: row.ID, ETag: next, Data: clone(row.Data)}, key
 	return next, nil
 }
-func (s *memoryRows) remove(_ context.Context, p *principal, _ contentKey, scope string, row *storedRow) error {
+func (s *memoryRows) remove(_ context.Context, p *principal, _ contentKey, scope, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
-	name := rowMapKey(p, scope, row.ID)
-	// Like sync, an empty if-match deletes unconditionally.
-	if row.ETag != "" && s.rows[name].ETag != row.ETag {
-		return apiErr(409, "REVISION_CONFLICT", "changed")
-	}
+	name := rowMapKey(p, scope, id)
 	delete(s.rows, name)
 	delete(s.sealed, name)
 	return nil
+}
+func (s *memoryRows) ids(_ context.Context, p *principal, scope, project string) ([]string, error) {
+	page, _ := s.list(context.Background(), p, s.key, scope, "", project, 0)
+	ids := page.Unreadable
+	for _, row := range page.Rows {
+		ids = append(ids, row.ID)
+	}
+	return ids, nil
 }
 
 func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memoryRows, contentKey) {
@@ -898,30 +902,6 @@ func prioritySend(t *testing.T, stopped bool) {
 		case <-time.After(3 * time.Second):
 			t.Fatalf("the %s turn never started", want)
 		}
-	}
-}
-
-func TestBulkDeletionScopesAccountAndProject(t *testing.T) {
-	h, rows, key := testChatHarness(t, nil)
-	for _, owner := range []string{"alice", "bob"} {
-		for _, id := range []string{"one", "two"} {
-			p := &principal{ID: owner}
-			rows.rows[rowMapKey(p, "chat", id)] = storedRow{ID: id, ETag: "1", Data: object{"projectId": id}}
-		}
-	}
-	w := postRoute(h, "/v1/threads/delete-all", object{"key": key.base64(), "projectId": "one"}, "alice")
-	if w.Code != 200 {
-		t.Fatalf("delete failed: %s", w.Body.String())
-	}
-	if len(rows.rows) != 3 {
-		t.Fatalf("wrong deletion scope: %v", rows.rows)
-	}
-	if _, err := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", "two"); err != nil {
-		t.Fatal(err)
-	}
-	w = postRoute(h, "/v1/threads/delete-all", object{"key": key.base64()}, "")
-	if w.Code != 401 {
-		t.Fatalf("anonymous bulk deletion accepted: %d", w.Code)
 	}
 }
 

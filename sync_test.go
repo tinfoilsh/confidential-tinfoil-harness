@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -157,7 +158,7 @@ func TestSyncListPreservesChatProjectFilter(t *testing.T) {
 
 func TestListPullsInBatchesAndListsUnreadableRows(t *testing.T) {
 	ids := []string{}
-	for i := range 25 {
+	for i := range pullBatch + 5 {
 		ids = append(ids, "row-"+jsonNumber(i))
 	}
 	batches, retried := []int{}, 0
@@ -195,17 +196,73 @@ func TestListPullsInBatchesAndListsUnreadableRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(batches, []int{20, 1, 5}) {
+	if !slices.Equal(batches, []int{pullBatch, 1, 5}) {
 		t.Fatalf("pull batches: %v", batches)
 	}
 	titles := []string{}
 	for _, row := range page.Rows {
 		titles = append(titles, str(row.Data["title"]))
 	}
-	if len(page.Rows) != 24 || !slices.Contains(titles, "row-7") || slices.Contains(titles, "row-3") || !slices.Equal(page.Unreadable, []string{"row-3"}) {
+	if len(page.Rows) != pullBatch+4 || !slices.Contains(titles, "row-7") || slices.Contains(titles, "row-3") || !slices.Equal(page.Unreadable, []string{"row-3"}) {
 		t.Fatalf("rows %v, unreadable %v", titles, page.Unreadable)
 	}
 	if _, err := client.load(context.Background(), &principal{ID: "alice", JWT: "jwt"}, randomKey(), "chat", "row-3"); asAPIError(err).Code != "KEY_MISMATCH" {
 		t.Fatalf("loading an unreadable row: %v", err)
+	}
+}
+
+// Sync finds a row's revision, retries a race and deletes rows no key can
+// open, so a deletion opens nothing and names no revision.
+func TestDeletionsLeaveTheWorkToSync(t *testing.T) {
+	h, _, key := testChatHarness(t, nil)
+	var requests []object
+	pages := map[string]object{"": {"updates": []object{{"id": "one"}, {"id": "sealed-to-a-retired-key"}}, "next_cursor": "more"}, "more": {"updates": []object{{"id": "two"}}}}
+	h.syncAPI = &syncClient{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
+		var in object
+		json.NewDecoder(r.Body).Decode(&in)
+		in["path"] = r.URL.Path
+		requests = append(requests, in)
+		switch r.URL.Path {
+		case "/v1/sync/list-status":
+			return syncTestResponse(200, pages[str(in["cursor"])])
+		case "/v1/sync/delete-all-projects":
+			return syncTestResponse(200, object{"ok": true, "deleted": 4})
+		case "/v1/sync/delete":
+			return syncTestResponse(200, object{"ok": true})
+		}
+		return syncTestResponse(404, object{"code": "NOT_FOUND"})
+	})}}
+	h.storeRows = h.syncAPI
+	deleted := func(scope, id string) object {
+		return object{"path": "/v1/sync/delete", "scope": scope, "id": id, "key": key.base64(), "if_match": ""}
+	}
+	for _, tc := range []struct {
+		path string
+		in   object
+		want []object
+	}{
+		{"/v1/threads/delete", object{"id": "missing"}, []object{deleted("chat", "missing")}},
+		{"/v1/projects/delete", object{"id": "project-1"}, []object{deleted("project", "project-1")}},
+		{"/v1/threads/delete-all", object{"projectId": "project-1"}, []object{
+			{"path": "/v1/sync/list-status", "scope": "chat", "project_id": "project-1", "cursor": "", "limit": float64(listStatusPage), "direction": "desc"},
+			{"path": "/v1/sync/list-status", "scope": "chat", "project_id": "project-1", "cursor": "more", "limit": float64(listStatusPage), "direction": "desc"},
+			deleted("chat", "one"), deleted("chat", "sealed-to-a-retired-key"), deleted("chat", "two")}},
+		{"/v1/projects/delete-all", object{}, []object{{"path": "/v1/sync/delete-all-projects", "key": key.base64()}}},
+	} {
+		requests = nil
+		tc.in["key"] = key.base64()
+		w := postRoute(h, tc.path, tc.in, "alice")
+		for _, request := range requests {
+			if str(request["idempotency_key"]) == "" && request["path"] != "/v1/sync/list-status" {
+				t.Fatalf("%s: sync was asked %v without an idempotency key", tc.path, request)
+			}
+			delete(request, "idempotency_key")
+		}
+		if w.Code != 200 || !reflect.DeepEqual(decodeValue(raw(requests)), decodeValue(raw(tc.want))) {
+			t.Fatalf("%s: HTTP %d %s, sync was asked\n%v\nwant\n%v", tc.path, w.Code, w.Body.String(), requests, tc.want)
+		}
+	}
+	if w := postRoute(h, "/v1/threads/delete-all", object{"key": key.base64()}, ""); w.Code != 401 {
+		t.Fatalf("anonymous bulk deletion accepted: %d", w.Code)
 	}
 }

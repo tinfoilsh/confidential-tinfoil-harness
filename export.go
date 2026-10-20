@@ -176,11 +176,9 @@ func (h *harness) openShare(ctx context.Context, _ *principal, _ contentKey, in 
 		return nil, err
 	}
 	fragment, ok := strings.CutPrefix(str(in["fragment"]), "v2:")
-	key, decodeErr := hex.DecodeString(fragment)
-	if !ok || decodeErr != nil || len(key) != 32 {
+	if !ok {
 		return nil, apiErr(400, "BAD_REQUEST", "A v2 share fragment is required")
 	}
-	clear(key)
 	req, _ := http.NewRequestWithContext(ctx, "GET", h.controlplane+"/api/shares/"+id, nil)
 	resp, err := h.cpClient.Do(req)
 	if err != nil {

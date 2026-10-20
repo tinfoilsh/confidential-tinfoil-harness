@@ -194,7 +194,7 @@ func (h *harness) deleteThread(ctx context.Context, p *principal, key contentKey
 		return nil, err
 	}
 	h.stopThread(p, id)
-	return h.deleteRow(ctx, p, key, "chat", id)
+	return object{}, h.storeRows.remove(ctx, p, key, "chat", id)
 }
 func forkTitle(title string) string {
 	title = cmp.Or(title, "Untitled")
@@ -297,36 +297,20 @@ func (h *harness) deleteAllThreads(ctx context.Context, p *principal, key conten
 	if err := validateFields(in, "", "", "projectId"); err != nil {
 		return nil, err
 	}
-	ids, err := h.rowIDs(ctx, p, key, "chat", str(in["projectId"]))
+	// Every id is listed before any is deleted, so a shrinking list cannot
+	// skip a page, and rows this key cannot open are deleted too.
+	ids, err := h.storeRows.ids(ctx, p, "chat", str(in["projectId"]))
 	if err != nil {
 		return nil, err
 	}
 	for _, id := range ids {
-		if _, err := h.deleteThread(ctx, p, key, object{"id": id}); err != nil && asAPIError(err).HTTP != 404 {
+		if _, err := h.deleteThread(ctx, p, key, object{"id": id}); err != nil {
 			return nil, err
 		}
 	}
 	return object{"deleted": len(ids)}, nil
 }
 
-func (h *harness) deleteRow(ctx context.Context, p *principal, key contentKey, scope, id string) (any, error) {
-	for i := 0; i < 3; i++ {
-		row, err := h.storeRows.load(ctx, p, key, scope, id)
-		if err != nil {
-			if asAPIError(err).HTTP == 404 {
-				return nil, err
-			}
-			// A row this key cannot open, such as one sealed to a retired key,
-			// is still the caller's to delete. Sync deletes it unconditionally.
-			return object{}, h.storeRows.remove(ctx, p, key, scope, &storedRow{ID: id})
-		}
-		err = h.storeRows.remove(ctx, p, key, scope, row)
-		if err == nil || asAPIError(err).Code != "REVISION_CONFLICT" {
-			return object{}, err
-		}
-	}
-	return nil, apiErr(409, "REVISION_CONFLICT", "The row changed while deleting")
-}
 func (h *harness) profile(ctx context.Context, p *principal, key contentKey) (object, error) {
 	row, err := h.storeRows.load(ctx, p, key, "profile", "profile")
 	if err != nil {
@@ -488,19 +472,18 @@ func (h *harness) deleteProject(ctx context.Context, p *principal, key contentKe
 	if err != nil {
 		return nil, err
 	}
-	return h.deleteRow(ctx, p, key, "project", id)
+	return object{}, h.storeRows.remove(ctx, p, key, "project", id)
 }
+
+// Sync deletes every project and project document in one step.
 func (h *harness) deleteAllProjects(ctx context.Context, p *principal, key contentKey, _ object) (any, error) {
-	ids, err := h.rowIDs(ctx, p, key, "project", "")
-	if err != nil {
+	var result struct {
+		Deleted int `json:"deleted"`
+	}
+	if err := h.syncAPI.call(ctx, p, "/v1/sync/delete-all-projects", object{"key": key.base64(), "idempotency_key": uuid.NewString()}, &result); err != nil {
 		return nil, err
 	}
-	for _, id := range ids {
-		if _, err := h.deleteProject(ctx, p, key, object{"id": id}); err != nil && asAPIError(err).HTTP != 404 {
-			return nil, err
-		}
-	}
-	return object{"deleted": len(ids)}, nil
+	return object{"deleted": result.Deleted}, nil
 }
 
 func (h *harness) deleteDocument(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
@@ -512,7 +495,7 @@ func (h *harness) deleteDocument(ctx context.Context, p *principal, key contentK
 	if err != nil {
 		return nil, err
 	}
-	return h.deleteRow(ctx, p, key, "project_document", project+"/"+doc)
+	return object{}, h.storeRows.remove(ctx, p, key, "project_document", project+"/"+doc)
 }
 func (h *harness) searchThreads(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
 	var found object

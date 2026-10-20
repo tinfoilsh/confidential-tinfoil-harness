@@ -3,9 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"regexp"
 	"strings"
@@ -16,8 +14,6 @@ import (
 // as JSON, and the chat row keeps only metadata and the blob key. Sync deletes
 // any blob a chat stops referencing, so every attachment a row names must be
 // stored under that row's chat. Every client reads and writes this format.
-const maxDocumentPayload = 48 << 20
-
 var enclaveAttachmentID = regexp.MustCompile(`^[0-9a-f]{36}$`)
 
 func attachmentKey(a object) string { return firstString(a["encryptionKey"], a["key"]) }
@@ -46,11 +42,7 @@ func encodeDocument(a object) ([]byte, error) {
 	if len(payload) == 0 {
 		return nil, apiErr(415, "ATTACHMENT_UNSUPPORTED", "The document has no extracted content")
 	}
-	encoded := raw(payload)
-	if len(encoded) > maxDocumentPayload {
-		return nil, apiErr(413, "ATTACHMENT_TOO_LARGE", "The document exceeds the storage limit")
-	}
-	return encoded, nil
+	return raw(payload), nil
 }
 
 func decodeDocument(data []byte) (object, error) {
@@ -95,16 +87,10 @@ func documentText(content object) string {
 	return strings.Join(parts, "\n\n")
 }
 
-// The web client derives the same key, so either client retrying an upload of
-// the same bytes to the same chat reuses one blob.
-func attachmentIdempotencyKey(chatID, clientID string, data []byte) string {
-	digest := sha256.Sum256(data)
-	sum := sha256.Sum256([]byte("attachment:" + chatID + ":" + clientID + ":" + base64.StdEncoding.EncodeToString(digest[:])))
-	return hex.EncodeToString(sum[:16])
-}
-
+// Sync derives a blob's id from its idempotency key, chat and bytes, so
+// storing the same attachment again reuses its blob.
 func (h *harness) putAttachment(ctx context.Context, p *principal, chatID, clientID string, data []byte) (string, string, error) {
-	in := object{"chat_id": chatID, "plaintext": base64.StdEncoding.EncodeToString(data), "idempotency_key": attachmentIdempotencyKey(chatID, clientID, data)}
+	in := object{"chat_id": chatID, "plaintext": base64.StdEncoding.EncodeToString(data), "idempotency_key": clientID}
 	var stored object
 	var err error
 	for attempt := 0; attempt < 3; attempt++ {
