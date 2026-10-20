@@ -3,6 +3,7 @@ package main
 import (
 	"cmp"
 	"context"
+	"net/http"
 	"slices"
 	"time"
 
@@ -162,6 +163,9 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	ctx = context.WithValue(ctx, apiKeyKey{}, string(r.credential.Key))
 	ctx = context.WithValue(ctx, usageContextKey{}, usageForRun(r))
 	ctx = context.WithValue(ctx, usageSinkKey{}, r.out)
+	if err := h.refuseFlagged(ctx, r, p); err != nil {
+		return err
+	}
 	var plan *turnPlan
 	// A chat another writer changed since it was read takes the turn again.
 	for attempt := 1; ; attempt++ {
@@ -258,6 +262,28 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 		}
 	}()
 	return nil
+}
+
+// refuseFlagged refuses a turn on a chat the safeguards flagged, which a
+// stored chat then records. An ask is a turn on the chat it asks about.
+func (h *harness) refuseFlagged(ctx context.Context, r *chatRun, p *principal) error {
+	chat := r.thread.id
+	if r.input.Kind == "ask" {
+		chat = r.input.ThreadID
+	}
+	if !h.auth.flaggedChats(ctx, p)[chat] {
+		return nil
+	}
+	if !r.thread.local && r.input.Kind != "ask" {
+		_, err := h.mutateThread(ctx, p, r.key, chat, func(t *Thread) error {
+			t.Flagged = true
+			return nil
+		})
+		if err != nil && asAPIError(err).HTTP != http.StatusNotFound {
+			return err
+		}
+	}
+	return errChatFlagged
 }
 
 // activeRun marks a chat's reply as streaming until the run's deadline.

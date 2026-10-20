@@ -166,7 +166,7 @@ func TestAnonymousReconnectUsesKeyPossessionInsteadOfIP(t *testing.T) {
 func subscriberHarness(t *testing.T, controlplane http.HandlerFunc) (*harness, contentKey) {
 	t.Helper()
 	h, _, key := testChatHarness(t, nil)
-	cp := httptest.NewServer(controlplane)
+	cp := httptest.NewServer(unflagged(controlplane))
 	t.Cleanup(cp.Close)
 	h.auth.client, h.auth.controlplane = cp.Client(), cp.URL
 	delete(h.auth.credentials, "user:alice")

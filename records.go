@@ -76,8 +76,10 @@ func (h *harness) listThreads(ctx context.Context, p *principal, key contentKey,
 	if err := h.readLegacyPins(ctx, p, key, rows); err != nil {
 		return nil, err
 	}
+	flags := h.auth.flaggedChats(ctx, p)
 	list := []threadSummary{}
 	for _, row := range rows {
+		flags.mark(&row.Thread)
 		list = append(list, summarize(&row.Thread))
 	}
 	return struct {
@@ -93,6 +95,7 @@ func (h *harness) getThread(ctx context.Context, p *principal, key contentKey, i
 	if err := h.readLegacyPins(ctx, p, key, []*threadRow{row}); err != nil {
 		return nil, err
 	}
+	h.auth.flaggedChats(ctx, p).mark(&row.Thread)
 	return window(row, in.Before, in.Limit), nil
 }
 func (h *harness) updateThread(ctx context.Context, p *principal, key contentKey, in *updateThreadRequest) (any, error) {
@@ -122,6 +125,7 @@ func (h *harness) updateThread(ctx context.Context, p *principal, key contentKey
 	if err != nil {
 		return nil, err
 	}
+	h.auth.flaggedChats(ctx, p).mark(&row.Thread)
 	if in.Local {
 		return h.deviceReply(row), nil
 	}
@@ -264,6 +268,7 @@ func (h *harness) changeMessages(ctx context.Context, p *principal, key contentK
 	if err != nil {
 		return nil, err
 	}
+	h.auth.flaggedChats(ctx, p).mark(&row.Thread)
 	if in.Local {
 		return h.deviceReply(row), nil
 	}
@@ -406,6 +411,7 @@ func (h *harness) searchThreads(ctx context.Context, p *principal, key contentKe
 			return nil, err
 		}
 	}
+	flags := h.auth.flaggedChats(ctx, p)
 	results := []threadSummary{}
 	for _, id := range ids {
 		row, err := h.loadThread(ctx, p, key, id)
@@ -416,6 +422,7 @@ func (h *harness) searchThreads(ctx context.Context, p *principal, key contentKe
 			}
 			return nil, err
 		}
+		flags.mark(&row.Thread)
 		results = append(results, summarize(&row.Thread))
 	}
 	return struct {

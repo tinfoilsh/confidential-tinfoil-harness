@@ -173,7 +173,7 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 	}
 	server := httptest.NewServer(upstream)
 	t.Cleanup(server.Close)
-	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	cp := httptest.NewServer(unflagged(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/shim/validate-key" {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -217,6 +217,18 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 	}
 	rows.key = key
 	return h, rows, key
+}
+
+// unflagged is a control plane that lists no safeguard flags and answers
+// everything else with handler.
+func unflagged(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == safeguardFlagsPath {
+			io.WriteString(w, `{"flags":[]}`)
+			return
+		}
+		handler(w, r)
+	}
 }
 
 // heldModel answers each model turn with one chunk, then holds the stream

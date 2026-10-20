@@ -85,7 +85,7 @@ func TestManagedModelRefreshesRejectedInferenceCredentialOnce(t *testing.T) {
 				}
 				io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\ndata: [DONE]\n\n")
 			})
-			cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			cp := httptest.NewServer(unflagged(func(w http.ResponseWriter, r *http.Request) {
 				exchanges.Add(1)
 				if r.URL.Path != "/api/chat/token" || r.Header.Get("Authorization") != "Bearer clerk-alice" {
 					t.Error("exchange did not use the Clerk session")
