@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sync/atomic"
 	"testing"
 )
@@ -22,12 +23,14 @@ func TestAFlaggedChatTakesNoTurns(t *testing.T) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		io.WriteString(w, `{"flags":[{"id":"f1","conversation_id":"flagged","created_at":"2026-10-01T00:00:00Z"}],"in_window":1,"window_hours":720,"warn_threshold":2,"ban_threshold":3}`)
+		io.WriteString(w, `{"flags":[{"id":"f1","conversation_id":"flagged","created_at":"2026-10-01T00:00:00Z"},{"id":"f2","conversation_id":"listed","created_at":"2026-10-01T00:00:00Z"}],"in_window":2,"window_hours":720,"warn_threshold":2,"ban_threshold":3}`)
 	}))
 	t.Cleanup(cp.Close)
 	h.auth.client, h.auth.controlplane = cp.Client(), cp.URL
 	storedThread(rows, "alice", "flagged")
 	storedThread(rows, "alice", "fine")
+	// A flagged chat that takes no turn is flagged only by the control plane.
+	storedThread(rows, "alice", "listed")
 	code := func(w *httptest.ResponseRecorder) string {
 		var refused struct {
 			Error apiError `json:"error"`
@@ -54,10 +57,17 @@ func TestAFlaggedChatTakesNoTurns(t *testing.T) {
 		Threads []threadSummary `json:"threads"`
 	}
 	json.Unmarshal(postRoute(h, "/v1/threads/list", object{"key": key.base64()}, "alice").Body.Bytes(), &list)
+	listed := map[string]bool{}
 	for _, summary := range list.Threads {
-		if summary.Flagged != (summary.ID == "flagged") {
-			t.Fatalf("the list shows %+v", list.Threads)
-		}
+		listed[summary.ID] = summary.Flagged
+	}
+	if len(list.Threads) != 3 || !reflect.DeepEqual(listed, map[string]bool{"flagged": true, "fine": false, "listed": true}) {
+		t.Fatalf("the list shows %+v", list.Threads)
+	}
+	var got threadSummary
+	json.Unmarshal(postRoute(h, "/v1/threads/get", object{"key": key.base64(), "id": "listed"}, "alice").Body.Bytes(), &got)
+	if got.ID != "listed" || !got.Flagged {
+		t.Fatalf("the chat reads as %+v", got)
 	}
 	if renamed := deviceOperation(t, h, "/v1/threads/update", priorThread(), object{"id": "flagged", "title": "Renamed"}, "alice"); renamed["flagged"] != true {
 		t.Fatalf("the device chat came back as %v", renamed)
