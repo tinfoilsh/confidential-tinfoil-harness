@@ -315,6 +315,11 @@ type profileUpgradeRequest struct {
 	Profile json.RawMessage `json:"profile"`
 }
 
+type profileMergeRequest struct {
+	profileUpgradeRequest
+	ChangedFields []string `json:"changedFields"`
+}
+
 func (in *profileUpgradeRequest) validate() error {
 	if !isObject(in.Profile) {
 		return apiErr(400, "BAD_REQUEST", "profile must be an object")

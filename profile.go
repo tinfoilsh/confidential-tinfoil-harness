@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"slices"
+	"strings"
 
 	"github.com/google/uuid"
 )
@@ -56,8 +57,7 @@ type CustomPreset struct {
 type storedProfile struct {
 	Profile
 	UpdatedAt string `json:"updatedAt,omitempty"`
-	// PinnedChatIDs are the favorites iOS kept here before each chat stored
-	// its own pin. A chat this lists reads as pinned.
+	// PinnedChatIDs makes favorites available outside the loaded history pages.
 	PinnedChatIDs []string `json:"pinnedChatIds,omitzero"`
 }
 
@@ -160,11 +160,18 @@ func (p *Profile) apply(patch Profile) {
 	}
 }
 
-// mergeDeviceProfile keeps the account's settings and imports the device's
-// missing settings and prompts. Conflicting prompt text gets its own copy.
-func mergeDeviceProfile(remote, local Profile) Profile {
+// mergeDeviceProfile imports missing settings and prompts, with explicit
+// device edits taking precedence. Conflicting prompt text gets its own copy.
+func mergeDeviceProfile(remote, local Profile, changed []string) Profile {
 	merged := local
 	merged.apply(remote)
+	to, from := reflect.ValueOf(&merged).Elem(), reflect.ValueOf(local)
+	for i := range from.NumField() {
+		name, _, _ := strings.Cut(from.Type().Field(i).Tag.Get("json"), ",")
+		if slices.Contains(changed, name) && !from.Field(i).IsZero() {
+			to.Field(i).Set(from.Field(i))
+		}
+	}
 	presets := slices.Clone(remote.CustomPromptPresets)
 	remapped := map[string]string{}
 	for _, preset := range local.CustomPromptPresets {
@@ -194,7 +201,7 @@ func mergeDeviceProfile(remote, local Profile) Profile {
 			merged.FavoritePromptPresetIDs = append(merged.FavoritePromptPresetIDs, id)
 		}
 	}
-	if remote.DefaultPromptPresetID == nil && local.DefaultPromptPresetID != nil {
+	if (remote.DefaultPromptPresetID == nil || slices.Contains(changed, "defaultPromptPresetId")) && local.DefaultPromptPresetID != nil {
 		if replacement := remapped[*local.DefaultPromptPresetID]; replacement != "" {
 			merged.DefaultPromptPresetID = &replacement
 		}

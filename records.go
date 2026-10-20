@@ -90,7 +90,7 @@ func (h *harness) listThreads(ctx context.Context, p *principal, key contentKey,
 	if err != nil {
 		return nil, err
 	}
-	if err := h.readLegacyPins(ctx, p, key, rows); err != nil {
+	if err := h.applyPins(ctx, p, key, rows); err != nil {
 		return nil, err
 	}
 	flags := h.auth.flaggedChats(ctx, p)
@@ -117,7 +117,7 @@ func (h *harness) getThread(ctx context.Context, p *principal, key contentKey, i
 	if err != nil {
 		return nil, err
 	}
-	if err := h.readLegacyPins(ctx, p, key, []*threadRow{row}); err != nil {
+	if err := h.applyPins(ctx, p, key, []*threadRow{row}); err != nil {
 		return nil, err
 	}
 	h.auth.flaggedChats(ctx, p).mark(&row.Thread)
@@ -163,7 +163,7 @@ func (h *harness) updateThread(ctx context.Context, p *principal, key contentKey
 }
 
 func (h *harness) pinnedThreads(ctx context.Context, p *principal, key contentKey) ([]threadSummary, error) {
-	ids, err := h.legacyPins(ctx, p, key)
+	ids, err := h.pinnedIDs(ctx, p, key)
 	if err != nil {
 		return nil, err
 	}
@@ -389,10 +389,10 @@ func (h *harness) updateProfile(ctx context.Context, p *principal, key contentKe
 	return h.viewProfile(stored), nil
 }
 
-func (h *harness) mergeDeviceProfile(ctx context.Context, p *principal, key contentKey, in *profileUpgradeRequest) (any, error) {
+func (h *harness) mergeDeviceProfile(ctx context.Context, p *principal, key contentKey, in *profileMergeRequest) (any, error) {
 	local := localProfile(in.Profile)
 	merged, err := h.mutateProfile(ctx, p, key, func(stored *storedProfile) error {
-		stored.Profile = mergeDeviceProfile(stored.Profile, *local)
+		stored.Profile = mergeDeviceProfile(stored.Profile, *local, in.ChangedFields)
 		return stored.Profile.validate()
 	})
 	if err != nil {
