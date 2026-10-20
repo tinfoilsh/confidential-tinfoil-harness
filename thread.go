@@ -286,6 +286,11 @@ func (b *Block) callID() string {
 	return b.ID
 }
 
+// resolved reports whether a client already answered the widget a call drew.
+func (b *Block) resolved() bool {
+	return len(b.Resolution) > 0 && string(b.Resolution) != string(jsonNull)
+}
+
 func (a *Attachment) isImage() bool { return a.Kind == "image" }
 
 // storageKey opens the attachment's blob: a sync key, or a control plane
