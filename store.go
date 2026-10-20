@@ -309,6 +309,7 @@ func (h *harness) projectDocuments(ctx context.Context, p *principal, key conten
 func (h *harness) createProjectDocument(ctx context.Context, p *principal, key contentKey, doc ProjectDocument) (ProjectDocument, error) {
 	id := doc.ProjectID + "/" + doc.ID
 	err := h.commitRow(ctx, p, key, "project_document", id, true, func(row *storedRow, exists bool) error {
+		row.project, row.projectSet = &doc.ProjectID, true
 		doc.CreatedAt = timestamp()
 		if exists {
 			doc.CreatedAt = readProjectDocument(row, doc.ProjectID).CreatedAt
@@ -397,6 +398,26 @@ func (h *harness) openSealedShare(ctx context.Context, shareKey string, cipherte
 }
 
 // Keys and imports
+
+func (h *harness) authorizeArchive(ctx context.Context, p *principal, encodedKey, operation string) error {
+	if encodedKey == "" {
+		return nil
+	}
+	if p.Anonymous {
+		return errAnonymousCloud
+	}
+	key, err := decodeContentKey(encodedKey)
+	if err != nil {
+		return err
+	}
+	defer clear(key[:])
+	token, err := h.storeRows.authorizeStorage(ctx, p, key, operation, "")
+	if err != nil {
+		return err
+	}
+	p.SyncToken = token
+	return nil
+}
 
 // keyCall passes a key management request to sync as the client sent it.
 func (h *harness) keyCall(ctx context.Context, p *principal, path string, in json.RawMessage) (json.RawMessage, error) {

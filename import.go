@@ -82,7 +82,18 @@ func (h *harness) handleImport(w http.ResponseWriter, r *http.Request) {
 	defer lease.release()
 	lift := h.scratch.idleBody(w, r)
 	r.Body = http.MaxBytesReader(w, r.Body, maxImportBody)
-	upload, options, err := readImportForm(r, lease)
+	upload, options, err := readImportForm(r, lease, func(options importOptions) error {
+		if options.Target != "cloud" {
+			return nil
+		}
+		if p.Anonymous {
+			return errAnonymousCloud
+		}
+		if options.Key == "" {
+			return apiErr(401, "KEY_REQUIRED", "A content key is required")
+		}
+		return h.authorizeArchive(r.Context(), p, options.Key, "import")
+	})
 	if err != nil {
 		respond(w, nil, err)
 		return
@@ -123,7 +134,7 @@ func requestSize(r *http.Request, limit int64) (int64, error) {
 	return r.ContentLength, nil
 }
 
-func readImportForm(r *http.Request, lease *scratchLease) (*scratchFile, importOptions, error) {
+func readImportForm(r *http.Request, lease *scratchLease, authorize func(importOptions) error) (*scratchFile, importOptions, error) {
 	var options importOptions
 	reader, err := r.MultipartReader()
 	if err != nil {
@@ -141,6 +152,9 @@ func readImportForm(r *http.Request, lease *scratchLease) (*scratchFile, importO
 		}
 		switch part.FormName() {
 		case "file":
+			if !hasOptions {
+				return nil, options, apiErr(400, "BAD_REQUEST", "options must precede the archive")
+			}
 			if upload != nil {
 				return nil, options, apiErr(400, "BAD_REQUEST", "Expected one archive")
 			}
@@ -156,6 +170,9 @@ func readImportForm(r *http.Request, lease *scratchLease) (*scratchFile, importO
 			}
 			hasOptions = true
 			if err := decodeFormField(part, &options); err != nil {
+				return nil, options, err
+			}
+			if err := authorize(options); err != nil {
 				return nil, options, err
 			}
 		default:

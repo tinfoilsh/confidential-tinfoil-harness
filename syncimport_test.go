@@ -59,7 +59,9 @@ func (f *fakeSync) importStep(t *testing.T, h *harness, r *http.Request, in obje
 		if int64(len(archive)) != job.total || hashHex(archive) != job.sha {
 			return 400, object{"code": "BAD_REQUEST"}
 		}
-		p := &principal{ID: strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer clerk-")}
+		user := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		user = strings.TrimPrefix(strings.TrimPrefix(user, "clerk-"), "sync-archive:")
+		p := &principal{ID: user}
 		counts, err := f.storeImport(h.storeRows.(*memoryRows), p, key, archive)
 		if err != nil {
 			t.Errorf("sync would refuse the import: %v", err)

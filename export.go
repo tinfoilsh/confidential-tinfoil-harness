@@ -223,7 +223,7 @@ func (h *harness) handleExport(w http.ResponseWriter, r *http.Request) {
 	defer lease.release()
 	lift := h.scratch.idleBody(w, r)
 	r.Body = http.MaxBytesReader(w, r.Body, maxExportBody)
-	form, err := readExportForm(r, lease)
+	form, err := readExportForm(r, lease, func(options exportOptions) error { return h.authorizeArchive(r.Context(), p, options.Key, "export") })
 	if err != nil {
 		respond(w, nil, err)
 		return
@@ -264,7 +264,7 @@ func (h *harness) handleExport(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func readExportForm(r *http.Request, lease *scratchLease) (*exportForm, error) {
+func readExportForm(r *http.Request, lease *scratchLease, authorize func(exportOptions) error) (*exportForm, error) {
 	reader, err := r.MultipartReader()
 	if err != nil {
 		return nil, apiErr(400, "BAD_REQUEST", "Expected multipart form data")
@@ -292,7 +292,13 @@ func readExportForm(r *http.Request, lease *scratchLease) (*exportForm, error) {
 			if err := decodeFormField(part, &form.options); err != nil {
 				return nil, err
 			}
+			if err := authorize(form.options); err != nil {
+				return nil, err
+			}
 		case "thread":
+			if !hasOptions {
+				return nil, apiErr(400, "BAD_REQUEST", "options must precede the chats")
+			}
 			data, err := io.ReadAll(io.LimitReader(part, maxTurnBody+1))
 			if err != nil {
 				return nil, formError(err)
@@ -321,6 +327,9 @@ func readExportForm(r *http.Request, lease *scratchLease) (*exportForm, error) {
 			}
 			form.threads = append(form.threads, spooled)
 		case "file":
+			if !hasOptions {
+				return nil, apiErr(400, "BAD_REQUEST", "options must precede the files")
+			}
 			id := part.FileName()
 			if err := requireID("file name", id); err != nil {
 				return nil, err

@@ -42,6 +42,10 @@ func (s *memoryRows) authorizeRun(_ context.Context, _ *principal, _ contentKey,
 	return secret("run-for-" + id), nil
 }
 
+func (s *memoryRows) authorizeStorage(_ context.Context, p *principal, _ contentKey, _, _ string) (secret, error) {
+	return secret("sync-archive:" + p.ID), nil
+}
+
 func randomKey() contentKey { var k contentKey; rand.Read(k[:]); return k }
 
 func rowMapKey(p *principal, scope, id string) string { return p.scope() + "/" + scope + "/" + id }

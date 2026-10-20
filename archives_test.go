@@ -828,7 +828,7 @@ func TestStalledArchivesFreeTheirSpace(t *testing.T) {
 
 	// The stalled import declares a body the space fits and sends part of it.
 	stalled := postRaw(t, server, "/v1/import", "multipart/form-data; boundary=stall", 30<<10)
-	fmt.Fprintf(stalled, "--stall\r\nContent-Disposition: form-data; name=\"file\"; filename=\"chats.json\"\r\n\r\n%s", strings.Repeat(" ", 4<<10))
+	fmt.Fprintf(stalled, "--stall\r\nContent-Disposition: form-data; name=\"options\"\r\n\r\n{\"target\":\"device\"}\r\n--stall\r\nContent-Disposition: form-data; name=\"file\"; filename=\"chats.json\"\r\n\r\n%s", strings.Repeat(" ", 4<<10))
 	waitForSpooled(t, dir, 1)
 	var form bytes.Buffer
 	writer := multipart.NewWriter(&form)

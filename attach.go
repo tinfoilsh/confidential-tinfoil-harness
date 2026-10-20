@@ -142,6 +142,11 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, err)
 		return
 	}
+	cred, err := h.auth.inference(r.Context(), p)
+	if err != nil {
+		respond(w, nil, h.withQuota(p, cred.Limit, err))
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxTextBytes+(1<<20))
 	reader, err := r.MultipartReader()
 	if err != nil {
@@ -164,6 +169,19 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 			if filename != "" || part.FileName() == "" {
 				respond(w, nil, apiErr(400, "BAD_REQUEST", "Expected one named file"))
 				return
+			}
+			if r.URL.Path == "/v1/projects/documents/upload" {
+				key, err := decodeContentKey(fields["key"])
+				if err != nil {
+					respond(w, nil, err)
+					return
+				}
+				p.SyncToken, err = h.storeRows.authorizeStorage(r.Context(), p, key, "project-upload", fields["projectId"])
+				clear(key[:])
+				if err != nil {
+					respond(w, nil, err)
+					return
+				}
 			}
 			filename = filepath.Base(part.FileName())
 			file, err = io.ReadAll(io.LimitReader(part, maxTextBytes+1))
@@ -188,11 +206,6 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 	defer clear(file)
 	if filename == "" || len(file) == 0 {
 		respond(w, nil, apiErr(400, "BAD_REQUEST", "A nonempty file is required"))
-		return
-	}
-	cred, err := h.auth.inference(r.Context(), p)
-	if err != nil {
-		respond(w, nil, h.withQuota(p, cred.Limit, err))
 		return
 	}
 	ctx := context.WithValue(r.Context(), apiKeyKey{}, string(cred.Key))

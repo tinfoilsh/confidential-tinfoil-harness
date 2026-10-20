@@ -37,6 +37,7 @@ type rowPage struct {
 }
 type rowStore interface {
 	authorizeRun(context.Context, *principal, contentKey, string, *string) (secret, error)
+	authorizeStorage(context.Context, *principal, contentKey, string, string) (secret, error)
 	load(context.Context, *principal, contentKey, string, string) (*storedRow, error)
 	list(context.Context, *principal, contentKey, string, string, string, int) (rowPage, error)
 	push(context.Context, *principal, contentKey, string, *storedRow, string) (string, error)
@@ -76,15 +77,27 @@ func (s *syncClient) call(ctx context.Context, p *principal, path string, in, ou
 }
 
 func (s *syncClient) authorizeRun(ctx context.Context, p *principal, key contentKey, threadID string, projectID *string) (secret, error) {
+	return s.storageCredential(ctx, p, "/v1/runs/authorize", struct {
+		ThreadID  string  `json:"thread_id"`
+		ProjectID *string `json:"project_id,omitempty"`
+		Key       string  `json:"key"`
+	}{threadID, projectID, key.base64()})
+}
+
+func (s *syncClient) authorizeStorage(ctx context.Context, p *principal, key contentKey, operation, projectID string) (secret, error) {
+	return s.storageCredential(ctx, p, "/v1/operations/authorize", struct {
+		Operation string `json:"operation"`
+		Key       string `json:"key"`
+		ProjectID string `json:"project_id,omitempty"`
+	}{operation, key.base64(), projectID})
+}
+
+func (s *syncClient) storageCredential(ctx context.Context, p *principal, path string, input any) (secret, error) {
 	var out struct {
 		Token     secret    `json:"token"`
 		ExpiresAt time.Time `json:"expires_at"`
 	}
-	err := s.call(ctx, p, "/v1/runs/authorize", struct {
-		ThreadID  string  `json:"thread_id"`
-		ProjectID *string `json:"project_id,omitempty"`
-		Key       string  `json:"key"`
-	}{threadID, projectID, key.base64()}, &out)
+	err := s.call(ctx, p, path, input, &out)
 	if err != nil {
 		return "", err
 	}
