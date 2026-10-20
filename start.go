@@ -227,6 +227,9 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	runCtx = context.WithValue(runCtx, apiKeyKey{}, string(r.credential.Key))
 	runCtx = context.WithValue(runCtx, usageContextKey{}, usageForRun(r))
 	runCtx = context.WithValue(runCtx, usageSinkKey{}, r.out)
+	r.out.mu.Lock()
+	r.out.thoughts = h.thoughtSummaries(runCtx, r.out, r.assembler)
+	r.out.mu.Unlock()
 	r.titleDone = make(chan struct{})
 	titleState := row.TitleState
 	go func() {

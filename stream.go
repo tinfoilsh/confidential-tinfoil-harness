@@ -15,6 +15,7 @@ type event struct {
 	ThreadID   string          `json:"threadId,omitempty"`
 	RunID      string          `json:"runId,omitempty"`
 	MessageID  string          `json:"messageId,omitempty"`
+	BlockID    string          `json:"blockId,omitempty"`
 	ParentID   string          `json:"parentMessageId,omitempty"`
 	ToolCallID string          `json:"toolCallId,omitempty"`
 	ToolName   string          `json:"toolCallName,omitempty"`
@@ -50,10 +51,11 @@ type stream struct {
 	reasoningField string // which of reasoning_content and reasoning the last turn streamed
 
 	// mu serializes writes against the tool goroutines.
-	mu      sync.Mutex
-	spend   usage
-	observe func(event)
-	sources []citationSource // pages the run's tools showed the model
+	mu       sync.Mutex
+	spend    usage
+	observe  func(event)
+	thoughts *thoughtSummaries // nil unless a summarizer summarizes the run's reasoning
+	sources  []citationSource  // pages the run's tools showed the model
 }
 
 func (s *stream) cite(sources []citationSource) {
@@ -138,6 +140,9 @@ func (s *stream) frame(e event) {
 		s.run.stop()
 	} else if s.observe != nil {
 		s.observe(e)
+		if s.thoughts != nil {
+			s.thoughts.follow(e)
+		}
 	}
 }
 

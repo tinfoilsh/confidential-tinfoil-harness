@@ -161,6 +161,15 @@ func replaceReplyText(message *Message, text string) {
 	}
 }
 
+// lastBlock is the block a reply streams into now, if any.
+func (a *messageAssembler) lastBlock(id string) *Block {
+	m := a.byID[id]
+	if m == nil || len(m.Timeline) == 0 {
+		return nil
+	}
+	return &m.Timeline[len(m.Timeline)-1]
+}
+
 func (a *messageAssembler) messages() []Message {
 	out := []Message{}
 	for _, m := range a.ordered {

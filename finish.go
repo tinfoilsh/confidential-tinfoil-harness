@@ -29,6 +29,10 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 	messages := r.assembler.messages()
 	spend, sources, reply := r.out.spend, r.out.sources, r.out.replyID
 	r.out.observe, r.out.sources = nil, nil
+	if r.out.thoughts != nil {
+		r.out.thoughts.close()
+		r.out.thoughts = nil
+	}
 	r.out.mu.Unlock()
 	continued := r.turn.Kind == "continue"
 	committed := []committedReply{}
