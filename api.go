@@ -11,18 +11,12 @@ import (
 	"time"
 )
 
-// object preserves fields written by newer web or iOS clients on CAS retries.
+// object is JSON whose shape the harness does not own: tool output, model
+// messages, downstream errors, the model catalog, and archives.
 type object map[string]any
 
 func raw(v any) json.RawMessage { b, _ := json.Marshal(v); return b }
-func clone(v object) object {
-	var copy object
-	json.Unmarshal(raw(v), &copy)
-	if copy == nil {
-		copy = object{}
-	}
-	return copy
-}
+
 func str(v any) string { s, _ := v.(string); return s }
 func obj(v any) object {
 	switch m := v.(type) {

@@ -49,13 +49,8 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 	}
 	defer set.close()
 	set.widgets = map[string]widget{}
-	for _, offered := range req.rendered {
-		declaration := obj(obj(decodeValue(offered))["function"])
-		for _, w := range widgetCatalog() {
-			if w.Name == str(declaration["name"]) {
-				set.widgets[w.Name] = w
-			}
-		}
+	for _, w := range req.widgets {
+		set.widgets[w.Name] = w
 	}
 	set.local = h.widgetResult
 

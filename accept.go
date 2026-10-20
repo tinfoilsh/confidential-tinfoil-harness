@@ -77,7 +77,7 @@ func (h *harness) acceptTurn(ctx context.Context, p *principal, key contentKey, 
 
 func quotaExhausted(limit rateLimit) error {
 	e := apiErr(429, "QUOTA_EXHAUSTED", "The daily quota is exhausted")
-	e.Kind = str(limit.Kind)
+	e.Kind, _ = limit.Kind.(string)
 	e.ResetsAt = limit.ResetsAt
 	return e
 }

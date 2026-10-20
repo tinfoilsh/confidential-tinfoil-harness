@@ -36,9 +36,7 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 		m := &messages[i]
 		m.IsInterrupted, m.IsError = new(cancelled), new(runErr != nil && !cancelled)
 		m.Model = cmp.Or(r.out.concreteModel, r.row.Model)
-		if definition := h.catalog.get().definition(m.Model); definition != nil {
-			m.ModelDisplayName = str(definition["name"])
-		}
+		m.ModelDisplayName = h.catalog.get().displayName(m.Model)
 		m.Usage = raw(messageUsage{PromptTokens: spend.Prompt, CompletionTokens: spend.Completion})
 		// A continued reply keeps the citations it already had.
 		for _, annotation := range citationAnnotations(m.Content, sources) {

@@ -276,3 +276,27 @@ type stateSnapshot struct {
 	Queue     []queueItem   `json:"queue"`
 	RateLimit rateLimit     `json:"rateLimit"`
 }
+
+// sessionView is what a client opens the app with.
+type sessionView struct {
+	User         sessionUser     `json:"user"`
+	RateLimit    rateLimit       `json:"rateLimit"`
+	Models       []object        `json:"models"`
+	Auto         autoView        `json:"auto"`
+	DefaultModel string          `json:"defaultModel"`
+	Widgets      []string        `json:"widgets"`
+	Presets      []preset        `json:"presets"`
+	Features     map[string]bool `json:"features"`
+}
+
+type sessionUser struct {
+	ID        string `json:"id"`
+	Anonymous bool   `json:"anonymous"`
+}
+
+// autoView is how a client offers Auto.
+type autoView struct {
+	Multimodal bool                `json:"multimodal"`
+	Default    string              `json:"default"`
+	Levels     []intelligenceLevel `json:"levels"`
+}

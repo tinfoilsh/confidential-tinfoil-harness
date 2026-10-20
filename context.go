@@ -28,7 +28,8 @@ type request struct {
 	runID                      string
 	model                      string
 	cacheScope                 string            // partitions the enclave's prompt cache per caller; a namespace, not a credential
-	rendered                   []json.RawMessage // widgets the caller draws: advertised, never dialled
+	widgets                    []widget          // what the caller draws: advertised, never dialled
+	rendered                   []json.RawMessage // their declarations
 	webSearch, piiCheck        bool
 }
 
@@ -113,8 +114,8 @@ func systemPrompt(c *chatCatalog, thread *Thread, profile *Profile, project *Pro
 	preset := ""
 	if id := thread.PresetID; id != nil {
 		for _, item := range c.Presets {
-			if item["id"] == *id {
-				preset = str(item["systemPrompt"])
+			if item.ID == *id {
+				preset = item.SystemPrompt
 			}
 		}
 		if saved := profile.preset(*id); saved != nil {
@@ -220,7 +221,7 @@ func (h *harness) buildRequest(thread *Thread, profile *Profile, project *Projec
 	if len(widgets) > 0 {
 		req.widgetHint = c.WidgetHeader
 		for _, w := range widgets {
-			req.rendered = append(req.rendered, w.declaration())
+			req.widgets, req.rendered = append(req.widgets, w), append(req.rendered, w.declaration())
 			req.widgetHint += "\n- " + w.Name + ": " + w.Hint
 		}
 	}
@@ -398,6 +399,15 @@ func budgetConversation(req *request, searching bool, definitions json.RawMessag
 	return append(conversation, req.reminder), nil
 }
 
+// role is who wrote a model message.
+func role(message json.RawMessage) string {
+	var m struct {
+		Role string `json:"role"`
+	}
+	json.Unmarshal(message, &m)
+	return m.Role
+}
+
 // Trim only complete older user turns as tool output grows. The current user
 // request and its entire tool exchange stay together, including the reminder.
 func trimToolHistory(req *request, messages []json.RawMessage, defs json.RawMessage) ([]json.RawMessage, error) {
@@ -410,12 +420,12 @@ func trimToolHistory(req *request, messages []json.RawMessage, defs json.RawMess
 		return messages, nil
 	}
 	start := 0
-	if len(messages) > 0 && obj(decodeValue(messages[0]))["role"] == "system" {
+	if len(messages) > 0 && role(messages[0]) == "system" {
 		start = 1
 	}
 	anchor := -1
 	for i, message := range messages {
-		if obj(decodeValue(message))["role"] == "user" && string(message) != string(req.reminder) {
+		if role(message) == "user" && string(message) != string(req.reminder) {
 			anchor = i
 		}
 	}
@@ -423,7 +433,7 @@ func trimToolHistory(req *request, messages []json.RawMessage, defs json.RawMess
 	for end < anchor && cost > limit {
 		cost -= messageTokens(messages[end])
 		end++
-		for end < anchor && obj(decodeValue(messages[end]))["role"] != "user" {
+		for end < anchor && role(messages[end]) != "user" {
 			cost -= messageTokens(messages[end])
 			end++
 		}

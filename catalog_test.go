@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -35,7 +36,7 @@ func TestCatalogRefreshAcceptsControlplaneArray(t *testing.T) {
 			case 1:
 				response = object{"models": definitions}
 			case 2:
-				changed := clone(definitions[1])
+				changed := maps.Clone(definitions[1])
 				changed["repo"] = "untrusted/model"
 				response = []object{changed}
 			case 3:

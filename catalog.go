@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -23,8 +24,18 @@ var widgetJSON []byte
 //go:embed presets.json
 var presetJSON []byte
 
-func builtInPresets() []object {
-	var presets []object
+// preset is a built-in prompt the clients offer.
+type preset struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Description  string `json:"description"`
+	SystemPrompt string `json:"systemPrompt"`
+	Icon         string `json:"icon"`
+	BuiltIn      bool   `json:"builtIn"`
+}
+
+func builtInPresets() []preset {
+	var presets []preset
 	json.Unmarshal(presetJSON, &presets)
 	return presets
 }
@@ -63,7 +74,7 @@ type chatCatalog struct {
 	Deprecated                  []object
 	Prompt, Rules, WidgetHeader string
 	EnabledWidgets              []string
-	Presets                     []object
+	Presets                     []preset
 	Fallback                    int // smallest configured window, for Auto while no model is offered
 }
 type catalogCache struct {
@@ -117,7 +128,7 @@ func buildCatalog(config []object, prompt object, models []*model) *chatCatalog 
 		}
 		name, repo := str(definition["modelName"]), str(definition["repo"])
 		if boolean(definition["deprecated"], false) {
-			c.Deprecated = append(c.Deprecated, clone(definition))
+			c.Deprecated = append(c.Deprecated, definition)
 			continue
 		}
 		configured := integer(obj(definition["chatConfig"])["contextWindowTokens"])
@@ -130,7 +141,7 @@ func buildCatalog(config []object, prompt object, models []*model) *chatCatalog 
 		}
 		for _, model := range models {
 			if model.name == name {
-				def := clone(definition)
+				def := maps.Clone(definition)
 				// A prompt must fit both the replica and the window the product configures.
 				window := model.context
 				if configured > 0 && (window <= 0 || configured < window) {
@@ -156,6 +167,11 @@ func (c *chatCatalog) definition(name string) object {
 	return nil
 }
 
+// displayName is what clients call a configured model, if anything.
+func (c *chatCatalog) displayName(name string) string {
+	return str(c.definition(name)["name"])
+}
+
 // vision reports whether a model reads images. The router gives an Auto turn
 // that carries images to a multimodal model.
 func (c *chatCatalog) vision(name string) bool {
@@ -171,12 +187,18 @@ func normalizeModel(name string) string {
 
 var reasoningEfforts = []string{"low", "medium", "high"}
 
-var intelligenceLevels = []object{{"id": "instant", "label": "Instant"}, {"id": "low", "label": "Low"}, {"id": "medium", "label": "Med"}, {"id": "high", "label": "High"}, {"id": "extra", "label": "Extra"}, {"id": "max", "label": "Max"}}
+// intelligenceLevel is one setting of how hard Auto works, as clients label it.
+type intelligenceLevel struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+}
+
+var intelligenceLevels = []intelligenceLevel{{"instant", "Instant"}, {"low", "Low"}, {"medium", "Med"}, {"high", "High"}, {"extra", "Extra"}, {"max", "Max"}}
 
 func intelligenceIDs() []string {
 	ids := []string{}
 	for _, l := range intelligenceLevels {
-		ids = append(ids, str(l["id"]))
+		ids = append(ids, l.ID)
 	}
 	return ids
 }
@@ -186,7 +208,7 @@ func intelligence(level string) (int, error) {
 		level = "high"
 	}
 	for i, l := range intelligenceLevels {
-		if l["id"] == level {
+		if l.ID == level {
 			return i * 20, nil
 		}
 	}

@@ -46,14 +46,20 @@ func (h *harness) session(ctx context.Context, p *principal, _ contentKey, _ jso
 		}
 		credential.Limit = h.auth.currentLimit(p)
 	}
-	features := object{"webSearch": webSearch.client != nil, "transcription": h.serviceReady("router"), "speech": h.serviceReady("router")}
-	presets := []object{}
-	for _, p := range c.Presets {
-		d := clone(p)
-		presets = append(presets, d)
+	presets := c.Presets
+	if presets == nil {
+		presets = []preset{}
 	}
-	auto := object{"multimodal": true, "default": "high", "levels": intelligenceLevels}
-	return object{"user": object{"id": p.ID, "anonymous": p.Anonymous}, "rateLimit": credential.Limit, "models": c.displayModels(), "auto": auto, "defaultModel": "auto", "widgets": c.EnabledWidgets, "presets": presets, "features": features}, nil
+	return sessionView{
+		User:         sessionUser{ID: p.ID, Anonymous: p.Anonymous},
+		RateLimit:    credential.Limit,
+		Models:       c.displayModels(),
+		Auto:         autoView{Multimodal: true, Default: "high", Levels: intelligenceLevels},
+		DefaultModel: "auto",
+		Widgets:      c.EnabledWidgets,
+		Presets:      presets,
+		Features:     map[string]bool{"webSearch": webSearch.client != nil, "transcription": h.serviceReady("router"), "speech": h.serviceReady("router")},
+	}, nil
 }
 
 func (h *harness) listThreads(ctx context.Context, p *principal, key contentKey, in *listRequest) (any, error) {
