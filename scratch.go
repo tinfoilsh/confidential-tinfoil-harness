@@ -76,6 +76,9 @@ func (s *scratchSpace) lease(ctx context.Context, expected int64) (*scratchLease
 }
 
 func (l *scratchLease) take(n int64) error {
+	if l.used+n > l.space.size {
+		return errArchiveTooLarge
+	}
 	if over := l.used + n - l.held; over > 0 {
 		if !l.space.sem.TryAcquire(over) {
 			return errScratchBusy

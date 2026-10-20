@@ -614,6 +614,11 @@ func TestArchivesWaitForScratchSpace(t *testing.T) {
 	if w := archiveRoute(h, "/v1/import", "alice", optionsPart(object{"target": "device"}), formPart{name: "file", filename: "big.json", data: bytes.Repeat([]byte(" "), 40<<10)}); w.Code != 413 || !strings.Contains(w.Body.String(), "ARCHIVE_TOO_LARGE") {
 		t.Fatalf("an import that cannot fit: HTTP %d %s", w.Code, w.Body.String())
 	}
+	// The export fits the space, but not with the conversations it writes.
+	large := threadPart(object{"id": "local-chat", "title": "Tab chat", "messages": []any{object{"id": "m", "role": "user", "content": strings.Repeat("x", 40<<10)}}})
+	if w := archiveRoute(h, "/v1/export", "", optionsPart(object{"format": "conversations"}), large); w.Code != 413 || !strings.Contains(w.Body.String(), "ARCHIVE_TOO_LARGE") {
+		t.Fatalf("an export that cannot fit: HTTP %d %s", w.Code, w.Body.String())
+	}
 	held, err := h.scratch.lease(context.Background(), 60<<10)
 	if err != nil {
 		t.Fatal(err)
