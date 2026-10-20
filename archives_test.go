@@ -630,6 +630,17 @@ func TestClaudeImagesAreFoundByTheirID(t *testing.T) {
 	}
 }
 
+// A record whose format's key is null is not an export of that format.
+func TestNullFormatKeysAreNotExports(t *testing.T) {
+	h, _, _ := testChatHarness(t, nil)
+	for _, record := range []string{`{"mapping":null}`, `[{"chat_messages":null}]`, `{"prompt_template":null,"docs":null}`} {
+		w := archiveRoute(h, "/v1/import", "", optionsPart(object{"target": "device"}), formPart{name: "file", filename: "conversations.json", data: []byte(record)})
+		if w.Code != 400 || !strings.Contains(w.Body.String(), "IMPORT_INVALID") {
+			t.Errorf("%s imported: HTTP %d %s", record, w.Code, w.Body.String())
+		}
+	}
+}
+
 // Claude's projects go to the cloud with their documents' text; on the
 // device alone they cannot be imported.
 func TestClaudeProjectsRequireTheCloud(t *testing.T) {

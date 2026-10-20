@@ -160,14 +160,20 @@ func Classify(record json.RawMessage) Format {
 	}
 	json.Unmarshal(record, &keys)
 	switch {
-	case keys.Mapping != nil:
+	case marks(keys.Mapping):
 		return ChatGPT
-	case keys.ChatMessages != nil:
+	case marks(keys.ChatMessages):
 		return Claude
-	case keys.PromptTemplate != nil || keys.Docs != nil:
+	case marks(keys.PromptTemplate) || marks(keys.Docs):
 		return ClaudeProjects
 	}
 	return ""
+}
+
+// marks reports whether a record holds a key that names its format, with
+// a value other than null.
+func marks(value json.RawMessage) bool {
+	return value != nil && !bytes.Equal(value, []byte("null"))
 }
 
 func parseISOTime(s string) time.Time {
