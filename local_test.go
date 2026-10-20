@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -286,5 +288,105 @@ func TestADeviceChatRunReturnsItsUpdatedThread(t *testing.T) {
 	}
 	if rows.calls != 0 {
 		t.Fatalf("a device chat used storage %d times", rows.calls)
+	}
+}
+
+// oldDeviceChat is a chat as the previous web client kept it in IndexedDB,
+// serialized as it sends it: dates as ISO strings, image bytes and document
+// text inline, and its bookkeeping.
+func oldDeviceChat(id string) object {
+	return object{
+		"id": id, "title": "Cats", "titleState": "generated", "model": "auto-smart", "webSearchEnabled": false,
+		"createdAt": "2026-03-01T10:00:00.000Z", "updatedAt": "2026-03-01T10:05:00.000Z",
+		"isLocalOnly": true, "lastAccessedAt": 1772359500000, "syncedAt": 0, "locallyModified": true, "pendingRecoveries": []any{},
+		"messages": []any{
+			object{"role": "user", "content": "What is in this picture?", "timestamp": "2026-03-01T10:00:01.000Z", "attachments": []any{
+				object{"id": "a1b2", "type": "image", "fileName": "cat.png", "mimeType": "image/png", "base64": "iVBORw0KGgo=", "thumbnailBase64": "dGh1bWI=", "fileSize": 8},
+				object{"id": "d3e4", "type": "document", "fileName": "notes.pdf", "mimeType": "application/pdf", "textContent": "Cats sleep a lot.", "fileSize": 1234},
+			}},
+			object{"role": "assistant", "content": "A cat [Cats](https://cats.example).", "timestamp": "2026-03-01T10:00:05.000+01:00", "modelDisplayName": "Kimi K3",
+				"thoughts": "Looks like a cat", "thinkingDuration": 2, "isThinking": false, "webSearchBeforeThinking": false,
+				"webSearch":   object{"query": "cat", "status": "completed", "sources": []any{object{"url": "https://cats.example", "title": "Cats", "snippet": "about cats"}}},
+				"annotations": []any{object{"type": "url_citation", "url_citation": object{"url": "https://cats.example", "title": "Cats", "start_index": 3, "end_index": 7}}}},
+			object{"role": "user", "content": "And this?", "timestamp": "2026-03-01T10:01:00.000Z", "documentContent": "legacy doc text", "imageData": []any{object{"base64": "R0lGODlh", "mimeType": "image/gif"}}},
+		},
+	}
+}
+
+func upgraded(t *testing.T, h *harness, user string, rows ...any) []any {
+	t.Helper()
+	w := postRoute(h, "/v1/threads/upgrade", object{"threads": rows}, user)
+	if w.Code != 200 {
+		t.Fatalf("upgrade: HTTP %d %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Threads []any `json:"threads"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &body)
+	return body.Threads
+}
+
+// The web client upgrades the chats its previous version kept on the device
+// through the harness's one reader of old chats, and stores what it returns.
+func TestOldDeviceChatsUpgradeIntoThreads(t *testing.T) {
+	h, rows, _ := testChatHarness(t, nil)
+	id := "8207544722379_4fe58a7b-eece-4f57-b098-d0c3cec90006"
+	threads := upgraded(t, h, "", oldDeviceChat(id), object{"id": "second", "messages": []any{}})
+	if len(threads) != 2 || obj(threads[1])["id"] != "second" {
+		t.Fatalf("the threads came back as %v", threads)
+	}
+	m := func(index int) string { return id + "-message-" + strconv.Itoa(index) }
+	want := object{
+		"id": id, "title": "Cats", "titleState": "generated", "model": "auto", "webSearchEnabled": false, "pinned": false,
+		"createdAt": "2026-03-01T10:00:00Z", "updatedAt": "2026-03-01T10:05:00Z", "projectId": nil, "presetId": nil, "activeRun": nil,
+		"messages": []any{
+			object{"id": m(0), "role": "user", "content": "What is in this picture?", "createdAt": "2026-03-01T10:00:01Z", "attachments": []any{
+				object{"id": "a1b2", "type": "image", "fileName": "cat.png", "mimeType": "image/png", "base64": "iVBORw0KGgo=", "thumbnailBase64": "dGh1bWI=", "fileSize": 8},
+				object{"id": "d3e4", "type": "document", "fileName": "notes.pdf", "mimeType": "application/pdf", "textContent": "Cats sleep a lot.", "fileSize": 1234},
+			}},
+			object{"id": m(1), "role": "assistant", "content": "A cat [Cats](https://cats.example).", "createdAt": "2026-03-01T09:00:05Z", "modelDisplayName": "Kimi K3",
+				"annotations": []any{object{"type": "url_citation", "url_citation": object{"url": "https://cats.example", "title": "Cats", "start_index": 3, "end_index": 7}}},
+				"timeline": []any{
+					object{"id": m(1) + "-thinking", "type": "thinking", "content": "Looks like a cat", "duration": 2},
+					object{"id": m(1) + "-search", "toolCallId": m(1) + "-search", "type": "tool_call", "name": "web_search", "arguments": `{"query":"cat"}`, "complete": true,
+						"result": object{"query": "cat", "results": []any{object{"url": "https://cats.example", "title": "Cats", "snippet": "about cats"}}}},
+					object{"id": m(1) + "-content", "type": "content", "content": "A cat [Cats](https://cats.example)."},
+				}},
+			object{"id": m(2), "role": "user", "content": "And this?", "createdAt": "2026-03-01T10:01:00Z", "attachments": []any{
+				object{"id": m(2) + "-attachment-0", "type": "document", "fileName": "Attached document", "textContent": "legacy doc text"},
+				object{"id": m(2) + "-attachment-1", "type": "image", "fileName": "image-0", "mimeType": "image/gif", "base64": "R0lGODlh"},
+			}},
+		},
+	}
+	if !reflect.DeepEqual(threads[0], decodeValue(raw(want))) {
+		t.Fatalf("upgraded\n%s\nwant\n%s", raw(threads[0]), raw(want))
+	}
+	if rows.calls != 0 {
+		t.Fatalf("the upgrade made %d storage calls", rows.calls)
+	}
+	// The thread continues as a device chat, whose turns may leave out image
+	// bytes.
+	for _, message := range arr(obj(threads[0])["messages"]) {
+		for _, a := range arr(obj(message)["attachments"]) {
+			delete(obj(a), "base64")
+		}
+	}
+	next := localInput(id, obj(threads[0]))
+	if events := eventsIn(t, postRoute(h, "/v1/threads/turn", next, "alice")); events[len(events)-1].Type != "RUN_FINISHED" {
+		t.Fatalf("the upgraded thread did not continue: %+v", events[len(events)-1])
+	}
+	// A chat the harness cannot read is refused with its batch, so its
+	// client can find it by sending the rest alone.
+	for _, row := range []any{object{"messages": []any{}}, object{"id": "bad", "messages": []any{object{"role": "system", "content": "x"}}}, "not a chat"} {
+		if w := postRoute(h, "/v1/threads/upgrade", object{"threads": []any{oldDeviceChat(id), row}}, "alice"); w.Code != 400 {
+			t.Fatalf("a batch holding %v: HTTP %d", row, w.Code)
+		}
+	}
+	// A batch is read up to the size of a turn, past the limit of other requests.
+	large := oldDeviceChat(id)
+	image := strings.Repeat("A", maxRequestBody)
+	obj(arr(obj(arr(large["messages"])[0])["attachments"])[0])["base64"] = image
+	if got := upgraded(t, h, "alice", large); str(obj(arr(obj(arr(obj(got[0])["messages"])[0])["attachments"])[0])["base64"]) != image {
+		t.Fatal("a large image did not pass through")
 	}
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/http"
 	"strings"
 	"time"
 )
@@ -57,6 +58,47 @@ func normalizeThread(row *storedRow) object {
 	t["messages"] = messages
 	row.Data = t
 	return t
+}
+
+// handleUpgrade reads chats the previous web client kept on a device, or in
+// an export, into the thread format, in order. It stores nothing. A batch
+// holding a chat it cannot read is refused whole, so its client can tell
+// which chat that is.
+func (h *harness) handleUpgrade(w http.ResponseWriter, r *http.Request) {
+	if _, err := h.auth.authenticate(r, true); err != nil {
+		respond(w, nil, err)
+		return
+	}
+	in, err := decodeJSONWithin(w, r, maxTurnBody)
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	rows, ok := in["threads"].([]any)
+	if !ok {
+		respond(w, nil, apiErr(400, "BAD_REQUEST", "threads must be an array"))
+		return
+	}
+	threads := make([]any, 0, len(rows))
+	for _, item := range rows {
+		if !validObject(item) {
+			respond(w, nil, apiErr(400, "BAD_REQUEST", "Each thread must be an object"))
+			return
+		}
+		id, err := requiredID(obj(item), "id")
+		if err != nil {
+			respond(w, nil, err)
+			return
+		}
+		// The thread is one its client can send back with a turn.
+		thread := localThread(id, obj(item)).Data
+		if err := validateLocalThread(thread); err != nil {
+			respond(w, nil, err)
+			return
+		}
+		threads = append(threads, thread)
+	}
+	respond(w, object{"threads": threads}, nil)
 }
 
 func isoTime(value any) string {

@@ -71,7 +71,7 @@ func (b *watchedBody) Read([]byte) (int, error) { b.read.Store(true); return 0, 
 // gets them read.
 func TestLargeBodiesAreReadOnlyAfterAuthentication(t *testing.T) {
 	h, _, _ := testChatHarness(t, nil)
-	for _, path := range []string{"/v1/threads/turn", "/v1/threads/import"} {
+	for _, path := range []string{"/v1/threads/turn", "/v1/threads/import", "/v1/threads/upgrade"} {
 		body := &watchedBody{}
 		r := httptest.NewRequest(http.MethodPost, path, body)
 		r.Header.Set("Authorization", "Bearer forged-session")
