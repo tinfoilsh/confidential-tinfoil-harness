@@ -405,9 +405,9 @@ func (b *tokenBudget) spend(tokens int64) *tokenBudget {
 	return &tokenBudget{Max: b.Max, Used: b.Used + int(tokens), Remaining: max(0, b.Remaining-int(tokens))}
 }
 
-// exhausted is the caller's quota once a model or service refused it as
-// spent. A free key counts no further request; a subscriber is capped
-// until the reset its budgets name.
+// exhausted is the caller's quota as a refusal for a spent one leaves it: a
+// free key has no request left, and a subscriber is capped until the reset
+// its budgets name.
 func (a *authenticator) exhausted(p *principal) rateLimit {
 	if p.Anonymous {
 		return exhaustedLimit("free_daily")
@@ -417,15 +417,24 @@ func (a *authenticator) exhausted(p *principal) rateLimit {
 	if capped, ok := a.capped[p.scope()]; ok && nowUTC().Before(capped.until) {
 		return capped.limit
 	}
-	cred, ok := a.credentials[p.scope()]
-	if ok && cred.Limit.Remaining != nil {
+	limit := a.credentials[p.scope()].Limit
+	if limit.MaxRequests == nil {
+		limit.MaxRequests = new(0)
+	}
+	limit.Remaining = new(0)
+	return limit
+}
+
+// spent records that a model refused the caller's free key as spent, so
+// its next turn is refused before it reaches one.
+func (a *authenticator) spent(p *principal) rateLimit {
+	a.mu.Lock()
+	if cred, ok := a.credentials[p.scope()]; ok && cred.Limit.Remaining != nil {
 		cred.Limit.Remaining = new(0)
 		a.credentials[p.scope()] = cred
-		return cred.Limit
 	}
-	limit := cred.Limit
-	limit.MaxRequests, limit.Remaining = new(0), new(0)
-	return limit
+	a.mu.Unlock()
+	return a.exhausted(p)
 }
 
 func (a *authenticator) currentLimit(p *principal) rateLimit {
