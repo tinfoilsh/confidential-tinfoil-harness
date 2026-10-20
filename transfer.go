@@ -58,7 +58,7 @@ func (h *harness) threadTranscript(ctx context.Context, p *principal, key conten
 	if missing > 0 {
 		return nil, apiErr(409, "ATTACHMENTS_UNAVAILABLE", strconv.Itoa(missing)+" attachments in this chat could not be read")
 	}
-	for _, field := range append(serverThreadFields, "clock", "clockVersion", "writer") {
+	for _, field := range serverThreadFields {
 		delete(thread, field)
 	}
 	return object{"thread": thread}, nil

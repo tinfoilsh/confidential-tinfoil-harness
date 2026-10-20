@@ -438,9 +438,9 @@ func TestDeletingAMessageRemovesOnlyThatMessage(t *testing.T) {
 	if len(messages) != 2 || obj(messages[0])["content"] != "one" || obj(messages[1])["content"] != "four" {
 		t.Fatalf("stored messages: %v", messages)
 	}
-	// The legacy image stays where it was stored, rather than copied inline.
-	if _, ok := obj(messages[0])["attachments"]; ok {
-		t.Fatalf("a deletion rewrote a message's legacy fields: %v", messages[0])
+	// The chat is stored in the format it was read in.
+	if image := arr(obj(messages[0])["attachments"]); len(image) != 1 || obj(image[0])["base64"] != "aW1hZ2U=" || obj(messages[0])["imageData"] != nil {
+		t.Fatalf("the deletion stored the legacy image as %v", messages[0])
 	}
 	if row, _ := rows.load(context.Background(), p, key, "chat", "solo"); row.ETag != "1" {
 		t.Fatal("a refused deletion changed the chat")
@@ -541,9 +541,11 @@ func TestEditingAReplyCollapsesItsText(t *testing.T) {
 	}
 	// A reply stored with flat fields keeps its thinking, search, code and widgets.
 	windowIDs(t, update("a2", "Rain."))
-	want = decodeValue(raw([]any{object{"type": "thinking", "id": "legacy-thinking", "content": "look it up", "isThinking": false, "duration": 3}, object{"type": "web_search", "id": "legacy-web-search-post", "state": search},
-		object{"type": "code_exec", "id": "legacy-code-exec", "calls": []any{code}}, object{"id": "w1", "type": "tool_call", "toolCallId": "w1", "name": "render_clock", "arguments": "{}"}, object{"type": "content", "id": "legacy-content", "content": "Rain."}}))
-	if a2 := reply(3); a2["content"] != "Rain." || !reflect.DeepEqual(a2["timeline"], want) {
+	want = decodeValue(raw([]any{object{"type": "thinking", "id": "a2-thinking", "content": "look it up", "duration": 3},
+		object{"type": "tool_call", "id": "a2-search", "toolCallId": "a2-search", "name": "web_search", "arguments": `{"query":"weather"}`, "result": object{"query": "weather", "results": []any{}}, "complete": true},
+		object{"type": "tool_call", "id": "x1", "toolCallId": "x1", "name": "bash", "arguments": `{"command":"date"}`, "result": object{"output": "Mon"}, "complete": true},
+		object{"id": "w1", "type": "tool_call", "toolCallId": "w1", "name": "render_clock", "arguments": "{}"}, object{"type": "content", "id": "a2-content", "content": "Rain."}}))
+	if a2 := reply(3); a2["content"] != "Rain." || !reflect.DeepEqual(a2["timeline"], want) || a2["thoughts"] != nil {
 		t.Fatalf("edited legacy reply: %v", a2)
 	}
 	windowIDs(t, update("a1", ""))
@@ -655,7 +657,7 @@ func TestContinueExtendsTheStoredReplyItNames(t *testing.T) {
 	reply := obj(messages[len(messages)-1])
 	want := decodeValue(raw([]any{object{"id": "t1", "type": "thinking", "content": "rhyme"}, object{"id": "c1", "type": "content", "content": "Roses are red, violets are blue."}}))
 	if len(messages) != 2 || reply["id"] != "a1" || reply["content"] != "Roses are red, violets are blue." || !reflect.DeepEqual(reply["timeline"], want) ||
-		reply["createdAt"] != "2026-01-01T00:00:01Z" || reply["thoughts"] != "rhyme" || reply["isInterrupted"] != false {
+		reply["createdAt"] != "2026-01-01T00:00:01Z" || reply["isInterrupted"] != false {
 		t.Fatalf("stored continuation: %v", messages)
 	}
 }
@@ -700,8 +702,6 @@ func TestAContinuationExtendsOnlyATrailingContentBlock(t *testing.T) {
 			[]any{thinking, object{"id": "c", "type": "content", "content": "Partial answer"}}},
 		"trailing thinking": {object{"id": "r", "role": "assistant", "timeline": []any{content, thinking}}, event{Type: "REASONING_MESSAGE_CHUNK", MessageID: "r-reasoning", Delta: "again"},
 			[]any{content, thinking, object{"id": "r_thinking_2", "type": "thinking", "content": "again"}}},
-		"flat fields": {object{"id": "r", "role": "assistant", "content": "Partial", "thoughts": "plan"}, event{Type: "TEXT_MESSAGE_CHUNK", MessageID: "r", Delta: " answer"},
-			[]any{object{"id": "legacy-thinking", "type": "thinking", "content": "plan", "isThinking": false}, object{"id": "legacy-content", "type": "content", "content": "Partial answer"}}},
 		"empty": {object{"id": "r", "role": "assistant", "timeline": []any{}}, event{Type: "TEXT_MESSAGE_CHUNK", MessageID: "r", Delta: " answer"},
 			[]any{object{"id": "r_content_0", "type": "content", "content": " answer"}}},
 	} {
@@ -925,13 +925,12 @@ func TestBulkDeletionScopesAccountAndProject(t *testing.T) {
 	}
 }
 
-func TestCASReappliesPatchAndPreservesIOSFields(t *testing.T) {
+func TestCASReappliesPatchToTheChangedRow(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	p := &principal{ID: "alice"}
-	rows.rows[rowMapKey(p, "chat", "existing")] = storedRow{ID: "existing", ETag: "7", Data: object{"title": "old", "messages": []any{}, "pendingRecoveries": []any{object{"turnId": "ios"}}, "unknown": object{"value": 1}, "clock": 12}}
+	rows.rows[rowMapKey(p, "chat", "existing")] = storedRow{ID: "existing", ETag: "7", Data: object{"title": "old", "messages": []any{}}}
 	rows.conflict = func(row *storedRow) {
-		row.Data["iosField"] = "keep"
-		row.Data["messages"] = []any{object{"id": "from-ios", "role": "user", "content": "concurrent"}}
+		row.Data["messages"] = []any{object{"id": "concurrent", "role": "user", "content": "concurrent"}}
 	}
 	result, err := h.updateThread(context.Background(), p, key, object{"id": "existing", "title": "manual"})
 	if err != nil {
@@ -941,8 +940,8 @@ func TestCASReappliesPatchAndPreservesIOSFields(t *testing.T) {
 		t.Fatal("patch lost")
 	}
 	row, _ := rows.load(context.Background(), p, key, "chat", "existing")
-	if row.Data["iosField"] != "keep" || len(arr(row.Data["messages"])) != 1 || len(arr(row.Data["pendingRecoveries"])) != 1 {
-		t.Fatal("CAS lost foreign fields")
+	if row.Data["title"] != "manual" || !reflect.DeepEqual(messageIDs(row.Data["messages"]), []string{"concurrent"}) {
+		t.Fatalf("the patch overwrote the concurrent change: %v", row.Data)
 	}
 }
 func TestSyncWireCarriesJWTProtocolAndBase64(t *testing.T) {

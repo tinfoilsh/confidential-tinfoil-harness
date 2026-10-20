@@ -5,6 +5,60 @@ import (
 	"time"
 )
 
+// threadFields and messageFields are the thread format: what the harness
+// stores in sync and a device keeps. Reading a thread upgrades it into this
+// format, so no other code reads a field old clients wrote.
+var (
+	threadFields  = strings.Fields("title titleState createdAt updatedAt model projectId presetId pinned webSearchEnabled messages lastRequestId activeRun contextUsage harnessHiddenCount")
+	messageFields = strings.Fields("id role createdAt content quote model modelDisplayName timeline attachments annotations usage isError isInterrupted")
+)
+
+// normalizeThread upgrades a row into the thread format in place. It reads
+// chats the web and iOS apps stored in sync, device chats the old web client
+// kept, old shares, and threads in the format already.
+func normalizeThread(row *storedRow) object {
+	t := selectFields(row.Data, strings.Join(threadFields, " "))
+	t["id"] = row.ID
+	for _, field := range []string{"createdAt", "updatedAt"} {
+		if value := isoTime(t[field]); value != "" {
+			t[field] = value
+		}
+	}
+	if str(t["title"]) == "" {
+		t["title"] = "New Chat"
+	}
+	if str(t["titleState"]) == "" {
+		t["titleState"] = "generated"
+		if t["title"] == "New Chat" {
+			t["titleState"] = "placeholder"
+		}
+	}
+	t["model"] = normalizeModel(str(t["model"]))
+	for _, field := range []string{"activeRun", "projectId", "presetId"} {
+		if _, ok := t[field]; !ok {
+			t[field] = nil
+		}
+	}
+	t["pinned"] = boolean(t["pinned"], false)
+	t["webSearchEnabled"] = boolean(t["webSearchEnabled"], true)
+	messages := []any{}
+	for i, item := range arr(row.Data["messages"]) {
+		m := obj(item)
+		if str(m["id"]) == "" {
+			m["id"] = row.ID + "-message-" + jsonNumber(i)
+		}
+		if str(m["createdAt"]) == "" {
+			m["createdAt"] = firstString(isoTime(m["timestamp"]), isoTime(t["createdAt"]))
+		}
+		upgradeTimeline(m)
+		upgradeAttachments(m)
+		messages = append(messages, selectFields(m, strings.Join(messageFields, " ")))
+	}
+	t["messages"] = messages
+	row.Data = t
+	return t
+}
+
 func isoTime(value any) string {
 	if s := str(value); s != "" {
 		if parsed, err := time.Parse(time.RFC3339Nano, s); err == nil {
@@ -18,8 +72,8 @@ func isoTime(value any) string {
 	return ""
 }
 
-// Read old timeline variants once at the server boundary. The flat legacy
-// fields remain on stored messages while iOS is still a writer.
+// upgradeTimeline gives a reply the timeline its old flat fields or block
+// types describe.
 func upgradeTimeline(message object) {
 	if message["role"] != "assistant" {
 		return
@@ -94,47 +148,6 @@ func upgradeTimeline(message object) {
 		}
 	}
 	message["timeline"] = blocks
-}
-
-// legacyTimeline gives a reply stored with only flat fields the timeline the
-// web client renders it with, plus the code and widget calls upgradeTimeline
-// shows from them, so that changing its text keeps those blocks.
-func legacyTimeline(message object) {
-	if message["timeline"] != nil || message["role"] != "assistant" {
-		return
-	}
-	blocks := []any{}
-	if fetches := arr(message["urlFetches"]); len(fetches) > 0 {
-		blocks = append(blocks, object{"type": "url_fetches", "id": "legacy-url-fetches", "fetches": fetches})
-	}
-	search, before := message["webSearch"], boolean(message["webSearchBeforeThinking"], false)
-	if search != nil && before {
-		blocks = append(blocks, object{"type": "web_search", "id": "legacy-web-search-pre", "state": search})
-	}
-	if thinking := boolean(message["isThinking"], false); thinking || strings.TrimSpace(str(message["thoughts"])) != "" {
-		block := object{"type": "thinking", "id": "legacy-thinking", "content": str(message["thoughts"]), "isThinking": thinking}
-		if duration, ok := message["thinkingDuration"]; ok {
-			block["duration"] = duration
-		}
-		blocks = append(blocks, block)
-	}
-	if search != nil && !before {
-		blocks = append(blocks, object{"type": "web_search", "id": "legacy-web-search-post", "state": search})
-	}
-	if calls := arr(message["codeExecCalls"]); len(calls) > 0 {
-		blocks = append(blocks, object{"type": "code_exec", "id": "legacy-code-exec", "calls": calls})
-	}
-	for _, item := range arr(message["toolCalls"]) {
-		call := clone(obj(item))
-		call["type"], call["toolCallId"] = "tool_call", call["id"]
-		blocks = append(blocks, call)
-	}
-	if content := str(message["content"]); content != "" {
-		blocks = append(blocks, object{"type": "content", "id": "legacy-content", "content": content})
-	}
-	if len(blocks) > 0 {
-		message["timeline"] = blocks
-	}
 }
 
 func upgradeAttachments(message object) {

@@ -412,7 +412,7 @@ func TestForkCopiesAChatThroughItsMessage(t *testing.T) {
 			t.Fatalf("the fork kept the source's %s: %v", field, row.Data)
 		}
 	}
-	if row.Data["presetId"] != "builtin:tutor" || !reflect.DeepEqual(row.Data["messages"], decodeValue(raw(messages[:2]))) {
+	if row.Data["presetId"] != "builtin:tutor" || !reflect.DeepEqual(messageIDs(row.Data["messages"]), []string{"m1", "m2"}) {
 		t.Fatalf("the fork lost the conversation: %v", row.Data)
 	}
 }
@@ -474,7 +474,7 @@ func TestALocalChatIsSharedFromItsTranscript(t *testing.T) {
 			object{"id": "img", "type": "image", "fileName": "photo.png", "mimeType": "image/png", "thumbnailBase64": "dGh1bWI="},
 			object{"id": "doc", "type": "document", "fileName": "notes.pdf", "mimeType": "application/pdf", "textContent": "the notes"},
 		}},
-		object{"role": "assistant", "content": "a photo", "timestamp": 1767225602000, "timeline": []any{object{"id": "b1", "type": "content", "content": "a photo"}}, "modelDisplayName": "Kimi K3", "thoughts": "looks like one"},
+		object{"role": "assistant", "content": "a photo", "timestamp": 1767225602000, "timeline": []any{object{"id": "b1", "type": "content", "content": "a photo"}}, "modelDisplayName": "Kimi K3"},
 	}}
 	if len(seals) != 1 || !reflect.DeepEqual(decodeValue(plaintext), decodeValue(raw(want))) {
 		t.Fatalf("sealed %d payloads, the last %s", len(seals), plaintext)
@@ -575,5 +575,23 @@ func TestAPromotedLegacyImageIsReadThroughSync(t *testing.T) {
 	w := postRoute(h, "/v1/attachments/get", object{"key": key.base64(), "id": "legacy-2", "threadId": "chat-1"}, "alice")
 	if w.Code != 200 || w.Body.String() != "promoted photo" {
 		t.Fatalf("a promoted legacy image: HTTP %d %s", w.Code, w.Body.String())
+	}
+}
+
+// A document whose blob sync never held loses its reference, and each turn
+// tells the model it is gone without storing that in the chat.
+func TestARetiredDocumentIsDescribedOnlyToTheModel(t *testing.T) {
+	var prompt string
+	h, rows, key := testChatHarness(t, capturePrompt(&prompt))
+	newFakeSync(t, h)
+	storedThread(rows, "alice", "chat-1", object{"id": "legacy-doc", "type": "document", "fileName": "old.pdf", "encryptionKey": "gone"})
+	finishedRun(t, h, "/v1/threads/turn", continueInput(key, "chat-1"))
+	if !strings.Contains(prompt, "old.pdf is no longer available") {
+		t.Fatalf("the model was not told the document is gone: %s", prompt)
+	}
+	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", "chat-1")
+	stored := obj(arr(obj(arr(row.Data["messages"])[0])["attachments"])[0])
+	if stored["encryptionKey"] != nil || stored["textContent"] != nil || stored["fileName"] != "old.pdf" {
+		t.Fatalf("the retired document was stored as %v", stored)
 	}
 }

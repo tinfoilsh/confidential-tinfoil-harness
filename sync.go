@@ -273,6 +273,9 @@ func (h *harness) mutate(ctx context.Context, p *principal, key contentKey, scop
 			}
 			row = &storedRow{ID: id, Data: object{"createdAt": timestamp()}}
 		}
+		if scope == "chat" {
+			normalizeThread(row)
+		}
 		if err := change(row.Data); err != nil {
 			return nil, err
 		}

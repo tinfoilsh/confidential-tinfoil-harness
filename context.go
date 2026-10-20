@@ -148,7 +148,7 @@ func timeReminder(now time.Time, zone string) (string, error) {
 func (h *harness) buildRequest(thread, profile, project object, documents []object, in object, runID string) (*request, *model, error) {
 	c := h.catalog.get()
 	options := obj(in["options"])
-	name := normalizeModel(firstString(options["model"], thread["model"], profile["selectedModel"], "auto"))
+	name := firstString(thread["model"], "auto")
 	req := &request{threadID: str(thread["id"]), runID: runID, model: name}
 	req.conversation = req.threadID
 	if in["kind"] == "ask" {
@@ -176,7 +176,7 @@ func (h *harness) buildRequest(thread, profile, project object, documents []obje
 		if window == 0 {
 			window = c.Fallback
 		}
-		level, err := intelligence(firstString(options["autoIntelligence"], thread["autoIntelligence"], profile["autoIntelligence"], "high"))
+		level, err := intelligence(firstString(options["autoIntelligence"], profile["autoIntelligence"], "high"))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -265,9 +265,6 @@ func renderMessage(message object, vision bool, policy string) []json.RawMessage
 	}
 	if content == "" {
 		content = str(message["content"])
-	}
-	if reasoning == "" {
-		reasoning = str(message["thoughts"])
 	}
 	assistant := object{"role": "assistant", "content": content}
 	if policy == "all" || policy == "tool-call-only" && len(calls) > 0 {

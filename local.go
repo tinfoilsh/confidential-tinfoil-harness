@@ -9,7 +9,7 @@ const maxTurnBody = 64 << 20
 const maxLocalMessages = 10000
 
 // Fields the harness owns are never taken from a client's copy of a thread.
-var serverThreadFields = []string{"activeRun", "harnessRequests", "harnessRetry", "harnessHiddenCount", "projectId", "contextUsage"}
+var serverThreadFields = []string{"activeRun", "harnessHiddenCount", "projectId", "contextUsage"}
 
 func validateLocalThread(thread object) error {
 	if err := validateFields(thread, "title titleState model lastRequestId", "pinned webSearchEnabled", "presetId"); err != nil {
@@ -67,18 +67,6 @@ func localThread(id string, thread object) *storedRow {
 	row := &storedRow{ID: id, Data: data}
 	normalizeThread(row)
 	return row
-}
-
-// localProfile keeps the settings a prompt reads. Display preferences and
-// unknown fields from newer clients are ignored rather than refused.
-func localProfile(profile object) object {
-	out := object{}
-	for _, field := range profileFields {
-		if value, ok := profile[field]; ok {
-			out[field] = value
-		}
-	}
-	return out
 }
 
 // deviceThread is a local thread as its client stores it after a run. Image

@@ -201,9 +201,6 @@ func (h *harness) placeAttachment(ctx context.Context, p *principal, threadID st
 	if err != nil {
 		return err
 	}
-	if storedID != id {
-		a["legacyId"] = id
-	}
 	a["id"], a["encryptionKey"], a["storageThreadId"] = storedID, key, threadID
 	delete(a, "key")
 	if pages := arr(a["pages"]); len(pages) > 0 {
@@ -308,7 +305,6 @@ func stripInlineAttachments(thread object) {
 					delete(a, field)
 				}
 			}
-			delete(a, "legacyId")
 			delete(a, "inferenceMimeType")
 			if attachmentKey(a) == "" {
 				continue
@@ -317,46 +313,6 @@ func stripInlineAttachments(thread object) {
 			if !isImage(a) {
 				delete(a, "textContent")
 				delete(a, "pages")
-			}
-		}
-	}
-}
-
-// keepDerivedAttachments gives a stored row the ids and attachments the
-// harness derives from legacy message fields when reading it, so the blobs
-// placed for them are referenced instead of being stored again every turn.
-func keepDerivedAttachments(id string, thread object) {
-	for i, item := range arr(thread["messages"]) {
-		m := obj(item)
-		if str(m["id"]) == "" {
-			m["id"] = id + "-message-" + jsonNumber(i)
-		}
-		upgradeAttachments(m)
-	}
-}
-
-func copyAttachmentDerivatives(source, target object) {
-	byID := map[string]object{}
-	for _, item := range arr(source["messages"]) {
-		for _, value := range arr(obj(item)["attachments"]) {
-			a := obj(value)
-			byID[firstString(a["legacyId"], a["id"])] = a
-		}
-	}
-	for _, item := range arr(target["messages"]) {
-		for _, value := range arr(obj(item)["attachments"]) {
-			a := obj(value)
-			source := byID[str(a["id"])]
-			if source == nil {
-				continue
-			}
-			for _, field := range []string{"id", "description", "encryptionKey", "storageThreadId", "pageCount"} {
-				if v, ok := source[field]; ok {
-					a[field] = v
-				}
-			}
-			if str(source["encryptionKey"]) != "" {
-				delete(a, "key")
 			}
 		}
 	}

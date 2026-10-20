@@ -154,7 +154,7 @@ func (h *harness) admit(ctx context.Context, p *principal, key contentKey, in ob
 	// The user message a turn adds is named by the client's request.
 	r.stopped, r.input, r.principal, r.key, r.messageID, r.credential, r.assembler = stopped, clean, p, key, r.nonce, credential, newMessageAssembler()
 	if local {
-		r.profile = localProfile(obj(in["profile"]))
+		r.profile = profileView(obj(in["profile"]))
 	}
 	r.out = &stream{run: r.log}
 

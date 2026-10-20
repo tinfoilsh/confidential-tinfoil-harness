@@ -22,7 +22,6 @@ func newMessageAssembler() *messageAssembler {
 // client, only a trailing content block takes the new text.
 func (a *messageAssembler) seed(m object) {
 	m = clone(m)
-	legacyTimeline(m)
 	blocks := arr(m["timeline"])
 	id, sealed := str(m["id"]), len(blocks)
 	if sealed > 0 && obj(blocks[sealed-1])["type"] == "content" {
@@ -116,7 +115,6 @@ func (a *messageAssembler) apply(e event) {
 // replaceReplyText rewrites a reply's text as the web client does: its
 // content blocks collapse into one holding the text, where the first was.
 func replaceReplyText(message object, text string) {
-	legacyTimeline(message)
 	timeline := arr(message["timeline"])
 	first := slices.IndexFunc(timeline, func(block any) bool { return obj(block)["type"] == "content" })
 	edited := object{"type": "content", "id": "edited-content", "content": text}

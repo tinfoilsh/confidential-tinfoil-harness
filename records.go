@@ -60,48 +60,6 @@ func (h *harness) session(ctx context.Context, p *principal, _ contentKey, _ obj
 	return object{"user": object{"id": p.ID, "anonymous": p.Anonymous}, "rateLimit": credential.Limit, "models": c.displayModels(), "auto": auto, "defaultModel": "auto", "widgets": c.EnabledWidgets, "presets": presets, "features": features}, nil
 }
 
-func normalizeThread(row *storedRow) object {
-	t := row.Data
-	t["id"] = row.ID
-	for _, field := range []string{"createdAt", "updatedAt"} {
-		if value := isoTime(t[field]); value != "" {
-			t[field] = value
-		}
-	}
-	if str(t["title"]) == "" {
-		t["title"] = "New Chat"
-	}
-	if str(t["titleState"]) == "" {
-		t["titleState"] = "generated"
-		if t["title"] == "New Chat" {
-			t["titleState"] = "placeholder"
-		}
-	}
-	t["model"] = normalizeModel(str(t["model"]))
-	if _, ok := t["activeRun"]; !ok {
-		t["activeRun"] = nil
-	}
-	if _, ok := t["projectId"]; !ok {
-		t["projectId"] = nil
-	}
-	if _, ok := t["presetId"]; !ok {
-		t["presetId"] = nil
-	}
-	t["pinned"] = boolean(t["pinned"], false)
-	t["webSearchEnabled"] = boolean(t["webSearchEnabled"], true)
-	for i, item := range arr(t["messages"]) {
-		m := obj(item)
-		if str(m["id"]) == "" {
-			m["id"] = row.ID + "-message-" + jsonNumber(i)
-		}
-		if str(m["createdAt"]) == "" {
-			m["createdAt"] = firstString(isoTime(m["timestamp"]), isoTime(t["createdAt"]))
-		}
-		upgradeTimeline(m)
-		upgradeAttachments(m)
-	}
-	return t
-}
 func jsonNumber(n int) string { return string(raw(n)) }
 func threadSummary(t object) object {
 	out := object{}
@@ -201,12 +159,8 @@ func (h *harness) updateThread(ctx context.Context, p *principal, key contentKey
 	if err != nil {
 		return nil, err
 	}
-	if model, ok := in["model"]; ok {
-		name := normalizeModel(str(model))
-		if name != "auto" && h.catalog.get().definition(name) == nil {
-			return nil, apiErr(404, "MODEL_UNAVAILABLE", "Unknown model")
-		}
-		in["model"] = name
+	if model, ok := in["model"]; ok && model != "auto" && h.catalog.get().definition(str(model)) == nil {
+		return nil, apiErr(404, "MODEL_UNAVAILABLE", "Unknown model")
 	}
 	if project := str(in["projectId"]); project != "" {
 		if _, err := h.storeRows.load(ctx, p, key, "project", project); err != nil {
@@ -277,7 +231,7 @@ func (h *harness) forkThread(ctx context.Context, p *principal, key contentKey, 
 	}
 	// Sync leaves out the web client's bookkeeping, not the harness's.
 	forked, err := h.mutate(ctx, p, key, "chat", target, false, func(data object) error {
-		for _, field := range []string{"activeRun", "harnessRequests", "harnessRetry", "contextUsage", "pinned"} {
+		for _, field := range []string{"activeRun", "contextUsage", "pinned"} {
 			delete(data, field)
 		}
 		return nil
@@ -322,14 +276,7 @@ func (h *harness) changeMessages(ctx context.Context, p *principal, key contentK
 		return nil, err
 	}
 	row, err := h.mutate(ctx, p, key, "chat", id, false, func(data object) error {
-		// Ids derived from a message's position are stored, so removing one
-		// message does not rename the messages after it.
 		messages := arr(data["messages"])
-		for i, item := range messages {
-			if m := obj(item); str(m["id"]) == "" {
-				m["id"] = id + "-message-" + jsonNumber(i)
-			}
-		}
 		index := slices.IndexFunc(messages, func(m any) bool { return obj(m)["id"] == messageID })
 		if index < 0 {
 			return apiErr(404, "THREAD_NOT_FOUND", "The message was not found")
@@ -388,19 +335,18 @@ func (h *harness) profile(ctx context.Context, p *principal, key contentKey) (ob
 		}
 		return nil, err
 	}
-	return row.Data, nil
+	return profileView(row.Data), nil
 }
+
+// profileView is a profile in the fields the harness reads, upgraded from
+// what old clients stored.
 func profileView(profile object) object {
 	out := selectFields(profile, strings.Join(profileFields, " ")+" updatedAt")
 	out["selectedModel"] = normalizeModel(str(out["selectedModel"]))
 	return out
 }
 func (h *harness) getProfile(ctx context.Context, p *principal, key contentKey, _ object) (any, error) {
-	profile, err := h.profile(ctx, p, key)
-	if err != nil {
-		return nil, err
-	}
-	return profileView(profile), nil
+	return h.profile(ctx, p, key)
 }
 
 var profileFields = strings.Fields("themeMode chatFont language nickname profession traits additionalContext isUsingPersonalization isUsingCustomPrompt customSystemPrompt customPromptPresets favoritePromptPresetIds defaultPromptPresetId selectedModel autoIntelligence reasoningEffort thinkingEnabled webSearchEnabled codeExecutionEnabled piiCheckEnabled genUIEnabled pixelateSidebarChatTitlesEnabled browserTabChatTitleEnabled enterToNewlineEnabled hasSeenOnboarding hasSeenWebSearchIntro dismissed")

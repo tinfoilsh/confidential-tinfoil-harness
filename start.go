@@ -11,6 +11,132 @@ import (
 // commitTimeout bounds a finished run's writes and a queued turn's start.
 const commitTimeout = time.Minute
 
+// turnPlan is what a turn starts from: its thread with the turn applied, in
+// the form it is stored, and the request its run makes.
+type turnPlan struct {
+	row         *storedRow
+	request     *request
+	model       *model
+	titleText   string
+	retryTarget object
+}
+
+// prepareTurn applies a turn to its chat as read now. A stored chat's
+// attachments are placed under it; the prompt reads their content.
+func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *principal) (*turnPlan, error) {
+	s := r.thread
+	var row *storedRow
+	profile, project, docs := object{}, object{}, []object{}
+	if s.local {
+		h.live.mu.Lock()
+		row = &storedRow{ID: s.row.ID, Data: clone(s.row.Data)}
+		h.live.mu.Unlock()
+		profile = clone(r.profile)
+	} else {
+		var err error
+		profile, err = h.profile(ctx, p, r.key)
+		if err != nil {
+			return nil, err
+		}
+		// A new chat's first turn creates its row under the client's id.
+		row, err = h.storeRows.load(ctx, p, r.key, "chat", s.id)
+		if err != nil && (asAPIError(err).HTTP != 404 || !rowIDPattern.MatchString(s.id)) {
+			return nil, err
+		}
+		if err != nil {
+			row = newThreadRow(s.id, r.input, nil)
+		}
+		normalizeThread(row)
+		if row.Data["lastRequestId"] == r.nonce {
+			return nil, errAlreadyApplied
+		}
+		if id := str(row.Data["projectId"]); id != "" {
+			stored, err := h.storeRows.load(ctx, p, r.key, "project", id)
+			if err != nil {
+				return nil, err
+			}
+			project = stored.Data
+			docs, err = h.projectDocuments(ctx, p, r.key, id)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	data := row.Data
+	created := row.ETag == "" && len(arr(data["messages"])) == 0
+	// A new chat starts with the default prompt preset, as the web client
+	// stamps a blank chat. A first turn naming a preset, or null, overrides it.
+	if _, named := r.input["presetId"]; !named && !s.local && created {
+		if preset := str(profile["defaultPromptPresetId"]); preset != "" {
+			data["presetId"] = preset
+		}
+	}
+	attachments, err := turnAttachments(r.input, data)
+	if err != nil {
+		return nil, err
+	}
+	if err := applyTurn(data, r.input, r.messageID, attachments); err != nil {
+		return nil, err
+	}
+	options := obj(r.input["options"])
+	if created {
+		data["model"] = firstString(profile["selectedModel"], "auto")
+	}
+	data["model"] = firstString(options["model"], data["model"], "auto")
+	if _, ok := options["webSearch"]; ok {
+		data["webSearchEnabled"] = options["webSearch"]
+	}
+	// Sync stores a chat only if every attachment it names is stored under the
+	// chat. An ask's stored source has attachments in sync; a keyless thread
+	// carries its own. Image descriptions are stored, image bytes are not.
+	if !s.local {
+		if err := h.placeAttachments(ctx, p, s.id, data); err != nil {
+			return nil, err
+		}
+	}
+	if err := h.hydrateContext(ctx, p, data, s.keyless); err != nil {
+		return nil, err
+	}
+	// Offloaded documents are read back for the prompt alone.
+	working := clone(data)
+	if !s.keyless {
+		if err := h.hydrateDocuments(ctx, p, working); err != nil {
+			return nil, err
+		}
+	}
+	request, model, err := h.buildRequest(working, profile, project, docs, r.input, r.log.id)
+	if err != nil {
+		return nil, err
+	}
+	if err := preflightBudget(request); err != nil {
+		return nil, err
+	}
+	plan := &turnPlan{row: row, request: request, model: model, titleText: titleSource(working)}
+	if r.input["kind"] == "retryToolCall" {
+		for _, message := range arr(data["messages"]) {
+			for _, b := range arr(obj(message)["timeline"]) {
+				block := obj(b)
+				if firstString(block["toolCallId"], block["id"]) == str(r.input["toolCallId"]) {
+					plan.retryTarget = clone(block)
+					plan.retryTarget["parentId"] = obj(message)["id"]
+				}
+			}
+		}
+		if plan.retryTarget == nil {
+			return nil, apiErr(404, "THREAD_NOT_FOUND", "The widget call was not found")
+		}
+		if !slices.ContainsFunc(h.catalog.get().selectedWidgets(arr(r.input["widgets"]), true), func(w widget) bool { return w.Name == str(plan.retryTarget["name"]) }) {
+			return nil, apiErr(503, "TOOL_UNAVAILABLE", "This widget is not enabled for the client")
+		}
+	}
+	data["contextUsage"] = requestContextUsage(request)
+	data["activeRun"], data["lastRequestId"] = activeRun(r.log.id), r.nonce
+	if !s.local {
+		stripInlineAttachments(data)
+	}
+	return plan, nil
+}
+
 // launch starts the chat's active turn. It commits the turn and the active
 // run's marker before any model I/O, and holds no lock while it reads or
 // writes; a chat being deleted or the service stopping refuses it at the end.
@@ -18,118 +144,30 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	s := r.thread
 	h.live.mu.Lock()
 	p := r.principal
-	var row *storedRow
-	if s.local {
-		row = &storedRow{ID: s.row.ID, Data: clone(s.row.Data)}
-	}
 	h.live.mu.Unlock()
 	ctx = context.WithValue(ctx, apiKeyKey{}, string(r.credential.Key))
 	ctx = context.WithValue(ctx, usageContextKey{}, usageForRun(r))
 	ctx = context.WithValue(ctx, usageSinkKey{}, r.out)
-	profile, project, docs := object{}, object{}, []object{}
-	if !s.local {
+	var plan *turnPlan
+	// A chat another writer changed since it was read takes the turn again.
+	for attempt := 1; ; attempt++ {
 		var err error
-		profile, err = h.profile(ctx, p, r.key)
-		if err != nil {
+		if plan, err = h.prepareTurn(ctx, r, p); err != nil {
 			return err
 		}
-		// A new chat's first turn creates its row under the client's id.
-		row, err = h.storeRows.load(ctx, p, r.key, "chat", s.id)
-		if err != nil && (asAPIError(err).HTTP != 404 || !rowIDPattern.MatchString(s.id)) {
-			return err
+		if s.local {
+			break
 		}
-		if err != nil {
-			row = newThreadRow(s.id, r.input, nil)
+		err = h.store(ctx, p, r.key, "chat", plan.row)
+		if err == nil {
+			break
 		}
-		normalizeThread(row)
-		if row.Data["lastRequestId"] == r.nonce {
-			return errAlreadyApplied
-		}
-		if id := str(row.Data["projectId"]); id != "" {
-			stored, err := h.storeRows.load(ctx, p, r.key, "project", id)
-			if err != nil {
-				return err
-			}
-			project = stored.Data
-			docs, err = h.projectDocuments(ctx, p, r.key, id)
-			if err != nil {
-				return err
-			}
-		}
-	}
-	if s.local {
-		profile = clone(r.profile)
-	}
-	// A new chat starts with the default prompt preset, as the web client
-	// stamps a blank chat. A first turn naming a preset, or null, overrides it.
-	if _, named := r.input["presetId"]; !named && !s.local && row.ETag == "" && len(arr(row.Data["messages"])) == 0 {
-		if preset := str(profile["defaultPromptPresetId"]); preset != "" {
-			row.Data["presetId"] = preset
-		}
-	}
-	working := clone(row.Data)
-	attachments, err := turnAttachments(r.input, working)
-	if err != nil {
-		return err
-	}
-	if err := applyTurn(working, r.input, r.messageID, attachments); err != nil {
-		return err
-	}
-	options := obj(r.input["options"])
-	if row.ETag == "" && len(arr(row.Data["messages"])) == 0 {
-		working["model"] = firstString(profile["selectedModel"], "auto")
-	}
-	working["model"] = normalizeModel(firstString(options["model"], working["model"], profile["selectedModel"], "auto"))
-	if _, ok := options["webSearch"]; ok {
-		working["webSearchEnabled"] = options["webSearch"]
-	}
-	// Sync stores a chat only if every attachment it names is stored under the
-	// chat. Offloaded documents are read back before the budget counts them.
-	// An ask's stored source has attachments in sync; a keyless thread
-	// carries its own.
-	if !s.local {
-		if err := h.placeAttachments(ctx, p, s.id, working); err != nil {
+		if asAPIError(err).Code != "REVISION_CONFLICT" || attempt == maxCommitAttempts {
 			return err
 		}
 	}
-	if !s.keyless {
-		if err := h.hydrateDocuments(ctx, p, working); err != nil {
-			return err
-		}
-	}
-	preview, _, err := h.buildRequest(working, profile, project, docs, r.input, r.log.id)
-	if err != nil {
-		return err
-	}
-	if err := preflightBudget(preview); err != nil {
-		return err
-	}
-	if err := h.hydrateContext(ctx, p, working, s.keyless); err != nil {
-		return err
-	}
-	titleText := titleSource(working)
-	request, model, err := h.buildRequest(working, profile, project, docs, r.input, r.log.id)
-	if err != nil {
-		return err
-	}
-	r.screening = h.screening(request)
-	if r.input["kind"] == "retryToolCall" {
-		for _, message := range arr(working["messages"]) {
-			for _, b := range arr(obj(message)["timeline"]) {
-				block := obj(b)
-				if firstString(block["toolCallId"], block["id"]) == str(r.input["toolCallId"]) {
-					r.retryTarget = clone(block)
-					r.retryTarget["parentId"] = obj(message)["id"]
-				}
-			}
-		}
-		if r.retryTarget == nil {
-			return apiErr(404, "THREAD_NOT_FOUND", "The widget call was not found")
-		}
-		if !slices.ContainsFunc(h.catalog.get().selectedWidgets(arr(r.input["widgets"]), true), func(w widget) bool { return w.Name == str(r.retryTarget["name"]) }) {
-			return apiErr(503, "TOOL_UNAVAILABLE", "This widget is not enabled for the client")
-		}
-	}
+	row, request, model, titleText := plan.row, plan.request, plan.model, plan.titleText
+	r.screening, r.retryTarget = h.screening(request), plan.retryTarget
 	request.cacheScope = cacheScope(p.scope())
 	request.refreshAuth = func(ctx context.Context) (inferenceCredential, error) {
 		h.live.mu.Lock()
@@ -143,48 +181,6 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 			h.live.mu.Unlock()
 		}
 		return credential, err
-	}
-	if err := preflightBudget(request); err != nil {
-		return err
-	}
-	working["contextUsage"] = requestContextUsage(request)
-	if !s.local {
-		initial := row.Data
-		stored, err := h.mutate(ctx, p, r.key, "chat", s.id, row.ETag == "", func(data object) error {
-			// Another attempt of this commit may have stored it already.
-			if data["lastRequestId"] == r.nonce && obj(data["activeRun"])["runId"] != r.log.id {
-				return errAlreadyApplied
-			}
-			if _, exists := data["messages"]; !exists {
-				for field, value := range initial {
-					data[field] = value
-				}
-			}
-			keepDerivedAttachments(s.id, data)
-			// The prompt's copy keeps attachment content; the stored row must not.
-			stored := []any{}
-			for _, a := range attachments {
-				stored = append(stored, clone(obj(a)))
-			}
-			if err := applyTurn(data, r.input, r.messageID, stored); err != nil {
-				return err
-			}
-			data["model"], data["webSearchEnabled"] = working["model"], working["webSearchEnabled"]
-			data["contextUsage"] = working["contextUsage"]
-			copyAttachmentDerivatives(working, data)
-			stripInlineAttachments(data)
-			data["activeRun"], data["lastRequestId"] = activeRun(r.log.id), r.nonce
-			delete(data, "harnessRetry")
-			delete(data, "harnessRequests")
-			return nil
-		})
-		if err != nil {
-			return err
-		}
-		row = stored
-	} else {
-		row.Data = working
-		row.Data["activeRun"], row.Data["lastRequestId"] = activeRun(r.log.id), r.nonce
 	}
 	// A continuation streams into the reply it extends, which RUN_STARTED names.
 	if r.input["kind"] == "continue" {

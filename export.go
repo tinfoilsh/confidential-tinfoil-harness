@@ -63,7 +63,7 @@ func (h *harness) shareThread(ctx context.Context, p *principal, _ contentKey, i
 	for _, item := range arr(t["messages"]) {
 		m := obj(item)
 		out := object{"role": m["role"], "content": str(m["content"]), "timestamp": millis(firstString(m["createdAt"], m["timestamp"])), "timeline": m["timeline"]}
-		for _, f := range []string{"thoughts", "thinkingDuration", "modelDisplayName", "isError", "quote"} {
+		for _, f := range []string{"modelDisplayName", "isError", "quote"} {
 			if v, ok := m[f]; ok {
 				out[f] = v
 			}
