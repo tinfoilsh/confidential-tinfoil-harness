@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/png"
 	"io"
@@ -345,7 +346,7 @@ func TestOldDeviceChatsUpgradeIntoThreads(t *testing.T) {
 		"createdAt": "2026-03-01T10:00:00Z", "updatedAt": "2026-03-01T10:05:00Z", "projectId": nil, "presetId": nil, "activeRun": nil,
 		"messages": []any{
 			object{"id": m(0), "role": "user", "content": "What is in this picture?", "createdAt": "2026-03-01T10:00:01Z", "attachments": []any{
-				object{"id": "a1b2", "kind": "image", "fileName": "cat.png", "mimeType": "image/png", "base64": "iVBORw0KGgo=", "thumbnail": "dGh1bWI=", "size": 8},
+				object{"id": "a1b2", "kind": "image", "fileName": "cat.png", "mimeType": "image/png", "thumbnail": "dGh1bWI=", "size": 8},
 				object{"id": "d3e4", "kind": "document", "fileName": "notes.pdf", "mimeType": "application/pdf", "textContent": "Cats sleep a lot.", "size": 1234},
 			}},
 			object{"id": m(1), "role": "assistant", "content": "A cat [Cats](https://cats.example).", "createdAt": "2026-03-01T09:00:05Z", "modelDisplayName": "Kimi K3",
@@ -359,7 +360,7 @@ func TestOldDeviceChatsUpgradeIntoThreads(t *testing.T) {
 				}},
 			object{"id": m(2), "role": "user", "content": "And this?", "createdAt": "2026-03-01T10:01:00Z", "attachments": []any{
 				object{"id": m(2) + "-attachment-0", "kind": "document", "fileName": "Attached document", "mimeType": "", "textContent": "legacy doc text"},
-				object{"id": m(2) + "-attachment-1", "kind": "image", "fileName": "image-0", "mimeType": "image/gif", "base64": "R0lGODlh"},
+				object{"id": m(2) + "-attachment-1", "kind": "image", "fileName": "image-0", "mimeType": "image/gif"},
 			}},
 		},
 	}
@@ -369,13 +370,8 @@ func TestOldDeviceChatsUpgradeIntoThreads(t *testing.T) {
 	if rows.calls != 0 {
 		t.Fatalf("the upgrade made %d storage calls", rows.calls)
 	}
-	// The thread continues as a device chat, whose turns may leave out image
-	// bytes.
-	for _, message := range arr(obj(threads[0])["messages"]) {
-		for _, a := range arr(obj(message)["attachments"]) {
-			delete(obj(a), "base64")
-		}
-	}
+	// The thread continues as a device chat. Images that do not decode come
+	// back without bytes, which no model could read.
 	next := localInput(id, obj(threads[0]))
 	if events := eventsIn(t, postRoute(h, "/v1/threads/turn", next, "alice")); events[len(events)-1].Type != "RUN_FINISHED" {
 		t.Fatalf("the upgraded thread did not continue: %+v", events[len(events)-1])
@@ -387,12 +383,24 @@ func TestOldDeviceChatsUpgradeIntoThreads(t *testing.T) {
 			t.Fatalf("a batch holding %v: HTTP %d", row, w.Code)
 		}
 	}
-	// A batch is read up to the size of a turn, past the limit of other requests.
+	// A batch is read up to the size of a turn, past the limit of other
+	// requests, and an image comes back as the copy and thumbnail an upload
+	// makes, not the original its client keeps.
+	var original bytes.Buffer
+	(&png.Encoder{CompressionLevel: png.NoCompression}).Encode(&original, image.NewRGBA(image.Rect(0, 0, 2048, 1024)))
 	large := oldDeviceChat(id)
-	image := strings.Repeat("A", maxRequestBody)
-	obj(arr(obj(arr(large["messages"])[0])["attachments"])[0])["base64"] = image
-	if got := upgraded(t, h, "alice", large); str(obj(arr(obj(arr(obj(got[0])["messages"])[0])["attachments"])[0])["base64"]) != image {
-		t.Fatal("a large image did not pass through")
+	obj(arr(obj(arr(large["messages"])[0])["attachments"])[0])["base64"] = base64.StdEncoding.EncodeToString(original.Bytes())
+	if original.Len() <= maxRequestBody {
+		t.Fatalf("the large image holds only %d bytes", original.Len())
+	}
+	got := obj(arr(obj(arr(obj(upgraded(t, h, "alice", large)[0])["messages"])[0])["attachments"])[0])
+	dimensions := func(field string) string {
+		data, _ := base64.StdEncoding.DecodeString(str(got[field]))
+		config, format, err := image.DecodeConfig(bytes.NewReader(data))
+		return fmt.Sprintf("%s %dx%d %v", format, config.Width, config.Height, err)
+	}
+	if resized, thumbnail := dimensions("base64"), dimensions("thumbnail"); resized != "jpeg 1536x768 <nil>" || thumbnail != "jpeg 256x128 <nil>" {
+		t.Fatalf("the large image came back as %s with a thumbnail of %s", resized, thumbnail)
 	}
 }
 

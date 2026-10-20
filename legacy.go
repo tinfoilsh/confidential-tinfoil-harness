@@ -2,6 +2,7 @@ package main
 
 import (
 	"cmp"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"regexp"
@@ -429,9 +430,33 @@ func (h *harness) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// The thread is one its client can send back with a turn.
-		threads = append(threads, readDeviceThread(named.ID, item))
+		thread := readDeviceThread(named.ID, item)
+		modelCopies(&thread)
+		threads = append(threads, thread)
 	}
 	respond(w, struct {
 		Threads []Thread `json:"threads"`
 	}{threads}, nil)
+}
+
+// modelCopies gives each image of an upgraded chat the copy and thumbnail an
+// upload makes in place of its original, which its client keeps from the old
+// chat. An image that does not decode keeps no bytes, since no model reads it.
+func modelCopies(t *Thread) {
+	t.eachAttachment(func(a *Attachment) error {
+		if !a.isImage() || a.Base64 == "" {
+			return nil
+		}
+		original, err := base64.StdEncoding.DecodeString(a.Base64)
+		a.Base64 = ""
+		if err != nil {
+			return nil
+		}
+		resized, thumb, err := resizeImage(original)
+		clear(original)
+		if err == nil {
+			a.Base64, a.Thumbnail = base64.StdEncoding.EncodeToString(resized), base64.StdEncoding.EncodeToString(thumb)
+		}
+		return nil
+	})
 }
