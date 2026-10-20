@@ -12,8 +12,11 @@ import (
 	"image/png"
 	"io"
 	"mime/multipart"
+	"net"
+	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -619,10 +622,7 @@ func TestArchivesWaitForScratchSpace(t *testing.T) {
 	if w := archiveRoute(h, "/v1/export", "", optionsPart(object{"format": "conversations"}), large); w.Code != 413 || !strings.Contains(w.Body.String(), "ARCHIVE_TOO_LARGE") {
 		t.Fatalf("an export that cannot fit: HTTP %d %s", w.Code, w.Body.String())
 	}
-	held, err := h.scratch.lease(context.Background(), 60<<10)
-	if err != nil {
-		t.Fatal(err)
-	}
+	held := heldScratch(t, h, 60<<10)
 	done := make(chan *httptest.ResponseRecorder)
 	go func() {
 		done <- archiveRoute(h, "/v1/export", "", optionsPart(object{"format": "conversations"}), thread)
@@ -638,16 +638,101 @@ func TestArchivesWaitForScratchSpace(t *testing.T) {
 	if w := <-done; w.Code != 200 {
 		t.Fatalf("the waiting export: HTTP %d %s", w.Code, w.Body.String())
 	}
-	held, _ = h.scratch.lease(context.Background(), 60<<10)
+	held = heldScratch(t, h, 60<<10)
+	defer held.release()
 	h.scratch.wait = 10 * time.Millisecond
 	if w := archiveRoute(h, "/v1/export", "", optionsPart(object{"format": "conversations"}), thread); w.Code != 503 || w.Header().Get("Retry-After") == "" || !strings.Contains(w.Body.String(), "TEMP_SPACE_BUSY") {
 		t.Fatalf("an export that waited too long: HTTP %d %s", w.Code, w.Body.String())
 	}
-	held.release()
-	// The export's conversations outgrow the request it leased space for.
-	held, _ = h.scratch.lease(context.Background(), 52<<10)
-	defer held.release()
-	if w := archiveRoute(h, "/v1/export", "", optionsPart(object{"format": "conversations"}), thread); w.Code != 503 || !strings.Contains(w.Body.String(), "TEMP_SPACE_BUSY") {
-		t.Fatalf("an export wrote past the space it holds: HTTP %d %s", w.Code, w.Body.String())
+}
+
+// heldScratch holds n bytes of the harness's scratch space.
+func heldScratch(t *testing.T, h *harness, n int64) *scratchLease {
+	t.Helper()
+	held, err := h.scratch.lease(context.Background(), n)
+	if err == nil {
+		err = held.take(n)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return held
+}
+
+// A request whose body stops arriving holds only the space its bytes take,
+// and only until it has sent nothing for a while, while one whose body
+// keeps arriving, however slowly, is served.
+func TestStalledArchivesFreeTheirSpace(t *testing.T) {
+	h, _, _ := testChatHarness(t, nil)
+	dir := t.TempDir()
+	h.scratch = newScratchSpace(dir, 64<<10)
+	h.scratch.wait, h.scratch.idle = time.Millisecond, 500*time.Millisecond
+	server := httptest.NewServer(h.routes())
+	t.Cleanup(server.Close)
+	post := func(contentType string, length int) net.Conn {
+		conn, err := net.Dial("tcp", server.Listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { conn.Close() })
+		fmt.Fprintf(conn, "POST /v1/import HTTP/1.1\r\nHost: harness\r\nAuthorization: Bearer clerk-alice\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n", contentType, length)
+		return conn
+	}
+	response := func(conn net.Conn) (*http.Response, string) {
+		conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		r, err := http.ReadResponse(bufio.NewReader(conn), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(r.Body)
+		return r, string(body)
+	}
+
+	// The stalled import declares a body the space fits and sends part of it.
+	stalled := post("multipart/form-data; boundary=stall", 30<<10)
+	fmt.Fprintf(stalled, "--stall\r\nContent-Disposition: form-data; name=\"file\"; filename=\"chats.json\"\r\n\r\n%s", strings.Repeat(" ", 4<<10))
+	for start := time.Now(); ; time.Sleep(time.Millisecond) {
+		if spooled, _ := filepath.Glob(filepath.Join(dir, "harness-archive-*")); len(spooled) > 0 {
+			if info, err := os.Stat(spooled[0]); err == nil && info.Size() > 0 {
+				break
+			}
+		}
+		if time.Since(start) > 10*time.Second {
+			t.Fatal("the stalled import never spooled its bytes")
+		}
+	}
+	var form bytes.Buffer
+	writer := multipart.NewWriter(&form)
+	options, _ := writer.CreateFormField("options")
+	options.Write(raw(object{"target": "device"}))
+	file, _ := writer.CreateFormFile("file", "conversations.json")
+	file.Write(raw([]object{{"uuid": "slow-chat", "name": "Slow", "chat_messages": []object{{"sender": "human", "text": "hi"}}}}))
+	writer.Close()
+	slow := post(writer.FormDataContentType(), form.Len())
+	trickled := make(chan struct{})
+	go func() {
+		defer close(trickled)
+		body := form.Bytes()
+		for piece := (len(body) + 7) / 8; len(body) > 0; body = body[min(piece, len(body)):] {
+			slow.Write(body[:min(piece, len(body))])
+			time.Sleep(h.scratch.idle / 5)
+		}
+	}()
+
+	thread := threadPart(object{"id": "local-chat", "title": "Tab chat", "messages": []any{object{"id": "m", "role": "user", "content": strings.Repeat("x", 16<<10)}}})
+	if w := archiveRoute(h, "/v1/export", "", optionsPart(object{"format": "conversations"}), thread); w.Code != 200 {
+		t.Fatalf("an export waited for a stalled import's space: HTTP %d %s", w.Code, w.Body.String())
+	}
+	if r, body := response(stalled); r.StatusCode != http.StatusRequestTimeout || !strings.Contains(body, "REQUEST_TIMEOUT") {
+		t.Fatalf("the stalled import: HTTP %d %s", r.StatusCode, body)
+	}
+	<-trickled
+	if r, body := response(slow); r.StatusCode != 200 || !strings.Contains(body, `"title":"Slow"`) || !strings.Contains(body, `"done"`) {
+		t.Fatalf("an import whose body kept arriving: HTTP %d %s", r.StatusCode, body)
+	}
+	for start := time.Now(); !h.scratch.sem.TryAcquire(h.scratch.size); time.Sleep(time.Millisecond) {
+		if time.Since(start) > 10*time.Second {
+			t.Fatal("the stalled import kept its space")
+		}
 	}
 }

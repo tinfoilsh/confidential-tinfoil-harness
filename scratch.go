@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"io"
+	"net/http"
 	"os"
 	"sync/atomic"
 	"syscall"
@@ -13,13 +14,18 @@ import (
 
 // Archives are spooled to the temporary directory: a tmpfs whose size the
 // enclave's configuration sets, held in the confidential VM's encrypted
-// memory, which has no swap device. Every request that spools leases the
-// space it expects to use first, and waits while other requests hold it.
-// A request that could never fit is refused at once.
+// memory, which has no swap device. A request takes space as the bytes it
+// spools arrive, and waits while other requests hold it. A request that
+// could never fit is refused at once, and one whose body stops arriving is
+// ended, freeing what it holds.
 
-// scratchWait bounds how long a request waits for space before it is
-// told to retry.
-const scratchWait = 2 * time.Minute
+const (
+	// scratchWait bounds how long a request waits for space before it is
+	// told to retry.
+	scratchWait = 2 * time.Minute
+	// scratchIdle bounds how long a request's body may send nothing.
+	scratchIdle = 30 * time.Second
+)
 
 var (
 	errArchiveTooLarge = apiErr(413, "ARCHIVE_TOO_LARGE", "The archive needs more temporary space than this service has")
@@ -27,16 +33,16 @@ var (
 )
 
 type scratchSpace struct {
-	dir  string
-	size int64
-	sem  *semaphore.Weighted
-	wait time.Duration
+	dir        string
+	size       int64
+	sem        *semaphore.Weighted
+	wait, idle time.Duration
 	// waiting counts requests waiting for space.
 	waiting atomic.Int32
 }
 
 func newScratchSpace(dir string, size int64) *scratchSpace {
-	return &scratchSpace{dir: dir, size: size, sem: semaphore.NewWeighted(size), wait: scratchWait}
+	return &scratchSpace{dir: dir, size: size, sem: semaphore.NewWeighted(size), wait: scratchWait, idle: scratchIdle}
 }
 
 // measuredScratch budgets the temporary directory as large as it is.
@@ -49,44 +55,66 @@ func measuredScratch() (*scratchSpace, error) {
 	return newScratchSpace(dir, int64(stat.Blocks)*int64(stat.Bsize)), nil
 }
 
-// scratchLease is the space one request holds. Its files count against it,
-// and it grows past what was expected only while space is free.
+// scratchLease is the space one request holds: what its files take.
 type scratchLease struct {
-	space      *scratchSpace
-	held, used int64
-	files      []*os.File
+	ctx   context.Context
+	space *scratchSpace
+	held  int64
+	files []*os.File
 }
 
+// lease starts a request's lease, which holds nothing until its files are
+// written. A request expected to need more than the whole space is refused.
 func (s *scratchSpace) lease(ctx context.Context, expected int64) (*scratchLease, error) {
 	if expected > s.size {
 		return nil, errArchiveTooLarge
 	}
-	waitCtx, cancel := context.WithTimeout(ctx, s.wait)
-	defer cancel()
-	s.waiting.Add(1)
-	err := s.sem.Acquire(waitCtx, expected)
-	s.waiting.Add(-1)
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, errScratchBusy
-	}
-	return &scratchLease{space: s, held: expected}, nil
+	return &scratchLease{ctx: ctx, space: s}, nil
 }
 
 func (l *scratchLease) take(n int64) error {
-	if l.used+n > l.space.size {
+	if l.held+n > l.space.size {
 		return errArchiveTooLarge
 	}
-	if over := l.used + n - l.held; over > 0 {
-		if !l.space.sem.TryAcquire(over) {
-			return errScratchBusy
-		}
-		l.held += over
+	if l.space.sem.TryAcquire(n) {
+		l.held += n
+		return nil
 	}
-	l.used += n
+	waitCtx, cancel := context.WithTimeout(l.ctx, l.space.wait)
+	defer cancel()
+	l.space.waiting.Add(1)
+	err := l.space.sem.Acquire(waitCtx, n)
+	l.space.waiting.Add(-1)
+	if err != nil {
+		if l.ctx.Err() != nil {
+			return l.ctx.Err()
+		}
+		return errScratchBusy
+	}
+	l.held += n
 	return nil
+}
+
+// idleBody ends a request whose body sends nothing for the space's idle
+// time. The returned func lifts the limit once the body is read, so it
+// cannot end the request after; left in place, it also bounds the server
+// reading what a refused request still sends.
+func (s *scratchSpace) idleBody(w http.ResponseWriter, r *http.Request) func() {
+	rc := http.NewResponseController(w)
+	r.Body = &idleReader{ReadCloser: r.Body, rc: rc, idle: s.idle}
+	return func() { rc.SetReadDeadline(time.Time{}) }
+}
+
+// idleReader gives each read of a body until the idle time to return.
+type idleReader struct {
+	io.ReadCloser
+	rc   *http.ResponseController
+	idle time.Duration
+}
+
+func (r *idleReader) Read(p []byte) (int, error) {
+	r.rc.SetReadDeadline(time.Now().Add(r.idle))
+	return r.ReadCloser.Read(p)
 }
 
 // release deletes the lease's files and frees its space.

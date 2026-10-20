@@ -221,12 +221,14 @@ func (h *harness) handleExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer lease.release()
+	lift := h.scratch.idleBody(w, r)
 	r.Body = http.MaxBytesReader(w, r.Body, maxExportBody)
 	form, err := readExportForm(r, lease)
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
+	lift()
 	var key *contentKey
 	if form.options.Key != "" {
 		if p.Anonymous {

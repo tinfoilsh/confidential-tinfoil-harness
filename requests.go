@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"reflect"
 	"slices"
 	"strconv"
@@ -37,11 +38,15 @@ func readBody(w http.ResponseWriter, r *http.Request, limit int64) (json.RawMess
 	return body, nil
 }
 
-// bodyError tells a body over the size limit from a malformed one.
+// bodyError tells a body over the size limit, or one that stopped
+// arriving, from a malformed one.
 func bodyError(err error, malformed string) *apiError {
 	var tooLarge *http.MaxBytesError
 	if errors.As(err, &tooLarge) {
 		return apiErr(http.StatusRequestEntityTooLarge, "PAYLOAD_TOO_LARGE", "The request exceeds the size limit")
+	}
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return apiErr(http.StatusRequestTimeout, "REQUEST_TIMEOUT", "The request stopped sending its body")
 	}
 	return apiErr(400, "BAD_REQUEST", malformed)
 }

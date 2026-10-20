@@ -39,8 +39,9 @@ const (
 	maxCloudImport = 512 << 20
 	// importChunk is the size sync's import job takes an archive in.
 	importChunk = 8 << 20
-	// importSpaceFactor leases space for the upload and the cloud import
-	// written from it, which is no larger than the upload it comes from.
+	// importSpaceFactor is the space an import expects to need: its upload
+	// and the cloud import written from it, which is no larger than the
+	// upload it comes from.
 	importSpaceFactor = 2
 	// Sync's import job refuses an archive past these.
 	maxImportChats       = 100_000
@@ -79,12 +80,14 @@ func (h *harness) handleImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer lease.release()
+	lift := h.scratch.idleBody(w, r)
 	r.Body = http.MaxBytesReader(w, r.Body, maxImportBody)
 	upload, options, err := readImportForm(r, lease)
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
+	lift()
 	run := &importRun{h: h, p: p, lease: lease, out: &importStream{w: w}, seen: map[string]bool{}}
 	switch options.Target {
 	case "device":
