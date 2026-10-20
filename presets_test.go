@@ -5,18 +5,21 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 )
 
 // savedPresets are prompts a user saved: one choosing an offered model with
-// web search off, and one naming a model no longer offered.
+// web search off, one naming a model no longer offered, and one naming a
+// model that serves only Auto.
 var savedPresets = []any{
 	object{"id": "user:fast", "name": "Fast", "systemPrompt": "Be brief.", "model": "gemma4-31b", "webSearchEnabled": false},
 	object{"id": "user:gone", "name": "Gone", "model": "retired-model", "webSearchEnabled": false},
+	object{"id": "user:free", "name": "Free", "model": "gpt-oss-120b", "webSearchEnabled": false},
 }
 
-// presetHarness offers kimi-k3 and gemma4-31b, and reports the model each
-// model turn asks for.
+// presetHarness offers kimi-k3 and gemma4-31b, and serves gpt-oss-120b
+// behind Auto alone. It reports the model each model turn asks for.
 func presetHarness(t *testing.T) (*harness, *memoryRows, contentKey, chan string) {
 	t.Helper()
 	asked := make(chan string, 16)
@@ -26,9 +29,11 @@ func presetHarness(t *testing.T) (*harness, *memoryRows, contentKey, chan string
 		asked <- str(body["model"])
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n")
 	})
-	h.offer.models = append(h.offer.models, &model{name: "gemma4-31b", context: 8192, client: h.offer.models[0].client})
+	client := h.offer.models[0].client
+	h.offer.models = append(h.offer.models, &model{name: "gemma4-31b", context: 8192, client: client}, &model{name: "gpt-oss-120b", context: 8192, client: client})
 	c := h.catalog.get()
-	c.Models = append(c.Models, object{"modelName": "gemma4-31b", "name": "Gemma", "budgetWindow": 8192, "chatConfig": object{}})
+	c.Models = append(c.Models, object{"modelName": "gemma4-31b", "name": "Gemma", "budgetWindow": 8192, "chatConfig": object{}},
+		object{"modelName": "gpt-oss-120b", "name": "Free", "paid": false, "budgetWindow": 8192, "chatConfig": object{}})
 	return h, rows, key, asked
 }
 
@@ -59,6 +64,7 @@ func TestANewChatTakesItsPresetsSettingsUnlessItsTurnSetsThem(t *testing.T) {
 		{"default preset", nil, object{}, "gemma4-31b", false},
 		{"turn's model", nil, object{"model": "kimi-k3"}, "kimi-k3", false},
 		{"unoffered model", "user:gone", object{}, "kimi-k3", false},
+		{"model behind Auto", "user:free", object{}, "kimi-k3", false},
 	} {
 		in := sendInput(key)
 		in["options"] = tc.options
@@ -104,5 +110,9 @@ func TestChoosingAPresetTakesTheSettingsTheRequestLeavesOut(t *testing.T) {
 	update(object{"presetId": nil})
 	if chat := update(object{"presetId": "user:fast", "webSearchEnabled": true}); chat.Model != "gemma4-31b" || !chat.WebSearchEnabled {
 		t.Fatalf("the update's own web search setting was not taken: %s %v", chat.Model, chat.WebSearchEnabled)
+	}
+	// A model that serves only Auto is never a chat's own.
+	if w := postRoute(h, "/v1/threads/update", object{"key": key.base64(), "id": id, "model": "gpt-oss-120b"}, "alice"); w.Code != 404 || !strings.Contains(w.Body.String(), "MODEL_UNAVAILABLE") {
+		t.Fatalf("choosing a model behind Auto: HTTP %d %s", w.Code, w.Body.String())
 	}
 }

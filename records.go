@@ -100,7 +100,7 @@ func (h *harness) getThread(ctx context.Context, p *principal, key contentKey, i
 	return window(row, in.Before, in.Limit), nil
 }
 func (h *harness) updateThread(ctx context.Context, p *principal, key contentKey, in *updateThreadRequest) (any, error) {
-	if in.Model != nil && *in.Model != autoModelName && h.catalog.get().definition(*in.Model) == nil {
+	if in.Model != nil && !h.catalog.get().offers(*in.Model) {
 		return nil, apiErr(404, "MODEL_UNAVAILABLE", "Unknown model")
 	}
 	if project := valueOr(in.ProjectID.value, ""); project != "" {

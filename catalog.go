@@ -183,7 +183,17 @@ func (c *chatCatalog) vision(name string) bool {
 
 // offers reports whether a chat may run on a model now.
 func (c *chatCatalog) offers(name string) bool {
-	return name == autoModelName || c.definition(name) != nil
+	if name == autoModelName {
+		return true
+	}
+	definition := c.definition(name)
+	return definition != nil && !autoOnly(definition)
+}
+
+// autoOnly reports whether a model is configured as not paid: it serves free
+// keys behind Auto, and no chat chooses it.
+func autoOnly(definition object) bool {
+	return !boolean(definition["paid"], true)
 }
 
 // applyPreset files a chat under a prompt preset, or none, and takes the
@@ -273,7 +283,6 @@ type modelConfig struct {
 	Name            string  `json:"name"`
 	NameShort       string  `json:"nameShort"`
 	Image           string  `json:"image"`
-	Paid            *bool   `json:"paid"`
 	Experimental    bool    `json:"experimental"`
 	Deprecated      bool    `json:"deprecated"`
 	DeprecationDate *string `json:"deprecationDate"`
@@ -320,16 +329,15 @@ const (
 	deprecatedDateTooltip = "This model will be taken offline on %s."
 )
 
-// displayModels are the models a client offers, Auto first. A model
-// configured as not paid serves free keys behind Auto and is never offered.
+// displayModels are the models a client offers, Auto first.
 func (c *chatCatalog) displayModels() []sessionModel {
 	models := []sessionModel{{ID: autoModelName, Label: autoLabel, ShortLabel: autoLabel, Badges: []lifecycleBadge{}, Auto: true}}
 	for _, m := range append(slices.Clone(c.Models), c.Deprecated...) {
-		var config modelConfig
-		readLenient(raw(m), &config)
-		if config.Paid != nil && !*config.Paid {
+		if autoOnly(m) {
 			continue
 		}
+		var config modelConfig
+		readLenient(raw(m), &config)
 		display := sessionModel{ID: config.ModelName, Label: config.Name, ShortLabel: cmp.Or(config.NameShort, config.Name), Icon: config.Image, Description: config.ChatConfig.DescriptionShort,
 			Deprecated: config.Deprecated, Badges: []lifecycleBadge{}}
 		if reason := config.ChatConfig.ReasoningConfig; reason != nil {
