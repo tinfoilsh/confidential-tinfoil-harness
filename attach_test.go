@@ -267,8 +267,16 @@ func TestATurnsUploadIsHeldToWhatUploadsMake(t *testing.T) {
 			t.Errorf("%s: HTTP %d %s", tc.name, w.Code, w.Body.String())
 		}
 	}
-	if events := eventsIn(t, turn(object{"id": "att_text", "kind": "document", "fileName": "notes.txt", "textContent": strings.Repeat("x", 64)})); events[len(events)-1].Type != "RUN_FINISHED" {
+	events = eventsIn(t, turn(object{"id": "att_text", "kind": "document", "fileName": "notes.txt", "textContent": strings.Repeat("x", 64)}))
+	if events[len(events)-1].Type != "RUN_FINISHED" {
 		t.Fatalf("text at the limit ended with %+v", events[len(events)-1])
+	}
+	held := storedChat(t, rows, key, events[0].ThreadID).Messages[0].Attachments
+	if len(held) != 1 || held[0].FileName != "notes.txt" {
+		t.Fatalf("the chat holds %+v", held)
+	}
+	if content, err := decodeDocument(fake.blobs[held[0].ID].data); err != nil || content.TextContent != strings.Repeat("x", 64) {
+		t.Fatalf("the stored document holds %+v: %v", content, err)
 	}
 }
 
