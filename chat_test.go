@@ -1450,7 +1450,7 @@ func TestToolSessionsCarryTheEnclaveHeaders(t *testing.T) {
 			if header.Get("X-Tinfoil-Tool-Model") != "kimi-k3" || header.Get("X-Tinfoil-Tool-Route") != tc.route || header.Get("X-Tinfoil-Tool-Streaming") != "true" {
 				t.Fatalf("wrong session headers: %v", header)
 			}
-			if got := header.Values("X-Tinfoil-Tool-PII-Check"); tc.pii && !reflect.DeepEqual(got, []string{"true"}) || !tc.pii && len(got) != 0 {
+			if got := header.Values("X-Tinfoil-Tool-PII-Check"); !reflect.DeepEqual(got, []string{strconv.FormatBool(tc.pii)}) {
 				t.Fatalf("the PII check header was %q", got)
 			}
 			for range 2 {

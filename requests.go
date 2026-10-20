@@ -482,6 +482,7 @@ type turnOptions struct {
 	AutoIntelligence string `json:"autoIntelligence,omitempty"`
 	ReasoningEffort  string `json:"reasoningEffort,omitempty"`
 	Timezone         string `json:"timezone,omitempty"`
+	Locale           string `json:"locale,omitempty"`
 	Thinking         *bool  `json:"thinking,omitempty"`
 	WebSearch        *bool  `json:"webSearch,omitempty"`
 	PIICheck         *bool  `json:"piiCheck,omitempty"`
@@ -565,7 +566,7 @@ func (in *turnRequest) validateContent() error {
 	if pixels > maxTurnResizePixels {
 		return apiErr(413, "ATTACHMENT_TOO_LARGE", "The turn's images hold more pixels than one turn can resize")
 	}
-	if in.Kind == "send" && strings.TrimSpace(valueOr(in.Content, "")) == "" && len(in.Attachments) == 0 {
+	if in.Kind == "send" && strings.TrimSpace(valueOr(in.Content, "")) == "" && strings.TrimSpace(valueOr(in.Quote, "")) == "" && len(in.Attachments) == 0 {
 		return apiErr(400, "BAD_REQUEST", "A message or attachment is required")
 	}
 	return nil
