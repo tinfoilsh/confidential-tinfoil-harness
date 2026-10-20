@@ -179,7 +179,7 @@ func TestStoredUploadIsOffloadedUnderItsThread(t *testing.T) {
 	}
 	// An edit names the attachment the chat stores by its id alone.
 	edit := continueInput(key, thread)
-	edit["kind"], edit["messageId"], edit["content"] = "edit", obj(arr(rowJSON(row)["messages"])[0])["id"], "look again"
+	edit["kind"], edit["messageId"], edit["content"] = "edit", readThreadRow(row).Messages[0].ID, "look again"
 	edit["attachments"] = []any{object{"id": "att_unknown"}}
 	if w := postRoute(h, "/v1/threads/turn", edit, "alice"); w.Code != 404 {
 		t.Fatalf("an edit naming an unknown attachment: HTTP %d", w.Code)
@@ -187,9 +187,9 @@ func TestStoredUploadIsOffloadedUnderItsThread(t *testing.T) {
 	edit["clientRequestId"], edit["attachments"] = uuid.NewString(), []any{object{"id": stored["id"]}}
 	finishedRun(t, h, "/v1/threads/turn", edit)
 	row, _ = rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", thread)
-	kept := obj(arr(obj(arr(rowJSON(row)["messages"])[0])["attachments"])[0])
-	if kept["id"] != stored["id"] || kept["encryptionKey"] != stored["encryptionKey"] || fake.putCount() != 1 {
-		t.Fatalf("the edit did not keep the stored attachment: %v after %d blobs", kept, fake.putCount())
+	kept := readThreadRow(row).Messages[0].Attachments[0]
+	if kept.ID != stored["id"] || kept.EncryptionKey != stored["encryptionKey"] || fake.putCount() != 1 {
+		t.Fatalf("the edit did not keep the stored attachment: %+v after %d blobs", kept, fake.putCount())
 	}
 }
 
@@ -224,9 +224,9 @@ func TestOffloadedDocumentIsReadBackForEachTurn(t *testing.T) {
 		t.Fatal("a document already stored under its thread was stored again")
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", "chat-1")
-	stored := obj(arr(obj(arr(rowJSON(row)["messages"])[0])["attachments"])[0])
-	if stored["id"] != id || stored["textContent"] != nil {
-		t.Fatalf("the stored reference changed: %v", stored)
+	stored := readThreadRow(row).Messages[0].Attachments[0]
+	if stored.ID != id || stored.TextContent != "" {
+		t.Fatalf("the stored reference changed: %+v", stored)
 	}
 }
 
@@ -279,8 +279,8 @@ func TestMissingAttachmentsAreRepairedBeforeRetrying(t *testing.T) {
 		object{"id": imageID, "type": "image", "fileName": "photo.png", "encryptionKey": "gone", "thumbnailBase64": "thumb"})
 	refused := 0
 	rows.refuse = func(row *storedRow) error {
-		for _, a := range arr(obj(arr(rowJSON(row)["messages"])[0])["attachments"]) {
-			if id := str(obj(a)["id"]); id == docID || id == imageID && obj(a)["encryptionKey"] != nil {
+		for _, a := range readThreadRow(row).Messages[0].Attachments {
+			if a.ID == docID || a.ID == imageID && a.EncryptionKey != "" {
 				refused++
 				return downstreamError(409, []byte(`{"ok":false,"code":"MISSING_ATTACHMENT","missing_attachments":["`+docID+`","`+imageID+`"]}`))
 			}
@@ -294,13 +294,13 @@ func TestMissingAttachmentsAreRepairedBeforeRetrying(t *testing.T) {
 		t.Fatalf("expected one refused push, got %d", refused)
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", "chat-1")
-	attachments := arr(obj(arr(rowJSON(row)["messages"])[0])["attachments"])
-	doc, image := obj(attachments[0]), obj(attachments[1])
-	if doc["id"] == docID || doc["storageThreadId"] != "chat-1" || fake.blobs[str(doc["id"])].chat != "chat-1" {
-		t.Fatalf("the document was not stored under its chat: %v", doc)
+	chat := readThreadRow(row)
+	doc, image := chat.Messages[0].Attachments[0], chat.Messages[0].Attachments[1]
+	if doc.ID == docID || doc.StorageThreadID != "chat-1" || fake.blobs[doc.ID].chat != "chat-1" {
+		t.Fatalf("the document was not stored under its chat: %+v", doc)
 	}
-	if image["encryptionKey"] != nil || image["thumbnailBase64"] != "thumb" || rowJSON(row)["title"] != "Renamed" {
-		t.Fatalf("the unreachable image was not retired to its thumbnail: %v", image)
+	if image.EncryptionKey != "" || image.ThumbnailBase64 != "thumb" || chat.Title != "Renamed" {
+		t.Fatalf("the unreachable image was not retired to its thumbnail: %+v", image)
 	}
 }
 
@@ -331,9 +331,9 @@ func TestLegacyKeyedAttachmentIsReadFromTheControlPlane(t *testing.T) {
 		t.Fatalf("stored %q under %v", payload, fake.puts[0]["chat_id"])
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", "chat-1")
-	stored := obj(arr(obj(arr(rowJSON(row)["messages"])[0])["attachments"])[0])
-	if stored["key"] != nil || !enclaveAttachmentID.MatchString(str(stored["id"])) {
-		t.Fatalf("legacy reference kept: %v", stored)
+	stored := readThreadRow(row).Messages[0].Attachments[0]
+	if stored.Key != "" || !enclaveAttachmentID.MatchString(stored.ID) {
+		t.Fatalf("legacy reference kept: %+v", stored)
 	}
 }
 
@@ -410,7 +410,7 @@ func TestForkCopiesAChatThroughItsMessage(t *testing.T) {
 	if fork := readThreadRow(row); fork.Pinned || fork.ContextUsage != nil || fork.ActiveRun != nil || rowJSON(row)["harnessRequests"] != nil {
 		t.Fatalf("the fork kept the source's bookkeeping: %s", row.Data)
 	}
-	if rowJSON(row)["presetId"] != "builtin:tutor" || !reflect.DeepEqual(messageIDs(rowJSON(row)["messages"]), []string{"m1", "m2"}) {
+	if fork := readThreadRow(row); valueOr(fork.PresetID, "") != "builtin:tutor" || len(fork.Messages) != 2 || fork.Messages[0].ID != "m1" || fork.Messages[1].ID != "m2" {
 		t.Fatalf("the fork lost the conversation: %v", row.Data)
 	}
 }
@@ -574,8 +574,8 @@ func TestARetiredDocumentIsDescribedOnlyToTheModel(t *testing.T) {
 		t.Fatalf("the model was not told the document is gone: %s", prompt)
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", "chat-1")
-	stored := obj(arr(obj(arr(rowJSON(row)["messages"])[0])["attachments"])[0])
-	if stored["encryptionKey"] != nil || stored["textContent"] != nil || stored["fileName"] != "old.pdf" {
-		t.Fatalf("the retired document was stored as %v", stored)
+	stored := readThreadRow(row).Messages[0].Attachments[0]
+	if stored.EncryptionKey != "" || stored.TextContent != "" || stored.FileName != "old.pdf" {
+		t.Fatalf("the retired document was stored as %+v", stored)
 	}
 }

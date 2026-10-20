@@ -103,7 +103,7 @@ func TestManagedModelRefreshesRejectedInferenceCredentialOnce(t *testing.T) {
 				t.Fatal("unexpected run result", last)
 			}
 			row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
-			if !rejectAgain && len(arr(rowJSON(row)["messages"])) != 2 {
+			if !rejectAgain && len(readThreadRow(row).Messages) != 2 {
 				t.Fatal("credential retry duplicated the turn")
 			}
 		})
@@ -166,8 +166,7 @@ func TestTruncatedModelStreamPreservesPartialAnswer(t *testing.T) {
 		t.Fatalf("a failed chat was screened: %+v", got)
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
-	last := obj(arr(rowJSON(row)["messages"])[1])
-	if last["content"] != "partial" || last["isError"] != true {
+	if last := readThreadRow(row).Messages[1]; last.Content != "partial" || !valueOr(last.IsError, false) {
 		t.Fatal("partial answer lost")
 	}
 }
@@ -201,7 +200,7 @@ func TestTitleRunsBeforeAnswerFinishes(t *testing.T) {
 	close(release)
 	<-run.finished
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", run.thread.id)
-	if rowJSON(row)["title"] != "A generated title" {
+	if readThreadRow(row).Title != "A generated title" {
 		t.Fatal("title did not commit")
 	}
 }
@@ -243,9 +242,8 @@ func TestWidgetRetryReplacesOnlyTheArguments(t *testing.T) {
 		t.Fatalf("retry failed: %+v", last)
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", "chat")
-	messages := arr(rowJSON(row)["messages"])
-	blocks := arr(obj(messages[1])["timeline"])
-	if len(messages) != 2 || len(blocks) != 2 || obj(blocks[1])["arguments"] != replacement {
+	messages := readThreadRow(row).Messages
+	if len(messages) != 2 || len(messages[1].Timeline) != 2 || messages[1].Timeline[1].Arguments != replacement {
 		t.Fatal("retry changed message structure")
 	}
 }
@@ -275,8 +273,8 @@ func TestManagedToolLoopKeepsReasoningAndOneAssistantMessage(t *testing.T) {
 		t.Fatal(events[len(events)-1])
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
-	messages := arr(rowJSON(row)["messages"])
-	if len(messages) != 2 || len(arr(obj(messages[1])["timeline"])) != 3 {
+	messages := readThreadRow(row).Messages
+	if len(messages) != 2 || len(messages[1].Timeline) != 3 {
 		t.Fatal("tool loop did not make one ordered assistant timeline")
 	}
 	referenceCheck(t, events, window(readThreadRow(row), "", 50).Messages)
@@ -304,7 +302,7 @@ func TestShutdownCommitsPartialOutput(t *testing.T) {
 		t.Fatal("shutdown did not finish the run")
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", run.thread.id)
-	if rowJSON(row)["activeRun"] != nil {
+	if readThreadRow(row).ActiveRun != nil {
 		t.Fatal("shutdown left an active marker")
 	}
 	if _, err := h.acceptTurn(context.Background(), &principal{ID: "alice"}, key, requestOf[turnRequest](sendInput(key))); err == nil {

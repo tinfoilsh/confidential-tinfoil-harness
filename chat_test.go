@@ -698,12 +698,12 @@ func TestContinueExtendsTheStoredReplyItNames(t *testing.T) {
 		t.Fatalf("the run committed %v", replies)
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", "chat-1")
-	messages := arr(rowJSON(row)["messages"])
-	reply := obj(messages[len(messages)-1])
-	want := decodeValue(raw([]any{object{"id": "t1", "type": "thinking", "content": "rhyme"}, object{"id": "c1", "type": "content", "content": "Roses are red, violets are blue."}}))
-	if len(messages) != 2 || reply["id"] != "a1" || reply["content"] != "Roses are red, violets are blue." || !reflect.DeepEqual(reply["timeline"], want) ||
-		reply["createdAt"] != "2026-01-01T00:00:01Z" || reply["isInterrupted"] != false {
-		t.Fatalf("stored continuation: %v", messages)
+	messages := readThreadRow(row).Messages
+	reply := messages[len(messages)-1]
+	want := []Block{{ID: "t1", Type: "thinking", Content: "rhyme"}, {ID: "c1", Type: "content", Content: "Roses are red, violets are blue."}}
+	if len(messages) != 2 || reply.ID != "a1" || reply.Content != "Roses are red, violets are blue." || !reflect.DeepEqual(reply.Timeline, want) ||
+		reply.CreatedAt != "2026-01-01T00:00:01Z" || valueOr(reply.IsInterrupted, true) {
+		t.Fatalf("stored continuation: %+v", messages)
 	}
 }
 
@@ -783,12 +783,12 @@ func TestAContinuedReplyKeepsItsCitations(t *testing.T) {
 	obj(in["options"])["webSearch"] = true
 	finishedRun(t, h, "/v1/threads/turn", in)
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", "chat-1")
-	reply := obj(arr(rowJSON(row)["messages"])[1])
+	reply := readThreadRow(row).Messages[1]
 	text := "See [A](https://a.test/1). Also [B](https://b.test)."
 	start := strings.Index(text, "[B]") + 1
 	want := decodeValue(raw([]any{cited, object{"type": "url_citation", "url_citation": object{"url": "https://b.test", "title": "B", "start_index": start, "end_index": start + 1}}}))
-	if reply["content"] != text || !reflect.DeepEqual(reply["annotations"], want) {
-		t.Fatalf("continued reply %q annotated %v", reply["content"], reply["annotations"])
+	if reply.Content != text || !reflect.DeepEqual(decodeValue(raw(reply.Annotations)), want) {
+		t.Fatalf("continued reply %q annotated %+v", reply.Content, reply.Annotations)
 	}
 }
 
@@ -871,11 +871,11 @@ func TestCancelCommitsPartialAndLeavesQueue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(arr(rowJSON(row)["messages"])) < 2 {
+	messages := readThreadRow(row).Messages
+	if len(messages) < 2 {
 		t.Fatal("partial assistant lost")
 	}
-	m := obj(arr(rowJSON(row)["messages"])[1])
-	if m["content"] != "partial" || m["isInterrupted"] != true {
+	if m := messages[1]; m.Content != "partial" || !valueOr(m.IsInterrupted, false) {
 		t.Fatalf("partial output not kept and marked interrupted: %v", m)
 	}
 	_, err = h.removeQueued(context.Background(), p, key, requestOf[runRequest](object{"key": key.base64(), "threadId": run.thread.id, "queueId": next.log.id}))
@@ -965,7 +965,7 @@ func TestCASReappliesPatchToTheChangedRow(t *testing.T) {
 		t.Fatal("patch lost")
 	}
 	row, _ := rows.load(context.Background(), p, key, "chat", "existing")
-	if rowJSON(row)["title"] != "manual" || !reflect.DeepEqual(messageIDs(rowJSON(row)["messages"]), []string{"concurrent"}) {
+	if chat := readThreadRow(row); chat.Title != "manual" || len(chat.Messages) != 1 || chat.Messages[0].ID != "concurrent" {
 		t.Fatalf("the patch overwrote the concurrent change: %v", row.Data)
 	}
 }
@@ -1556,9 +1556,9 @@ func TestReasoningPrecedesTheAnswerItArrivesWith(t *testing.T) {
 		t.Fatalf("streamed %v", order)
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
-	timeline := arr(obj(arr(rowJSON(row)["messages"])[1])["timeline"])
-	if len(timeline) != 2 || obj(timeline[0])["type"] != "thinking" || obj(timeline[1])["type"] != "content" {
-		t.Fatalf("stored timeline %v", timeline)
+	timeline := readThreadRow(row).Messages[1].Timeline
+	if len(timeline) != 2 || timeline[0].Type != "thinking" || timeline[1].Type != "content" {
+		t.Fatalf("stored timeline %+v", timeline)
 	}
 }
 
@@ -1596,7 +1596,7 @@ func TestAModelChunkOverAMebibyteIsRead(t *testing.T) {
 	})
 	events := finishedRun(t, h, "/v1/threads/turn", sendInput(key))
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
-	if obj(arr(rowJSON(row)["messages"])[1])["content"] != answer {
+	if readThreadRow(row).Messages[1].Content != answer {
 		t.Fatal("the large chunk was not read whole")
 	}
 }
@@ -1784,7 +1784,7 @@ func TestAnswersAnnotateTheSourcesTheyCite(t *testing.T) {
 		return map[string]any{"type": "url_citation", "url_citation": map[string]any{"url": url, "title": title, "start_index": float64(start), "end_index": float64(start + len(label))}}
 	}
 	want := []any{cite("https://a.test/1/", "A", "A"), cite("https://b.test", "https://b.test", "b")}
-	if got := obj(arr(rowJSON(row)["messages"])[1])["annotations"]; !reflect.DeepEqual(got, any(want)) {
+	if got := decodeValue(raw(readThreadRow(row).Messages[1].Annotations)); !reflect.DeepEqual(got, any(want)) {
 		t.Fatalf("stored annotations %v", got)
 	}
 	// Clients receive them with the run's end and with the stored chat.
@@ -1814,9 +1814,9 @@ func TestCutModelStreamDoesNotCompleteItsToolCall(t *testing.T) {
 		}
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
-	block := obj(arr(obj(arr(rowJSON(row)["messages"])[1])["timeline"])[0])
-	if block["arguments"] != `{"query":"ca` || block["complete"] == true {
-		t.Fatalf("truncated arguments stored as complete: %v", block)
+	block := readThreadRow(row).Messages[1].Timeline[0]
+	if block.Arguments != `{"query":"ca` || block.Complete {
+		t.Fatalf("truncated arguments stored as complete: %+v", block)
 	}
 }
 

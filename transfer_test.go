@@ -85,14 +85,13 @@ func TestImportStoresTheDeviceChatUnderItsID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	attachments := arr(obj(arr(rowJSON(row)["messages"])[0])["attachments"])
-	for _, value := range attachments {
-		a := obj(value)
-		if !enclaveAttachmentID.MatchString(str(a["id"])) || a["storageThreadId"] != "0000000000005_device" || a["base64"] != nil || a["textContent"] != nil {
-			t.Fatalf("attachment not stored under the chat: %v", a)
+	attachments := readThreadRow(row).Messages[0].Attachments
+	for _, a := range attachments {
+		if !enclaveAttachmentID.MatchString(a.ID) || a.StorageThreadID != "0000000000005_device" || a.Base64 != "" || a.TextContent != "" {
+			t.Fatalf("attachment not stored under the chat: %+v", a)
 		}
 	}
-	if fake.putCount() != 2 || string(fake.blobs[str(obj(attachments[0])["id"])].data) != "image bytes" || string(fake.blobs[str(obj(attachments[1])["id"])].data) != `{"textContent":"doc text"}` {
+	if fake.putCount() != 2 || string(fake.blobs[attachments[0].ID].data) != "image bytes" || string(fake.blobs[attachments[1].ID].data) != `{"textContent":"doc text"}` {
 		t.Fatalf("blobs: %d", fake.putCount())
 	}
 	if w := postRoute(h, "/v1/threads/import", in, "alice"); w.Code != 409 || !strings.Contains(w.Body.String(), "THREAD_EXISTS") {
