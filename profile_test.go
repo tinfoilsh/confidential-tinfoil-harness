@@ -121,9 +121,11 @@ func TestADeviceTurnDropsInvalidProfileFields(t *testing.T) {
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n")
 	})
 	in := localInput("", object{"messages": []any{}})
-	in["profile"] = object{"nickname": "Sam", "themeMode": "neon", "traits": 5, "customPromptPresets": []any{object{"id": "user:unnamed"}}}
+	// A saved prompt without a name is dropped, so a new chat cannot start with it.
+	in["profile"] = object{"nickname": "Sam", "themeMode": "neon", "traits": 5, "defaultPromptPresetId": "user:unnamed",
+		"customPromptPresets": []any{object{"id": "user:unnamed", "systemPrompt": "Unnamed prompt marker"}}}
 	finishedRun(t, h, "/v1/threads/turn", in)
-	if system := <-systems; !strings.Contains(system, "<nickname>Sam</nickname>") {
-		t.Fatalf("the device's valid settings were lost: %q", system)
+	if system := <-systems; strings.Contains(system, "Unnamed prompt marker") || !strings.Contains(system, "<nickname>Sam</nickname>") {
+		t.Fatalf("the device's settings read as %q", system)
 	}
 }
