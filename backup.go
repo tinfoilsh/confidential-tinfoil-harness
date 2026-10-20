@@ -25,14 +25,23 @@ const (
 	relationshipsPath   = "relationships.json"
 )
 
-// Limits a backup is read and written within.
+// Limits a backup is read and written within. A backup holds any image
+// uploads take.
 const (
 	maxArchiveEntries      = 50_000
 	maxArchiveExpansion    = 2 << 30
 	maxArchiveJSONEntry    = 256 << 20
-	maxArchiveImage        = 32 << 20
+	maxArchiveImage        = maxUploadBytes
 	maxBackupManifestBytes = 32 << 20
 )
+
+// backupEntryLimit is the most an entry of a backup may hold.
+func backupEntryLimit(name string) uint64 {
+	if path.Ext(name) == ".bin" {
+		return maxArchiveImage
+	}
+	return maxArchiveJSONEntry
+}
 
 type backupManifest struct {
 	Format    string           `json:"format"`
@@ -223,6 +232,7 @@ func archiveTime(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:0
 type backupWriter struct {
 	zip      *zip.Writer
 	manifest backupManifest
+	expanded uint64
 }
 
 func newBackupWriter(w io.Writer) *backupWriter {
@@ -233,11 +243,21 @@ func (b *backupWriter) add(kind, name string, data []byte) error {
 	if len(b.manifest.Files)+1 >= maxArchiveEntries {
 		return apiErr(413, "ARCHIVE_TOO_LARGE", "The backup holds too many items")
 	}
-	if err := writeEntry(b.zip, name, data, kind != "images" || path.Ext(name) == ".json"); err != nil {
+	if err := b.write(name, data, backupEntryLimit(name), kind != "images" || path.Ext(name) == ".json"); err != nil {
 		return err
 	}
 	b.manifest.Files = append(b.manifest.Files, backupFile{Path: name, Kind: kind, SHA256: hashHex(data), SizeBytes: int64(len(data))})
 	return nil
+}
+
+// write adds an entry, refusing one a restore would refuse: one past its
+// limit, or one that expands the backup past the limit.
+func (b *backupWriter) write(name string, data []byte, limit uint64, compress bool) error {
+	b.expanded += uint64(len(data))
+	if uint64(len(data)) > limit || b.expanded > maxArchiveExpansion {
+		return apiErr(413, "ARCHIVE_TOO_LARGE", "The backup exceeds the size a restore takes")
+	}
+	return writeEntry(b.zip, name, data, compress)
 }
 
 func (b *backupWriter) addJSON(kind, name string, value any) error {
@@ -267,7 +287,7 @@ func (b *backupWriter) close(id string, created time.Time) error {
 	if detached > 0 {
 		m.Warnings = append(m.Warnings, backupWarning{Code: "chats_detached_from_omitted_projects", Category: "relationship_adjustment", Count: detached})
 	}
-	if err := writeEntry(b.zip, manifestPath, raw(m), true); err != nil {
+	if err := b.write(manifestPath, raw(m), maxBackupManifestBytes, true); err != nil {
 		return err
 	}
 	return b.zip.Close()

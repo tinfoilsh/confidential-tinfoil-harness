@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -296,6 +297,36 @@ func TestNativeBackupRoundTrips(t *testing.T) {
 	docs, _ := restored.projectDocuments(context.Background(), alice, key, restoredProject.ID)
 	if restoredProject.Name != "Research" || restoredProject.SystemInstructions != "Cite sources" || valueOr(restoredProject.Color, "") != "teal" || len(docs) != 1 || docs[0].Content != "Paper text" || docs[0].Filename != "paper.md" {
 		t.Fatalf("project: %+v %+v", restoredProject, docs)
+	}
+}
+
+// A backup holds the largest image uploads take, and its writer refuses
+// what no restore would take, an image or a whole backup that is larger.
+func TestBackupsHoldWhatRestoresTake(t *testing.T) {
+	h, _, _ := testChatHarness(t, nil)
+	largest := append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, imageUploads.MaxBytes-8)...)
+	device := object{"id": "local-chat", "title": "Large photo", "messages": []any{object{"id": "m", "role": "user", "content": "Look", "attachments": []any{object{"id": "att_large", "kind": "image", "fileName": "large.png"}}}}}
+	w := archiveRoute(h, "/v1/export", "", optionsPart(object{"format": "native"}), threadPart(device), formPart{name: "file", filename: "att_large", data: largest})
+	if w.Code != 200 {
+		t.Fatalf("export: HTTP %d %.300s", w.Code, w.Body.String())
+	}
+	result := importOf(t, h, "", w.Body.Bytes(), "tinfoil-backup.zip", object{"target": "device"})
+	if len(result.threads) != 1 || len(result.threads[0].Messages[0].Attachments) != 1 || !bytes.Equal(result.originals[result.threads[0].Messages[0].Attachments[0].ID], largest) {
+		t.Fatalf("the largest image was not restored: %+v", result.done)
+	}
+
+	tooLarge := func(err error) bool { return err != nil && asAPIError(err).Code == "ARCHIVE_TOO_LARGE" }
+	if err := newBackupWriter(io.Discard).add("images", backupImagePath("larger", ".bin"), append(largest, 0)); !tooLarge(err) {
+		t.Fatalf("a backup held an image no restore takes: %v", err)
+	}
+	b, written := newBackupWriter(io.Discard), 0
+	for ; written+len(largest) <= maxArchiveExpansion; written += len(largest) {
+		if err := b.add("images", backupImagePath(strconv.Itoa(written), ".bin"), largest); err != nil {
+			t.Fatalf("a backup of %d bytes was refused: %v", written+len(largest), err)
+		}
+	}
+	if err := b.add("images", backupImagePath("past", ".bin"), largest); !tooLarge(err) {
+		t.Fatalf("a backup expanded past what a restore takes: %v", err)
 	}
 }
 

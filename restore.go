@@ -51,11 +51,7 @@ func openNativeBackup(zr *zip.Reader) (*nativeBackup, error) {
 		if !safeEntryName(f) || f.Flags&0x1 != 0 || !backupPaths.MatchString(f.Name) || b.entries[f.Name] != nil {
 			return nil, errInvalidBackup("it holds an unknown, unsafe or repeated entry")
 		}
-		limit := uint64(maxArchiveJSONEntry)
-		if path.Ext(f.Name) == ".bin" {
-			limit = maxArchiveImage
-		}
-		if expanded += f.UncompressedSize64; f.UncompressedSize64 > limit || expanded > maxArchiveExpansion {
+		if expanded += f.UncompressedSize64; f.UncompressedSize64 > backupEntryLimit(f.Name) || expanded > maxArchiveExpansion {
 			return nil, apiErr(413, "IMPORT_TOO_LARGE", "The backup exceeds the size limits")
 		}
 		b.entries[f.Name] = f
