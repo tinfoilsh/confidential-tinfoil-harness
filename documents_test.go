@@ -524,34 +524,40 @@ func TestDeleteAllIncludesRowsTheKeyCannotOpen(t *testing.T) {
 	}
 }
 
-func TestPinsFollowTheProfileWhenMirroringFails(t *testing.T) {
+func TestAChatTheProfileListsReadsAsPinned(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	p := &principal{ID: "alice", JWT: "clerk-alice"}
+	p := &principal{ID: "alice"}
 	storedThread(rows, "alice", "chat-1")
 	storedThread(rows, "alice", "chat-2")
-	rows.rows[rowMapKey(p, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: object{"pinnedChatIds": []any{"chat-1", "chat-2"}}}
-	pushes := 0
-	rows.refuse = func(row *storedRow) error {
-		pushes++
-		return apiErr(503, "UPSTREAM_REFUSED", "sync is down")
+	rows.rows[rowMapKey(p, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: object{"pinnedChatIds": []any{"chat-1"}}}
+	pinned := func() map[string]any {
+		t.Helper()
+		var page struct {
+			Threads []object `json:"threads"`
+		}
+		json.Unmarshal(postRoute(h, "/v1/threads/list", object{"key": key.base64()}, "alice").Body.Bytes(), &page)
+		out := map[string]any{}
+		for _, thread := range page.Threads {
+			out[str(thread["id"])] = thread["pinned"]
+		}
+		return out
 	}
-	page := []storedRow{}
-	for _, id := range []string{"chat-1", "chat-2"} {
-		row, _ := rows.load(context.Background(), p, key, "chat", id)
-		page = append(page, *row)
+	if got := pinned(); got["chat-1"] != true || got["chat-2"] != false || rows.rows[rowMapKey(p, "chat", "chat-1")].ETag != "1" {
+		t.Fatalf("listed pins %v; the read wrote the chat: %v", got, rows.rows[rowMapKey(p, "chat", "chat-1")].ETag != "1")
 	}
-	if err := h.syncPins(context.Background(), p, key, page); err != nil {
-		t.Fatal(err)
+	update := func(id string, pin bool) {
+		t.Helper()
+		if w := postRoute(h, "/v1/threads/update", object{"key": key.base64(), "id": id, "pinned": pin}, "alice"); w.Code != 200 {
+			t.Fatalf("pinning %s: HTTP %d %s", id, w.Code, w.Body.String())
+		}
 	}
-	// One failed write stops mirroring, and the read still shows the profile's pins.
-	if pushes != 1 || page[0].Data["pinned"] != true || page[1].Data["pinned"] != true {
-		t.Fatalf("pushes %d, pins %v %v", pushes, page[0].Data["pinned"], page[1].Data["pinned"])
+	update("chat-2", true)
+	if rows.rows[rowMapKey(p, "profile", "profile")].ETag != "1" {
+		t.Fatal("pinning a chat wrote the profile's old list")
 	}
-	cancelled, cancel := context.WithCancel(context.Background())
-	cancel()
-	page[0].Data["pinned"] = false
-	if err := h.syncPins(cancelled, p, key, page[:1]); err == nil {
-		t.Fatal("a cancelled read reported success")
+	update("chat-1", false)
+	if got := pinned(); got["chat-1"] != false || got["chat-2"] != true {
+		t.Fatalf("after pinning chat-2 and unpinning chat-1 the list shows %v", got)
 	}
 }
 

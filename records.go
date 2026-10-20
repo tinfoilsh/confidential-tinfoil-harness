@@ -168,7 +168,7 @@ func (h *harness) listThreads(ctx context.Context, p *principal, key contentKey,
 	if err != nil {
 		return nil, err
 	}
-	if err := h.syncPins(ctx, p, key, page.Rows); err != nil {
+	if err := h.readLegacyPins(ctx, p, key, page.Rows); err != nil {
 		return nil, err
 	}
 	list := []any{}
@@ -187,7 +187,7 @@ func (h *harness) getThread(ctx context.Context, p *principal, key contentKey, i
 		return nil, err
 	}
 	rows := []storedRow{*row}
-	if err := h.syncPins(ctx, p, key, rows); err != nil {
+	if err := h.readLegacyPins(ctx, p, key, rows); err != nil {
 		return nil, err
 	}
 	row = &rows[0]
@@ -227,8 +227,8 @@ func (h *harness) updateThread(ctx context.Context, p *principal, key contentKey
 	if err != nil {
 		return nil, err
 	}
-	if value, ok := in["pinned"].(bool); ok {
-		if err := h.writeLegacyPin(ctx, p, key, id, value); err != nil {
+	if pinned, ok := in["pinned"].(bool); ok && !pinned {
+		if err := h.unpinLegacy(ctx, p, key, id); err != nil {
 			return nil, err
 		}
 	}
