@@ -31,6 +31,9 @@ func applyTurn(t *Thread, in *turnRequest, messageID string, attachments []Attac
 			return apiErr(400, "BAD_REQUEST", "The turn kind does not match the message role")
 		}
 		if in.Kind == "edit" {
+			if in.Content == nil {
+				content = messages[index].Content
+			}
 			if in.Attachments == nil {
 				attachments = messages[index].Attachments
 				if attachments == nil {

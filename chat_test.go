@@ -614,7 +614,7 @@ func TestEditingAReplyCollapsesItsText(t *testing.T) {
 	}
 }
 
-func TestAnEditKeepsTheQuoteItOmits(t *testing.T) {
+func TestAnEditKeepsTheTextAndQuoteItOmits(t *testing.T) {
 	questions := make(chan string, 1)
 	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		messages := lastRequest(r)
@@ -623,12 +623,13 @@ func TestAnEditKeepsTheQuoteItOmits(t *testing.T) {
 	})
 	p := &principal{ID: "alice"}
 	for _, tc := range []struct {
-		quote    any // nil leaves the quote out of the edit
-		stored   string
-		question string
+		content, quote any // nil leaves the field out of the edit
+		stored, quoted string
+		question       string
 	}{
-		{nil, "First answer\nQuoted context", "In reply to:\n> First answer\n> Quoted context\n\nEdited question"},
-		{"", "", "Edited question"},
+		{"Edited question", nil, "Edited question", "First answer\nQuoted context", "In reply to:\n> First answer\n> Quoted context\n\nEdited question"},
+		{"Edited question", "", "Edited question", "", "Edited question"},
+		{nil, "", "Second question", "", "Second question"},
 	} {
 		rows.rows[rowMapKey(p, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: raw(object{"title": "Old", "titleState": "manual", "model": "kimi-k3", "messages": []any{
 			object{"id": "u1", "role": "user", "content": "First question"},
@@ -637,18 +638,21 @@ func TestAnEditKeepsTheQuoteItOmits(t *testing.T) {
 			object{"id": "a2", "role": "assistant", "content": "Second answer"},
 		}})}
 		in := continueInput(key, "chat-1")
-		in["kind"], in["messageId"], in["content"] = "edit", "u2", "Edited question"
-		if tc.quote != nil {
-			in["quote"] = tc.quote
+		in["kind"], in["messageId"] = "edit", "u2"
+		delete(in, "content")
+		for field, value := range map[string]any{"content": tc.content, "quote": tc.quote} {
+			if value != nil {
+				in[field] = value
+			}
 		}
 		finishedRun(t, h, "/v1/threads/turn", in)
 		row, _ := rows.load(context.Background(), p, key, "chat", "chat-1")
 		messages := readThreadRow(row).Messages
-		if len(messages) != 4 || messages[2].Content != "Edited question" || messages[2].Quote != tc.stored || messages[3].Content != "New answer" {
-			t.Fatalf("an edit with quote %v stored %+v", tc.quote, messages)
+		if len(messages) != 4 || messages[2].Content != tc.stored || messages[2].Quote != tc.quoted || messages[3].Content != "New answer" {
+			t.Fatalf("an edit of %v quoting %v stored %+v", tc.content, tc.quote, messages)
 		}
 		if question := <-questions; question != tc.question {
-			t.Fatalf("an edit with quote %v asked %q", tc.quote, question)
+			t.Fatalf("an edit of %v quoting %v asked %q", tc.content, tc.quote, question)
 		}
 	}
 }
