@@ -345,7 +345,7 @@ func (m *legacyMessage) attachments(messageID string, images backupImages) []Att
 		}
 		for i, image := range m.ImageData {
 			if held, ok := images[image.ImageID]; ok && image.Base64 == "" {
-				image.Base64 = held.Base64
+				image.Base64, image.MimeType = held.Base64, cmp.Or(held.MimeType, image.MimeType)
 			}
 			if image.Base64 != "" {
 				attachments = append(attachments, Attachment{Kind: "image", FileName: "image-" + strconv.Itoa(i), MimeType: cmp.Or(image.MimeType, "image/png"), Base64: image.Base64})

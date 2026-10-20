@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"image"
+	"image/jpeg"
 	"image/png"
 	"io"
 	"mime/multipart"
@@ -398,6 +399,28 @@ func TestRestoresCountTheImagesTheyLeaveOut(t *testing.T) {
 	if len(result.done.Warnings) != 3 || !strings.HasPrefix(result.done.Warnings[0], "1 images were left out") {
 		t.Fatalf("warnings of an old backup: %v", result.done.Warnings)
 	}
+}
+
+// An image an old message showed is restored as the type its bytes are,
+// whatever type the message named.
+func TestOldBackupImagesKeepTheirType(t *testing.T) {
+	h, _, _ := testChatHarness(t, nil)
+	var photo bytes.Buffer
+	if err := jpeg.Encode(&photo, image.NewGray(image.Rect(0, 0, 4, 4)), nil); err != nil {
+		t.Fatal(err)
+	}
+	backup := withBackupEntries(t, fixture(t, "web-backup-v1.zip"), map[string][]byte{backupImagePath("legacy:local-1:0:0", ".bin"): photo.Bytes()})
+	result := importOf(t, h, "", backup, "backup.zip", object{"target": "device"})
+	for _, thread := range result.threads {
+		if thread.Title != "Old device chat" {
+			continue
+		}
+		if pictures := thread.Messages[0].Attachments; len(pictures) != 2 || pictures[1].MimeType != "image/jpeg" || !bytes.Equal(result.originals[pictures[1].ID], photo.Bytes()) {
+			t.Fatalf("the old picture: %+v", pictures)
+		}
+		return
+	}
+	t.Fatalf("the old chat was not restored: %d chats", len(result.threads))
 }
 
 // Backups the web app made before the harness wrote them hold chats in its
