@@ -1,13 +1,8 @@
 package main
 
-// errAlreadyResolved refuses a second answer to a widget, which another
-// turn already resolved.
-var errAlreadyResolved = apiErr(409, "ALREADY_RESOLVED", "The tool call was already resolved; reload the chat")
-
 // applyTurn makes the change a turn's kind makes to a transcript before its
-// reply: a new or edited question, a resolved tool call, or the cut a
-// regeneration or continuation starts from. An answer to the last question
-// changes nothing.
+// reply: a new or edited question, or the cut a regeneration or
+// continuation starts from. An answer to the last question changes nothing.
 func applyTurn(t *Thread, in *turnRequest, messageID string, attachments []Attachment) error {
 	if t.messageIndex(messageID) >= 0 {
 		return nil
@@ -49,24 +44,6 @@ func applyTurn(t *Thread, in *turnRequest, messageID string, attachments []Attac
 			index++
 		}
 		messages = messages[:index]
-	}
-	if in.Kind == "resolve" {
-		found := false
-		for i := range messages {
-			for j := range messages[i].Timeline {
-				if block := &messages[i].Timeline[j]; block.callID() == in.ToolCallID {
-					if block.resolved() {
-						return errAlreadyResolved
-					}
-					block.Resolution, block.ResolvedAt = in.Resolution, raw(timestamp())
-					found = true
-				}
-			}
-		}
-		if !found {
-			return apiErr(404, "THREAD_NOT_FOUND", "The tool call was not found")
-		}
-		content, _ = in.resolution()
 	}
 	if in.Kind == "ask" {
 		content, quote = valueOr(in.Quote, ""), ""

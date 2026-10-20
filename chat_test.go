@@ -715,45 +715,6 @@ func TestAnEditKeepsTheTextAndQuoteItOmits(t *testing.T) {
 	}
 }
 
-// A widget is resolved once: its answer becomes the next question, and a
-// second answer is refused rather than asked as well.
-func TestAWidgetIsResolvedOnce(t *testing.T) {
-	questions := make(chan string, 2)
-	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
-		messages := lastRequest(r)
-		questions <- str(obj(messages[len(messages)-2])["content"])
-		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"Noted\"}}]}\n\ndata: [DONE]\n\n")
-	})
-	p := &principal{ID: "alice"}
-	rows.rows[rowMapKey(p, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: raw(object{"title": "Old", "titleState": "manual", "model": "kimi-k3", "messages": []any{
-		object{"id": "u1", "role": "user", "content": "Pick one"},
-		object{"id": "a1", "role": "assistant", "content": "", "timeline": []any{object{"id": "call", "type": "tool_call", "toolCallId": "call", "name": "render_choices", "arguments": "{}", "resolution": nil, "resolvedAt": nil}}},
-	}})}
-	resolve := func(text string) object {
-		in := continueInput(key, "chat-1")
-		in["kind"], in["toolCallId"], in["resolution"] = "resolve", "call", object{"text": text}
-		delete(in, "content")
-		return in
-	}
-	finishedRun(t, h, "/v1/threads/turn", resolve("Option A"))
-	if question := <-questions; question != "Option A" {
-		t.Fatalf("the resolution asked %q", question)
-	}
-	w := postRoute(h, "/v1/threads/turn", resolve("Option B"), "alice")
-	var refused struct {
-		Error apiError `json:"error"`
-	}
-	json.Unmarshal(w.Body.Bytes(), &refused)
-	if w.Code != 409 || refused.Error.Code != "ALREADY_RESOLVED" {
-		t.Fatalf("a second resolution: HTTP %d %s", w.Code, w.Body.String())
-	}
-	row, _ := rows.load(context.Background(), p, key, "chat", "chat-1")
-	messages := readThreadRow(row).Messages
-	if len(messages) != 4 || string(messages[1].Timeline[0].Resolution) != `{"text":"Option A"}` || messages[2].Content != "Option A" {
-		t.Fatalf("the chat holds %+v", messages)
-	}
-}
-
 func continueTurn(key contentKey, thread, message string) object {
 	in := sendInput(key)
 	in["threadId"], in["kind"] = thread, "continue"

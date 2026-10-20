@@ -467,7 +467,6 @@ type turnRequest struct {
 	Quote           *string          `json:"quote,omitempty"`
 	MessageID       string           `json:"messageId,omitempty"`
 	ToolCallID      string           `json:"toolCallId,omitempty"`
-	Resolution      json.RawMessage  `json:"resolution,omitempty"`
 	Attachments     []sentAttachment `json:"attachments,omitzero"`
 	Widgets         []string         `json:"widgets,omitzero"`
 	Options         turnOptions      `json:"options"`
@@ -500,7 +499,7 @@ type sentAttachment struct {
 }
 
 var (
-	turnKinds       = []string{"send", "edit", "regenerate", "continue", "resolve", "retryToolCall", "ask", "retry"}
+	turnKinds       = []string{"send", "edit", "regenerate", "continue", "retryToolCall", "ask", "retry"}
 	attachmentKinds = []string{"image", "document", "audio"}
 )
 
@@ -551,14 +550,6 @@ func (in *turnRequest) validateContent() error {
 		// An ask about a device chat reads the conversation its client sends.
 		return apiErr(400, "BAD_REQUEST", "A local thread requires its transcript")
 	}
-	if in.Kind == "resolve" {
-		if !isObject(in.Resolution) {
-			return apiErr(400, "BAD_REQUEST", "resolution must be an object")
-		}
-		if _, err := in.resolution(); err != nil {
-			return err
-		}
-	}
 	pixels := int64(0)
 	for i := range in.Attachments {
 		if err := in.Attachments[i].validate(); err != nil {
@@ -573,15 +564,6 @@ func (in *turnRequest) validateContent() error {
 		return apiErr(400, "BAD_REQUEST", "A message or attachment is required")
 	}
 	return nil
-}
-
-// resolution is the text a client resolved a widget with.
-func (in *turnRequest) resolution() (string, error) {
-	var resolution struct {
-		Text string `json:"text"`
-	}
-	err := decodeRequest(in.Resolution, &resolution)
-	return resolution.Text, err
 }
 
 func (a *sentAttachment) validate() error {

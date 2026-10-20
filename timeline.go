@@ -90,7 +90,7 @@ func (a *messageAssembler) apply(e event) {
 		m := a.message(parent)
 		a.stamp(parent, m, e.Timestamp)
 		a.calls[e.ToolCallID] = blockRef{m, len(m.Timeline)}
-		m.Timeline = append(m.Timeline, Block{ID: e.ToolCallID, Type: "tool_call", ToolCallID: e.ToolCallID, Name: e.ToolName, Progress: []json.RawMessage{}, ResolvedAt: jsonNull, Resolution: jsonNull})
+		m.Timeline = append(m.Timeline, Block{ID: e.ToolCallID, Type: "tool_call", ToolCallID: e.ToolCallID, Name: e.ToolName, Progress: []json.RawMessage{}})
 	case "TOOL_CALL_ARGS":
 		if call, ok := a.calls[e.ToolCallID]; ok {
 			call.block().Arguments += delta
@@ -130,9 +130,6 @@ func (a *messageAssembler) apply(e event) {
 		}
 	}
 }
-
-// jsonNull is a field present as null.
-var jsonNull = json.RawMessage("null")
 
 // replaceReplyText rewrites a reply's text as the web client does: its
 // content blocks collapse into one holding the text, where the first was.

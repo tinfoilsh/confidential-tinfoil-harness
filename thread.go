@@ -48,7 +48,7 @@ type Message struct {
 }
 
 // Block is one step of a reply: text, reasoning, or a tool call. What tools
-// return and what a client resolves a widget with are kept as they came.
+// return is kept as it came.
 type Block struct {
 	ID         string            `json:"id"`
 	Type       string            `json:"type"`
@@ -61,8 +61,6 @@ type Block struct {
 	Metadata   json.RawMessage   `json:"metadata,omitempty"`
 	Progress   []json.RawMessage `json:"progress,omitzero"`
 	Activity   json.RawMessage   `json:"activity,omitempty"`
-	ResolvedAt json.RawMessage   `json:"resolvedAt,omitempty"`
-	Resolution json.RawMessage   `json:"resolution,omitempty"`
 	Display    *ToolDisplay      `json:"display,omitempty"`
 	// InvalidArguments marks a widget call whose arguments the widget's
 	// current declaration refuses, so its client offers to regenerate them.
@@ -284,11 +282,6 @@ func (b *Block) callID() string {
 		return b.ToolCallID
 	}
 	return b.ID
-}
-
-// resolved reports whether a client already answered the widget a call drew.
-func (b *Block) resolved() bool {
-	return len(b.Resolution) > 0 && string(b.Resolution) != string(jsonNull)
 }
 
 func (a *Attachment) isImage() bool { return a.Kind == "image" }

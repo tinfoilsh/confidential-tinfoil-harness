@@ -406,11 +406,7 @@ func (h *harness) writeBackup(ctx context.Context, p *principal, key contentKey,
 						blocks = append(blocks, object{"type": "code_exec", "id": block["id"], "calls": []any{call}})
 						continue
 					}
-					copy := selectFields(block, "type id toolCallId name arguments resolution")
-					if block["resolvedAt"] != nil {
-						copy["resolvedAt"] = millis(block["resolvedAt"])
-					}
-					blocks = append(blocks, copy)
+					blocks = append(blocks, selectFields(block, "type id toolCallId name arguments"))
 				}
 			}
 			if len(blocks) > 0 {
