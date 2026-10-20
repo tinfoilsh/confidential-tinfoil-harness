@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -13,9 +14,15 @@ import (
 	"github.com/google/uuid"
 )
 
+// storedRow is a row as sync holds it: sealed JSON, opened only by the
+// store's readers.
 type storedRow struct {
 	ID, ETag string
-	Data     object
+	Data     json.RawMessage
+	// project is the project sync files a chat or document under, apart
+	// from its sealed data; projectSet says sync reported one, even none.
+	project    *string
+	projectSet bool
 	// restore lets a create reuse the id of a chat deleted from sync, as a
 	// chat moved to the device and back does.
 	restore bool
@@ -113,20 +120,12 @@ func (s *syncClient) pullBatch(ctx context.Context, p *principal, key contentKey
 			failed[item.ID] = errors.New("invalid sync plaintext encoding")
 			continue
 		}
-		var data object
-		err = json.Unmarshal(plain, &data)
-		clear(plain)
-		if err != nil || data == nil {
+		if trimmed := bytes.TrimSpace(plain); len(trimmed) == 0 || trimmed[0] != '{' || !json.Valid(trimmed) {
+			clear(plain)
 			failed[item.ID] = errors.New("invalid sync row")
 			continue
 		}
-		if item.ProjectSet {
-			data["projectId"] = item.ProjectID
-			if item.ProjectID != nil {
-				data["projectId"] = *item.ProjectID
-			}
-		}
-		*rows = append(*rows, storedRow{ID: item.ID, ETag: item.ETag, Data: data})
+		*rows = append(*rows, storedRow{ID: item.ID, ETag: item.ETag, Data: plain, project: item.ProjectID, projectSet: item.ProjectSet})
 	}
 	if len(again) > 0 {
 		return s.pullBatch(ctx, p, key, scope, again, false, rows, failed)
@@ -219,23 +218,19 @@ func (s *syncClient) push(ctx context.Context, p *principal, key contentKey, sco
 		match = row.ETag
 	}
 	metadata := object{}
-	if scope == "chat" {
-		metadata["projectId"] = row.Data["projectId"]
-		if row.restore {
-			metadata["restoreDeleted"] = true
-		}
+	if scope == "chat" || scope == "project_document" {
+		metadata["projectId"] = row.project
+	}
+	if scope == "chat" && row.restore {
+		metadata["restoreDeleted"] = true
 	}
 	if scope == "profile" {
 		metadata["profile_sync_protocol"] = 2
 	}
-	if scope == "project_document" {
-		metadata["projectId"] = row.Data["projectId"]
-	}
-	plaintext := raw(row.Data)
 	var result struct {
 		ETag string `json:"etag"`
 	}
-	err := s.call(ctx, p, "/v1/sync/push", object{"scope": scope, "id": row.ID, "key": key.base64(), "plaintext": base64.StdEncoding.EncodeToString(plaintext), "if_match": match, "idempotency_key": nonce, "metadata": metadata}, &result)
+	err := s.call(ctx, p, "/v1/sync/push", object{"scope": scope, "id": row.ID, "key": key.base64(), "plaintext": base64.StdEncoding.EncodeToString(row.Data), "if_match": match, "idempotency_key": nonce, "metadata": metadata}, &result)
 	return result.ETag, err
 }
 
@@ -243,88 +238,4 @@ func (s *syncClient) push(ctx context.Context, p *principal, key contentKey, sco
 // race, and treat a missing row as deleted.
 func (s *syncClient) remove(ctx context.Context, p *principal, key contentKey, scope, id string) error {
 	return s.call(ctx, p, "/v1/sync/delete", object{"scope": scope, "id": id, "key": key.base64(), "if_match": "", "idempotency_key": uuid.NewString()}, nil)
-}
-
-// mutate always re-applies the operation to the freshly pulled row. A conflict
-// never causes an old whole-row image to overwrite another writer's fields.
-func (h *harness) eachRow(ctx context.Context, p *principal, key contentKey, scope, project string, visit func(*storedRow) error) error {
-	return h.eachRowOrUnreadable(ctx, p, key, scope, project, visit, func(string) {})
-}
-
-func (h *harness) eachRowOrUnreadable(ctx context.Context, p *principal, key contentKey, scope, project string, visit func(*storedRow) error, unreadable func(string)) error {
-	cursor := ""
-	for {
-		page, err := h.storeRows.list(ctx, p, key, scope, cursor, project, 100)
-		if err != nil {
-			return err
-		}
-		for _, id := range page.Unreadable {
-			unreadable(id)
-		}
-		for _, row := range page.Rows {
-			if err := visit(&row); err != nil {
-				return err
-			}
-		}
-		if page.Next == "" {
-			return nil
-		}
-		if cursor == page.Next {
-			return apiErr(502, "UPSTREAM_REFUSED", "The storage cursor did not advance")
-		}
-		cursor = page.Next
-	}
-}
-
-func (h *harness) mutate(ctx context.Context, p *principal, key contentKey, scope, id string, create bool, change func(object) error) (*storedRow, error) {
-	for attempt := 0; attempt < maxCommitAttempts; attempt++ {
-		row, err := h.storeRows.load(ctx, p, key, scope, id)
-		if err != nil {
-			if !create || asAPIError(err).HTTP != 404 {
-				return nil, err
-			}
-			row = &storedRow{ID: id, Data: object{"createdAt": timestamp()}}
-		}
-		if scope == "chat" {
-			normalizeThread(row)
-		}
-		if err := change(row.Data); err != nil {
-			return nil, err
-		}
-		err = h.store(ctx, p, key, scope, row)
-		if err == nil {
-			return row, nil
-		}
-		if asAPIError(err).Code != "REVISION_CONFLICT" {
-			return nil, err
-		}
-	}
-	return nil, apiErr(409, "REVISION_CONFLICT", "The row changed during every commit attempt")
-}
-
-// store pushes a row at the revision it was read at. A push whose outcome is
-// unknown is sent again under the same idempotency key, which sync answers
-// with the first push's outcome. A chat naming attachments sync does not hold
-// under it is repaired once and pushed again.
-func (h *harness) store(ctx context.Context, p *principal, key contentKey, scope string, row *storedRow) error {
-	row.Data["updatedAt"] = timestamp()
-	nonce, repaired := uuid.NewString(), false
-	for attempt := 1; ; attempt++ {
-		etag, err := h.storeRows.push(ctx, p, key, scope, row, nonce)
-		e := asAPIError(err)
-		switch {
-		case err == nil:
-			row.ETag = etag
-			return nil
-		case e.Code == "SYNC_OUTCOME_UNKNOWN" && attempt < maxCommitAttempts:
-			continue
-		case e.Code == "MISSING_ATTACHMENT" && scope == "chat" && !repaired:
-			if err := h.repairAttachments(ctx, p, row, e.missing); err != nil {
-				return err
-			}
-			nonce, repaired = uuid.NewString(), true
-			continue
-		}
-		return err
-	}
 }

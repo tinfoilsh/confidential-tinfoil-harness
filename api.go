@@ -67,6 +67,14 @@ func integer(v any) int {
 	}
 	return 0
 }
+
+// optionalString is a request's string field that may be null.
+func optionalString(v any) *string {
+	if s, ok := v.(string); ok {
+		return &s
+	}
+	return nil
+}
 func nowUTC() time.Time { return time.Now().UTC() }
 func timestamp() string { return nowUTC().Format(time.RFC3339Nano) }
 func firstString(values ...any) string {

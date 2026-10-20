@@ -41,7 +41,7 @@ type threadSession struct {
 	// row. A keyless thread, local or anonymous, never uses the content key.
 	local, keyless bool
 	// row is a local thread's transcript, which a queued turn continues from.
-	row    *storedRow
+	row    *threadRow
 	active *chatRun
 	queue  []*chatRun
 	// waiting ends the queue a stopped run leaves if its client never sends it.
@@ -65,11 +65,11 @@ type chatRun struct {
 	refused                  error
 	finished                 chan struct{}
 	titleDone                chan struct{}
-	row                      *storedRow // the thread as the run started and committed it
+	row                      *threadRow // the thread as the run started and committed it
 	assembler                *messageAssembler
-	retryTarget              object
+	retryTarget              *retryTarget
 	replacement              string
-	profile                  object // a local thread's settings, sent by its client
+	profile                  *Profile // a local thread's settings, sent by its client
 	screening                *screening
 
 	// yielded marks an active run stopped so a queued turn starts now.
@@ -119,7 +119,7 @@ func (h *harness) makeActive(s *threadSession, r *chatRun) {
 // reply that has not started is told by its first state snapshot.
 func queueChanged(s *threadSession) {
 	if s.active != nil && s.active.running {
-		s.active.out.emit(event{Type: "STATE_DELTA", Delta: []object{{"op": "replace", "path": "/queue", "value": queueItems(s)}}})
+		s.active.out.emit(event{Type: "STATE_DELTA", Delta: []statePatch{{"replace", "/queue", queueItems(s)}}})
 	}
 }
 
@@ -187,7 +187,7 @@ func (h *harness) endQueued(r *chatRun, end event) {
 	close(r.finished)
 }
 
-var removedTurn = event{Type: "RUN_FINISHED", Metadata: raw(object{"cancelled": true})}
+var removedTurn = event{Type: "RUN_FINISHED", Metadata: raw(runMetadata{Cancelled: new(true)})}
 
 // endWaitingQueue ends the queue of a stopped run that nobody came back to.
 func (h *harness) endWaitingQueue(s *threadSession) {

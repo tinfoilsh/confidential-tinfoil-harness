@@ -103,7 +103,7 @@ func TestManagedModelRefreshesRejectedInferenceCredentialOnce(t *testing.T) {
 				t.Fatal("unexpected run result", last)
 			}
 			row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
-			if !rejectAgain && len(arr(row.Data["messages"])) != 2 {
+			if !rejectAgain && len(arr(rowJSON(row)["messages"])) != 2 {
 				t.Fatal("credential retry duplicated the turn")
 			}
 		})
@@ -133,10 +133,10 @@ func referenceCheck(t *testing.T, events []event, expectedMessages any) {
 	}
 }
 func TestSharedThreadUsesPublicTimelineAndAttachments(t *testing.T) {
-	result := sharedThreadView("share-id", object{"title": "Shared", "createdAt": float64(1700000000000), "messages": []any{
+	result := obj(decodeValue(raw(sharedThreadView("share-id", raw(object{"title": "Shared", "createdAt": float64(1700000000000), "messages": []any{
 		object{"role": "assistant", "content": "answer", "timestamp": float64(1700000000000)},
 		object{"role": "user", "content": "photo", "timestamp": float64(1700000000000), "attachments": []any{object{"id": "attachment", "type": "image", "fileName": "photo.png", "mimeType": "image/png", "encryptionKey": "share-attachment-key", "thumbnailBase64": "thumbnail"}}},
-	}})
+	}})))))
 	if !strings.HasPrefix(str(result["createdAt"]), "2023-") {
 		t.Fatalf("invalid timestamp: %v", result)
 	}
@@ -166,7 +166,7 @@ func TestTruncatedModelStreamPreservesPartialAnswer(t *testing.T) {
 		t.Fatalf("a failed chat was screened: %+v", got)
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
-	last := obj(arr(row.Data["messages"])[1])
+	last := obj(arr(rowJSON(row)["messages"])[1])
 	if last["content"] != "partial" || last["isError"] != true {
 		t.Fatal("partial answer lost")
 	}
@@ -201,7 +201,7 @@ func TestTitleRunsBeforeAnswerFinishes(t *testing.T) {
 	close(release)
 	<-run.finished
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", run.thread.id)
-	if row.Data["title"] != "A generated title" {
+	if rowJSON(row)["title"] != "A generated title" {
 		t.Fatal("title did not commit")
 	}
 }
@@ -231,7 +231,7 @@ func TestWidgetRetryReplacesOnlyTheArguments(t *testing.T) {
 	catalog := h.catalog.get()
 	catalog.EnabledWidgets = []string{"render_stat_cards"}
 	original := `{"stats":[{"label":"Count","value":1}]}`
-	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat")] = storedRow{ID: "chat", ETag: "1", Data: object{"createdAt": timestamp(), "title": "Title", "titleState": "manual", "model": "kimi-k3", "messages": []any{object{"id": "user", "role": "user", "content": "show a stat", "timestamp": timestamp()}, object{"id": "assistant", "role": "assistant", "content": "keep this text", "timestamp": timestamp(), "timeline": []any{object{"type": "content", "id": "text", "content": "keep this text"}, object{"type": "tool_call", "id": "call", "toolCallId": "call", "name": "render_stat_cards", "arguments": original}}}}}}
+	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat")] = storedRow{ID: "chat", ETag: "1", Data: raw(object{"createdAt": timestamp(), "title": "Title", "titleState": "manual", "model": "kimi-k3", "messages": []any{object{"id": "user", "role": "user", "content": "show a stat", "timestamp": timestamp()}, object{"id": "assistant", "role": "assistant", "content": "keep this text", "timestamp": timestamp(), "timeline": []any{object{"type": "content", "id": "text", "content": "keep this text"}, object{"type": "tool_call", "id": "call", "toolCallId": "call", "name": "render_stat_cards", "arguments": original}}}}})}
 	in := sendInput(key)
 	in["threadId"] = "chat"
 	in["kind"] = "retryToolCall"
@@ -243,7 +243,7 @@ func TestWidgetRetryReplacesOnlyTheArguments(t *testing.T) {
 		t.Fatalf("retry failed: %+v", last)
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", "chat")
-	messages := arr(row.Data["messages"])
+	messages := arr(rowJSON(row)["messages"])
 	blocks := arr(obj(messages[1])["timeline"])
 	if len(messages) != 2 || len(blocks) != 2 || obj(blocks[1])["arguments"] != replacement {
 		t.Fatal("retry changed message structure")
@@ -275,11 +275,11 @@ func TestManagedToolLoopKeepsReasoningAndOneAssistantMessage(t *testing.T) {
 		t.Fatal(events[len(events)-1])
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
-	messages := arr(row.Data["messages"])
+	messages := arr(rowJSON(row)["messages"])
 	if len(messages) != 2 || len(arr(obj(messages[1])["timeline"])) != 3 {
 		t.Fatal("tool loop did not make one ordered assistant timeline")
 	}
-	referenceCheck(t, events, publicThread(row, "", 50)["messages"])
+	referenceCheck(t, events, window(readThreadRow(row), "", 50).Messages)
 }
 func TestShutdownCommitsPartialOutput(t *testing.T) {
 	started := make(chan struct{})
@@ -304,7 +304,7 @@ func TestShutdownCommitsPartialOutput(t *testing.T) {
 		t.Fatal("shutdown did not finish the run")
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", run.thread.id)
-	if row.Data["activeRun"] != nil {
+	if rowJSON(row)["activeRun"] != nil {
 		t.Fatal("shutdown left an active marker")
 	}
 	if _, err := h.acceptTurn(context.Background(), &principal{ID: "alice"}, key, sendInput(key)); err == nil {

@@ -8,9 +8,6 @@ const maxTurnBody = 64 << 20
 
 const maxLocalMessages = 10000
 
-// Fields the harness owns are never taken from a client's copy of a thread.
-var serverThreadFields = []string{"activeRun", "harnessHiddenCount", "projectId", "contextUsage"}
-
 func validateLocalThread(thread object) error {
 	if err := validateFields(thread, "title titleState model lastRequestId", "pinned webSearchEnabled", "presetId"); err != nil {
 		return err
@@ -51,37 +48,17 @@ func validateLocalThread(thread object) error {
 	return nil
 }
 
-// localThread is the row a local turn starts from. It keeps the client's
-// fields, so the transcript returned to the client round-trips them.
-func localThread(id string, thread object) *storedRow {
-	data := clone(thread)
-	for _, field := range serverThreadFields {
-		delete(data, field)
-	}
-	if _, ok := data["messages"]; !ok {
-		data["messages"] = []any{}
-	}
-	if str(data["createdAt"]) == "" && integer(data["createdAt"]) == 0 {
-		data["createdAt"] = timestamp()
-	}
-	row := &storedRow{ID: id, Data: data}
-	normalizeThread(row)
-	return row
-}
-
 // deviceThread is a local thread as its client stores it after a run. Image
 // bytes and document page images are left out, so a scanned document cannot
 // fill the run's log: the client holds them and puts them back by id.
-func deviceThread(row *storedRow) object {
-	thread := clone(normalizeThread(row))
-	for _, message := range arr(thread["messages"]) {
-		for _, a := range arr(obj(message)["attachments"]) {
-			delete(obj(a), "base64")
-			delete(obj(a), "inferenceMimeType")
-			for _, page := range arr(obj(a)["pages"]) {
-				obj(page)["image"] = ""
-			}
+func deviceThread(t *Thread) Thread {
+	thread := t.clone()
+	thread.eachAttachment(func(a *Attachment) error {
+		a.Base64, a.inferenceMimeType = "", ""
+		for i := range a.Pages {
+			a.Pages[i].Image = ""
 		}
-	}
+		return nil
+	})
 	return thread
 }

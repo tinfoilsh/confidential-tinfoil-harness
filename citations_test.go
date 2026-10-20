@@ -51,15 +51,14 @@ func TestModelReadsSearchResultsAsCitedText(t *testing.T) {
 	}
 }
 
-func citationsIn(t *testing.T, text string, sources ...citationSource) []map[string]any {
+func citationsIn(t *testing.T, text string, sources ...citationSource) []URLCitation {
 	t.Helper()
-	var out []map[string]any
+	var out []URLCitation
 	for _, annotation := range citationAnnotations(text, sources) {
-		value := annotation.(object)
-		if value["type"] != "url_citation" {
-			t.Fatalf("annotation type %v", value["type"])
+		if annotation.Type != "url_citation" {
+			t.Fatalf("annotation type %v", annotation.Type)
 		}
-		out = append(out, value["url_citation"].(object))
+		out = append(out, *annotation.URLCitation)
 	}
 	return out
 }
@@ -71,16 +70,16 @@ func TestCitationAnnotationsSpanTheLinkLabel(t *testing.T) {
 		t.Fatalf("expected 2 annotations, got %v", got)
 	}
 	for i, label := range []string{"Source A", "Source B"} {
-		start, end := got[i]["start_index"].(int), got[i]["end_index"].(int)
-		if got[i]["title"] != label || content[start:end] != label || got[i]["url"] != "https://example.com/"+strings.ToLower(label[len(label)-1:]) {
+		start, end := got[i].StartIndex, got[i].EndIndex
+		if got[i].Title != label || content[start:end] != label || got[i].URL != "https://example.com/"+strings.ToLower(label[len(label)-1:]) {
 			t.Errorf("annotation %d: %v", i, got[i])
 		}
 	}
-	if got := citationsIn(t, "Real cite [Known](https://known.example/a) and fake cite [Fake](https://fabricated.example/x).", citationSource{"https://known.example/a", "Known Source"}); len(got) != 1 || got[0]["url"] != "https://known.example/a" {
+	if got := citationsIn(t, "Real cite [Known](https://known.example/a) and fake cite [Fake](https://fabricated.example/x).", citationSource{"https://known.example/a", "Known Source"}); len(got) != 1 || got[0].URL != "https://known.example/a" {
 		t.Fatalf("an unknown URL was annotated: %v", got)
 	}
 	repeated := citationsIn(t, "First [Same](https://example.com/same) and again [Same](https://example.com/same).", citationSource{"https://example.com/same", "Same"})
-	if len(repeated) != 2 || repeated[0]["start_index"].(int) >= repeated[1]["start_index"].(int) {
+	if len(repeated) != 2 || repeated[0].StartIndex >= repeated[1].StartIndex {
 		t.Fatalf("repeated citations %v", repeated)
 	}
 	if got := citationAnnotations("plain text without citations", []citationSource{{"https://example.com/a", "Source A"}}); got != nil {
@@ -91,7 +90,7 @@ func TestCitationAnnotationsSpanTheLinkLabel(t *testing.T) {
 func TestCitationAnnotationsUseCodePointOffsets(t *testing.T) {
 	content := "Thin\u202fspace\u202fthen [Page](https://example.com/page)."
 	got := citationsIn(t, content, citationSource{"https://example.com/page", "Page"})
-	if len(got) != 1 || string([]rune(content)[got[0]["start_index"].(int):got[0]["end_index"].(int)]) != "Page" {
+	if len(got) != 1 || string([]rune(content)[got[0].StartIndex:got[0].EndIndex]) != "Page" {
 		t.Fatalf("annotations %v", got)
 	}
 }
@@ -100,9 +99,9 @@ func TestCitationAnnotationsMatchURLsWithParentheses(t *testing.T) {
 	const planet = "https://en.wikipedia.org/wiki/Mercury_(planet)"
 	content := "Mercury is closest to the Sun [Wikipedia](" + planet + ") (see [A](https://a.test/x))."
 	got := citationsIn(t, content, citationSource{planet, "Mercury (planet)"}, citationSource{"https://a.test/x", "A"})
-	want := []map[string]any{
-		{"url": planet, "title": "Mercury (planet)", "start_index": strings.Index(content, "Wikipedia"), "end_index": strings.Index(content, "Wikipedia") + len("Wikipedia")},
-		{"url": "https://a.test/x", "title": "A", "start_index": strings.Index(content, "[A]") + 1, "end_index": strings.Index(content, "[A]") + 2},
+	want := []URLCitation{
+		{URL: planet, Title: "Mercury (planet)", StartIndex: strings.Index(content, "Wikipedia"), EndIndex: strings.Index(content, "Wikipedia") + len("Wikipedia")},
+		{URL: "https://a.test/x", Title: "A", StartIndex: strings.Index(content, "[A]") + 1, EndIndex: strings.Index(content, "[A]") + 2},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("annotations %v, want %v", got, want)
@@ -112,7 +111,7 @@ func TestCitationAnnotationsMatchURLsWithParentheses(t *testing.T) {
 func TestCitationAnnotationsKeepTheModelsURL(t *testing.T) {
 	const recorded = "https://apnews.com/article/ukraine-druzhba-pipeline-7dfc9574bf95a69eda13b1440171e402"
 	got := citationsIn(t, "Pipeline repairs are complete [Source: AP News]("+recorded+"/).", citationSource{recorded, "AP News"})
-	if len(got) != 1 || got[0]["url"] != recorded+"/" || got[0]["title"] != "AP News" {
+	if len(got) != 1 || got[0].URL != recorded+"/" || got[0].Title != "AP News" {
 		t.Fatalf("annotations %v", got)
 	}
 }
@@ -131,7 +130,7 @@ func TestCitationTitles(t *testing.T) {
 		for _, title := range tc.titles {
 			sources = append(sources, citationSource{source, title})
 		}
-		if got := citationsIn(t, "See [source]("+source+") for details.", sources...); len(got) != 1 || got[0]["title"] != tc.want {
+		if got := citationsIn(t, "See [source]("+source+") for details.", sources...); len(got) != 1 || got[0].Title != tc.want {
 			t.Errorf("%s: citation %v, want title %q", name, got, tc.want)
 		}
 	}

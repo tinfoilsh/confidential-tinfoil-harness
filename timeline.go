@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -8,48 +9,59 @@ import (
 
 // apply runs under stream.mu, so tool goroutines and model deltas use one order.
 type messageAssembler struct {
-	ordered []object
-	byID    map[string]object
-	calls   map[string]object
+	ordered []*Message
+	byID    map[string]*Message
+	calls   map[string]blockRef
 	sealed  map[string]int // leading blocks of a continued reply that new text starts after
 }
 
+// blockRef is a tool call's block, which stays at its index as a reply grows.
+type blockRef struct {
+	message *Message
+	index   int
+}
+
+func (r blockRef) block() *Block { return &r.message.Timeline[r.index] }
+
 func newMessageAssembler() *messageAssembler {
-	return &messageAssembler{byID: map[string]object{}, calls: map[string]object{}, sealed: map[string]int{}}
+	return &messageAssembler{byID: map[string]*Message{}, calls: map[string]blockRef{}, sealed: map[string]int{}}
 }
 
 // seed starts from a reply that a continuation extends. As on the web
 // client, only a trailing content block takes the new text.
-func (a *messageAssembler) seed(m object) {
-	m = clone(m)
-	blocks := arr(m["timeline"])
-	id, sealed := str(m["id"]), len(blocks)
-	if sealed > 0 && obj(blocks[sealed-1])["type"] == "content" {
+func (a *messageAssembler) seed(reply Message) {
+	m := reply.clone()
+	if m.Timeline == nil {
+		m.Timeline = []Block{}
+	}
+	sealed := len(m.Timeline)
+	if sealed > 0 && m.Timeline[sealed-1].Type == "content" {
 		sealed--
 	}
-	m["timeline"], a.byID[id], a.sealed[id] = blocks, m, sealed
-	a.ordered = append(a.ordered, m)
+	a.byID[m.ID], a.sealed[m.ID] = &m, sealed
+	a.ordered = append(a.ordered, &m)
 }
-func (a *messageAssembler) message(id string) object {
+func (a *messageAssembler) message(id string) *Message {
 	if id == "" {
 		id = "msg_orphan"
 	}
 	if m := a.byID[id]; m != nil {
 		return m
 	}
-	m := object{"id": id, "role": "assistant", "content": "", "createdAt": timestamp(), "timeline": []any{}}
+	m := &Message{ID: id, Role: "assistant", CreatedAt: timestamp(), Timeline: []Block{}}
 	a.byID[id] = m
 	a.ordered = append(a.ordered, m)
 	return m
 }
 
 // stamp dates a reply by its first event; a continued reply keeps its date.
-func (a *messageAssembler) stamp(id string, m object, at string) {
-	if _, seeded := a.sealed[id]; at != "" && !seeded && len(arr(m["timeline"])) == 0 {
-		m["createdAt"] = at
+func (a *messageAssembler) stamp(id string, m *Message, at string) {
+	if _, seeded := a.sealed[id]; at != "" && !seeded && len(m.Timeline) == 0 {
+		m.CreatedAt = at
 	}
 }
 func (a *messageAssembler) apply(e event) {
+	delta, _ := e.Delta.(string)
 	switch e.Type {
 	case "TEXT_MESSAGE_CHUNK", "REASONING_MESSAGE_CHUNK":
 		id, kind := e.MessageID, "content"
@@ -59,91 +71,93 @@ func (a *messageAssembler) apply(e event) {
 		}
 		m := a.message(id)
 		a.stamp(id, m, e.Timestamp)
-		blocks := arr(m["timeline"])
-		var b object
-		if len(blocks) > a.sealed[id] && obj(blocks[len(blocks)-1])["type"] == kind {
-			b = obj(blocks[len(blocks)-1])
-		} else {
-			b = object{"id": fmt.Sprintf("%s_%s_%d", id, kind, len(blocks)), "type": kind, "content": ""}
-			blocks = append(blocks, b)
-			m["timeline"] = blocks
+		blocks := m.Timeline
+		if len(blocks) <= a.sealed[id] || blocks[len(blocks)-1].Type != kind {
+			m.Timeline = append(blocks, Block{ID: fmt.Sprintf("%s_%s_%d", id, kind, len(blocks)), Type: kind})
 		}
-		b["content"] = str(b["content"]) + str(e.Delta)
+		m.Timeline[len(m.Timeline)-1].Content += delta
 		if kind == "content" {
-			m["content"] = str(m["content"]) + str(e.Delta)
+			m.Content += delta
 		}
 	case "TOOL_CALL_START":
 		parent := e.ParentID
 		if parent == "" && len(a.ordered) > 0 {
-			parent = str(a.ordered[len(a.ordered)-1]["id"])
+			parent = a.ordered[len(a.ordered)-1].ID
 		}
 		if parent == "" {
 			parent = "msg_" + e.ToolCallID
 		}
 		m := a.message(parent)
 		a.stamp(parent, m, e.Timestamp)
-		b := object{"id": e.ToolCallID, "type": "tool_call", "toolCallId": e.ToolCallID, "name": e.ToolName, "arguments": "", "progress": []any{}, "resolvedAt": nil, "resolution": nil}
-		a.calls[e.ToolCallID] = b
-		m["timeline"] = append(arr(m["timeline"]), b)
+		a.calls[e.ToolCallID] = blockRef{m, len(m.Timeline)}
+		m.Timeline = append(m.Timeline, Block{ID: e.ToolCallID, Type: "tool_call", ToolCallID: e.ToolCallID, Name: e.ToolName, Progress: []json.RawMessage{}, ResolvedAt: jsonNull, Resolution: jsonNull})
 	case "TOOL_CALL_ARGS":
-		if b := a.calls[e.ToolCallID]; b != nil {
-			b["arguments"] = str(b["arguments"]) + str(e.Delta)
+		if call, ok := a.calls[e.ToolCallID]; ok {
+			call.block().Arguments += delta
 		}
 	case "TOOL_CALL_END":
-		if b := a.calls[e.ToolCallID]; b != nil {
-			b["complete"] = true
+		if call, ok := a.calls[e.ToolCallID]; ok {
+			call.block().Complete = true
 		}
 	case "TOOL_CALL_RESULT":
-		if b := a.calls[e.ToolCallID]; b != nil {
-			b["result"] = decodeValue(e.Content)
+		if call, ok := a.calls[e.ToolCallID]; ok {
+			b := call.block()
+			b.Result = e.Content
 			if len(e.Metadata) > 0 {
-				b["metadata"] = decodeValue(e.Metadata)
+				b.Metadata = e.Metadata
 			}
 		}
 	case "ACTIVITY_DELTA":
-		if b := a.calls[strings.TrimPrefix(e.MessageID, "act_")]; b != nil {
-			for _, value := range arr(decodeValue(e.Patch)) {
-				op := obj(value)
-				if op["path"] == "/output/-" {
-					b["progress"] = append(arr(b["progress"]), op["value"])
+		if call, ok := a.calls[strings.TrimPrefix(e.MessageID, "act_")]; ok {
+			var ops []struct {
+				Path  string          `json:"path"`
+				Value json.RawMessage `json:"value"`
+			}
+			json.Unmarshal(e.Patch, &ops)
+			for _, op := range ops {
+				if op.Path == "/output/-" {
+					b := call.block()
+					b.Progress = append(b.Progress, op.Value)
 				}
 			}
 		}
 	}
 }
 
+// jsonNull is a field present as null.
+var jsonNull = json.RawMessage("null")
+
 // replaceReplyText rewrites a reply's text as the web client does: its
 // content blocks collapse into one holding the text, where the first was.
-func replaceReplyText(message object, text string) {
-	timeline := arr(message["timeline"])
-	first := slices.IndexFunc(timeline, func(block any) bool { return obj(block)["type"] == "content" })
-	edited := object{"type": "content", "id": "edited-content", "content": text}
+func replaceReplyText(message *Message, text string) {
+	timeline := message.Timeline
+	first := slices.IndexFunc(timeline, func(block Block) bool { return block.Type == "content" })
+	edited := Block{Type: "content", ID: "edited-content", Content: text}
 	if first < 0 {
 		first = len(timeline)
 	} else {
-		edited["id"] = obj(timeline[first])["id"]
+		edited.ID = timeline[first].ID
 	}
-	blocks := []any{}
+	blocks := []Block{}
 	for i := range len(timeline) + 1 {
 		if i == first && text != "" {
 			blocks = append(blocks, edited)
 		}
-		if i < len(timeline) && obj(timeline[i])["type"] != "content" {
+		if i < len(timeline) && timeline[i].Type != "content" {
 			blocks = append(blocks, timeline[i])
 		}
 	}
-	message["content"] = text
+	message.Content = text
+	message.Timeline = nil
 	if len(blocks) > 0 {
-		message["timeline"] = blocks
-	} else {
-		delete(message, "timeline")
+		message.Timeline = blocks
 	}
 }
 
-func (a *messageAssembler) messages() []object {
-	out := []object{}
+func (a *messageAssembler) messages() []Message {
+	out := []Message{}
 	for _, m := range a.ordered {
-		out = append(out, clone(m))
+		out = append(out, m.clone())
 	}
 	return out
 }

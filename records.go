@@ -3,11 +3,9 @@ package main
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"slices"
 	"strings"
-	"time"
-
-	"github.com/google/uuid"
 )
 
 func (h *harness) apiRoutes() []routeSpec {
@@ -32,9 +30,7 @@ func (h *harness) apiRoutes() []routeSpec {
 	}
 	for _, pair := range [][2]string{{"current", "/v1/key/current"}, {"register", "/v1/key/register"}, {"add-bundle", "/v1/key/add-bundle"}, {"remove-bundle", "/v1/key/remove-bundle"}, {"migrate-all", "/v1/blobs/migrate-all"}} {
 		routes = append(routes, routeSpec{"/v1/keys/" + pair[0], false, false, func(ctx context.Context, p *principal, _ contentKey, in object) (any, error) {
-			var out object
-			err := h.syncAPI.call(ctx, p, pair[1], in, &out)
-			return out, err
+			return h.keyCall(ctx, p, pair[1], raw(in))
 		}})
 	}
 	return routes
@@ -60,102 +56,36 @@ func (h *harness) session(ctx context.Context, p *principal, _ contentKey, _ obj
 	return object{"user": object{"id": p.ID, "anonymous": p.Anonymous}, "rateLimit": credential.Limit, "models": c.displayModels(), "auto": auto, "defaultModel": "auto", "widgets": c.EnabledWidgets, "presets": presets, "features": features}, nil
 }
 
-func threadSummary(t object) object {
-	out := object{}
-	for _, key := range []string{"id", "title", "titleState", "createdAt", "updatedAt", "projectId", "model", "webSearchEnabled", "pinned", "contextUsage"} {
-		out[key] = t[key]
-	}
-	out["activeRun"] = nil
-	run := obj(t["activeRun"])
-	if expires, err := time.Parse(time.RFC3339Nano, str(run["expiresAt"])); err == nil && nowUTC().Before(expires) {
-		out["activeRun"] = object{"runId": run["runId"], "expiresAt": run["expiresAt"]}
-	}
-	out["messageCount"] = max(0, len(arr(t["messages"]))-integer(t["harnessHiddenCount"]))
-	return out
-}
-func publicMessage(m object) object {
-	out := object{}
-	for _, key := range []string{"id", "role", "createdAt", "quote", "model", "modelDisplayName", "isError", "isInterrupted", "usage", "annotations"} {
-		if v, ok := m[key]; ok {
-			out[key] = v
-		}
-	}
-	if m["role"] == "assistant" {
-		out["timeline"] = arr(m["timeline"])
-	} else {
-		out["content"] = str(m["content"])
-	}
-	if attachments := arr(m["attachments"]); len(attachments) > 0 {
-		view := []any{}
-		for _, item := range attachments {
-			view = append(view, publicAttachment(obj(item)))
-		}
-		out["attachments"] = view
-	}
-	return out
-}
-
-// A chat is shown in windows of its latest messages.
-const (
-	messageWindow    = 50
-	maxMessageWindow = 200
-)
-
-func publicThread(row *storedRow, before string, limit int) object {
-	t := normalizeThread(row)
-	out := threadSummary(t)
-	out["revision"], out["presetId"] = row.ETag, t["presetId"]
-	all := arr(t["messages"])
-	all = all[min(len(all), integer(t["harnessHiddenCount"])):]
-	end := len(all)
-	if before != "" {
-		for i, m := range all {
-			if obj(m)["id"] == before {
-				end = i
-				break
-			}
-		}
-	}
-	if limit <= 0 || limit > maxMessageWindow {
-		limit = messageWindow
-	}
-	start := max(0, end-limit)
-	messages := []any{}
-	for _, message := range all[start:end] {
-		messages = append(messages, publicMessage(obj(message)))
-	}
-	out["messages"], out["hasOlder"] = messages, start > 0
-	return out
-}
 func (h *harness) listThreads(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
-	page, err := h.storeRows.list(ctx, p, key, "chat", str(in["cursor"]), str(in["projectId"]), integer(in["limit"]))
+	rows, next, err := h.threadPage(ctx, p, key, str(in["cursor"]), str(in["projectId"]), integer(in["limit"]))
 	if err != nil {
 		return nil, err
 	}
-	if err := h.readLegacyPins(ctx, p, key, page.Rows); err != nil {
+	if err := h.readLegacyPins(ctx, p, key, rows); err != nil {
 		return nil, err
 	}
-	list := []any{}
-	for _, row := range page.Rows {
-		list = append(list, threadSummary(normalizeThread(&row)))
+	list := []threadSummary{}
+	for _, row := range rows {
+		list = append(list, summarize(&row.Thread))
 	}
-	return object{"threads": list, "nextCursor": page.Next}, nil
+	return struct {
+		Threads    []threadSummary `json:"threads"`
+		NextCursor string          `json:"nextCursor"`
+	}{list, next}, nil
 }
 func (h *harness) getThread(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
 	id, err := requiredID(in, "id")
 	if err != nil {
 		return nil, err
 	}
-	row, err := h.storeRows.load(ctx, p, key, "chat", id)
+	row, err := h.loadThread(ctx, p, key, id)
 	if err != nil {
 		return nil, err
 	}
-	rows := []storedRow{*row}
-	if err := h.readLegacyPins(ctx, p, key, rows); err != nil {
+	if err := h.readLegacyPins(ctx, p, key, []*threadRow{row}); err != nil {
 		return nil, err
 	}
-	row = &rows[0]
-	return publicThread(row, str(in["before"]), integer(in["limit"])), nil
+	return window(row, str(in["before"]), integer(in["limit"])), nil
 }
 func (h *harness) updateThread(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
 	if err := validateFields(in, "title model", "webSearchEnabled pinned", "projectId presetId"); err != nil {
@@ -169,18 +99,28 @@ func (h *harness) updateThread(ctx context.Context, p *principal, key contentKey
 		return nil, apiErr(404, "MODEL_UNAVAILABLE", "Unknown model")
 	}
 	if project := str(in["projectId"]); project != "" {
-		if _, err := h.storeRows.load(ctx, p, key, "project", project); err != nil {
+		if _, err := h.loadProject(ctx, p, key, project); err != nil {
 			return nil, err
 		}
 	}
-	row, err := h.mutate(ctx, p, key, "chat", id, false, func(data object) error {
-		for _, f := range []string{"title", "model", "webSearchEnabled", "projectId", "presetId", "pinned"} {
-			if v, ok := in[f]; ok {
-				data[f] = v
-			}
+	row, err := h.mutateThread(ctx, p, key, id, func(t *Thread) error {
+		if title, ok := in["title"]; ok {
+			t.Title, t.TitleState = str(title), "manual"
 		}
-		if _, ok := in["title"]; ok {
-			data["titleState"] = "manual"
+		if model, ok := in["model"]; ok {
+			t.Model = str(model)
+		}
+		if enabled, ok := in["webSearchEnabled"]; ok {
+			t.WebSearchEnabled = boolean(enabled, false)
+		}
+		if project, ok := in["projectId"]; ok {
+			t.ProjectID = optionalString(project)
+		}
+		if preset, ok := in["presetId"]; ok {
+			t.PresetID = optionalString(preset)
+		}
+		if pinned, ok := in["pinned"]; ok {
+			t.Pinned = boolean(pinned, false)
 		}
 		return nil
 	})
@@ -192,7 +132,7 @@ func (h *harness) updateThread(ctx context.Context, p *principal, key contentKey
 			return nil, err
 		}
 	}
-	return threadSummary(normalizeThread(row)), nil
+	return summarize(&row.Thread), nil
 }
 func (h *harness) deleteThread(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
 	id, err := requiredID(in, "id")
@@ -200,7 +140,7 @@ func (h *harness) deleteThread(ctx context.Context, p *principal, key contentKey
 		return nil, err
 	}
 	h.stopThread(p, id)
-	return object{}, h.storeRows.remove(ctx, p, key, "chat", id)
+	return struct{}{}, h.removeRow(ctx, p, key, "chat", id)
 }
 func forkTitle(title string) string {
 	title = cmp.Or(title, "Untitled")
@@ -221,42 +161,39 @@ func (h *harness) forkThread(ctx context.Context, p *principal, key contentKey, 
 	if err != nil {
 		return nil, err
 	}
-	row, err := h.storeRows.load(ctx, p, key, "chat", id)
+	row, err := h.loadThread(ctx, p, key, id)
 	if err != nil {
 		return nil, err
 	}
-	title := forkTitle(str(row.Data["title"]))
-	t := normalizeThread(row)
-	count := 1 + slices.IndexFunc(arr(t["messages"]), func(m any) bool { return obj(m)["id"] == messageID })
+	count := 1 + row.messageIndex(messageID)
 	if count == 0 {
 		return nil, apiErr(404, "THREAD_NOT_FOUND", "The message was not found")
 	}
 	target := rowID()
-	if err := h.syncAPI.call(ctx, p, "/v1/sync/fork", object{"source_id": id, "target_id": target, "key": key.base64(), "message_count": count, "title": title, "created_at": timestamp(), "idempotency_key": uuid.NewString()}, nil); err != nil {
+	if err := h.forkStored(ctx, p, key, id, target, forkTitle(row.Title), count); err != nil {
 		return nil, err
 	}
 	// Sync leaves out the web client's bookkeeping, not the harness's.
-	forked, err := h.mutate(ctx, p, key, "chat", target, false, func(data object) error {
-		for _, field := range []string{"activeRun", "contextUsage", "pinned"} {
-			delete(data, field)
-		}
+	forked, err := h.mutateThread(ctx, p, key, target, func(t *Thread) error {
+		t.ActiveRun, t.ContextUsage, t.Pinned = nil, nil, false
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return threadSummary(normalizeThread(forked)), nil
+	return summarize(&forked.Thread), nil
 }
 
 // Message actions change a stored chat's transcript. A local thread's client
 // changes its own copy, which its next turn sends.
 func (h *harness) deleteMessage(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
-	return h.changeMessages(ctx, p, key, in, func(messages []any, index int) ([]any, error) {
+	return h.changeMessages(ctx, p, key, in, func(t *Thread, index int) error {
 		// As on the web client, a chat keeps its last message.
-		if len(messages) == 1 {
-			return nil, apiErr(400, "BAD_REQUEST", "A chat keeps its last message")
+		if len(t.Messages) == 1 {
+			return apiErr(400, "BAD_REQUEST", "A chat keeps its last message")
 		}
-		return slices.Delete(messages, index, index+1), nil
+		t.Messages = slices.Delete(t.Messages, index, index+1)
+		return nil
 	})
 }
 func (h *harness) updateMessage(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
@@ -264,15 +201,15 @@ func (h *harness) updateMessage(ctx context.Context, p *principal, key contentKe
 	if !ok {
 		return nil, apiErr(400, "BAD_REQUEST", "content must be a string")
 	}
-	return h.changeMessages(ctx, p, key, in, func(messages []any, index int) ([]any, error) {
-		if obj(messages[index])["role"] != "assistant" {
-			return nil, apiErr(400, "BAD_REQUEST", "Only a reply is edited in place")
+	return h.changeMessages(ctx, p, key, in, func(t *Thread, index int) error {
+		if t.Messages[index].Role != "assistant" {
+			return apiErr(400, "BAD_REQUEST", "Only a reply is edited in place")
 		}
-		replaceReplyText(obj(messages[index]), text)
-		return messages, nil
+		replaceReplyText(&t.Messages[index], text)
+		return nil
 	})
 }
-func (h *harness) changeMessages(ctx context.Context, p *principal, key contentKey, in object, change func([]any, int) ([]any, error)) (any, error) {
+func (h *harness) changeMessages(ctx context.Context, p *principal, key contentKey, in object, change func(*Thread, int) error) (any, error) {
 	id, err := requiredID(in, "threadId")
 	if err != nil {
 		return nil, err
@@ -281,23 +218,17 @@ func (h *harness) changeMessages(ctx context.Context, p *principal, key contentK
 	if err != nil {
 		return nil, err
 	}
-	row, err := h.mutate(ctx, p, key, "chat", id, false, func(data object) error {
-		messages := arr(data["messages"])
-		index := slices.IndexFunc(messages, func(m any) bool { return obj(m)["id"] == messageID })
+	row, err := h.mutateThread(ctx, p, key, id, func(t *Thread) error {
+		index := t.messageIndex(messageID)
 		if index < 0 {
 			return apiErr(404, "THREAD_NOT_FOUND", "The message was not found")
 		}
-		changed, err := change(messages, index)
-		if err != nil {
-			return err
-		}
-		data["messages"] = changed
-		return nil
+		return change(t, index)
 	})
 	if err != nil {
 		return nil, err
 	}
-	return publicThread(row, "", messageWindow), nil
+	return window(row, "", messageWindow), nil
 }
 func (h *harness) deleteAllThreads(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
 	if err := validateFields(in, "", "", "projectId"); err != nil {
@@ -305,7 +236,7 @@ func (h *harness) deleteAllThreads(ctx context.Context, p *principal, key conten
 	}
 	// Every id is listed before any is deleted, so a shrinking list cannot
 	// skip a page, and rows this key cannot open are deleted too.
-	ids, err := h.storeRows.ids(ctx, p, "chat", str(in["projectId"]))
+	ids, err := h.chatIDs(ctx, p, str(in["projectId"]))
 	if err != nil {
 		return nil, err
 	}
@@ -314,29 +245,35 @@ func (h *harness) deleteAllThreads(ctx context.Context, p *principal, key conten
 			return nil, err
 		}
 	}
-	return object{"deleted": len(ids)}, nil
+	return deletedCount{len(ids)}, nil
 }
 
-func (h *harness) profile(ctx context.Context, p *principal, key contentKey) (object, error) {
-	row, err := h.storeRows.load(ctx, p, key, "profile", "profile")
-	if err != nil {
-		if asAPIError(err).HTTP == 404 {
-			return object{}, nil
-		}
-		return nil, err
+// deletedCount answers a bulk deletion.
+type deletedCount struct {
+	Deleted int `json:"deleted"`
+}
+
+// profile is a user's settings as a prompt reads them.
+func (h *harness) profile(ctx context.Context, p *principal, key contentKey) (Profile, error) {
+	stored, err := h.loadProfile(ctx, p, key)
+	if err != nil || stored == nil {
+		return Profile{}, err
 	}
-	return profileView(row.Data), nil
+	return viewProfile(*stored).Profile, nil
 }
 
-// profileView is a profile in the fields the harness reads, upgraded from
-// what old clients stored.
-func profileView(profile object) object {
-	out := selectFields(profile, strings.Join(profileFields, " ")+" updatedAt")
-	out["selectedModel"] = normalizeModel(str(out["selectedModel"]))
-	return out
+// viewProfile is a stored profile as its client reads it.
+func viewProfile(stored storedProfile) profileView {
+	view := profileView{Profile: stored.Profile, UpdatedAt: stored.UpdatedAt}
+	view.SelectedModel = new(normalizeModel(valueOr(view.SelectedModel, "")))
+	return view
 }
 func (h *harness) getProfile(ctx context.Context, p *principal, key contentKey, _ object) (any, error) {
-	return h.profile(ctx, p, key)
+	stored, err := h.loadProfile(ctx, p, key)
+	if err != nil || stored == nil {
+		return profileView{}, err
+	}
+	return viewProfile(*stored), nil
 }
 
 var profileFields = strings.Fields("themeMode chatFont language nickname profession traits additionalContext isUsingPersonalization isUsingCustomPrompt customSystemPrompt customPromptPresets favoritePromptPresetIds defaultPromptPresetId selectedModel autoIntelligence reasoningEffort thinkingEnabled webSearchEnabled codeExecutionEnabled piiCheckEnabled genUIEnabled pixelateSidebarChatTitlesEnabled browserTabChatTitleEnabled enterToNewlineEnabled hasSeenOnboarding hasSeenWebSearchIntro dismissed")
@@ -354,76 +291,39 @@ func (h *harness) updateProfile(ctx context.Context, p *principal, key contentKe
 			return nil, apiErr(400, "BAD_REQUEST", "Unknown profile field: "+f)
 		}
 	}
-	row, err := h.mutate(ctx, p, key, "profile", "profile", true, func(data object) error {
-		for field, value := range patch {
-			data[field] = value
+	var changes Profile
+	json.Unmarshal(raw(patch), &changes)
+	clearsDefault := patch["defaultPromptPresetId"] == nil
+	if _, ok := patch["defaultPromptPresetId"]; !ok {
+		clearsDefault = false
+	}
+	stored, err := h.mutateProfile(ctx, p, key, func(profile *storedProfile) {
+		profile.apply(changes)
+		if clearsDefault {
+			profile.DefaultPromptPresetID = nil
 		}
-		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return profileView(row.Data), nil
-}
-func projectView(row *storedRow) object {
-	out := clone(row.Data)
-	out["id"] = row.ID
-	for _, field := range []string{"createdAt", "updatedAt"} {
-		if value := isoTime(out[field]); value != "" {
-			out[field] = value
-		}
-	}
-	for _, f := range []string{"syncVersion", "clock", "writer", "clockVersion"} {
-		delete(out, f)
-	}
-	return out
+	return viewProfile(stored), nil
 }
 func (h *harness) listProjects(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
-	page, err := h.storeRows.list(ctx, p, key, "project", str(in["cursor"]), "", 50)
+	projects, next, err := h.projectPage(ctx, p, key, str(in["cursor"]), 50)
 	if err != nil {
 		return nil, err
 	}
-	list := []any{}
-	for _, row := range page.Rows {
-		list = append(list, projectView(&row))
-	}
-	return object{"projects": list, "nextCursor": page.Next}, nil
-}
-func (h *harness) projectDocuments(ctx context.Context, p *principal, key contentKey, id string) ([]object, error) {
-	list, cursor, index := []object{}, "", map[string]int{}
-	for {
-		page, err := h.storeRows.list(ctx, p, key, "project_document", cursor, id, 100)
-		if err != nil {
-			return nil, err
-		}
-		for _, row := range page.Rows {
-			doc := projectView(&row)
-			doc["id"] = strings.TrimPrefix(row.ID, id+"/")
-			doc["projectId"] = id
-			// Unfiltered pages can repeat a row that changed while listing;
-			// the later copy is the newer one.
-			if i, ok := index[row.ID]; ok {
-				list[i] = doc
-				continue
-			}
-			index[row.ID] = len(list)
-			list = append(list, doc)
-		}
-		if page.Next == "" {
-			return list, nil
-		}
-		if page.Next == cursor {
-			return nil, apiErr(502, "UPSTREAM_REFUSED", "The document cursor did not advance")
-		}
-		cursor = page.Next
-	}
+	return struct {
+		Projects   []Project `json:"projects"`
+		NextCursor string    `json:"nextCursor"`
+	}{projects, next}, nil
 }
 func (h *harness) getProject(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
 	id, err := requiredID(in, "id")
 	if err != nil {
 		return nil, err
 	}
-	row, err := h.storeRows.load(ctx, p, key, "project", id)
+	project, err := h.loadProject(ctx, p, key, id)
 	if err != nil {
 		return nil, err
 	}
@@ -431,9 +331,10 @@ func (h *harness) getProject(ctx context.Context, p *principal, key contentKey, 
 	if err != nil {
 		return nil, err
 	}
-	out := projectView(row)
-	out["documents"] = docs
-	return out, nil
+	return struct {
+		Project
+		Documents []ProjectDocument `json:"documents"`
+	}{project, docs}, nil
 }
 func (h *harness) createProject(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
 	if err := validateFields(in, "name description systemInstructions color", "", ""); err != nil {
@@ -442,15 +343,9 @@ func (h *harness) createProject(ctx context.Context, p *principal, key contentKe
 	if strings.TrimSpace(str(in["name"])) == "" {
 		return nil, apiErr(400, "BAD_REQUEST", "A project name is required")
 	}
-	id := rowID()
-	row, err := h.mutate(ctx, p, key, "project", id, true, func(data object) error {
-		data["name"], data["description"], data["systemInstructions"], data["color"] = in["name"], str(in["description"]), str(in["systemInstructions"]), in["color"]
-		return nil
+	return h.mutateProject(ctx, p, key, rowID(), true, func(project *Project) {
+		project.Name, project.Description, project.SystemInstructions, project.Color = str(in["name"]), str(in["description"]), str(in["systemInstructions"]), optionalString(in["color"])
 	})
-	if err != nil {
-		return nil, err
-	}
-	return projectView(row), nil
 }
 func (h *harness) updateProject(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
 	if err := validateFields(in, "name description systemInstructions color", "", ""); err != nil {
@@ -460,36 +355,31 @@ func (h *harness) updateProject(ctx context.Context, p *principal, key contentKe
 	if err != nil {
 		return nil, err
 	}
-	row, err := h.mutate(ctx, p, key, "project", id, false, func(data object) error {
-		for _, f := range []string{"name", "description", "systemInstructions", "color"} {
-			if v, ok := in[f]; ok {
-				data[f] = v
+	return h.mutateProject(ctx, p, key, id, false, func(project *Project) {
+		for field, value := range map[string]*string{"name": &project.Name, "description": &project.Description, "systemInstructions": &project.SystemInstructions} {
+			if v, ok := in[field]; ok {
+				*value = str(v)
 			}
 		}
-		return nil
+		if color, ok := in["color"]; ok {
+			project.Color = optionalString(color)
+		}
 	})
-	if err != nil {
-		return nil, err
-	}
-	return projectView(row), nil
 }
 func (h *harness) deleteProject(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
 	id, err := requiredID(in, "id")
 	if err != nil {
 		return nil, err
 	}
-	return object{}, h.storeRows.remove(ctx, p, key, "project", id)
+	return struct{}{}, h.removeRow(ctx, p, key, "project", id)
 }
 
-// Sync deletes every project and project document in one step.
 func (h *harness) deleteAllProjects(ctx context.Context, p *principal, key contentKey, _ object) (any, error) {
-	var result struct {
-		Deleted int `json:"deleted"`
-	}
-	if err := h.syncAPI.call(ctx, p, "/v1/sync/delete-all-projects", object{"key": key.base64(), "idempotency_key": uuid.NewString()}, &result); err != nil {
+	deleted, err := h.removeAllProjects(ctx, p, key)
+	if err != nil {
 		return nil, err
 	}
-	return object{"deleted": result.Deleted}, nil
+	return deletedCount{deleted}, nil
 }
 
 func (h *harness) deleteDocument(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
@@ -501,26 +391,21 @@ func (h *harness) deleteDocument(ctx context.Context, p *principal, key contentK
 	if err != nil {
 		return nil, err
 	}
-	return object{}, h.storeRows.remove(ctx, p, key, "project_document", project+"/"+doc)
+	return struct{}{}, h.removeRow(ctx, p, key, "project_document", project+"/"+doc)
 }
 func (h *harness) searchThreads(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
-	var found object
-	err := h.syncAPI.call(ctx, p, "/v1/search/query", object{"key": key.base64(), "query": str(in["query"]), "limit": integer(in["limit"])}, &found)
+	ids, indexing, err := h.searchChats(ctx, p, key, str(in["query"]), integer(in["limit"]))
 	if err != nil {
 		return nil, err
 	}
-	indexing := boolean(found["needs_reindex"], false)
 	if indexing {
-		var job object
-		if err := h.syncAPI.call(ctx, p, "/v1/search/reindex", object{"keys": []object{{"key": key.base64()}}}, &job); err != nil {
+		if indexing, err = h.reindexChats(ctx, p, key); err != nil {
 			return nil, err
 		}
-		indexing = job["status"] == "running"
 	}
-	results := []any{}
-	for _, v := range arr(found["results"]) {
-		match := obj(v)
-		row, err := h.storeRows.load(ctx, p, key, "chat", str(match["id"]))
+	results := []threadSummary{}
+	for _, id := range ids {
+		row, err := h.loadThread(ctx, p, key, id)
 		if err != nil {
 			// A deleted or unreadable chat leaves the other results intact.
 			if code := asAPIError(err).HTTP; code == 404 || code == 409 {
@@ -528,7 +413,10 @@ func (h *harness) searchThreads(ctx context.Context, p *principal, key contentKe
 			}
 			return nil, err
 		}
-		results = append(results, threadSummary(normalizeThread(row)))
+		results = append(results, summarize(&row.Thread))
 	}
-	return object{"results": results, "indexing": indexing}, nil
+	return struct {
+		Results  []threadSummary `json:"results"`
+		Indexing bool            `json:"indexing"`
+	}{results, indexing}, nil
 }

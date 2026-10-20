@@ -19,49 +19,44 @@ func (h *harness) threadTranscript(ctx context.Context, p *principal, key conten
 	if err != nil {
 		return nil, err
 	}
-	row, err := h.storeRows.load(ctx, p, key, "chat", id)
+	row, err := h.loadThread(ctx, p, key, id)
 	if err != nil {
 		return nil, err
 	}
-	thread := normalizeThread(row)
 	missing := 0
-	for _, item := range arr(thread["messages"]) {
-		for _, value := range arr(obj(item)["attachments"]) {
-			a := obj(value)
-			if attachmentKey(a) == "" {
-				continue
-			}
-			data, err := h.attachmentBytes(ctx, p, a, false)
-			if err == nil && isImage(a) {
-				a["base64"] = base64.StdEncoding.EncodeToString(data)
-			} else if err == nil {
-				var content object
-				if content, err = decodeDocument(data); err == nil {
-					for field, value := range content {
-						a[field] = value
-					}
-				}
-			}
-			clear(data)
-			if unreachable(err) {
-				missing++
-				continue
-			}
-			if err != nil {
-				return nil, err
-			}
-			for _, field := range []string{"encryptionKey", "key", "storageThreadId", "pageCount"} {
-				delete(a, field)
+	err = row.eachAttachment(func(a *Attachment) error {
+		if a.storageKey() == "" {
+			return nil
+		}
+		data, err := h.attachmentBytes(ctx, p, a, false)
+		if err == nil && a.isImage() {
+			a.Base64 = base64.StdEncoding.EncodeToString(data)
+		} else if err == nil {
+			var content documentBlob
+			if content, err = decodeDocument(data); err == nil {
+				a.TextContent, a.Pages = content.TextContent, content.Pages
 			}
 		}
+		clear(data)
+		if unreachable(err) {
+			missing++
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		a.EncryptionKey, a.Key, a.StorageThreadID, a.PageCount = "", "", "", 0
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	if missing > 0 {
 		return nil, apiErr(409, "ATTACHMENTS_UNAVAILABLE", strconv.Itoa(missing)+" attachments in this chat could not be read")
 	}
-	for _, field := range serverThreadFields {
-		delete(thread, field)
-	}
-	return object{"thread": thread}, nil
+	return struct {
+		Thread deviceTranscript `json:"thread"`
+	}{deviceTranscript{Thread: row.Thread}}, nil
 }
 
 // handleThreadImport stores a chat from the device as a cloud chat under the
@@ -100,17 +95,16 @@ func (h *harness) importThread(ctx context.Context, p *principal, key contentKey
 	if err := validateLocalThread(obj(in["thread"])); err != nil {
 		return nil, err
 	}
-	row := localThread(id, obj(in["thread"]))
-	if err := h.placeAttachments(ctx, p, id, row.Data); err != nil {
+	row := &threadRow{Thread: readDeviceThread(id, raw(in["thread"])), restore: true}
+	if err := h.placeAttachments(ctx, p, id, &row.Thread); err != nil {
 		return nil, err
 	}
-	stripInlineAttachments(row.Data)
-	row.restore = true
-	if err := h.store(ctx, p, key, "chat", row); err != nil {
+	stripInlineAttachments(&row.Thread)
+	if err := h.saveThread(ctx, p, key, row); err != nil {
 		if asAPIError(err).Code == "REVISION_CONFLICT" {
 			return nil, apiErr(409, "THREAD_EXISTS", "This chat is already in the cloud")
 		}
 		return nil, err
 	}
-	return threadSummary(normalizeThread(row)), nil
+	return summarize(&row.Thread), nil
 }

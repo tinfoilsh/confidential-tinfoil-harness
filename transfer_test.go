@@ -18,7 +18,9 @@ func TestTranscriptInlinesAttachmentsAndDetachesKeys(t *testing.T) {
 		object{"id": imageID, "type": "image", "fileName": "photo.png", "mimeType": "image/png", "encryptionKey": imageKey, "thumbnailBase64": "thumb", "storageThreadId": "chat-1"},
 		object{"id": docID, "type": "document", "fileName": "plan.pdf", "encryptionKey": docKey, "pageCount": 2})
 	row := rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat-1")]
-	row.Data["projectId"], row.Data["harnessRequests"], row.Data["clock"] = "project-1", object{"nonce": object{}}, 9
+	editRow(&row, func(data object) {
+		data["projectId"], data["harnessRequests"], data["clock"] = "project-1", object{"nonce": object{}}, 9
+	})
 	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat-1")] = row
 	w := postRoute(h, "/v1/threads/transcript", object{"key": key.base64(), "threadId": "chat-1"}, "alice")
 	if w.Code != 200 {
@@ -83,7 +85,7 @@ func TestImportStoresTheDeviceChatUnderItsID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	attachments := arr(obj(arr(row.Data["messages"])[0])["attachments"])
+	attachments := arr(obj(arr(rowJSON(row)["messages"])[0])["attachments"])
 	for _, value := range attachments {
 		a := obj(value)
 		if !enclaveAttachmentID.MatchString(str(a["id"])) || a["storageThreadId"] != "0000000000005_device" || a["base64"] != nil || a["textContent"] != nil {
@@ -117,7 +119,7 @@ func TestImportMayReuseADeletedChatID(t *testing.T) {
 	if metadata["restoreDeleted"] != true {
 		t.Fatalf("metadata: %v", metadata)
 	}
-	row := &storedRow{ID: "chat-1", Data: object{"messages": []any{}}}
+	row := &storedRow{ID: "chat-1", Data: raw(object{"messages": []any{}})}
 	client.push(context.Background(), &principal{ID: "alice", JWT: "jwt"}, key, "chat", row, "nonce")
 	if _, ok := metadata["restoreDeleted"]; ok {
 		t.Fatal("an ordinary push asked to restore a deleted chat")

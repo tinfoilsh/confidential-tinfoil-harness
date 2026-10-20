@@ -111,3 +111,10 @@ func validateSentAttachment(value any) error {
 	}
 	return nil
 }
+
+// profileFieldsOf is a client's profile in the fields a prompt reads.
+func profileFieldsOf(profile object) object {
+	out := selectFields(profile, strings.Join(profileFields, " "))
+	out["selectedModel"] = normalizeModel(str(out["selectedModel"]))
+	return out
+}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"slices"
 	"time"
@@ -14,24 +15,34 @@ const commitTimeout = time.Minute
 // turnPlan is what a turn starts from: its thread with the turn applied, in
 // the form it is stored, and the request its run makes.
 type turnPlan struct {
-	row         *storedRow
+	row         *threadRow
 	request     *request
 	model       *model
 	titleText   string
-	retryTarget object
+	retryTarget *retryTarget
+}
+
+// retryTarget is the widget call a retry regenerates, and the reply it is in.
+type retryTarget struct {
+	block    Block
+	parentID string
 }
 
 // prepareTurn applies a turn to its chat as read now. A stored chat's
 // attachments are placed under it; the prompt reads their content.
 func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *principal) (*turnPlan, error) {
 	s := r.thread
-	var row *storedRow
-	profile, project, docs := object{}, object{}, []object{}
+	var row *threadRow
+	var profile Profile
+	var project *Project
+	var docs []ProjectDocument
 	if s.local {
 		h.live.mu.Lock()
-		row = &storedRow{ID: s.row.ID, Data: clone(s.row.Data)}
+		row = &threadRow{Thread: s.row.clone()}
 		h.live.mu.Unlock()
-		profile = clone(r.profile)
+		if r.profile != nil {
+			profile = *r.profile
+		}
 	} else {
 		var err error
 		profile, err = h.profile(ctx, p, r.key)
@@ -39,100 +50,97 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *principal) (*t
 			return nil, err
 		}
 		// A new chat's first turn creates its row under the client's id.
-		row, err = h.storeRows.load(ctx, p, r.key, "chat", s.id)
+		row, err = h.loadThread(ctx, p, r.key, s.id)
 		if err != nil && (asAPIError(err).HTTP != 404 || !rowIDPattern.MatchString(s.id)) {
 			return nil, err
 		}
 		if err != nil {
-			row = newThreadRow(s.id, r.input, nil)
+			row = &threadRow{Thread: newThread(s.id, optionalString(r.input["projectId"]), optionalString(r.input["presetId"]))}
 		}
-		normalizeThread(row)
-		if row.Data["lastRequestId"] == r.nonce {
+		if row.LastRequestID == r.nonce {
 			return nil, errAlreadyApplied
 		}
-		if id := str(row.Data["projectId"]); id != "" {
-			stored, err := h.storeRows.load(ctx, p, r.key, "project", id)
+		if id := valueOr(row.ProjectID, ""); id != "" {
+			stored, err := h.loadProject(ctx, p, r.key, id)
 			if err != nil {
 				return nil, err
 			}
-			project = stored.Data
+			project = &stored
 			docs, err = h.projectDocuments(ctx, p, r.key, id)
 			if err != nil {
 				return nil, err
 			}
 		}
 	}
-	data := row.Data
-	created := row.ETag == "" && len(arr(data["messages"])) == 0
+	t := &row.Thread
+	created := row.etag == "" && len(t.Messages) == 0
 	// A new chat starts with the default prompt preset, as the web client
 	// stamps a blank chat. A first turn naming a preset, or null, overrides it.
 	if _, named := r.input["presetId"]; !named && !s.local && created {
-		if preset := str(profile["defaultPromptPresetId"]); preset != "" {
-			data["presetId"] = preset
+		if preset := valueOr(profile.DefaultPromptPresetID, ""); preset != "" {
+			t.PresetID = &preset
 		}
 	}
-	attachments, err := turnAttachments(r.input, data)
+	attachments, err := turnAttachments(r.input, t)
 	if err != nil {
 		return nil, err
 	}
-	if err := applyTurn(data, r.input, r.messageID, attachments); err != nil {
+	if err := applyTurn(t, r.input, r.messageID, attachments); err != nil {
 		return nil, err
 	}
 	options := obj(r.input["options"])
 	if created {
-		data["model"] = firstString(profile["selectedModel"], "auto")
+		t.Model = cmp.Or(valueOr(profile.SelectedModel, ""), "auto")
 	}
-	data["model"] = firstString(options["model"], data["model"], "auto")
-	if _, ok := options["webSearch"]; ok {
-		data["webSearchEnabled"] = options["webSearch"]
+	t.Model = cmp.Or(str(options["model"]), t.Model, "auto")
+	if enabled, ok := options["webSearch"]; ok {
+		t.WebSearchEnabled = boolean(enabled, false)
 	}
 	// Sync stores a chat only if every attachment it names is stored under the
 	// chat. An ask's stored source has attachments in sync; a keyless thread
 	// carries its own. Image descriptions are stored, image bytes are not.
 	if !s.local {
-		if err := h.placeAttachments(ctx, p, s.id, data); err != nil {
+		if err := h.placeAttachments(ctx, p, s.id, t); err != nil {
 			return nil, err
 		}
 	}
-	if err := h.hydrateContext(ctx, p, data, s.keyless); err != nil {
+	if err := h.hydrateContext(ctx, p, t, s.keyless); err != nil {
 		return nil, err
 	}
 	// Offloaded documents are read back for the prompt alone.
-	working := clone(data)
+	working := t.clone()
 	if !s.keyless {
-		if err := h.hydrateDocuments(ctx, p, working); err != nil {
+		if err := h.hydrateDocuments(ctx, p, &working); err != nil {
 			return nil, err
 		}
 	}
-	request, model, err := h.buildRequest(working, profile, project, docs, r.input, r.log.id)
+	request, model, err := h.buildRequest(&working, &profile, project, docs, r.input, r.log.id)
 	if err != nil {
 		return nil, err
 	}
 	if err := preflightBudget(request); err != nil {
 		return nil, err
 	}
-	plan := &turnPlan{row: row, request: request, model: model, titleText: titleSource(working)}
+	plan := &turnPlan{row: row, request: request, model: model, titleText: titleSource(&working)}
 	if r.input["kind"] == "retryToolCall" {
-		for _, message := range arr(data["messages"]) {
-			for _, b := range arr(obj(message)["timeline"]) {
-				block := obj(b)
-				if firstString(block["toolCallId"], block["id"]) == str(r.input["toolCallId"]) {
-					plan.retryTarget = clone(block)
-					plan.retryTarget["parentId"] = obj(message)["id"]
+		for _, message := range t.Messages {
+			for _, block := range message.Timeline {
+				if block.callID() == str(r.input["toolCallId"]) {
+					plan.retryTarget = &retryTarget{block: block, parentID: message.ID}
 				}
 			}
 		}
 		if plan.retryTarget == nil {
 			return nil, apiErr(404, "THREAD_NOT_FOUND", "The widget call was not found")
 		}
-		if !slices.ContainsFunc(h.catalog.get().selectedWidgets(arr(r.input["widgets"]), true), func(w widget) bool { return w.Name == str(plan.retryTarget["name"]) }) {
+		if !slices.ContainsFunc(h.catalog.get().selectedWidgets(arr(r.input["widgets"]), true), func(w widget) bool { return w.Name == plan.retryTarget.block.Name }) {
 			return nil, apiErr(503, "TOOL_UNAVAILABLE", "This widget is not enabled for the client")
 		}
 	}
-	data["contextUsage"] = requestContextUsage(request)
-	data["activeRun"], data["lastRequestId"] = activeRun(r.log.id), r.nonce
+	t.ContextUsage = requestContextUsage(request)
+	t.ActiveRun, t.LastRequestID = activeRun(r.log.id), r.nonce
 	if !s.local {
-		stripInlineAttachments(data)
+		stripInlineAttachments(t)
 	}
 	return plan, nil
 }
@@ -158,7 +166,7 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 		if s.local {
 			break
 		}
-		err = h.store(ctx, p, r.key, "chat", plan.row)
+		err = h.saveThread(ctx, p, r.key, plan.row)
 		if err == nil {
 			break
 		}
@@ -184,14 +192,11 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	}
 	// A continuation streams into the reply it extends, which RUN_STARTED names.
 	if r.input["kind"] == "continue" {
-		messages := arr(row.Data["messages"])
-		reply := obj(messages[len(messages)-1])
+		reply := row.Messages[len(row.Messages)-1]
 		r.assembler.seed(reply)
-		r.out.replyID = str(reply["id"])
+		r.out.replyID = reply.ID
 	}
-	window := publicThread(row, "", messageWindow)
-	hasOlder := boolean(window["hasOlder"], false)
-	summary := threadSummary(normalizeThread(row))
+	shown := window(row, "", messageWindow)
 	h.live.mu.Lock()
 	if s.deleted {
 		h.live.mu.Unlock()
@@ -204,8 +209,8 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	r.row, r.running = row, true
 	// Framed under the lock, so no queue change reaches the run before them.
 	r.out.emit(event{Type: "RUN_STARTED", ThreadID: s.id, RunID: r.log.id, MessageID: r.out.replyID})
-	r.out.emit(event{Type: "MESSAGES_SNAPSHOT", Messages: window["messages"], HasOlder: &hasOlder})
-	r.out.emit(event{Type: "STATE_SNAPSHOT", Snapshot: object{"thread": summary, "queue": queueItems(s), "rateLimit": r.credential.Limit}})
+	r.out.emit(event{Type: "MESSAGES_SNAPSHOT", Messages: shown.Messages, HasOlder: &shown.HasOlder})
+	r.out.emit(event{Type: "STATE_SNAPSHOT", Snapshot: object{"thread": shown.threadSummary, "queue": queueItems(s), "rateLimit": r.credential.Limit}})
 	r.out.mu.Lock()
 	r.out.observe = r.assembler.apply
 	r.out.mu.Unlock()
@@ -217,7 +222,7 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	runCtx = context.WithValue(runCtx, usageContextKey{}, usageForRun(r))
 	runCtx = context.WithValue(runCtx, usageSinkKey{}, r.out)
 	r.titleDone = make(chan struct{})
-	titleState := row.Data["titleState"]
+	titleState := row.TitleState
 	go func() {
 		defer close(r.titleDone)
 		defer func() { rescued("title", recover()) }()
@@ -246,10 +251,9 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	return nil
 }
 
-// activeRun tells clients a reply may be streaming, until the run's deadline.
-// It never locks the chat: a run whose process died leaves it behind.
-func activeRun(runID string) object {
-	return object{"runId": runID, "expiresAt": nowUTC().Add(runTimeout).Format(time.RFC3339Nano)}
+// activeRun marks a chat's reply as streaming until the run's deadline.
+func activeRun(runID string) *ActiveRun {
+	return &ActiveRun{RunID: runID, ExpiresAt: nowUTC().Add(runTimeout).Format(time.RFC3339Nano)}
 }
 
 func usageForRun(r *chatRun) usagereporting.Context {

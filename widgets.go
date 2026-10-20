@@ -298,7 +298,7 @@ func piiReport(result object) object {
 func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *model) error {
 	var declaration widget
 	for _, w := range widgetCatalog() {
-		if w.Name == str(r.retryTarget["name"]) {
+		if w.Name == r.retryTarget.block.Name {
 			declaration = w
 			break
 		}
@@ -326,7 +326,7 @@ func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *
 	}
 	r.replacement = content
 	id := str(r.input["toolCallId"])
-	r.out.callStart(id, declaration.Name, str(r.retryTarget["parentId"]))
+	r.out.callStart(id, declaration.Name, r.retryTarget.parentID)
 	r.out.callArgs(id, content)
 	r.out.callEnd(id)
 	return nil
@@ -334,21 +334,21 @@ func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *
 
 // A retry must not revive a deleted widget or overwrite a concurrent writer.
 // expected is the widget's arguments when the retry started.
-func replaceWidget(data object, messageID, callID, expected, replacement string) error {
-	for _, message := range arr(data["messages"]) {
-		m := obj(message)
-		if m["id"] != messageID {
+func replaceWidget(t *Thread, messageID, callID, expected, replacement string) error {
+	for i := range t.Messages {
+		m := &t.Messages[i]
+		if m.ID != messageID {
 			continue
 		}
-		for _, item := range arr(m["timeline"]) {
-			block := obj(item)
-			if firstString(block["toolCallId"], block["id"]) != callID {
+		for j := range m.Timeline {
+			block := &m.Timeline[j]
+			if block.callID() != callID {
 				continue
 			}
-			if block["arguments"] != expected && block["arguments"] != replacement {
+			if block.Arguments != expected && block.Arguments != replacement {
 				return apiErr(409, "REVISION_CONFLICT", "The widget changed during its retry")
 			}
-			block["arguments"] = replacement
+			block.Arguments = replacement
 			return nil
 		}
 	}

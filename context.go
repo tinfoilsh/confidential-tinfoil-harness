@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -58,24 +59,27 @@ func tokenCount(s string) int {
 func escapePrompt(s string) string {
 	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(s)
 }
-func preferences(profile object) string {
-	if !boolean(profile["isUsingPersonalization"], true) {
+func preferences(profile *Profile) string {
+	if !profile.personalized() {
 		return ""
 	}
 	var content strings.Builder
-	for _, field := range []string{"nickname", "profession"} {
-		if value := strings.TrimSpace(str(profile[field])); value != "" {
-			fmt.Fprintf(&content, "\n  <%s>%s</%s>", field, escapePrompt(value), field)
+	for _, field := range []struct {
+		name  string
+		value *string
+	}{{"nickname", profile.Nickname}, {"profession", profile.Profession}} {
+		if value := strings.TrimSpace(valueOr(field.value, "")); value != "" {
+			fmt.Fprintf(&content, "\n  <%s>%s</%s>", field.name, escapePrompt(value), field.name)
 		}
 	}
-	if traits := arr(profile["traits"]); len(traits) > 0 {
+	if len(profile.Traits) > 0 {
 		content.WriteString("\n  <traits>")
-		for _, value := range traits {
-			fmt.Fprintf(&content, "\n    <trait>%s</trait>", escapePrompt(str(value)))
+		for _, value := range profile.Traits {
+			fmt.Fprintf(&content, "\n    <trait>%s</trait>", escapePrompt(value))
 		}
 		content.WriteString("\n  </traits>")
 	}
-	if value := strings.TrimSpace(str(profile["additionalContext"])); value != "" {
+	if value := strings.TrimSpace(valueOr(profile.AdditionalContext, "")); value != "" {
 		fmt.Fprintf(&content, "\n  <additional_context>\n    %s\n  </additional_context>", escapePrompt(value))
 	}
 	if content.Len() == 0 {
@@ -83,49 +87,49 @@ func preferences(profile object) string {
 	}
 	return "The user has provided personal preferences for this conversation. Adapt your responses according to these settings while maintaining accuracy and helpfulness.\n\n<user_preferences>" + content.String() + "\n</user_preferences>"
 }
-func projectPrompt(project object, documents []object) string {
-	if len(project) == 0 {
+func projectPrompt(project *Project, documents []ProjectDocument) string {
+	if project == nil {
 		return ""
 	}
-	content := "## Project: " + escapePrompt(str(project["name"])) + "\n"
-	if s := str(project["description"]); s != "" {
+	content := "## Project: " + escapePrompt(project.Name) + "\n"
+	if s := project.Description; s != "" {
 		content += "\n" + escapePrompt(s) + "\n"
 	}
-	if s := str(project["systemInstructions"]); s != "" {
+	if s := project.SystemInstructions; s != "" {
 		content += "\n### Instructions\n" + escapePrompt(s) + "\n"
 	}
 	if len(documents) > 0 {
 		content += "\n### Documents\n"
 		for _, doc := range documents {
-			if text := str(doc["content"]); text != "" {
-				content += "--- " + escapePrompt(str(doc["filename"])) + " ---\n" + escapePrompt(text) + "\n\n"
+			if doc.Content != "" {
+				content += "--- " + escapePrompt(doc.Filename) + " ---\n" + escapePrompt(doc.Content) + "\n\n"
 			}
 		}
 	}
 	return "\n\n<project_context>\n" + content + "\n</project_context>"
 }
-func systemPrompt(c *chatCatalog, thread, profile, project object, documents []object, displayName, timezone string) string {
+func systemPrompt(c *chatCatalog, thread *Thread, profile *Profile, project *Project, documents []ProjectDocument, displayName, timezone string) string {
 	base, rules := c.Prompt, c.Rules
 	preset := ""
-	for _, item := range c.Presets {
-		if item["id"] == thread["presetId"] {
-			preset = str(item["systemPrompt"])
+	if id := thread.PresetID; id != nil {
+		for _, item := range c.Presets {
+			if item["id"] == *id {
+				preset = str(item["systemPrompt"])
+			}
 		}
-	}
-	for _, item := range arr(profile["customPromptPresets"]) {
-		if obj(item)["id"] == thread["presetId"] {
-			preset = str(obj(item)["systemPrompt"])
+		if saved := profile.preset(*id); saved != nil {
+			preset = valueOr(saved.SystemPrompt, "")
 		}
 	}
 	if strings.TrimSpace(preset) != "" {
 		base = preset
-	} else if boolean(profile["isUsingCustomPrompt"], false) {
-		base = str(profile["customSystemPrompt"])
+	} else if valueOr(profile.IsUsingCustomPrompt, false) {
+		base = valueOr(profile.CustomSystemPrompt, "")
 		if strings.TrimSpace(base) == "" {
 			rules = ""
 		}
 	}
-	replacer := strings.NewReplacer("{MODEL_NAME}", displayName, "{LANGUAGE}", firstString(profile["language"], "English"), "{TIMEZONE}", timezone, "{USER_PREFERENCES}", preferences(profile))
+	replacer := strings.NewReplacer("{MODEL_NAME}", displayName, "{LANGUAGE}", cmp.Or(valueOr(profile.Language, ""), "English"), "{TIMEZONE}", timezone, "{USER_PREFERENCES}", preferences(profile))
 	base = replacer.Replace(base) + projectPrompt(project, documents)
 	if rules != "" {
 		base += "\n" + replacer.Replace(rules)
@@ -143,11 +147,11 @@ func timeReminder(now time.Time, zone string) (string, error) {
 	return "<system-reminder>Current time: " + englishTime(now.In(loc), zone) + " (" + zone + ")</system-reminder>", nil
 }
 
-func (h *harness) buildRequest(thread, profile, project object, documents []object, in object, runID string) (*request, *model, error) {
+func (h *harness) buildRequest(thread *Thread, profile *Profile, project *Project, documents []ProjectDocument, in object, runID string) (*request, *model, error) {
 	c := h.catalog.get()
 	options := obj(in["options"])
-	name := firstString(thread["model"], "auto")
-	req := &request{threadID: str(thread["id"]), runID: runID, model: name}
+	name := cmp.Or(thread.Model, "auto")
+	req := &request{threadID: thread.ID, runID: runID, model: name}
 	req.conversation = req.threadID
 	if in["kind"] == "ask" {
 		req.conversation = str(in["threadId"])
@@ -174,7 +178,7 @@ func (h *harness) buildRequest(thread, profile, project object, documents []obje
 		if window == 0 {
 			window = c.Fallback
 		}
-		level, err := intelligence(firstString(options["autoIntelligence"], profile["autoIntelligence"], "high"))
+		level, err := intelligence(cmp.Or(str(options["autoIntelligence"]), valueOr(profile.AutoIntelligence, ""), "high"))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -186,11 +190,11 @@ func (h *harness) buildRequest(thread, profile, project object, documents []obje
 		display, window = str(def["name"]), integer(def["budgetWindow"])
 		reason := obj(obj(def["chatConfig"])["reasoningConfig"])
 		policy = firstString(reason["reasoningHistoryPolicy"], "none")
-		effort := firstString(options["reasoningEffort"], profile["reasoningEffort"], "medium")
+		effort := cmp.Or(str(options["reasoningEffort"]), valueOr(profile.ReasoningEffort, ""), "medium")
 		if !slices.Contains(reasoningEfforts, effort) {
 			return nil, nil, apiErr(400, "BAD_REQUEST", "Unknown reasoning effort")
 		}
-		req.params = modelParams(def, boolean(options["thinking"], boolean(profile["thinkingEnabled"], boolean(reason["defaultEnabled"], true))), effort)
+		req.params = modelParams(def, boolean(options["thinking"], valueOr(profile.ThinkingEnabled, boolean(reason["defaultEnabled"], true))), effort)
 	}
 	if picked == nil || picked.client == nil {
 		return nil, nil, apiErr(404, "MODEL_UNAVAILABLE", "The selected model has no attested transport")
@@ -207,12 +211,12 @@ func (h *harness) buildRequest(thread, profile, project object, documents []obje
 	}
 	req.system = systemPrompt(c, thread, profile, project, documents, display, zone)
 	req.window, req.policy = window, policy
-	req.piiCheck = boolean(options["piiCheck"], boolean(profile["piiCheckEnabled"], true))
-	req.webSearch = boolean(options["webSearch"], boolean(thread["webSearchEnabled"], boolean(profile["webSearchEnabled"], true)))
+	req.piiCheck = boolean(options["piiCheck"], valueOr(profile.PIICheckEnabled, true))
+	req.webSearch = boolean(options["webSearch"], thread.WebSearchEnabled)
 	if req.webSearch && webSearch.client == nil {
 		return nil, nil, apiErr(503, "TOOL_UNAVAILABLE", "webSearch is unavailable")
 	}
-	widgets := c.selectedWidgets(arr(in["widgets"]), boolean(options["genUI"], boolean(profile["genUIEnabled"], true)))
+	widgets := c.selectedWidgets(arr(in["widgets"]), boolean(options["genUI"], valueOr(profile.GenUIEnabled, true)))
 	if len(widgets) > 0 {
 		req.widgetHint = c.WidgetHeader
 		for _, w := range widgets {
@@ -221,31 +225,32 @@ func (h *harness) buildRequest(thread, profile, project object, documents []obje
 		}
 	}
 	vision := c.vision(name)
-	for _, item := range arr(thread["messages"]) {
-		req.groups = append(req.groups, renderMessage(obj(item), vision, policy))
+	for i := range thread.Messages {
+		req.groups = append(req.groups, renderMessage(&thread.Messages[i], vision, policy))
 	}
 	req.reminder = raw(object{"role": "user", "content": reminder})
 	return req, picked, nil
 }
 
-func renderMessage(message object, vision bool, policy string) []json.RawMessage {
-	if str(message["role"]) == "user" {
+func renderMessage(message *Message, vision bool, policy string) []json.RawMessage {
+	if message.Role == "user" {
 		return []json.RawMessage{raw(object{"role": "user", "content": userContent(message, vision)})}
 	}
 	content, reasoning := "", ""
 	calls, results := []object{}, []json.RawMessage{}
-	for _, item := range arr(message["timeline"]) {
-		block := obj(item)
-		switch block["type"] {
+	for _, block := range message.Timeline {
+		switch block.Type {
 		case "content":
-			content += str(block["content"])
+			content += block.Content
 		case "thinking":
-			reasoning += str(block["content"])
+			reasoning += block.Content
 		case "tool_call":
-			id := firstString(block["toolCallId"], block["id"])
-			calls = append(calls, object{"id": id, "type": "function", "function": object{"name": block["name"], "arguments": historyArgs(firstString(block["arguments"], "{}"))}})
+			id := block.callID()
+			calls = append(calls, object{"id": id, "type": "function", "function": object{"name": block.Name, "arguments": historyArgs(cmp.Or(block.Arguments, "{}"))}})
 			result := "executed"
-			if value, ok := block["result"]; ok && !strings.HasPrefix(str(block["name"]), "render_") {
+			if block.Result != nil && !strings.HasPrefix(block.Name, "render_") {
+				// Results are replayed as the harness has always written them.
+				value := decodeValue(block.Result)
 				if text, ok := value.(string); ok {
 					result = text
 				} else {
@@ -256,7 +261,7 @@ func renderMessage(message object, vision bool, policy string) []json.RawMessage
 		}
 	}
 	if content == "" {
-		content = str(message["content"])
+		content = message.Content
 	}
 	assistant := object{"role": "assistant", "content": content}
 	if policy == "all" || policy == "tool-call-only" && len(calls) > 0 {
@@ -268,9 +273,9 @@ func renderMessage(message object, vision bool, policy string) []json.RawMessage
 	return append([]json.RawMessage{raw(assistant)}, results...)
 }
 
-func userContent(message object, vision bool) any {
-	text := str(message["content"])
-	if quote := str(message["quote"]); quote != "" {
+func userContent(message *Message, vision bool) any {
+	text := message.Content
+	if quote := message.Quote; quote != "" {
 		prefix := "In reply to:\n> " + strings.ReplaceAll(quote, "\n", "\n> ")
 		if text != "" {
 			prefix += "\n\n" + text
@@ -279,34 +284,32 @@ func userContent(message object, vision bool) any {
 	}
 	docs, descriptions := []string{}, []string{}
 	parts, images := []object{}, []object{}
-	for _, item := range arr(message["attachments"]) {
-		a := obj(item)
-		kind := firstString(a["type"], a["kind"])
-		if kind == "image" {
-			if vision && str(a["base64"]) != "" {
-				images = append(images, object{"type": "image_url", "image_url": object{"url": "data:" + firstString(a["inferenceMimeType"], a["mimeType"]) + ";base64," + str(a["base64"])}})
-			} else if str(a["description"]) != "" {
-				descriptions = append(descriptions, "Image: "+str(a["fileName"])+"\nDescription:\n"+str(a["description"]))
+	for i := range message.Attachments {
+		a := &message.Attachments[i]
+		if a.isImage() {
+			if vision && a.Base64 != "" {
+				images = append(images, object{"type": "image_url", "image_url": object{"url": "data:" + cmp.Or(a.inferenceMimeType, a.MimeType) + ";base64," + a.Base64}})
+			} else if a.Description != "" {
+				descriptions = append(descriptions, "Image: "+a.FileName+"\nDescription:\n"+a.Description)
 			}
-		} else if vision && len(arr(a["pages"])) > 0 {
-			parts = append(parts, object{"type": "text", "text": "[Attached file: " + str(a["fileName"]) + "]"})
-			for _, value := range arr(a["pages"]) {
-				p := obj(value)
-				label := fmt.Sprintf("Page %d", integer(p["page"]))
-				if boolean(p["is_scanned"], false) {
+		} else if vision && len(a.Pages) > 0 {
+			parts = append(parts, object{"type": "text", "text": "[Attached file: " + a.FileName + "]"})
+			for _, page := range a.Pages {
+				label := fmt.Sprintf("Page %d", page.Page)
+				if page.IsScanned {
 					label += " (scanned)"
 				}
 				label += ":"
-				if str(p["text"]) != "" {
-					label += "\n" + str(p["text"])
+				if page.Text != "" {
+					label += "\n" + page.Text
 				}
 				parts = append(parts, object{"type": "text", "text": label})
-				if str(p["image"]) != "" {
-					parts = append(parts, object{"type": "image_url", "image_url": object{"url": "data:image/png;base64," + str(p["image"])}})
+				if page.Image != "" {
+					parts = append(parts, object{"type": "image_url", "image_url": object{"url": "data:image/png;base64," + page.Image}})
 				}
 			}
-		} else if str(a["textContent"]) != "" {
-			docs = append(docs, "Document title: "+str(a["fileName"])+"\nDocument contents:\n"+str(a["textContent"]))
+		} else if a.TextContent != "" {
+			docs = append(docs, "Document title: "+a.FileName+"\nDocument contents:\n"+a.TextContent)
 		}
 	}
 	if len(docs) > 0 {
@@ -456,7 +459,7 @@ func preflightBudget(request *request) error {
 }
 
 // Report the full requested history so the UI can show when older turns are omitted.
-func requestContextUsage(req *request) object {
+func requestContextUsage(req *request) *ContextUsage {
 	system := req.system + "\n\n" + req.widgetHint
 	if req.webSearch {
 		system += "\n\n" + searchInstructions
@@ -466,5 +469,5 @@ func requestContextUsage(req *request) object {
 		used += cost
 	}
 	limit := req.window * 4 / 5
-	return object{"usedTokens": used, "limitTokens": limit, "percentage": float64(used) * 100 / float64(max(1, limit))}
+	return &ContextUsage{UsedTokens: used, LimitTokens: limit, Percentage: float64(used) * 100 / float64(max(1, limit))}
 }

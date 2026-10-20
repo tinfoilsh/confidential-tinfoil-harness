@@ -2,13 +2,13 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"regexp"
 	"slices"
 	"strings"
-	"time"
 )
 
 // Since sync protocol 3 a stored document's blob holds its extracted content
@@ -17,106 +17,58 @@ import (
 // stored under that row's chat. Every client reads and writes this format.
 var enclaveAttachmentID = regexp.MustCompile(`^[0-9a-f]{36}$`)
 
-func attachmentKey(a object) string { return firstString(a["encryptionKey"], a["key"]) }
-func isImage(a object) bool         { return firstString(a["type"], a["kind"]) == "image" }
-func documentContent(a object) bool {
-	return str(a["textContent"]) != "" || len(arr(a["pages"])) > 0
+// documentBlob is a document's extracted content, as its blob holds it.
+type documentBlob struct {
+	Pages       []DocumentPage `json:"pages,omitempty"`
+	TextContent string         `json:"textContent,omitempty"`
 }
 
-func encodeDocument(a object) ([]byte, error) {
-	payload := object{}
-	if text := str(a["textContent"]); text != "" {
-		payload["textContent"] = text
-	}
-	pages := []any{}
-	for _, item := range arr(a["pages"]) {
-		page := obj(item)
-		image := str(page["image"])
+// content is the extracted content an attachment holds inline.
+func (a *Attachment) content() documentBlob {
+	return documentBlob{TextContent: a.TextContent, Pages: a.Pages}
+}
+
+func (d documentBlob) empty() bool { return d.TextContent == "" && len(d.Pages) == 0 }
+
+func encodeDocument(a *Attachment) ([]byte, error) {
+	payload := documentBlob{TextContent: a.TextContent}
+	for _, page := range a.Pages {
+		image := page.Image
 		if strings.HasPrefix(image, "data:") {
 			_, image, _ = strings.Cut(image, ",")
 		}
-		pages = append(pages, object{"page": max(0, integer(page["page"])), "text": str(page["text"]), "image": image, "is_scanned": boolean(page["is_scanned"], false)})
+		payload.Pages = append(payload.Pages, DocumentPage{Page: max(0, page.Page), Text: page.Text, Image: image, IsScanned: page.IsScanned})
 	}
-	if len(pages) > 0 {
-		payload["pages"] = pages
-	}
-	if len(payload) == 0 {
+	if payload.empty() {
 		return nil, apiErr(415, "ATTACHMENT_UNSUPPORTED", "The document has no extracted content")
 	}
 	return raw(payload), nil
 }
 
-func decodeDocument(data []byte) (object, error) {
+func decodeDocument(data []byte) (documentBlob, error) {
 	if trimmed := bytes.TrimSpace(data); len(trimmed) > 0 && trimmed[0] == '{' {
 		var payload struct {
-			TextContent *string `json:"textContent"`
-			Pages       *[]struct {
-				Page      int    `json:"page"`
-				Text      string `json:"text"`
-				Image     string `json:"image"`
-				IsScanned bool   `json:"is_scanned"`
-			} `json:"pages"`
+			TextContent *string         `json:"textContent"`
+			Pages       *[]DocumentPage `json:"pages"`
 		}
 		if json.Unmarshal(trimmed, &payload) == nil && (payload.TextContent != nil || payload.Pages != nil) {
-			out := object{}
-			if payload.TextContent != nil {
-				out["textContent"] = *payload.TextContent
-			}
-			if payload.Pages != nil {
-				pages := []any{}
-				for _, page := range *payload.Pages {
-					pages = append(pages, object{"page": page.Page, "text": page.Text, "image": page.Image, "is_scanned": page.IsScanned})
-				}
-				out["pages"] = pages
-			}
-			return out, nil
+			return documentBlob{TextContent: valueOr(payload.TextContent, ""), Pages: valueOr(payload.Pages, []DocumentPage{})}, nil
 		}
 	}
-	return nil, apiErr(422, "ATTACHMENT_UNSUPPORTED", "The stored document cannot be read")
+	return documentBlob{}, apiErr(422, "ATTACHMENT_UNSUPPORTED", "The stored document cannot be read")
 }
 
-func documentText(content object) string {
-	if text := str(content["textContent"]); text != "" {
-		return text
+func documentText(content documentBlob) string {
+	if content.TextContent != "" {
+		return content.TextContent
 	}
 	parts := []string{}
-	for _, item := range arr(content["pages"]) {
-		if text := str(obj(item)["text"]); text != "" {
-			parts = append(parts, text)
+	for _, page := range content.Pages {
+		if page.Text != "" {
+			parts = append(parts, page.Text)
 		}
 	}
 	return strings.Join(parts, "\n\n")
-}
-
-// Sync derives a blob's id from its idempotency key, chat and bytes, so
-// storing the same attachment again reuses its blob.
-func (h *harness) putAttachment(ctx context.Context, p *principal, chatID, clientID string, data []byte) (string, string, error) {
-	in := object{"chat_id": chatID, "plaintext": base64.StdEncoding.EncodeToString(data), "idempotency_key": clientID}
-	var stored object
-	var err error
-	for attempt := 0; attempt < 3; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-time.After(time.Duration(attempt) * time.Second):
-			case <-ctx.Done():
-				return "", "", ctx.Err()
-			}
-		}
-		stored = nil
-		// A purge of the same chat or a lost index write fails with a 502.
-		// The idempotency key makes the retry store the same blob.
-		if err = h.syncAPI.call(ctx, p, "/v1/attachment/put", in, &stored); err == nil || asAPIError(err).Status != 502 {
-			break
-		}
-	}
-	if err != nil {
-		return "", "", err
-	}
-	id, key := str(stored["id"]), str(stored["att_key"])
-	if !enclaveAttachmentID.MatchString(id) || key == "" {
-		return "", "", apiErr(502, "UPSTREAM_REFUSED", "The sync service returned an invalid attachment")
-	}
-	return id, key, nil
 }
 
 func unreachable(err error) bool {
@@ -127,23 +79,16 @@ func unreachable(err error) bool {
 // placeAttachments stores every attachment of a thread under the thread, in
 // the protocol 3 format, before the thread is pushed. It keeps the content
 // inline in the given copy, which is the one a prompt is built from.
-func (h *harness) placeAttachments(ctx context.Context, p *principal, threadID string, thread object) error {
-	for _, item := range arr(thread["messages"]) {
-		for _, value := range arr(obj(item)["attachments"]) {
-			if err := h.placeAttachment(ctx, p, threadID, obj(value)); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+func (h *harness) placeAttachments(ctx context.Context, p *principal, threadID string, t *Thread) error {
+	return t.eachAttachment(func(a *Attachment) error { return h.placeAttachment(ctx, p, threadID, a) })
 }
 
-func (h *harness) placeAttachment(ctx context.Context, p *principal, threadID string, a object) error {
-	id, keyed := str(a["id"]), attachmentKey(a) != ""
-	elsewhere := !enclaveAttachmentID.MatchString(id) || firstString(a["storageThreadId"], threadID) != threadID
+func (h *harness) placeAttachment(ctx context.Context, p *principal, threadID string, a *Attachment) error {
+	keyed := a.storageKey() != ""
+	elsewhere := !enclaveAttachmentID.MatchString(a.ID) || cmp.Or(a.StorageThreadID, threadID) != threadID
 	var data []byte
 	switch {
-	case !isImage(a) && documentContent(a):
+	case !a.isImage() && a.hasContent():
 		// A new upload, or a row the web or iOS app wrote before it stored
 		// documents as blobs, keeps the content inline.
 		payload, err := encodeDocument(a)
@@ -151,27 +96,27 @@ func (h *harness) placeAttachment(ctx context.Context, p *principal, threadID st
 			return err
 		}
 		data = payload
-	case isImage(a) && str(a["base64"]) != "" && (!keyed || elsewhere):
-		decoded, err := base64.StdEncoding.DecodeString(str(a["base64"]))
+	case a.isImage() && a.Base64 != "" && (!keyed || elsewhere):
+		decoded, err := base64.StdEncoding.DecodeString(a.Base64)
 		if err != nil {
 			return apiErr(400, "ATTACHMENT_UNSUPPORTED", "An image is not valid base64")
 		}
 		data = decoded
 	case keyed && elsewhere:
 		stored, err := h.attachmentBytes(ctx, p, a, false)
-		if err == nil && !isImage(a) {
-			var content object
+		if err == nil && !a.isImage() {
+			var content documentBlob
 			content, err = decodeDocument(stored)
 			clear(stored)
 			if err == nil {
-				stored, err = encodeDocument(content)
+				stored, err = encodeDocument(&Attachment{TextContent: content.TextContent, Pages: content.Pages})
 			}
 		}
 		if unreachable(err) {
 			// Sync rejects a push naming an id that is not an enclave id, so
 			// such a reference is retired now. Any other unavailable one fails
 			// the push as missing, and repairAttachments then retires it.
-			if !enclaveAttachmentID.MatchString(id) {
+			if !enclaveAttachmentID.MatchString(a.ID) {
 				retireAttachment(a)
 			}
 			return nil
@@ -184,48 +129,45 @@ func (h *harness) placeAttachment(ctx context.Context, p *principal, threadID st
 		return nil
 	}
 	defer clear(data)
-	storedID, key, err := h.putAttachment(ctx, p, threadID, id, data)
+	storedID, key, err := h.putAttachment(ctx, p, threadID, a.ID, data)
 	if err != nil {
 		return err
 	}
-	a["id"], a["encryptionKey"], a["storageThreadId"] = storedID, key, threadID
-	delete(a, "key")
-	if pages := arr(a["pages"]); len(pages) > 0 {
-		a["pageCount"] = len(pages)
+	a.ID, a.EncryptionKey, a.StorageThreadID, a.Key = storedID, key, threadID, ""
+	if len(a.Pages) > 0 {
+		a.PageCount = len(a.Pages)
 	}
 	return nil
 }
 
-func unavailableDocument(a object) string {
-	return "[The document " + firstString(a["fileName"], "attachment") + " is no longer available.]"
+func unavailableDocument(a *Attachment) string {
+	return "[The document " + cmp.Or(a.FileName, "attachment") + " is no longer available.]"
 }
 
 // hydrateDocuments reads offloaded documents into a working copy of a thread.
 // A document whose blob is gone is described as unavailable rather than
 // failing every later turn in its chat.
-func (h *harness) hydrateDocuments(ctx context.Context, p *principal, thread object) error {
-	for _, item := range arr(thread["messages"]) {
-		for _, value := range arr(obj(item)["attachments"]) {
-			a := obj(value)
-			if isImage(a) || documentContent(a) {
-				continue
-			}
-			if attachmentKey(a) == "" {
-				a["textContent"] = unavailableDocument(a)
-				continue
-			}
-			if err := h.inflateDocument(ctx, p, a); err != nil {
-				if !unreachable(err) {
-					return err
-				}
-				a["textContent"] = unavailableDocument(a)
-			}
+func (h *harness) hydrateDocuments(ctx context.Context, p *principal, t *Thread) error {
+	return t.eachAttachment(func(a *Attachment) error {
+		if a.isImage() || a.hasContent() {
+			return nil
 		}
-	}
-	return nil
+		if a.storageKey() == "" {
+			a.TextContent = unavailableDocument(a)
+			return nil
+		}
+		if err := h.inflateDocument(ctx, p, a); err != nil {
+			if !unreachable(err) {
+				return err
+			}
+			a.TextContent = unavailableDocument(a)
+		}
+		return nil
+	})
 }
 
-func (h *harness) inflateDocument(ctx context.Context, p *principal, a object) error {
+// inflateDocument reads a document's content from its blob into it.
+func (h *harness) inflateDocument(ctx context.Context, p *principal, a *Attachment) error {
 	data, err := h.attachmentBytes(ctx, p, a, false)
 	if err != nil {
 		return err
@@ -235,9 +177,7 @@ func (h *harness) inflateDocument(ctx context.Context, p *principal, a object) e
 	if err != nil {
 		return err
 	}
-	for field, value := range content {
-		a[field] = value
-	}
+	a.TextContent, a.Pages = content.TextContent, content.Pages
 	return nil
 }
 
@@ -245,53 +185,41 @@ func (h *harness) inflateDocument(ctx context.Context, p *principal, a object) e
 // not hold under the row's chat: a row the web or iOS app wrote before sync
 // checked references may point at blobs filed under another chat or deleted
 // since.
-func (h *harness) repairAttachments(ctx context.Context, p *principal, row *storedRow, missing []string) error {
-	for _, item := range arr(row.Data["messages"]) {
-		for _, value := range arr(obj(item)["attachments"]) {
-			a := obj(value)
-			if !slices.Contains(missing, str(a["id"])) {
-				continue
-			}
-			a["storageThreadId"] = "elsewhere"
-			if err := h.placeAttachment(ctx, p, row.ID, a); err != nil {
-				return err
-			}
-			if str(a["storageThreadId"]) != row.ID {
-				retireAttachment(a)
-			}
+func (h *harness) repairAttachments(ctx context.Context, p *principal, t *Thread, missing []string) error {
+	return t.eachAttachment(func(a *Attachment) error {
+		if !slices.Contains(missing, a.ID) {
+			return nil
 		}
-	}
-	return nil
+		a.StorageThreadID = "elsewhere"
+		if err := h.placeAttachment(ctx, p, t.ID, a); err != nil {
+			return err
+		}
+		if a.StorageThreadID != t.ID {
+			retireAttachment(a)
+		}
+		return nil
+	})
 }
 
 // An attachment without its blob keeps its metadata, and an image its
 // thumbnail.
-func retireAttachment(a object) {
-	delete(a, "encryptionKey")
-	delete(a, "key")
-	delete(a, "storageThreadId")
+func retireAttachment(a *Attachment) {
+	a.EncryptionKey, a.Key, a.StorageThreadID = "", "", ""
 }
 
-// stripInlineAttachments keeps only metadata and keys in a row that is about
-// to be stored. Content stays inline only for attachments without a blob.
-func stripInlineAttachments(thread object) {
-	for _, message := range arr(thread["messages"]) {
-		for _, value := range arr(obj(message)["attachments"]) {
-			a := obj(value)
-			for field, v := range a {
-				if v == nil {
-					delete(a, field)
-				}
-			}
-			delete(a, "inferenceMimeType")
-			if attachmentKey(a) == "" {
-				continue
-			}
-			delete(a, "base64")
-			if !isImage(a) {
-				delete(a, "textContent")
-				delete(a, "pages")
-			}
+// stripInlineAttachments keeps only metadata and keys in a thread that is
+// about to be stored. Content stays inline only for attachments without a
+// blob.
+func stripInlineAttachments(t *Thread) {
+	t.eachAttachment(func(a *Attachment) error {
+		a.inferenceMimeType = ""
+		if a.storageKey() == "" {
+			return nil
 		}
-	}
+		a.Base64 = ""
+		if !a.isImage() {
+			a.TextContent, a.Pages = "", nil
+		}
+		return nil
+	})
 }

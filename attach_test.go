@@ -45,8 +45,9 @@ func TestDocumentsConvertThroughTheRouter(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			text, hasText := descriptor["textContent"]
-			pages, hasPages := descriptor["pages"]
+			fields := obj(decodeValue(raw(descriptor)))
+			text, hasText := fields["textContent"]
+			pages, hasPages := fields["pages"]
 			if hasText != (tc.text != nil) || text != tc.text || hasPages != (tc.pages > 0) || len(arr(pages)) != tc.pages {
 				t.Fatalf("descriptor kept absent fields or lost present ones: %v", descriptor)
 			}

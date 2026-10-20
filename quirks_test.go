@@ -107,11 +107,11 @@ func TestContinuationReplaysRepairedArguments(t *testing.T) {
 }
 
 func TestStoredToolCallsReplayWithRepairedArguments(t *testing.T) {
-	message := object{"role": "assistant", "timeline": []any{
-		object{"type": "tool_call", "toolCallId": "call_1", "name": "web_search", "arguments": `{"query":"cats"}`},
-		object{"type": "tool_call", "toolCallId": "call_2", "name": "web_search", "arguments": `{"query":"`},
-		object{"type": "tool_call", "toolCallId": "call_3", "name": "web_fetch", "arguments": `{"urls":["https://a.test"]} Now fetching`},
-		object{"type": "tool_call", "toolCallId": "call_4", "name": "web_search"},
+	message := &Message{Role: "assistant", Timeline: []Block{
+		{Type: "tool_call", ToolCallID: "call_1", Name: "web_search", Arguments: `{"query":"cats"}`},
+		{Type: "tool_call", ToolCallID: "call_2", Name: "web_search", Arguments: `{"query":"`},
+		{Type: "tool_call", ToolCallID: "call_3", Name: "web_fetch", Arguments: `{"urls":["https://a.test"]} Now fetching`},
+		{Type: "tool_call", ToolCallID: "call_4", Name: "web_search"},
 	}}
 	var assistant struct {
 		ToolCalls []toolCallJSON `json:"tool_calls"`

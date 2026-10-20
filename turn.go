@@ -89,7 +89,7 @@ func validateTurn(in object) error {
 	if err := validateLocalThread(obj(in["thread"])); err != nil {
 		return err
 	}
-	if err := validateProfile(profileView(obj(in["profile"]))); err != nil {
+	if err := validateProfile(profileFieldsOf(obj(in["profile"]))); err != nil {
 		return err
 	}
 	if value, ok := in["options"]; ok {

@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"image"
@@ -39,7 +38,7 @@ func (h *harness) shareThread(ctx context.Context, p *principal, _ contentKey, i
 	if err != nil {
 		return nil, err
 	}
-	var t object
+	var t Thread
 	if boolean(in["local"], false) {
 		if !validObject(in["thread"]) {
 			return nil, apiErr(400, "BAD_REQUEST", "A local thread requires its transcript")
@@ -47,50 +46,28 @@ func (h *harness) shareThread(ctx context.Context, p *principal, _ contentKey, i
 		if err := validateLocalThread(obj(in["thread"])); err != nil {
 			return nil, err
 		}
-		t = localThread(id, obj(in["thread"])).Data
+		t = readDeviceThread(id, raw(in["thread"]))
 	} else {
 		key, err := decodeContentKey(str(in["key"]))
 		if err != nil {
 			return nil, err
 		}
 		defer clear(key[:])
-		row, err := h.storeRows.load(ctx, p, key, "chat", id)
+		row, err := h.loadThread(ctx, p, key, id)
 		if err != nil {
 			return nil, err
 		}
-		t = normalizeThread(row)
+		t = row.Thread
 	}
-	messages := []any{}
-	for _, item := range arr(t["messages"]) {
-		m := obj(item)
-		out := object{"role": m["role"], "content": str(m["content"]), "timestamp": millis(firstString(m["createdAt"], m["timestamp"])), "timeline": m["timeline"]}
-		for _, f := range []string{"modelDisplayName", "isError", "quote"} {
-			if v, ok := m[f]; ok {
-				out[f] = v
-			}
+	payload := sharePayload{V: 1, Title: t.Title, Messages: []shareMessage{}, CreatedAt: millis(t.CreatedAt)}
+	for _, m := range t.Messages {
+		shared := shareMessage{Role: m.Role, Content: m.Content, Timestamp: millis(m.CreatedAt), Timeline: m.Timeline, ModelDisplayName: m.ModelDisplayName, IsError: m.IsError, Quote: m.Quote}
+		for _, a := range m.Attachments {
+			shared.Attachments = append(shared.Attachments, shareAttachment{ID: a.ID, Type: a.Type, FileName: a.FileName, MimeType: a.MimeType, ThumbnailBase64: a.ThumbnailBase64, EncryptionKey: a.EncryptionKey, TextContent: a.TextContent, Description: a.Description})
 		}
-		attachments := []any{}
-		for _, item := range arr(m["attachments"]) {
-			a := obj(item)
-			d := object{}
-			for _, f := range []string{"id", "type", "fileName", "mimeType", "thumbnailBase64", "encryptionKey", "textContent", "description"} {
-				if v, ok := a[f]; ok {
-					d[f] = v
-				}
-			}
-			attachments = append(attachments, d)
-		}
-		if len(attachments) > 0 {
-			out["attachments"] = attachments
-		}
-		messages = append(messages, out)
+		payload.Messages = append(payload.Messages, shared)
 	}
-	payload := object{"v": 1, "title": t["title"], "messages": messages, "createdAt": millis(t["createdAt"])}
-	var sealed object
-	if err := h.syncAPI.call(ctx, p, "/v1/share/seal", object{"plaintext": base64.StdEncoding.EncodeToString(raw(payload))}, &sealed); err != nil {
-		return nil, err
-	}
-	ciphertext, err := base64.StdEncoding.DecodeString(str(sealed["ciphertext"]))
+	ciphertext, shareKey, err := h.sealShare(ctx, p, raw(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +76,9 @@ func (h *harness) shareThread(ctx context.Context, p *principal, _ contentKey, i
 	if _, err := h.shareRequest(ctx, p, http.MethodPut, id, ciphertext); err != nil {
 		return nil, err
 	}
-	return object{"url": chatURL + "/share/" + url.PathEscape(id) + "#v2:" + str(sealed["share_key"])}, nil
+	return struct {
+		URL string `json:"url"`
+	}{chatURL + "/share/" + url.PathEscape(id) + "#v2:" + shareKey}, nil
 }
 
 // The share endpoints authenticate the owner's Clerk session.
@@ -137,7 +116,7 @@ func (h *harness) revokeShare(ctx context.Context, p *principal, _ contentKey, i
 	if _, err := h.shareRequest(ctx, p, http.MethodDelete, id, nil); err != nil && asAPIError(err).HTTP != 404 {
 		return nil, err
 	}
-	return object{}, nil
+	return struct{}{}, nil
 }
 
 func (h *harness) shareStatus(ctx context.Context, p *principal, _ contentKey, in object) (any, error) {
@@ -155,20 +134,24 @@ func (h *harness) shareStatus(ctx context.Context, p *principal, _ contentKey, i
 	if json.Unmarshal(b, &status) != nil || status.Shared == nil {
 		return nil, apiErr(502, "UPSTREAM_REFUSED", "Invalid share status")
 	}
-	return object{"shared": *status.Shared}, nil
+	return struct {
+		Shared bool `json:"shared"`
+	}{*status.Shared}, nil
 }
-func sharedThreadView(id string, payload object) object {
-	thread := normalizeThread(&storedRow{ID: id, Data: payload})
-	messages := []any{}
-	for _, value := range arr(thread["messages"]) {
-		message := obj(value)
-		out := publicMessage(message)
-		for i, value := range arr(out["attachments"]) {
-			obj(value)["attKey"] = obj(arr(message["attachments"])[i])["encryptionKey"]
+
+// sharedThreadView is an opened share's payload, read like any old chat.
+func sharedThreadView(id string, payload []byte) sharedThread {
+	t := readThread(id, payload)
+	shared := sharedThread{Title: t.Title, CreatedAt: present(t.CreatedAt), Messages: []sharedMessage{}}
+	for i := range t.Messages {
+		m := &t.Messages[i]
+		view := sharedMessage{messageView: viewMessage(m)}
+		for j, a := range view.messageView.Attachments {
+			view.Attachments = append(view.Attachments, sharedAttachment{attachmentView: a, AttKey: present(m.Attachments[j].EncryptionKey)})
 		}
-		messages = append(messages, out)
+		shared.Messages = append(shared.Messages, view)
 	}
-	return object{"title": thread["title"], "createdAt": thread["createdAt"], "messages": messages}
+	return shared
 }
 
 func (h *harness) openShare(ctx context.Context, _ *principal, _ contentKey, in object) (any, error) {
@@ -193,21 +176,18 @@ func (h *harness) openShare(ctx context.Context, _ *principal, _ contentKey, in 
 	if resp.StatusCode/100 != 2 {
 		return nil, downstreamError(resp.StatusCode, ciphertext)
 	}
-	var opened object
-	err = h.syncAPI.call(ctx, &principal{Anonymous: true}, "/v1/share/open", object{"share_key": fragment, "ciphertext": base64.StdEncoding.EncodeToString(ciphertext)}, &opened)
-	if err != nil {
-		return nil, err
-	}
-	plain, err := base64.StdEncoding.DecodeString(str(opened["plaintext"]))
+	plain, err := h.openSealedShare(ctx, fragment, ciphertext)
 	if err != nil {
 		return nil, err
 	}
 	defer clear(plain)
-	var payload object
-	if json.Unmarshal(plain, &payload) != nil || integer(payload["v"]) != 1 {
+	var version struct {
+		V float64 `json:"v"`
+	}
+	if trimmed := bytes.TrimSpace(plain); len(trimmed) == 0 || trimmed[0] != '{' || json.Unmarshal(trimmed, &version) != nil || int(version.V) != 1 {
 		return nil, apiErr(400, "BAD_REQUEST", "Invalid shared thread")
 	}
-	return sharedThreadView(id, payload), nil
+	return sharedThreadView(id, plain), nil
 }
 
 func (h *harness) handleExport(w http.ResponseWriter, r *http.Request) {
@@ -275,10 +255,12 @@ func (h *harness) claudeProjects(ctx context.Context, p *principal, key contentK
 			return err
 		}
 		documents := []object{}
-		for _, d := range docs {
+		for _, doc := range docs {
+			d := asObject(doc)
 			documents = append(documents, object{"uuid": d["id"], "filename": d["filename"], "content": d["content"], "created_at": d["createdAt"]})
 		}
-		project := object{"uuid": row.ID, "name": row.Data["name"], "description": row.Data["description"], "prompt_template": row.Data["systemInstructions"], "created_at": row.Data["createdAt"], "updated_at": row.Data["updatedAt"], "docs": documents}
+		data := asObject(readProject(row))
+		project := object{"uuid": row.ID, "name": data["name"], "description": data["description"], "prompt_template": data["systemInstructions"], "created_at": data["createdAt"], "updated_at": data["updatedAt"], "docs": documents}
 		total += len(raw(project))
 		if total > 64<<20 {
 			return apiErr(413, "ATTACHMENT_TOO_LARGE", "The project export exceeds 64 MiB")
@@ -331,6 +313,21 @@ func (b *backupWriter) bytes(kind, path string, data []byte) error {
 	b.files = append(b.files, object{"path": path, "kind": kind, "sha256": hashHex(data), "size_bytes": len(data)})
 	return nil
 }
+
+// asObject is a record as the archive reads it.
+func asObject(v any) object {
+	var out object
+	json.Unmarshal(raw(v), &out)
+	return out
+}
+
+// archiveAttachment is the archive's copy of an attachment as the store reads it.
+func archiveAttachment(a object) *Attachment {
+	var stored Attachment
+	json.Unmarshal(raw(a), &stored)
+	return &stored
+}
+
 func selectFields(data object, fields string) object {
 	out := object{}
 	for _, field := range strings.Fields(fields) {
@@ -349,7 +346,7 @@ func (h *harness) writeBackup(ctx context.Context, p *principal, key contentKey,
 		if projectID != "" && row.ID != projectID {
 			return nil
 		}
-		project := selectFields(row.Data, "name description systemInstructions color memory createdAt updatedAt")
+		project := selectFields(asObject(readProject(row)), "name description systemInstructions color memory createdAt updatedAt")
 		project["id"] = row.ID
 		if project["memory"] == nil {
 			project["memory"] = []any{}
@@ -363,7 +360,8 @@ func (h *harness) writeBackup(ctx context.Context, p *principal, key contentKey,
 		if err != nil {
 			return err
 		}
-		for _, d := range docs {
+		for _, document := range docs {
+			d := asObject(document)
 			doc := selectFields(d, "id projectId filename contentType sizeBytes createdAt updatedAt")
 			doc["extractedText"] = str(d["content"])
 			path := "project_documents/id-" + hex.EncodeToString([]byte(row.ID)) + "/id-" + hex.EncodeToString([]byte(str(d["id"]))) + ".json"
@@ -390,7 +388,7 @@ func (h *harness) writeBackup(ctx context.Context, p *principal, key contentKey,
 		if len(ids) > 0 && !ids[row.ID] {
 			return nil
 		}
-		t := normalizeThread(row)
+		t := asObject(readThreadRow(row).Thread)
 		chat := selectFields(t, "id title titleState createdAt updatedAt projectId presetId model webSearchEnabled")
 		if project := str(chat["projectId"]); project != "" {
 			if selectedProjects[project] {
@@ -437,16 +435,17 @@ func (h *harness) writeBackup(ctx context.Context, p *principal, key contentKey,
 			attachments := []any{}
 			for _, item := range arr(m["attachments"]) {
 				a := obj(item)
-				if !isImage(a) && !documentContent(a) && attachmentKey(a) != "" {
-					if err := h.inflateDocument(ctx, p, a); err != nil {
+				if stored := archiveAttachment(a); !stored.isImage() && !stored.hasContent() && stored.storageKey() != "" {
+					if err := h.inflateDocument(ctx, p, stored); err != nil {
 						if !unreachable(err) {
 							return err
 						}
 						b.omit(row.ID, str(a["id"]))
 						continue
 					}
+					a = asObject(stored)
 				}
-				if !isImage(a) {
+				if !archiveAttachment(a).isImage() {
 					document := selectFields(a, "id fileName mimeType textContent description fileSize")
 					document["type"] = "document"
 					pages := []any{}
@@ -469,7 +468,7 @@ func (h *harness) writeBackup(ctx context.Context, p *principal, key contentKey,
 					attachments = append(attachments, document)
 					continue
 				}
-				if str(a["base64"]) == "" && attachmentKey(a) == "" {
+				if str(a["base64"]) == "" && archiveAttachment(a).storageKey() == "" {
 					// Only its thumbnail was kept, so the image itself is missing.
 					b.omit(row.ID, str(a["id"]))
 					continue
@@ -526,7 +525,7 @@ func (h *harness) writeBackup(ctx context.Context, p *principal, key contentKey,
 }
 
 func (h *harness) backupImage(ctx context.Context, p *principal, b *backupWriter, relationships object, chatID string, index int, attachment, descriptor object, page any) (string, error) {
-	data, err := h.attachmentBytes(ctx, p, descriptor, false)
+	data, err := h.attachmentBytes(ctx, p, archiveAttachment(descriptor), false)
 	if err != nil {
 		return "", err
 	}

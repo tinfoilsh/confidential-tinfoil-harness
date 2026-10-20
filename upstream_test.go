@@ -101,7 +101,7 @@ func TestModelRefusalsReachTheRunWithTheirMeaning(t *testing.T) {
 			}
 			if tc.status == 200 {
 				row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
-				if reply := obj(arr(row.Data["messages"])[1]); reply["content"] != "partial" || reply["isError"] != true {
+				if reply := obj(arr(rowJSON(row)["messages"])[1]); reply["content"] != "partial" || reply["isError"] != true {
 					t.Fatalf("the streamed answer was lost: %v", reply)
 				}
 			}

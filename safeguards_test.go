@@ -95,10 +95,10 @@ func TestScreeningIsThePromptAndHistoryWithoutToolResults(t *testing.T) {
 }
 
 func TestOnlyCompletedFirstPartyChatsAreScreened(t *testing.T) {
-	reply := []object{{"content": "hello"}}
+	reply := []Message{{Content: "hello"}}
 	for name, tc := range map[string]struct {
 		change func(*chatRun)
-		reply  []object
+		reply  []Message
 		err    error
 		want   bool
 	}{
@@ -106,11 +106,11 @@ func TestOnlyCompletedFirstPartyChatsAreScreened(t *testing.T) {
 		"failed":       {func(*chatRun) {}, reply, errors.New("model failed"), false},
 		"cancelled":    {func(r *chatRun) { r.cancelled = true }, reply, nil, false},
 		"deleted":      {func(r *chatRun) { r.thread.deleted = true }, reply, nil, false},
-		"widget retry": {func(r *chatRun) { r.retryTarget = object{"name": "render_chart"} }, reply, nil, false},
+		"widget retry": {func(r *chatRun) { r.retryTarget = &retryTarget{block: Block{Name: "render_chart"}} }, reply, nil, false},
 		"anonymous":    {func(r *chatRun) { r.principal.Anonymous = true }, reply, nil, false},
 		"api key":      {func(r *chatRun) { r.credential.firstParty = false }, reply, nil, false},
 		"not captured": {func(r *chatRun) { r.screening = nil }, reply, nil, false},
-		"no reply":     {func(*chatRun) {}, []object{{"content": ""}}, nil, false},
+		"no reply":     {func(*chatRun) {}, []Message{{Content: ""}}, nil, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var submissions atomic.Int32

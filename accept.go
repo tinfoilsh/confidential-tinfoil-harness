@@ -82,19 +82,17 @@ func quotaExhausted(limit rateLimit) error {
 	return e
 }
 
-// newThreadRow is a chat's first row. An ask starts from the conversation it
-// asks about and hides it from its client.
-func newThreadRow(id string, in, source object) *storedRow {
-	data := object{"id": id, "title": "New Chat", "titleState": "placeholder", "createdAt": timestamp(), "updatedAt": timestamp(), "messages": []any{}, "model": "auto", "activeRun": nil}
-	data["projectId"], data["presetId"] = in["projectId"], in["presetId"]
-	if source != nil {
-		data["messages"] = source["messages"]
-		data["harnessHiddenCount"] = len(arr(source["messages"]))
-		data["projectId"], data["presetId"] = source["projectId"], source["presetId"]
-	}
-	row := &storedRow{ID: id, Data: data}
-	normalizeThread(row)
-	return row
+// newThread is a chat's first form, filed under a project and preset.
+func newThread(id string, projectID, presetID *string) Thread {
+	return Thread{ID: id, Title: "New Chat", TitleState: "placeholder", CreatedAt: timestamp(), UpdatedAt: timestamp(), Model: "auto", ProjectID: projectID, PresetID: presetID, WebSearchEnabled: true, Messages: []Message{}}
+}
+
+// askThread is an ask's thread: it starts from the conversation it asks
+// about and hides it from its client.
+func askThread(id string, source *Thread) *threadRow {
+	t := newThread(id, source.ProjectID, source.PresetID)
+	t.Messages, t.HiddenCount = source.Messages, len(source.Messages)
+	return &threadRow{Thread: t}
 }
 
 // admit gives a turn its chat: it starts now if the chat has no running
@@ -109,16 +107,16 @@ func (h *harness) admit(ctx context.Context, p *principal, key contentKey, in ob
 	}
 	id, local := str(in["threadId"]), boolean(in["local"], false)
 	keyless := p.Anonymous || local
-	var source object
+	var source *Thread
 	if in["kind"] == "ask" {
 		if local {
-			source = localThread(id, obj(in["thread"])).Data
+			source = new(readDeviceThread(id, raw(in["thread"])))
 		} else {
-			row, err := h.storeRows.load(ctx, p, key, "chat", id)
+			row, err := h.loadThread(ctx, p, key, id)
 			if err != nil {
 				return err
 			}
-			source = clone(normalizeThread(row))
+			source = &row.Thread
 		}
 		id = ""
 	}
@@ -134,10 +132,10 @@ func (h *harness) admit(ctx context.Context, p *principal, key contentKey, in ob
 	// An idle local thread starts from the client's copy, which may have been
 	// edited since the last turn. A queued turn continues the active run's row.
 	// An ask is a new thread that hides the copy it starts from.
-	var seed *storedRow
+	var seed *threadRow
 	if thread, ok := in["thread"]; ok && local && source == nil {
-		seed = localThread(id, obj(thread))
-		if seed.Data["lastRequestId"] == r.nonce {
+		seed = &threadRow{Thread: readDeviceThread(id, raw(thread))}
+		if seed.LastRequestID == r.nonce {
 			return errAlreadyApplied
 		}
 	}
@@ -154,7 +152,7 @@ func (h *harness) admit(ctx context.Context, p *principal, key contentKey, in ob
 	// The user message a turn adds is named by the client's request.
 	r.stopped, r.input, r.principal, r.key, r.messageID, r.credential, r.assembler = stopped, clean, p, key, r.nonce, credential, newMessageAssembler()
 	if local {
-		r.profile = profileView(obj(in["profile"]))
+		r.profile = localProfile(raw(in["profile"]))
 	}
 	r.out = &stream{run: r.log}
 
@@ -184,7 +182,7 @@ func (h *harness) admit(ctx context.Context, p *principal, key contentKey, in ob
 	if s.active != nil {
 		r.queued = true
 		s.queue = append(s.queue, r)
-		r.out.emit(event{Type: "STATE_DELTA", ThreadID: id, RunID: r.log.id, Delta: []object{{"op": "add", "path": "/queue/-", "value": queueItem(r)}}})
+		r.out.emit(event{Type: "STATE_DELTA", ThreadID: id, RunID: r.log.id, Delta: []statePatch{{"add", "/queue/-", queueItem(r)}}})
 		queueChanged(s)
 		return nil
 	}
@@ -192,7 +190,7 @@ func (h *harness) admit(ctx context.Context, p *principal, key contentKey, in ob
 	case seed != nil:
 		s.row = seed
 	case source != nil:
-		s.row = newThreadRow(id, in, source)
+		s.row = askThread(id, source)
 	}
 	h.makeActive(s, r)
 	return nil

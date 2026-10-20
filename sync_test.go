@@ -202,7 +202,7 @@ func TestListPullsInBatchesAndListsUnreadableRows(t *testing.T) {
 	}
 	titles := []string{}
 	for _, row := range page.Rows {
-		titles = append(titles, str(row.Data["title"]))
+		titles = append(titles, readThreadRow(&row).Title)
 	}
 	if len(page.Rows) != pullBatch+4 || !slices.Contains(titles, "row-7") || slices.Contains(titles, "row-3") || !slices.Equal(page.Unreadable, []string{"row-3"}) {
 		t.Fatalf("rows %v, unreadable %v", titles, page.Unreadable)

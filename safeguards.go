@@ -168,7 +168,7 @@ func (h *harness) screening(req *request) *screening {
 
 // screen submits a run that completed with a reply, under a first-party chat
 // credential, for classification.
-func (h *harness) screen(r *chatRun, reply []object, runErr error) {
+func (h *harness) screen(r *chatRun, reply []Message, runErr error) {
 	h.live.mu.Lock()
 	deleted := r.thread.deleted
 	h.live.mu.Unlock()
@@ -177,8 +177,8 @@ func (h *harness) screen(r *chatRun, reply []object, runErr error) {
 	}
 	var text []string
 	for _, m := range reply {
-		if content := str(m["content"]); content != "" {
-			text = append(text, content)
+		if m.Content != "" {
+			text = append(text, m.Content)
 		}
 	}
 	history := r.screening.messages

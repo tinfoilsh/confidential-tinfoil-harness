@@ -137,7 +137,7 @@ func TestAFinishingRunsWritesBlockNothing(t *testing.T) {
 	release := func() { released.Do(func() { close(commit) }) }
 	t.Cleanup(release)
 	rows.refuse = func(row *storedRow) error {
-		if len(arr(row.Data["messages"])) == 2 && row.Data["activeRun"] == nil {
+		if len(arr(rowJSON(row)["messages"])) == 2 && rowJSON(row)["activeRun"] == nil {
 			once.Do(func() {
 				close(committing)
 				<-commit
@@ -250,8 +250,8 @@ func TestARetriedRequestFollowsItsRunOrIsAlreadyApplied(t *testing.T) {
 		}
 	}
 	row, _ := rows.load(context.Background(), p, key, "chat", run.thread.id)
-	messages := arr(row.Data["messages"])
-	if len(messages) != 2 || obj(messages[0])["id"] != in["clientRequestId"] || row.Data["lastRequestId"] != in["clientRequestId"] {
+	messages := arr(rowJSON(row)["messages"])
+	if len(messages) != 2 || obj(messages[0])["id"] != in["clientRequestId"] || rowJSON(row)["lastRequestId"] != in["clientRequestId"] {
 		t.Fatalf("the chat holds %v", row.Data)
 	}
 	// A device chat names its last request in the copy its client sends.
