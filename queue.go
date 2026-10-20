@@ -46,8 +46,10 @@ func (h *harness) sendQueued(ctx context.Context, p *principal, _ contentKey, in
 	s.queue = append([]*chatRun{r}, slices.Delete(s.queue, index, index+1)...)
 	if s.active != nil {
 		queueChanged(s)
+		// A reply already stopped and finishing still hands the chat on.
+		s.active.yielded = true
 		if !s.active.ending {
-			s.active.cancelled, s.active.yielded = true, true
+			s.active.cancelled = true
 			s.active.log.stop()
 		}
 		h.live.mu.Unlock()

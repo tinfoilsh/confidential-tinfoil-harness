@@ -896,16 +896,24 @@ func TestCancelCommitsPartialAndLeavesQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// The moments a queued turn may be sent ahead of the reply before it.
+const (
+	whileStreaming  = "while a reply streams"
+	whileCommitting = "while a stopped reply commits"
+	afterAStop      = "after a stop"
+)
+
 func TestPrioritySendStartsTheChosenTurnNext(t *testing.T) {
-	for _, stopped := range []bool{false, true} {
-		t.Run(map[bool]string{false: "while a reply streams", true: "after a stop"}[stopped], func(t *testing.T) { prioritySend(t, stopped) })
+	for _, when := range []string{whileStreaming, whileCommitting, afterAStop} {
+		t.Run(when, func(t *testing.T) { prioritySend(t, when) })
 	}
 }
 
-func prioritySend(t *testing.T, stopped bool) {
+func prioritySend(t *testing.T, when string) {
 	var calls atomic.Int32
 	latest := make(chan any, 2)
-	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		messages := lastRequest(r)
 		if calls.Add(1) == 1 {
 			io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
@@ -940,15 +948,37 @@ func prioritySend(t *testing.T, stopped bool) {
 	}
 	queue("first")
 	second := queue("second")
-	if stopped {
+	// The stopped reply's commit is held until the turn is sent.
+	committing, commit := make(chan struct{}), make(chan struct{})
+	var once, released sync.Once
+	release := func() { released.Do(func() { close(commit) }) }
+	t.Cleanup(release)
+	if when == whileCommitting {
+		rows.refuse = func(row *storedRow) error {
+			if chat := readThreadRow(row); len(chat.Messages) == 2 && chat.ActiveRun == nil {
+				once.Do(func() {
+					close(committing)
+					<-commit
+				})
+			}
+			return nil
+		}
+	}
+	if when != whileStreaming {
 		if _, err := h.cancelThread(context.Background(), p, key, requestOf[runRequest](object{"key": key.base64(), "threadId": run.thread.id, "runId": run.log.id})); err != nil {
 			t.Fatal(err)
 		}
+	}
+	switch when {
+	case whileCommitting:
+		<-committing
+	case afterAStop:
 		<-run.finished
 	}
 	if _, err := h.sendQueued(context.Background(), p, key, requestOf[runRequest](object{"key": key.base64(), "threadId": run.thread.id, "queueId": second.log.id})); err != nil {
 		t.Fatal(err)
 	}
+	release()
 	// The chosen turn runs next, and the other queued turn after it.
 	for _, want := range []string{"second", "first"} {
 		select {
