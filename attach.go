@@ -48,12 +48,10 @@ const (
 type uploadGroup struct {
 	Accept   []string `json:"accept"`
 	MaxBytes int      `json:"maxBytes"`
-	// names are files without an extension the group also accepts.
-	names []string
 }
 
 var (
-	textUploads     = uploadGroup{Accept: strings.Fields(".txt .md .py .js .jsx .ts .tsx .css .json .xml .yaml .yml .toml .sh .bash .rb .java .cpp .c .h .hpp .go .rs .swift .kt .kts .r .sql .lua .pl .php .cs .csx .vb .fs .fsx .scala .dart .ex .exs .erl .hs .ml .mli .clj .cljs .groovy .gradle .m .mm .zig .nim .jl .ps1 .psm1 .bat .cmd .asm .s .proto .graphql .gql .tf .tfvars .dockerfile .makefile .cmake .tex .bib .svg .properties .lock .diff .patch .env .ini .cfg .conf .log .rtf .html .htm .xhtml .csv .tsv .qfx .qif .ofx .ifs .qbo .qbx .bai .bai2 .mt940 .sta .ics .vcf"), MaxBytes: maxTextBytes, names: []string{"Dockerfile", "Makefile"}}
+	textUploads     = uploadGroup{Accept: strings.Fields(".txt .md .py .js .jsx .ts .tsx .css .json .xml .yaml .yml .toml .sh .bash .rb .java .cpp .c .h .hpp .go .rs .swift .kt .kts .r .sql .lua .pl .php .cs .csx .vb .fs .fsx .scala .dart .ex .exs .erl .hs .ml .mli .clj .cljs .groovy .gradle .m .mm .zig .nim .jl .ps1 .psm1 .bat .cmd .asm .s .proto .graphql .gql .tf .tfvars .dockerfile .makefile .cmake .tex .bib .svg .properties .lock .diff .patch .env .ini .cfg .conf .log .rtf .html .htm .xhtml .csv .tsv .qfx .qif .ofx .ifs .qbo .qbx .bai .bai2 .mt940 .sta .ics .vcf"), MaxBytes: maxTextBytes}
 	imageUploads    = uploadGroup{Accept: strings.Fields(".jpg .jpeg .png .gif .webp .bmp .tiff .tif"), MaxBytes: maxUploadBytes}
 	documentUploads = uploadGroup{Accept: strings.Fields(".pdf .docx .pptx .xlsx"), MaxBytes: maxUploadBytes}
 	audioUploads    = uploadGroup{Accept: strings.Fields(".mp3 .wav .ogg .m4a .aac .flac .webm .wma"), MaxBytes: maxUploadBytes}
@@ -67,7 +65,7 @@ var (
 )
 
 func (g *uploadGroup) accepts(filename string) bool {
-	return slices.Contains(g.Accept, strings.ToLower(filepath.Ext(filename))) || slices.ContainsFunc(g.names, func(name string) bool { return strings.EqualFold(name, filename) })
+	return slices.Contains(g.Accept, strings.ToLower(filepath.Ext(filename)))
 }
 
 // What a client's composer does before anything reaches the harness: a
