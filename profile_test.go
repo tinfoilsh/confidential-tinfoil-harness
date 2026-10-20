@@ -66,6 +66,12 @@ func TestAStoredProfileReadsUpgradedAndKeepsTheUpgradeOnceChanged(t *testing.T) 
 	if again := get(); !reflect.DeepEqual(again, profile) {
 		t.Fatalf("a second read upgraded differently:\n%v\n%v", again, profile)
 	}
+	// A profile without a date dates its migrated prompt the same on every read.
+	rows.rows[rowMapKey(&principal{ID: "bob"}, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: raw(oldProfile())}
+	undated := profileOf(t, postRoute(h, "/v1/profile/get", object{"key": key.base64()}, "bob"))
+	if created := presetsByID(undated)[migratedPromptPresetID]["createdAt"]; created != float64(0) {
+		t.Fatalf("an undated profile's migrated prompt is dated %v", created)
+	}
 	// Removing the migrated prompt stores the upgrade, so it does not return.
 	w := postRoute(h, "/v1/profile/update", object{"key": key.base64(), "patch": object{"customPromptPresets": []any{presets["user:kept"]}}}, "alice")
 	if presets := presetsByID(profileOf(t, w)); len(presets) != 1 {

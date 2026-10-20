@@ -319,15 +319,19 @@ func readProfile(data []byte) storedProfile {
 	readLenient(data, &stored)
 	profile := stored.storedProfile
 	profile.UpdatedAt = string(stored.UpdatedAt)
-	// The migrated prompt is dated by the profile, so each read of a profile
-	// not yet stored again makes the same one.
+	// The migrated prompt is dated by the profile, or by undatedProfile for a
+	// profile without a date, so each read of a profile not yet stored again
+	// makes the same one.
 	written, err := time.Parse(time.RFC3339Nano, profile.UpdatedAt)
 	if err != nil {
-		written = nowUTC()
+		written = undatedProfile
 	}
 	upgradeProfile(&profile.Profile, written)
 	return profile
 }
+
+// undatedProfile is the date a profile without one is read as written.
+var undatedProfile = time.Unix(0, 0).UTC()
 
 // migratedPromptPresetID names the saved prompt an old custom default
 // prompt becomes, as the iOS app names it.
