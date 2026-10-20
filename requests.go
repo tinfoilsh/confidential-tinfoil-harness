@@ -478,7 +478,6 @@ type turnOptions struct {
 	Timezone         string `json:"timezone,omitempty"`
 	Thinking         *bool  `json:"thinking,omitempty"`
 	WebSearch        *bool  `json:"webSearch,omitempty"`
-	CodeExecution    *bool  `json:"codeExecution,omitempty"`
 	PIICheck         *bool  `json:"piiCheck,omitempty"`
 	GenUI            *bool  `json:"genUI,omitempty"`
 }
