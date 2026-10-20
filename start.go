@@ -86,15 +86,17 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *principal, cre
 			return nil, err
 		}
 	}
-	// A new chat starts on the user's model and default prompt preset, whose
-	// settings it takes. A first turn naming a preset, or null, overrides
-	// the default, and the turn's own settings override the preset's.
+	// A new chat starts on the user's model, web search setting and default
+	// prompt preset, whose settings it takes. A first turn naming a preset,
+	// or null, overrides the default, and the turn's own settings override
+	// the preset's.
 	if row.etag == "" && len(t.Messages) == 0 {
 		preset := r.input.PresetID.value
 		if id := valueOr(profile.DefaultPromptPresetID, ""); !r.input.PresetID.set && id != "" {
 			preset = &id
 		}
 		t.Model = cmp.Or(valueOr(profile.SelectedModel, ""), autoModelName)
+		t.WebSearchEnabled = valueOr(profile.WebSearchEnabled, t.WebSearchEnabled)
 		h.catalog.get().applyPreset(t, &profile, preset)
 	}
 	attachments, err := turnAttachments(turn, t)

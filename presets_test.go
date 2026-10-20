@@ -86,6 +86,28 @@ func TestANewChatTakesItsPresetsSettingsUnlessItsTurnSetsThem(t *testing.T) {
 	}
 }
 
+// A new chat takes the profile's web search setting, which its turn's own
+// setting overrides.
+func TestANewChatTakesTheProfilesWebSearchSetting(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	for _, tc := range []struct {
+		profile bool
+		options object
+		want    bool
+	}{
+		{false, object{}, false},
+		{true, object{"webSearch": false}, false},
+	} {
+		rows.rows[rowMapKey(&principal{ID: "alice"}, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: raw(object{"webSearchEnabled": tc.profile})}
+		in := sendInput(key)
+		in["options"] = tc.options
+		events := finishedRun(t, h, "/v1/threads/turn", in)
+		if chat := storedChat(t, rows, key, events[0].ThreadID); chat.WebSearchEnabled != tc.want {
+			t.Fatalf("with web search %v in the profile and options %v, the chat started with it %v", tc.profile, tc.options, chat.WebSearchEnabled)
+		}
+	}
+}
+
 func TestChoosingAPresetTakesTheSettingsTheRequestLeavesOut(t *testing.T) {
 	h, rows, key, _ := presetHarness(t)
 	rows.rows[rowMapKey(&principal{ID: "alice"}, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: raw(presetProfile())}
