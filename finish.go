@@ -86,7 +86,7 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 				runErr = err
 			}
 		} else {
-			row, err := h.mutate(ctx, p, r.key, "chat", s.id, false, nil, commit)
+			row, err := h.mutate(ctx, p, r.key, "chat", s.id, false, commit)
 			if err != nil {
 				runErr = err
 			} else {

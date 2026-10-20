@@ -150,7 +150,7 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	working["contextUsage"] = requestContextUsage(request)
 	if !s.local {
 		initial := row.Data
-		stored, err := h.mutate(ctx, p, r.key, "chat", s.id, row.ETag == "", nil, func(data object) error {
+		stored, err := h.mutate(ctx, p, r.key, "chat", s.id, row.ETag == "", func(data object) error {
 			// Another attempt of this commit may have stored it already.
 			if data["lastRequestId"] == r.nonce && obj(data["activeRun"])["runId"] != r.log.id {
 				return errAlreadyApplied

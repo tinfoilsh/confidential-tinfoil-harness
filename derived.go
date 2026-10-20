@@ -115,7 +115,7 @@ func (h *harness) generateTitle(ctx context.Context, r *chatRun, p *principal, t
 		r.out.emit(event{Type: "STATE_DELTA", Delta: titleDelta(r.row.Data)})
 		return
 	}
-	updated, err := h.mutate(ctx, p, r.key, "chat", r.thread.id, false, nil, name)
+	updated, err := h.mutate(ctx, p, r.key, "chat", r.thread.id, false, name)
 	if err != nil {
 		return
 	}

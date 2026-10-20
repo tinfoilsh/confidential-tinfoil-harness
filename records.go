@@ -201,7 +201,6 @@ func (h *harness) updateThread(ctx context.Context, p *principal, key contentKey
 	if err != nil {
 		return nil, err
 	}
-	fields := []string{"title", "model", "webSearchEnabled", "projectId", "presetId", "pinned"}
 	if model, ok := in["model"]; ok {
 		name := normalizeModel(str(model))
 		if name != "auto" && h.catalog.get().definition(name) == nil {
@@ -214,8 +213,8 @@ func (h *harness) updateThread(ctx context.Context, p *principal, key contentKey
 			return nil, err
 		}
 	}
-	row, err := h.mutate(ctx, p, key, "chat", id, false, fields, func(data object) error {
-		for _, f := range fields {
+	row, err := h.mutate(ctx, p, key, "chat", id, false, func(data object) error {
+		for _, f := range []string{"title", "model", "webSearchEnabled", "projectId", "presetId", "pinned"} {
 			if v, ok := in[f]; ok {
 				data[f] = v
 			}
@@ -277,7 +276,7 @@ func (h *harness) forkThread(ctx context.Context, p *principal, key contentKey, 
 		return nil, err
 	}
 	// Sync leaves out the web client's bookkeeping, not the harness's.
-	forked, err := h.mutate(ctx, p, key, "chat", target, false, nil, func(data object) error {
+	forked, err := h.mutate(ctx, p, key, "chat", target, false, func(data object) error {
 		for _, field := range []string{"activeRun", "harnessRequests", "harnessRetry", "contextUsage", "pinned"} {
 			delete(data, field)
 		}
@@ -322,7 +321,7 @@ func (h *harness) changeMessages(ctx context.Context, p *principal, key contentK
 	if err != nil {
 		return nil, err
 	}
-	row, err := h.mutate(ctx, p, key, "chat", id, false, nil, func(data object) error {
+	row, err := h.mutate(ctx, p, key, "chat", id, false, func(data object) error {
 		// Ids derived from a message's position are stored, so removing one
 		// message does not rename the messages after it.
 		messages := arr(data["messages"])
@@ -419,14 +418,12 @@ func (h *harness) updateProfile(ctx context.Context, p *principal, key contentKe
 	if value, ok := patch["defaultPromptPresetId"]; ok && value == nil {
 		patch["defaultPromptPresetId"] = ""
 	}
-	fields := []string{}
 	for f := range patch {
 		if !slices.Contains(profileFields, f) {
 			return nil, apiErr(400, "BAD_REQUEST", "Unknown profile field: "+f)
 		}
-		fields = append(fields, f)
 	}
-	row, err := h.mutate(ctx, p, key, "profile", "profile", true, fields, func(data object) error {
+	row, err := h.mutate(ctx, p, key, "profile", "profile", true, func(data object) error {
 		for field, value := range patch {
 			data[field] = value
 		}
@@ -515,7 +512,7 @@ func (h *harness) createProject(ctx context.Context, p *principal, key contentKe
 		return nil, apiErr(400, "BAD_REQUEST", "A project name is required")
 	}
 	id := rowID()
-	row, err := h.mutate(ctx, p, key, "project", id, true, nil, func(data object) error {
+	row, err := h.mutate(ctx, p, key, "project", id, true, func(data object) error {
 		data["name"], data["description"], data["systemInstructions"], data["color"] = in["name"], str(in["description"]), str(in["systemInstructions"]), in["color"]
 		return nil
 	})
@@ -532,7 +529,7 @@ func (h *harness) updateProject(ctx context.Context, p *principal, key contentKe
 	if err != nil {
 		return nil, err
 	}
-	row, err := h.mutate(ctx, p, key, "project", id, false, nil, func(data object) error {
+	row, err := h.mutate(ctx, p, key, "project", id, false, func(data object) error {
 		for _, f := range []string{"name", "description", "systemInstructions", "color"} {
 			if v, ok := in[f]; ok {
 				data[f] = v

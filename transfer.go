@@ -5,8 +5,6 @@ import (
 	"encoding/base64"
 	"net/http"
 	"strconv"
-
-	"github.com/google/uuid"
 )
 
 // Moving a chat between the cloud and the device keeps its id, as the web
@@ -107,22 +105,12 @@ func (h *harness) importThread(ctx context.Context, p *principal, key contentKey
 		return nil, err
 	}
 	stripInlineAttachments(row.Data)
-	row.Data["updatedAt"] = timestamp()
 	row.restore = true
-	stampRow(row, "chat", nil)
-	etag, err := h.storeRows.push(ctx, p, key, "chat", row, uuid.NewString())
-	if e := asAPIError(err); err != nil && e.Code == "MISSING_ATTACHMENT" {
-		if err := h.repairAttachments(ctx, p, row, e.missing); err != nil {
-			return nil, err
-		}
-		etag, err = h.storeRows.push(ctx, p, key, "chat", row, uuid.NewString())
-	}
-	if err != nil {
+	if err := h.store(ctx, p, key, "chat", row); err != nil {
 		if asAPIError(err).Code == "REVISION_CONFLICT" {
 			return nil, apiErr(409, "THREAD_EXISTS", "This chat is already in the cloud")
 		}
 		return nil, err
 	}
-	row.ETag = etag
 	return threadSummary(normalizeThread(row)), nil
 }

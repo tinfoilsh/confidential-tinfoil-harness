@@ -25,7 +25,7 @@ func (h *harness) syncPins(ctx context.Context, p *principal, key contentKey, ro
 			continue
 		}
 		if mirror {
-			updated, err := h.mutate(ctx, p, key, "chat", row.ID, false, nil, func(data object) error { data["pinned"] = pinned; return nil })
+			updated, err := h.mutate(ctx, p, key, "chat", row.ID, false, func(data object) error { data["pinned"] = pinned; return nil })
 			if err == nil {
 				*row = *updated
 				continue
@@ -43,7 +43,7 @@ func (h *harness) syncPins(ctx context.Context, p *principal, key contentKey, ro
 	return nil
 }
 func (h *harness) writeLegacyPin(ctx context.Context, p *principal, key contentKey, id string, pinned bool) error {
-	_, err := h.mutate(ctx, p, key, "profile", "profile", true, []string{"pinnedChatIds"}, func(data object) error {
+	_, err := h.mutate(ctx, p, key, "profile", "profile", true, func(data object) error {
 		pins := slices.DeleteFunc(arr(data["pinnedChatIds"]), func(value any) bool { return value == id })
 		if pinned {
 			pins = append(pins, id)

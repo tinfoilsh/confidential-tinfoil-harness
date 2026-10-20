@@ -7,7 +7,6 @@ import (
 	"errors"
 	"net/http"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -49,6 +48,8 @@ const (
 	// Sync fetches a pull's rows within one 30-second budget.
 	pullBatch        = 20
 	maxSyncPlaintext = 32 << 20
+	// maxCommitAttempts bounds the pushes of one change to a row.
+	maxCommitAttempts = 3
 )
 
 func syncTimeout(path string) time.Duration {
@@ -224,26 +225,6 @@ func (s *syncClient) remove(ctx context.Context, p *principal, key contentKey, s
 	return s.call(ctx, p, "/v1/sync/delete", object{"scope": scope, "id": row.ID, "key": key.base64(), "if_match": row.ETag, "idempotency_key": uuid.NewString()}, nil)
 }
 
-func stampRow(row *storedRow, scope string, fields []string) {
-	version, _ := strconv.Atoi(row.ETag)
-	row.Data["updatedAt"] = timestamp()
-	row.Data["clockVersion"] = version + 1
-	if scope == "profile" {
-		row.Data["version"] = version + 1
-		clocks := obj(row.Data["fieldClocks"])
-		for _, field := range fields {
-			clock := clone(obj(clocks[field]))
-			clock["v"] = max(integer(clock["v"]), version) + 1
-			clock["w"] = "harness"
-			clocks[field] = clock
-		}
-		row.Data["fieldClocks"] = clocks
-	} else {
-		row.Data["clock"] = max(integer(row.Data["clock"]), version) + 1
-		row.Data["writer"] = "harness"
-	}
-}
-
 // mutate always re-applies the operation to the freshly pulled row. A conflict
 // never causes an old whole-row image to overwrite another writer's fields.
 func (h *harness) eachRow(ctx context.Context, p *principal, key contentKey, scope, project string, visit func(*storedRow) error) error {
@@ -283,8 +264,8 @@ func (h *harness) rowIDs(ctx context.Context, p *principal, key contentKey, scop
 	return ids, err
 }
 
-func (h *harness) mutate(ctx context.Context, p *principal, key contentKey, scope, id string, create bool, fields []string, change func(object) error) (*storedRow, error) {
-	for attempt := 0; attempt < 3; attempt++ {
+func (h *harness) mutate(ctx context.Context, p *principal, key contentKey, scope, id string, create bool, change func(object) error) (*storedRow, error) {
+	for attempt := 0; attempt < maxCommitAttempts; attempt++ {
 		row, err := h.storeRows.load(ctx, p, key, scope, id)
 		if err != nil {
 			if !create || asAPIError(err).HTTP != 404 {
@@ -295,21 +276,40 @@ func (h *harness) mutate(ctx context.Context, p *principal, key contentKey, scop
 		if err := change(row.Data); err != nil {
 			return nil, err
 		}
-		stampRow(row, scope, fields)
-		etag, err := h.storeRows.push(ctx, p, key, scope, row, uuid.NewString())
-		if e := asAPIError(err); scope == "chat" && e.Code == "MISSING_ATTACHMENT" {
-			if err := h.repairAttachments(ctx, p, row, e.missing); err != nil {
-				return nil, err
-			}
-			etag, err = h.storeRows.push(ctx, p, key, scope, row, uuid.NewString())
-		}
+		err = h.store(ctx, p, key, scope, row)
 		if err == nil {
-			row.ETag = etag
 			return row, nil
 		}
-		if code := asAPIError(err).Code; code != "REVISION_CONFLICT" && code != "SYNC_OUTCOME_UNKNOWN" {
+		if asAPIError(err).Code != "REVISION_CONFLICT" {
 			return nil, err
 		}
 	}
-	return nil, apiErr(409, "REVISION_CONFLICT", "The row changed during three commit attempts")
+	return nil, apiErr(409, "REVISION_CONFLICT", "The row changed during every commit attempt")
+}
+
+// store pushes a row at the revision it was read at. A push whose outcome is
+// unknown is sent again under the same idempotency key, which sync answers
+// with the first push's outcome. A chat naming attachments sync does not hold
+// under it is repaired once and pushed again.
+func (h *harness) store(ctx context.Context, p *principal, key contentKey, scope string, row *storedRow) error {
+	row.Data["updatedAt"] = timestamp()
+	nonce, repaired := uuid.NewString(), false
+	for attempt := 1; ; attempt++ {
+		etag, err := h.storeRows.push(ctx, p, key, scope, row, nonce)
+		e := asAPIError(err)
+		switch {
+		case err == nil:
+			row.ETag = etag
+			return nil
+		case e.Code == "SYNC_OUTCOME_UNKNOWN" && attempt < maxCommitAttempts:
+			continue
+		case e.Code == "MISSING_ATTACHMENT" && scope == "chat" && !repaired:
+			if err := h.repairAttachments(ctx, p, row, e.missing); err != nil {
+				return err
+			}
+			nonce, repaired = uuid.NewString(), true
+			continue
+		}
+		return err
+	}
 }

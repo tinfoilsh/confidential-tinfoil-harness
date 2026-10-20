@@ -947,9 +947,6 @@ func TestCASReappliesPatchAndPreservesIOSFields(t *testing.T) {
 	if row.Data["iosField"] != "keep" || len(arr(row.Data["messages"])) != 1 || len(arr(row.Data["pendingRecoveries"])) != 1 {
 		t.Fatal("CAS lost foreign fields")
 	}
-	if integer(row.Data["clockVersion"]) != 9 || integer(row.Data["clock"]) <= 12 {
-		t.Fatal("iOS clocks not stamped")
-	}
 }
 func TestSyncWireCarriesJWTProtocolAndBase64(t *testing.T) {
 	key := randomKey()

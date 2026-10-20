@@ -160,7 +160,7 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		id := rowID()
-		row, err := h.mutate(ctx, p, key, "project_document", projectID+"/"+id, true, nil, func(data object) error {
+		row, err := h.mutate(ctx, p, key, "project_document", projectID+"/"+id, true, func(data object) error {
 			data["projectId"], data["filename"], data["contentType"], data["sizeBytes"], data["content"] = projectID, filename, descriptor["mimeType"], len(file), descriptor["textContent"]
 			return nil
 		})
