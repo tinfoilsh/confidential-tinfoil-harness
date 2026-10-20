@@ -19,7 +19,7 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	h.live.mu.Lock()
 	p := r.principal
 	var row *storedRow
-	if s.ephemeral {
+	if s.local {
 		row = &storedRow{ID: s.row.ID, Data: clone(s.row.Data)}
 	}
 	h.live.mu.Unlock()
@@ -27,7 +27,7 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	ctx = context.WithValue(ctx, usageContextKey{}, usageForRun(r))
 	ctx = context.WithValue(ctx, usageSinkKey{}, r.out)
 	profile, project, docs := object{}, object{}, []object{}
-	if !s.ephemeral {
+	if !s.local {
 		var err error
 		profile, err = h.profile(ctx, p, r.key)
 		if err != nil {
@@ -62,7 +62,7 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	}
 	// A new chat starts with the default prompt preset, as the web client
 	// stamps a blank chat. A first turn naming a preset, or null, overrides it.
-	if _, named := r.input["presetId"]; !named && !s.ephemeral && row.ETag == "" && len(arr(row.Data["messages"])) == 0 {
+	if _, named := r.input["presetId"]; !named && !s.local && row.ETag == "" && len(arr(row.Data["messages"])) == 0 {
 		if preset := str(profile["defaultPromptPresetId"]); preset != "" {
 			row.Data["presetId"] = preset
 		}
@@ -85,14 +85,14 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	}
 	// Sync stores a chat only if every attachment it names is stored under the
 	// chat. Offloaded documents are read back before the budget counts them.
-	// An ask's stored source has attachments in sync; a local source carries them.
-	temporary := s.ephemeral && (r.input["kind"] != "ask" || s.local)
-	if !s.ephemeral {
+	// An ask's stored source has attachments in sync; a keyless thread
+	// carries its own.
+	if !s.local {
 		if err := h.placeAttachments(ctx, p, s.id, working); err != nil {
 			return err
 		}
 	}
-	if !temporary {
+	if !s.keyless {
 		if err := h.hydrateDocuments(ctx, p, working); err != nil {
 			return err
 		}
@@ -104,7 +104,7 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	if err := preflightBudget(preview); err != nil {
 		return err
 	}
-	if err := h.hydrateContext(ctx, p, working, temporary); err != nil {
+	if err := h.hydrateContext(ctx, p, working, s.keyless); err != nil {
 		return err
 	}
 	titleText := titleSource(working)
@@ -148,7 +148,7 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 		return err
 	}
 	working["contextUsage"] = requestContextUsage(request)
-	if !s.ephemeral {
+	if !s.local {
 		initial := row.Data
 		stored, err := h.mutate(ctx, p, r.key, "chat", s.id, row.ETag == "", nil, func(data object) error {
 			// Another attempt of this commit may have stored it already.
@@ -225,7 +225,8 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	go func() {
 		defer close(r.titleDone)
 		defer func() { rescued("title", recover()) }()
-		if !s.ephemeral || s.local {
+		// An ask's thread is discarded with its run.
+		if r.input["kind"] != "ask" {
 			titleCtx, stop := context.WithTimeout(runCtx, 30*time.Second)
 			defer stop()
 			h.generateTitle(titleCtx, r, &titlePrincipal, titleState, titleText)

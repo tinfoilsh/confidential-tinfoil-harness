@@ -664,7 +664,7 @@ func TestContinueExtendsTheStoredReplyItNames(t *testing.T) {
 
 func TestContinueExtendsLocalReplies(t *testing.T) {
 	prompts := make(chan []any, 1)
-	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+	h, rows, _ := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		if messages := lastRequest(r); strings.HasSuffix(str(obj(messages[len(messages)-1])["content"]), continueInstruction) {
 			prompts <- messages
 		}
@@ -676,17 +676,6 @@ func TestContinueExtendsLocalReplies(t *testing.T) {
 			roles = append(roles, str(obj(m)["role"])+":"+str(obj(m)["content"]))
 		}
 		return roles
-	}
-	// A temporary thread ends with its run, so there is nothing left to continue.
-	first := sendInput(key)
-	delete(first, "key")
-	first["ephemeral"] = true
-	thread := eventsIn(t, postRoute(h, "/v1/threads/turn", first, ""))[0].ThreadID
-	temporary := continueTurn(key, thread, "")
-	delete(temporary, "key")
-	temporary["ephemeral"] = true
-	if w := postRoute(h, "/v1/threads/turn", temporary, ""); w.Code != 404 {
-		t.Fatalf("a finished temporary thread was continued: HTTP %d %s", w.Code, w.Body.String())
 	}
 	// A local thread's client sends the reply it continues and stores the result.
 	local := localInput("0000000000004_local", priorThread())
@@ -771,14 +760,28 @@ func TestAContinuedReplyIsScreenedWhole(t *testing.T) {
 	}
 }
 
-func TestAnonymousEphemeralNeverCallsStorage(t *testing.T) {
+// A chat that is not stored in the cloud is kept on its device, so its run
+// returns the thread for the client to store.
+func TestChatsOutsideTheCloudAreDeviceChats(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	in := sendInput(key)
-	delete(in, "key")
-	in["ephemeral"] = true
+	anonymous := sendInput(key)
+	delete(anonymous, "key")
+	temporary := sendInput(key)
+	temporary["ephemeral"] = true
+	for _, tc := range []struct {
+		in   object
+		user string
+		code int
+	}{{anonymous, "", 401}, {temporary, "alice", 400}} {
+		if w := postRoute(h, "/v1/threads/turn", tc.in, tc.user); w.Code != tc.code {
+			t.Fatalf("a turn neither stored nor local answered %d, want %d: %s", w.Code, tc.code, w.Body.String())
+		}
+	}
+	in := localInput("", object{})
 	events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, ""))
-	if events[len(events)-1].Type != "RUN_FINISHED" || rows.calls != 0 {
-		t.Fatalf("ephemeral run ended with %+v after %d storage calls", events[len(events)-1], rows.calls)
+	thread := obj(obj(decodeValue(events[len(events)-1].Metadata))["thread"])
+	if events[len(events)-1].Type != "RUN_FINISHED" || len(arr(thread["messages"])) != 2 || rows.calls != 0 {
+		t.Fatalf("an anonymous chat ended with %+v after %d storage calls", events[len(events)-1], rows.calls)
 	}
 }
 func TestCancelCommitsPartialAndLeavesQueue(t *testing.T) {
@@ -1700,6 +1703,10 @@ func TestACompletedFirstPartyChatIsScreenedOnce(t *testing.T) {
 			conversation := events[0].ThreadID
 			if kind == "ask" {
 				conversation = "source"
+				// An ask's thread ends with its run.
+				if len(rows.rows) != 1 {
+					t.Fatalf("an ask stored %d rows", len(rows.rows))
+				}
 			}
 			if len(got) != 1 || got[0].Credential != accessJWT("tinfoil-chat", "chat") || got[0].ConversationID != conversation {
 				t.Fatalf("the sidecar received %+v", got)

@@ -32,12 +32,13 @@ func (h *harness) handleTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	local := boolean(in["local"], false)
-	if kind == "ask" || local {
-		in["ephemeral"] = true
+	// An ask is never stored, so it may still say so.
+	if boolean(in["ephemeral"], false) && kind != "ask" {
+		respond(w, nil, apiErr(400, "BAD_REQUEST", "Temporary chats are kept on the device"))
+		return
 	}
-	ephemeral := boolean(in["ephemeral"], false)
-	if p.Anonymous && !ephemeral {
-		respond(w, nil, apiErr(401, "UNAUTHENTICATED", "Anonymous turns must be ephemeral"))
+	if p.Anonymous && !local {
+		respond(w, nil, apiErr(401, "UNAUTHENTICATED", "Anonymous chats are kept on the device"))
 		return
 	}
 	var key contentKey
@@ -49,10 +50,6 @@ func (h *harness) handleTurn(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	defer clear(key[:])
-	if kind == "ask" && p.Anonymous && !local {
-		respond(w, nil, apiErr(401, "UNAUTHENTICATED", "Ask requires access to a stored thread"))
-		return
-	}
 	if _, err := requiredID(in, "threadId"); err != nil {
 		respond(w, nil, err)
 		return

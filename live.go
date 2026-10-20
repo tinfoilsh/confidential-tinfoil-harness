@@ -35,12 +35,12 @@ func (l *liveRuns) forget(r *chatRun) {
 
 type threadSession struct {
 	id, owner, keyHash string
-	ephemeral, deleted bool
-	// A local thread is stored by the client, which sends its transcript with
-	// each turn. Like an anonymous thread, it never uses the content key.
+	deleted            bool
+	// A local thread is stored by its client, which sends its transcript
+	// with each turn; an ask is stored by nobody. The run holds either's
+	// row. A keyless thread, local or anonymous, never uses the content key.
 	local, keyless bool
-	// row is a temporary or local thread's transcript, which a queued turn
-	// continues from.
+	// row is a local thread's transcript, which a queued turn continues from.
 	row    *storedRow
 	active *chatRun
 	queue  []*chatRun

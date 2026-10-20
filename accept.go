@@ -107,8 +107,7 @@ func (h *harness) admit(ctx context.Context, p *principal, key contentKey, in ob
 	if credential.Limit.exhausted() {
 		return quotaExhausted(credential.Limit)
 	}
-	ephemeral, id := boolean(in["ephemeral"], false), str(in["threadId"])
-	local := boolean(in["local"], false)
+	id, local := str(in["threadId"]), boolean(in["local"], false)
 	keyless := p.Anonymous || local
 	var source object
 	if in["kind"] == "ask" {
@@ -123,19 +122,10 @@ func (h *harness) admit(ctx context.Context, p *principal, key contentKey, in ob
 		}
 		id = ""
 	}
+	// A stored chat's project is read as its first turn starts.
 	if source == nil && str(in["projectId"]) != "" {
-		project, err := requiredID(in, "projectId")
-		if err != nil {
+		if _, err := requiredID(in, "projectId"); err != nil {
 			return err
-		}
-		if p.Anonymous {
-			return apiErr(401, "UNAUTHENTICATED", "Sign in to use a project")
-		}
-		// A stored chat's project is read as its first turn starts.
-		if ephemeral {
-			if _, err := h.storeRows.load(ctx, p, key, "project", project); err != nil {
-				return err
-			}
 		}
 	}
 	if id == "" {
@@ -174,7 +164,9 @@ func (h *harness) admit(ctx context.Context, p *principal, key contentKey, in ob
 		return errShutdown
 	}
 	s := h.live.threads[liveKey(p, id)]
-	if s != nil && (s.deleted || s.ephemeral != ephemeral || s.local != local || !s.keyless && s.keyHash != key.fingerprint()) {
+	// An ask's run holds its row, as a device chat's does.
+	held := local || source != nil
+	if s != nil && (s.deleted || s.local != held || !s.keyless && s.keyHash != key.fingerprint()) {
 		return apiErr(404, "THREAD_NOT_FOUND", "The thread is unavailable")
 	}
 	if s != nil && s.active != nil && len(s.queue) >= maxQueuedTurns {
@@ -184,7 +176,7 @@ func (h *harness) admit(ctx context.Context, p *principal, key contentKey, in ob
 		return apiErr(400, "BAD_REQUEST", "A local thread requires its transcript")
 	}
 	if s == nil {
-		s = &threadSession{id: id, owner: p.scope(), keyHash: key.fingerprint(), ephemeral: ephemeral, local: local, keyless: keyless}
+		s = &threadSession{id: id, owner: p.scope(), keyHash: key.fingerprint(), local: held, keyless: keyless}
 		h.live.threads[liveKey(p, id)] = s
 	}
 	r.thread = s
@@ -199,7 +191,7 @@ func (h *harness) admit(ctx context.Context, p *principal, key contentKey, in ob
 	switch {
 	case seed != nil:
 		s.row = seed
-	case ephemeral && s.row == nil:
+	case source != nil:
 		s.row = newThreadRow(id, in, source)
 	}
 	h.makeActive(s, r)

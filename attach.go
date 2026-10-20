@@ -616,7 +616,7 @@ func turnAttachments(in, thread object) ([]any, error) {
 
 // A local transcript may omit older images' bytes to stay small. The model
 // then reads such an image through its description, or not at all.
-func (h *harness) hydrateContext(ctx context.Context, p *principal, thread object, temporary bool) error {
+func (h *harness) hydrateContext(ctx context.Context, p *principal, thread object, keyless bool) error {
 	name := str(thread["model"])
 	c := h.catalog.get()
 	vision := boolean(c.definition(name)["multimodal"], false)
@@ -636,7 +636,7 @@ func (h *harness) hydrateContext(ctx context.Context, p *principal, thread objec
 				continue
 			}
 			// Without its bytes, only its thumbnail was kept.
-			if str(a["base64"]) == "" && (temporary || attachmentKey(a) == "") {
+			if str(a["base64"]) == "" && (keyless || attachmentKey(a) == "") {
 				continue
 			}
 			data, err := h.attachmentBytes(ctx, p, a, false)

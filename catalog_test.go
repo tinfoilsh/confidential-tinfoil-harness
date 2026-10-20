@@ -121,9 +121,8 @@ func TestHarnessStartsBeforeTheGatewayOffersAModel(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &session); err != nil || response.Code != 200 || session.DefaultModel != "auto" || len(session.Models) != 0 {
 		t.Fatalf("session without offered models: HTTP %d %s", response.Code, response.Body.String())
 	}
-	turn := sendInput(contentKey{})
-	delete(turn, "key")
-	turn["ephemeral"], turn["options"] = true, object{"model": "auto", "webSearch": false}
+	turn := localInput("", object{})
+	turn["options"] = object{"model": "auto", "webSearch": false}
 	if events := eventsIn(t, postRoute(h, "/v1/threads/turn", turn, "")); events[len(events)-1].Type != "RUN_FINISHED" {
 		t.Fatalf("Auto did not run within the configured window: %+v", events[len(events)-1])
 	}

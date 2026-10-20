@@ -81,7 +81,7 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 		return nil
 	}
 	if !deleted {
-		if s.ephemeral {
+		if s.local {
 			if err := commit(r.row.Data); err != nil {
 				runErr = err
 			}
@@ -109,7 +109,7 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 	}
 	h.live.mu.Lock()
 	queue := queueItems(s)
-	if s.ephemeral {
+	if s.local {
 		s.row = r.row
 	}
 	next := h.advance(r, !cancelled || r.yielded)

@@ -98,7 +98,7 @@ func TestAnonymousKeyValidationRefusesWorkBeforeAllocatingThreads(t *testing.T) 
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var modelCalls atomic.Int32
-			h, rows, key := testChatHarness(t, func(http.ResponseWriter, *http.Request) { modelCalls.Add(1) })
+			h, rows, _ := testChatHarness(t, func(http.ResponseWriter, *http.Request) { modelCalls.Add(1) })
 			cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				if tc.retryAfter != "" {
 					w.Header().Set("Retry-After", tc.retryAfter)
@@ -108,10 +108,7 @@ func TestAnonymousKeyValidationRefusesWorkBeforeAllocatingThreads(t *testing.T) 
 			}))
 			defer cp.Close()
 			h.auth.client, h.auth.controlplane = cp.Client(), cp.URL
-			in := sendInput(key)
-			delete(in, "key")
-			in["ephemeral"] = true
-			response := postRoute(h, "/v1/threads/turn", in, "")
+			response := postRoute(h, "/v1/threads/turn", localInput("", object{}), "")
 			var refused struct {
 				Error apiError `json:"error"`
 			}
@@ -134,12 +131,9 @@ func TestAnonymousKeyValidationRefusesWorkBeforeAllocatingThreads(t *testing.T) 
 
 func TestAnonymousReconnectUsesKeyPossessionInsteadOfIP(t *testing.T) {
 	model, release := heldModel()
-	h, _, key := testChatHarness(t, model)
+	h, _, _ := testChatHarness(t, model)
 	t.Cleanup(release)
-	in := sendInput(key)
-	delete(in, "key")
-	in["ephemeral"] = true
-	run, err := h.acceptTurn(context.Background(), &principal{Anonymous: true, AnonymousID: hashHex([]byte("free_anonymous-key")), InferenceKey: "free_anonymous-key"}, contentKey{}, in)
+	run, err := h.acceptTurn(context.Background(), &principal{Anonymous: true, AnonymousID: hashHex([]byte("free_anonymous-key")), InferenceKey: "free_anonymous-key"}, contentKey{}, localInput("", object{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,14 +299,11 @@ func TestHourlyCapIsRememberedUntilItResets(t *testing.T) {
 }
 
 func TestAnonymousRunThatExhaustsItsQuotaReportsNoneLeft(t *testing.T) {
-	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+	h, _, _ := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
 		io.WriteString(w, `{"error":{"message":"Daily request limit reached.","type":"insufficient_quota","code":"insufficient_quota"}}`)
 	})
-	in := sendInput(key)
-	delete(in, "key")
-	in["ephemeral"] = true
-	events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, ""))
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", localInput("", object{}), ""))
 	var limit json.RawMessage
 	for _, e := range events {
 		if e.Type == "STATE_SNAPSHOT" {
