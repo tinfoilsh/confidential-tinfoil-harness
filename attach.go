@@ -451,15 +451,17 @@ func (h *harness) attachmentBytes(ctx context.Context, p *principal, descriptor 
 		return base64.StdEncoding.DecodeString(value)
 	}
 	id := str(descriptor["id"])
-	if !public && str(descriptor["encryptionKey"]) == "" && str(descriptor["key"]) != "" {
-		return h.legacyAttachmentBytes(ctx, id, str(descriptor["key"]))
-	}
 	path := "/v1/attachment/get"
 	if public {
 		path += "-public"
 	}
 	var result object
 	err := h.syncAPI.call(ctx, p, path, object{"id": id, "att_key": firstString(descriptor["encryptionKey"], descriptor["attKey"], descriptor["key"])}, &result)
+	// Sync moves an image that only has a legacy key into its own storage
+	// under the same id and key, after which the control plane refuses it.
+	if err != nil && asAPIError(err).HTTP == http.StatusNotFound && !public && str(descriptor["encryptionKey"]) == "" && str(descriptor["key"]) != "" {
+		return h.legacyAttachmentBytes(ctx, id, str(descriptor["key"]))
+	}
 	if err != nil {
 		return nil, err
 	}

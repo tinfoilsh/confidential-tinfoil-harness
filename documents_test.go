@@ -554,3 +554,20 @@ func TestPinsFollowTheProfileWhenMirroringFails(t *testing.T) {
 		t.Fatal("a cancelled read reported success")
 	}
 }
+
+// Sync moves a legacy image into its own storage under the same id and key,
+// and the control plane then answers 410 for it.
+func TestAPromotedLegacyImageIsReadThroughSync(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	fake := newFakeSync(t, h)
+	legacyKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
+	fake.blobs["legacy-2"] = fakeBlob{chat: "chat-1", key: legacyKey, data: []byte("promoted photo")}
+	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusGone) }))
+	defer cp.Close()
+	h.controlplane = cp.URL
+	storedThread(rows, "alice", "chat-1", object{"id": "legacy-2", "type": "image", "fileName": "photo.png", "mimeType": "image/png", "key": legacyKey})
+	w := postRoute(h, "/v1/attachments/get", object{"key": key.base64(), "id": "legacy-2", "threadId": "chat-1"}, "alice")
+	if w.Code != 200 || w.Body.String() != "promoted photo" {
+		t.Fatalf("a promoted legacy image: HTTP %d %s", w.Code, w.Body.String())
+	}
+}
