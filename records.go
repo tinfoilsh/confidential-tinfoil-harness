@@ -372,7 +372,7 @@ func (h *harness) createProject(ctx context.Context, p *principal, key contentKe
 		return nil, apiErr(400, "BAD_REQUEST", "A project name is required")
 	}
 	return h.mutateProject(ctx, p, key, rowID(), true, func(project *Project) {
-		project.Name, project.Description, project.SystemInstructions, project.Color = *in.Name, valueOr(in.Description, ""), valueOr(in.SystemInstructions, ""), in.Color
+		project.Name, project.Description, project.SystemInstructions, project.Color = *in.Name, valueOr(in.Description, ""), valueOr(in.SystemInstructions, ""), in.Color.value
 	})
 }
 func (h *harness) updateProject(ctx context.Context, p *principal, key contentKey, in *projectRequest) (any, error) {
@@ -383,8 +383,8 @@ func (h *harness) updateProject(ctx context.Context, p *principal, key contentKe
 		project.Name = valueOr(in.Name, project.Name)
 		project.Description = valueOr(in.Description, project.Description)
 		project.SystemInstructions = valueOr(in.SystemInstructions, project.SystemInstructions)
-		if in.Color != nil {
-			project.Color = in.Color
+		if in.Color.set {
+			project.Color = in.Color.value
 		}
 	})
 }

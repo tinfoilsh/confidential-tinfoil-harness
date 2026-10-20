@@ -399,6 +399,40 @@ func TestFirstTurnUsesProjectAndPreset(t *testing.T) {
 	}
 }
 
+// A project update leaves out what it does not name, and a null color
+// clears the project's.
+func TestAProjectUpdateClearsItsColorWithNull(t *testing.T) {
+	h, _, key := testChatHarness(t, nil)
+	var created Project
+	json.Unmarshal(postRoute(h, "/v1/projects/create", object{"key": key.base64(), "name": "Research", "color": "blue"}, "alice").Body.Bytes(), &created)
+	stored := func() Project {
+		t.Helper()
+		project, err := h.loadProject(context.Background(), &principal{ID: "alice"}, key, created.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return project
+	}
+	update := func(patch object) {
+		t.Helper()
+		patch["key"], patch["id"] = key.base64(), created.ID
+		if w := postRoute(h, "/v1/projects/update", patch, "alice"); w.Code != 200 {
+			t.Fatalf("update %v: HTTP %d %s", patch, w.Code, w.Body.String())
+		}
+	}
+	update(object{"name": "Renamed"})
+	if project := stored(); project.Name != "Renamed" || valueOr(project.Color, "") != "blue" {
+		t.Fatalf("a rename left the project as %+v", project)
+	}
+	update(object{"color": nil})
+	if project := stored(); project.Name != "Renamed" || project.Color != nil {
+		t.Fatalf("a null color left the project as %+v", project)
+	}
+	if w := postRoute(h, "/v1/projects/update", object{"key": key.base64(), "id": created.ID, "color": 5}, "alice"); w.Code != 400 {
+		t.Fatalf("a color that is not a string: HTTP %d", w.Code)
+	}
+}
+
 func TestNewChatsStartWithTheDefaultPromptPreset(t *testing.T) {
 	systems := make(chan string, 1)
 	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {

@@ -318,12 +318,14 @@ func (in *profileUpgradeRequest) validate() error {
 }
 
 type projectRequest struct {
-	ID                 string  `json:"id"`
-	Name               *string `json:"name"`
-	Description        *string `json:"description"`
-	SystemInstructions *string `json:"systemInstructions"`
-	Color              *string `json:"color"`
+	ID                 string           `json:"id"`
+	Name               *string          `json:"name"`
+	Description        *string          `json:"description"`
+	SystemInstructions *string          `json:"systemInstructions"`
+	Color              nullable[string] `json:"color"`
 }
+
+func (in *projectRequest) validate() error { return in.Color.check("color") }
 
 type projectDocumentRequest struct {
 	ProjectID  string `json:"projectId"`
