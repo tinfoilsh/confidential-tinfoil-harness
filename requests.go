@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"reflect"
 	"slices"
 	"strconv"
@@ -37,11 +38,15 @@ func readBody(w http.ResponseWriter, r *http.Request, limit int64) (json.RawMess
 	return body, nil
 }
 
-// bodyError tells a body over the size limit from a malformed one.
+// bodyError tells a body over the size limit, or one that stopped
+// arriving, from a malformed one.
 func bodyError(err error, malformed string) *apiError {
 	var tooLarge *http.MaxBytesError
 	if errors.As(err, &tooLarge) {
 		return apiErr(http.StatusRequestEntityTooLarge, "PAYLOAD_TOO_LARGE", "The request exceeds the size limit")
+	}
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return apiErr(http.StatusRequestTimeout, "REQUEST_TIMEOUT", "The request stopped sending its body")
 	}
 	return apiErr(400, "BAD_REQUEST", malformed)
 }
@@ -161,6 +166,11 @@ func requestKey(key string) (contentKey, error) {
 
 type idRequest struct {
 	ID string `json:"id"`
+}
+
+type deleteThreadRequest struct {
+	idRequest
+	Revision string `json:"revision,omitempty"`
 }
 
 func (in *idRequest) validate() error { return requireID("id", in.ID) }
@@ -308,6 +318,11 @@ func (in *profileUpdateRequest) patch() (Profile, bool, error) {
 // profileUpgradeRequest names the settings a client keeps on its device.
 type profileUpgradeRequest struct {
 	Profile json.RawMessage `json:"profile"`
+}
+
+type profileMergeRequest struct {
+	profileUpgradeRequest
+	ChangedFields []string `json:"changedFields"`
 }
 
 func (in *profileUpgradeRequest) validate() error {
@@ -477,6 +492,7 @@ type turnOptions struct {
 	AutoIntelligence string `json:"autoIntelligence,omitempty"`
 	ReasoningEffort  string `json:"reasoningEffort,omitempty"`
 	Timezone         string `json:"timezone,omitempty"`
+	Locale           string `json:"locale,omitempty"`
 	Thinking         *bool  `json:"thinking,omitempty"`
 	WebSearch        *bool  `json:"webSearch,omitempty"`
 	PIICheck         *bool  `json:"piiCheck,omitempty"`
@@ -560,7 +576,7 @@ func (in *turnRequest) validateContent() error {
 	if pixels > maxTurnResizePixels {
 		return apiErr(413, "ATTACHMENT_TOO_LARGE", "The turn's images hold more pixels than one turn can resize")
 	}
-	if in.Kind == "send" && strings.TrimSpace(valueOr(in.Content, "")) == "" && len(in.Attachments) == 0 {
+	if in.Kind == "send" && strings.TrimSpace(valueOr(in.Content, "")) == "" && strings.TrimSpace(valueOr(in.Quote, "")) == "" && len(in.Attachments) == 0 {
 		return apiErr(400, "BAD_REQUEST", "A message or attachment is required")
 	}
 	return nil

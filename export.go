@@ -3,27 +3,26 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"cmp"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
+	"encoding/base64"
 	"encoding/json"
-	"image"
-	"image/png"
+	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 )
 
-func millis(value any) int64 {
-	if t, err := time.Parse(time.RFC3339Nano, str(value)); err == nil {
+func millis(value string) int64 {
+	if t, err := time.Parse(time.RFC3339Nano, value); err == nil {
 		return t.UnixMilli()
 	}
-	return int64(integer(value))
+	return 0
 }
 
 // chatURL is where a share link opens.
@@ -172,379 +171,770 @@ func (h *harness) openShare(ctx context.Context, _ *principal, _ contentKey, in 
 	return sharedThreadView(id, plain), nil
 }
 
+// An export is one streamed ZIP archive of the chats a client keeps on its
+// device, which it sends, and, with its content key, everything it stores
+// in the cloud. Native backups hold every chat whole; a conversations
+// export holds them in the Claude-compatible format the web app wrote.
+
+const (
+	// maxExportBody bounds an export request: its device chats and the
+	// images they show.
+	maxExportBody = 512 << 20
+	// maxExportParts bounds the chats and images an export request sends.
+	maxExportParts = maxArchiveEntries
+	// maxProjectsExport bounds the Claude-compatible projects file.
+	maxProjectsExport = 64 << 20
+)
+
+type exportOptions struct {
+	Format string `json:"format"`
+	Key    string `json:"key"`
+}
+
+// exportForm is an export request: its options, and its device chats and
+// the originals of their images, spooled to scratch space.
+type exportForm struct {
+	options   exportOptions
+	spool     *scratchFile
+	threads   []spooledPart
+	originals map[string]spooledPart
+}
+
+type spooledPart struct {
+	offset, size int64
+}
+
 func (h *harness) handleExport(w http.ResponseWriter, r *http.Request) {
-	body, err := readBody(w, r, maxRequestBody)
+	p, err := h.auth.authenticate(r, true)
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
-	var in object
-	json.Unmarshal(body, &in)
-	p, err := h.auth.authenticate(r, false)
+	size, err := requestSize(r, maxExportBody)
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
-	key, err := decodeContentKey(str(in["key"]))
+	lease, err := h.scratch.lease(r.Context(), size)
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
-	defer clear(key[:])
-	format := str(in["format"])
-	if format == "claude-projects" {
-		result, err := h.claudeProjects(r.Context(), p, key, str(in["projectId"]))
+	defer lease.release()
+	lift := h.scratch.idleBody(w, r)
+	r.Body = http.MaxBytesReader(w, r.Body, maxExportBody)
+	form, err := readExportForm(r, lease, func(options exportOptions) error { return h.authorizeArchive(r.Context(), p, options.Key, "export") })
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	lift()
+	var key *contentKey
+	if form.options.Key != "" {
+		if p.Anonymous {
+			respond(w, nil, errAnonymousCloud)
+			return
+		}
+		decoded, err := decodeContentKey(form.options.Key)
 		if err != nil {
 			respond(w, nil, err)
 			return
 		}
-		w.Header().Set("Content-Disposition", `attachment; filename="projects.json"`)
-		respond(w, result, nil)
-		return
+		defer clear(decoded[:])
+		key = &decoded
 	}
-	if format != "tinfoil-backup" {
-		respond(w, nil, apiErr(400, "BAD_REQUEST", "Unknown export format"))
-		return
+	ctx := r.Context()
+	switch form.options.Format {
+	case "native":
+		streamArchive(w, "tinfoil-backup.zip", func(out io.Writer) error { return h.writeBackup(ctx, p, key, form, out) })
+	case "conversations":
+		streamArchive(w, "tinfoil-chats.zip", func(out io.Writer) error { return h.writeConversations(ctx, p, key, form, lease, out) })
+	case "claude-projects":
+		if key == nil {
+			respond(w, nil, apiErr(401, "KEY_REQUIRED", "A content key is required"))
+			return
+		}
+		projects, err := h.claudeProjects(ctx, p, *key)
+		if err == nil {
+			w.Header().Set("Content-Disposition", `attachment; filename="projects.json"`)
+		}
+		respond(w, projects, err)
+	default:
+		respond(w, nil, apiErr(400, "BAD_REQUEST", "format must be native, conversations or claude-projects"))
 	}
-	// Build into an encrypted spool so an upstream failure is still a JSON error,
-	// and plaintext ZIP bytes are only emitted after the archive is complete.
-	spool, err := newSealedSpool()
+}
+
+func readExportForm(r *http.Request, lease *scratchLease, authorize func(exportOptions) error) (*exportForm, error) {
+	reader, err := r.MultipartReader()
 	if err != nil {
-		respond(w, nil, err)
-		return
+		return nil, apiErr(400, "BAD_REQUEST", "Expected multipart form data")
 	}
-	defer spool.Close()
-	err = h.writeBackup(r.Context(), p, key, in, spool)
-	if err == nil {
-		err = spool.Finish()
-	}
+	spool, err := lease.create()
 	if err != nil {
-		respond(w, nil, err)
-		return
+		return nil, err
 	}
-	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Disposition", `attachment; filename="tinfoil-backup.zip"`)
-	io.Copy(w, io.NewSectionReader(spool, 0, spool.Size()))
-}
-func (h *harness) claudeProjects(ctx context.Context, p *principal, key contentKey, projectID string) ([]object, error) {
-	projects := []object{}
-	total := 0
-	err := h.eachRow(ctx, p, key, "project", "", func(row *storedRow) error {
-		if projectID != "" && row.ID != projectID {
-			return nil
+	form := &exportForm{spool: spool, originals: map[string]spooledPart{}}
+	hasOptions, ids := false, map[string]bool{}
+	for count := 0; ; count++ {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
 		}
-		docs, err := h.projectDocuments(ctx, p, key, row.ID)
-		if err != nil {
-			return err
+		if err != nil || count >= maxExportParts {
+			return nil, formError(err)
 		}
-		documents := []object{}
-		for _, doc := range docs {
-			d := asObject(doc)
-			documents = append(documents, object{"uuid": d["id"], "filename": d["filename"], "content": d["content"], "created_at": d["createdAt"]})
+		switch part.FormName() {
+		case "options":
+			if hasOptions {
+				return nil, apiErr(400, "BAD_REQUEST", "Duplicate multipart field")
+			}
+			hasOptions = true
+			if err := decodeFormField(part, &form.options); err != nil {
+				return nil, err
+			}
+			if err := authorize(form.options); err != nil {
+				return nil, err
+			}
+		case "thread":
+			if !hasOptions {
+				return nil, apiErr(400, "BAD_REQUEST", "options must precede the chats")
+			}
+			data, err := io.ReadAll(io.LimitReader(part, maxTurnBody+1))
+			if err != nil {
+				return nil, formError(err)
+			}
+			if len(data) > maxTurnBody {
+				return nil, apiErr(413, "PAYLOAD_TOO_LARGE", "A chat exceeds the size limit")
+			}
+			if !isObject(data) {
+				return nil, apiErr(400, "BAD_REQUEST", "Each thread must be an object")
+			}
+			var named idRequest
+			json.Unmarshal(data, &named)
+			if err := named.validate(); err != nil {
+				return nil, err
+			}
+			if err := validateLocalThread(data); err != nil {
+				return nil, err
+			}
+			if ids[named.ID] {
+				return nil, apiErr(400, "BAD_REQUEST", "Each thread is sent once")
+			}
+			ids[named.ID] = true
+			spooled, err := form.spoolPart(bytes.NewReader(data))
+			if err != nil {
+				return nil, err
+			}
+			form.threads = append(form.threads, spooled)
+		case "file":
+			if !hasOptions {
+				return nil, apiErr(400, "BAD_REQUEST", "options must precede the files")
+			}
+			id := part.FileName()
+			if err := requireID("file name", id); err != nil {
+				return nil, err
+			}
+			if _, ok := form.originals[id]; ok {
+				return nil, apiErr(400, "BAD_REQUEST", "Each file is sent once")
+			}
+			spooled, err := form.spoolPart(io.LimitReader(part, int64(imageUploads.MaxBytes)+1))
+			if err != nil {
+				return nil, err
+			}
+			if spooled.size > int64(imageUploads.MaxBytes) {
+				return nil, apiErr(413, "ATTACHMENT_TOO_LARGE", "A file exceeds the size limit")
+			}
+			form.originals[id] = spooled
+		default:
+			return nil, apiErr(400, "BAD_REQUEST", "Unknown multipart field: "+part.FormName())
 		}
-		data := asObject(readProject(row))
-		project := object{"uuid": row.ID, "name": data["name"], "description": data["description"], "prompt_template": data["systemInstructions"], "created_at": data["createdAt"], "updated_at": data["updatedAt"], "docs": documents}
-		total += len(raw(project))
-		if total > 64<<20 {
-			return apiErr(413, "ATTACHMENT_TOO_LARGE", "The project export exceeds 64 MiB")
-		}
-		projects = append(projects, project)
-		return nil
-	})
-	return projects, err
-}
-func backupPath(kind, id string) string {
-	return kind + "/id-" + hex.EncodeToString([]byte(id)) + ".json"
-}
-func hashHex(data []byte) string { d := sha256.Sum256(data); return hex.EncodeToString(d[:]) }
-
-type backupWriter struct {
-	zip       *zip.Writer
-	files     []object
-	counts    object
-	total     int64
-	omissions []any
-}
-
-// An attachment whose blob sync no longer holds is listed as omitted instead
-// of failing the whole backup.
-func (b *backupWriter) omit(chatID, sourceID string) {
-	b.omissions = append(b.omissions, object{"kind": "attachment", "source_id": sourceID, "parent_source_id": chatID, "category": "unavailable", "reason": "attachment_not_found"})
-}
-
-func (b *backupWriter) omitRow(kind, id string) {
-	b.omissions = append(b.omissions, object{"kind": kind, "source_id": id, "category": "invalid", "reason": "row_unreadable"})
-}
-
-func (b *backupWriter) add(kind, path string, value any) error {
-	return b.bytes(kind, path, raw(value))
-}
-func (b *backupWriter) bytes(kind, path string, data []byte) error {
-	b.total += int64(len(data))
-	if b.total > 1<<30 || len(b.files) >= 50000 {
-		return apiErr(413, "ATTACHMENT_TOO_LARGE", "The backup exceeds the archive limits")
+		part.Close()
 	}
-	header := &zip.FileHeader{Name: path, Method: zip.Deflate}
-	header.SetModTime(time.Date(1980, 1, 1, 0, 0, 0, 0, time.UTC))
-	writer, err := b.zip.CreateHeader(header)
+	if !hasOptions {
+		return nil, apiErr(400, "BAD_REQUEST", "options are required")
+	}
+	return form, nil
+}
+
+func (f *exportForm) spoolPart(r io.Reader) (spooledPart, error) {
+	offset := f.spool.Size()
+	n, err := io.Copy(f.spool, r)
 	if err != nil {
+		return spooledPart{}, formError(err)
+	}
+	return spooledPart{offset: offset, size: n}, nil
+}
+
+func (f *exportForm) read(part spooledPart) ([]byte, error) {
+	return io.ReadAll(f.spool.section(part.offset, part.size))
+}
+
+// thread reads one of the request's device chats.
+func (f *exportForm) thread(i int) (Thread, error) {
+	data, err := f.read(f.threads[i])
+	if err != nil {
+		return Thread{}, err
+	}
+	var named idRequest
+	json.Unmarshal(data, &named)
+	return readDeviceThread(named.ID, data), nil
+}
+
+// deviceImage is a device chat image's bytes: the original its client
+// sent, or the copy the chat holds.
+func (f *exportForm) deviceImage(a *Attachment) ([]byte, error) {
+	if part, ok := f.originals[a.ID]; ok {
+		return f.read(part)
+	}
+	if a.Base64 == "" {
+		return nil, errAttachmentMissing
+	}
+	data, err := base64.StdEncoding.DecodeString(a.Base64)
+	if err != nil {
+		return nil, errAttachmentMissing
+	}
+	return data, nil
+}
+
+// noDocument is a device chat's document, which holds whatever content it has.
+func noDocument(*Attachment) error { return errAttachmentMissing }
+
+// cloudImage is a stored image's bytes; one sync no longer holds is missing.
+func (h *harness) cloudImage(ctx context.Context, p *principal) func(*Attachment) ([]byte, error) {
+	return func(a *Attachment) ([]byte, error) {
+		if a.Base64 == "" && a.storageKey() == "" {
+			return nil, errAttachmentMissing
+		}
+		data, err := h.attachmentBytes(ctx, p, a, false)
+		if unreachable(err) {
+			return nil, errAttachmentMissing
+		}
+		return data, err
+	}
+}
+
+func (h *harness) cloudDocument(ctx context.Context, p *principal) func(*Attachment) error {
+	return func(a *Attachment) error {
+		err := h.inflateDocument(ctx, p, a)
+		if unreachable(err) {
+			return errAttachmentMissing
+		}
 		return err
 	}
-	if _, err := writer.Write(data); err != nil {
-		return err
+}
+
+func missing(err error) bool { return err == errAttachmentMissing }
+
+// streamArchive answers with an archive as it is written. A failure before
+// its first bytes is answered as an error; one after cuts the response,
+// so the client never keeps a partial archive.
+func streamArchive(w http.ResponseWriter, name string, write func(io.Writer) error) {
+	out := &archiveResponse{w: w, name: name}
+	if err := write(out); err != nil {
+		if !out.started {
+			respond(w, nil, err)
+			return
+		}
+		panic(http.ErrAbortHandler)
 	}
-	b.files = append(b.files, object{"path": path, "kind": kind, "sha256": hashHex(data), "size_bytes": len(data)})
-	return nil
 }
 
-// asObject is a record as the archive reads it.
-func asObject(v any) object {
-	var out object
-	json.Unmarshal(raw(v), &out)
-	return out
+type archiveResponse struct {
+	w       http.ResponseWriter
+	name    string
+	started bool
 }
 
-// archiveAttachment is the archive's copy of an attachment as the store reads it.
-func archiveAttachment(a object) *Attachment {
-	var stored Attachment
-	json.Unmarshal(raw(a), &stored)
-	return &stored
-}
-
-func selectFields(data object, fields string) object {
-	out := object{}
-	for _, field := range strings.Fields(fields) {
-		if v, ok := data[field]; ok && v != nil {
-			out[field] = v
-		}
+func (a *archiveResponse) Write(p []byte) (int, error) {
+	if !a.started {
+		a.started = true
+		a.w.Header().Set("Content-Type", "application/zip")
+		a.w.Header().Set("Cache-Control", "no-store")
+		a.w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": a.name}))
+		a.w.WriteHeader(http.StatusOK)
 	}
-	return out
+	return a.w.Write(p)
 }
-func (h *harness) writeBackup(ctx context.Context, p *principal, key contentKey, in object, output io.Writer) error {
-	b := &backupWriter{zip: zip.NewWriter(output), counts: object{"projects": 0, "project_documents": 0, "cloud_chats": 0, "local_chats": 0, "relationships": 0, "images": 0, "files": 0}}
-	relationships := object{"projectChats": []any{}, "projectDocuments": []any{}, "chatImages": []any{}}
-	selectedProjects := map[string]bool{}
-	projectID := str(in["projectId"])
-	err := h.eachRowOrUnreadable(ctx, p, key, "project", "", func(row *storedRow) error {
-		if projectID != "" && row.ID != projectID {
-			return nil
-		}
-		project := selectFields(asObject(readProject(row)), "name description systemInstructions color memory createdAt updatedAt")
-		project["id"] = row.ID
-		if project["memory"] == nil {
-			project["memory"] = []any{}
-		}
-		selectedProjects[row.ID] = true
-		if err := b.add("projects", backupPath("projects", row.ID), project); err != nil {
-			return err
-		}
-		b.counts["projects"] = integer(b.counts["projects"]) + 1
-		docs, err := h.projectDocuments(ctx, p, key, row.ID)
-		if err != nil {
-			return err
-		}
-		for _, document := range docs {
-			d := asObject(document)
-			doc := selectFields(d, "id projectId filename contentType sizeBytes createdAt updatedAt")
-			doc["extractedText"] = str(d["content"])
-			path := "project_documents/id-" + hex.EncodeToString([]byte(row.ID)) + "/id-" + hex.EncodeToString([]byte(str(d["id"]))) + ".json"
-			if err := b.add("project_documents", path, doc); err != nil {
+
+// writeBackup writes a native backup: the cloud's projects, documents and
+// chats when the key is given, then the device's chats.
+func (h *harness) writeBackup(ctx context.Context, p *principal, key *contentKey, form *exportForm, out io.Writer) error {
+	b := newBackupWriter(out)
+	rel := backupRelationships{ProjectChats: []projectChatLink{}, ProjectDocuments: []projectDocumentLink{}, ChatImages: []chatImageLink{}}
+	cloudChats := map[string]bool{}
+	if key != nil {
+		projects := map[string]bool{}
+		err := h.eachRowOrUnreadable(ctx, p, *key, "project", "", func(row *storedRow) error {
+			project := readProject(row)
+			if err := b.addJSON("projects", backupEntityPath("projects", project.ID), project); err != nil {
 				return err
 			}
-			b.counts["project_documents"] = integer(b.counts["project_documents"]) + 1
-			relationships["projectDocuments"] = append(arr(relationships["projectDocuments"]), object{"projectId": row.ID, "documentId": d["id"]})
+			b.manifest.Counts.Projects++
+			projects[project.ID] = true
+			docs, err := h.projectDocuments(ctx, p, *key, project.ID)
+			if err != nil {
+				return err
+			}
+			for _, doc := range docs {
+				entry := backupDocument{ID: doc.ID, ProjectID: project.ID, Filename: doc.Filename, ContentType: doc.ContentType, SizeBytes: doc.SizeBytes, ExtractedText: doc.Content, CreatedAt: looseTime(doc.CreatedAt), UpdatedAt: looseTime(doc.UpdatedAt)}
+				if err := b.addJSON("project_documents", backupDocumentPath(project.ID, doc.ID), entry); err != nil {
+					return err
+				}
+				b.manifest.Counts.ProjectDocuments++
+				rel.ProjectDocuments = append(rel.ProjectDocuments, projectDocumentLink{project.ID, doc.ID})
+			}
+			return nil
+		}, func(id string) {
+			b.omit(backupOmission{Kind: "project", SourceID: id, Category: "invalid", Reason: "row_unreadable"})
+		})
+		if err != nil {
+			return err
 		}
-		return nil
-	}, func(id string) {
-		if projectID == "" || id == projectID {
-			b.omitRow("project", id)
+		err = h.eachRowOrUnreadable(ctx, p, *key, "chat", "", func(row *storedRow) error {
+			t := readThreadRow(row).Thread
+			cloudChats[t.ID] = true
+			if project := valueOr(t.ProjectID, ""); project != "" {
+				if projects[project] {
+					rel.ProjectChats = append(rel.ProjectChats, projectChatLink{project, t.ID})
+				} else {
+					t.ProjectID = nil
+					b.omit(backupOmission{Kind: "relationship", SourceID: t.ID, ParentSourceID: project, Category: "unavailable", Reason: "project_reference_unavailable"})
+				}
+			}
+			return backupChat(b, &rel, "cloud_chats", &t, h.cloudImage(ctx, p), h.cloudDocument(ctx, p))
+		}, func(id string) {
+			b.omit(backupOmission{Kind: "cloud_chat", SourceID: id, Category: "invalid", Reason: "row_unreadable"})
+		})
+		if err != nil {
+			return err
 		}
-	})
-	if err != nil {
+	}
+	for i := range form.threads {
+		t, err := form.thread(i)
+		if err != nil {
+			return err
+		}
+		// A chat moved to the cloud whose device copy remains is kept once.
+		if cloudChats[t.ID] {
+			b.omit(backupOmission{Kind: "local_chat", SourceID: t.ID, Category: "invalid", Reason: "duplicate_chat_id"})
+			continue
+		}
+		if err := backupChat(b, &rel, "local_chats", &t, form.deviceImage, noDocument); err != nil {
+			return err
+		}
+	}
+	if err := b.addJSON("relationships", relationshipsPath, rel); err != nil {
 		return err
 	}
-	ids := map[string]bool{}
-	for _, id := range arr(in["threadIds"]) {
-		ids[str(id)] = true
+	b.manifest.Counts.Relationships = rel.count()
+	return b.close(uuid.NewString(), nowUTC())
+}
+
+// backupChat writes a chat with each of its images beside it. An image or
+// document whose content cannot be read is left out and listed as omitted.
+func backupChat(b *backupWriter, rel *backupRelationships, kind string, t *Thread, image func(*Attachment) ([]byte, error), document func(*Attachment) error) error {
+	entry := backupThread{Thread: *t, Messages: make([]backupMessage, 0, len(t.Messages))}
+	entry.ActiveRun, entry.LastRequestID, entry.LastRequestKind, entry.Flagged, entry.HiddenCount = nil, "", "", false, 0
+	omit := func(id string) {
+		b.omit(backupOmission{Kind: "attachment", SourceID: id, ParentSourceID: t.ID, Category: "unavailable", Reason: "attachment_not_found"})
 	}
-	err = h.eachRowOrUnreadable(ctx, p, key, "chat", projectID, func(row *storedRow) error {
-		if len(ids) > 0 && !ids[row.ID] {
-			return nil
+	addImage := func(meta backupImage, data []byte) error {
+		meta.MimeType, meta.SizeBytes = http.DetectContentType(data), new(int64(len(data)))
+		if err := b.addJSON("images", backupImagePath(meta.ID, ".json"), meta); err != nil {
+			return err
 		}
-		t := asObject(readThreadRow(row).Thread)
-		chat := selectFields(t, "id title titleState createdAt updatedAt projectId presetId model webSearchEnabled")
-		if project := str(chat["projectId"]); project != "" {
-			if selectedProjects[project] {
-				relationships["projectChats"] = append(arr(relationships["projectChats"]), object{"projectId": project, "chatId": row.ID})
-			} else {
-				chat["projectId"] = nil
-			}
+		if err := b.add("images", backupImagePath(meta.ID, ".bin"), data); err != nil {
+			return err
 		}
-		messages := []any{}
-		for index, item := range arr(t["messages"]) {
-			m := obj(item)
-			message := selectFields(m, "role content turnId modelDisplayName thoughts thinkingDuration isError quote webSearch urlFetches codeExecCalls annotations searchReasoning webSearchBeforeThinking")
-			message["timestamp"] = firstString(m["createdAt"], m["timestamp"], t["createdAt"])
-			message["content"] = str(m["content"])
-			blocks := []any{}
-			for _, item := range arr(m["timeline"]) {
-				block := obj(item)
-				switch block["type"] {
-				case "content":
-					blocks = append(blocks, selectFields(block, "type id content"))
-				case "thinking":
-					copy := selectFields(block, "type id content duration")
-					copy["isThinking"] = false
-					blocks = append(blocks, copy)
-				case "tool_call":
-					if result, exists := block["result"]; exists && (!strings.HasPrefix(str(block["name"]), "render_") || block["name"] == "render_link_preview") {
-						// Native v2 has no result field on tool_call. Its existing
-						// code_exec output string carries the typed result losslessly.
-						arguments := obj(decodeValue([]byte(str(block["arguments"]))))
-						call := object{"id": firstString(block["toolCallId"], block["id"]), "toolName": block["name"], "arguments": arguments, "status": "completed", "output": string(raw(result))}
-						blocks = append(blocks, object{"type": "code_exec", "id": block["id"], "calls": []any{call}})
-						continue
-					}
-					blocks = append(blocks, selectFields(block, "type id toolCallId name arguments"))
+		b.manifest.Counts.Images++
+		rel.ChatImages = append(rel.ChatImages, chatImageLink{t.ID, meta.ID})
+		return nil
+	}
+	for i, m := range t.Messages {
+		message := backupMessage{Message: m}
+		for j, a := range m.Attachments {
+			id := fmt.Sprintf("%s/%d/%d", t.ID, i, j)
+			if !a.isImage() && !a.hasContent() && a.storageKey() != "" {
+				if err := document(&a); missing(err) {
+					omit(id)
+					continue
+				} else if err != nil {
+					return err
 				}
 			}
-			if len(blocks) > 0 {
-				message["timeline"] = blocks
-			}
-			attachments := []any{}
-			for _, item := range arr(m["attachments"]) {
-				a := obj(item)
-				if stored := archiveAttachment(a); !stored.isImage() && !stored.hasContent() && stored.storageKey() != "" {
-					if err := h.inflateDocument(ctx, p, stored); err != nil {
-						if !unreachable(err) {
-							return err
-						}
-						b.omit(row.ID, str(a["id"]))
-						continue
-					}
-					a = asObject(stored)
-				}
-				if !archiveAttachment(a).isImage() {
-					document := selectFields(a, "id fileName mimeType textContent description")
-					document["type"] = "document"
-					if size, ok := a["size"]; ok {
-						document["fileSize"] = size
-					}
-					pages := []any{}
-					for _, value := range arr(a["pages"]) {
-						page := obj(value)
-						portable := object{"page": integer(page["page"]), "text": str(page["text"]), "is_scanned": boolean(page["is_scanned"], false)}
-						if image := str(page["image"]); image != "" {
-							imageRef := object{"base64": image, "mimeType": "image/png", "fileName": firstString(a["fileName"], "page") + ".png"}
-							imageID, err := h.backupImage(ctx, p, b, relationships, row.ID, index, a, imageRef, page["page"])
-							if err != nil {
-								return err
-							}
-							portable["imageId"] = imageID
-						}
-						pages = append(pages, portable)
-					}
-					if len(pages) > 0 {
-						document["pages"] = pages
-					}
-					attachments = append(attachments, document)
-					continue
-				}
-				if str(a["base64"]) == "" && archiveAttachment(a).storageKey() == "" {
-					// Only its thumbnail was kept, so the image itself is missing.
-					b.omit(row.ID, str(a["id"]))
-					continue
-				}
-				imageID, err := h.backupImage(ctx, p, b, relationships, row.ID, index, a, a, nil)
-				if unreachable(err) {
-					b.omit(row.ID, str(a["id"]))
+			attachment := backupAttachment{Attachment: a}
+			attachment.Base64, attachment.EncryptionKey, attachment.Key, attachment.StorageThreadID, attachment.Attachment.Pages = "", "", "", "", nil
+			if a.isImage() {
+				data, err := image(&a)
+				if missing(err) {
+					omit(id)
 					continue
 				}
 				if err != nil {
 					return err
 				}
-				attachments = append(attachments, object{"type": "image", "id": a["id"], "imageId": imageID})
+				if err := addImage(backupImage{ID: id, ChatID: t.ID, MessageIndex: i, AttachmentID: a.ID, FileName: cmp.Or(a.FileName, "image"), Description: a.Description}, data); err != nil {
+					return err
+				}
+				attachment.ImageID = id
 			}
-			if len(attachments) > 0 {
-				message["attachments"] = attachments
+			for k, page := range a.Pages {
+				shown := backupPage{Page: page.Page, Text: page.Text, IsScanned: page.IsScanned}
+				if page.Image != "" {
+					pageID := fmt.Sprintf("%s/page/%d", id, k)
+					_, encoded, found := strings.Cut(page.Image, ",")
+					if !found || !strings.HasPrefix(page.Image, "data:") {
+						encoded = page.Image
+					}
+					data, err := base64.StdEncoding.DecodeString(encoded)
+					if err != nil {
+						omit(pageID)
+					} else if err := addImage(backupImage{ID: pageID, ChatID: t.ID, MessageIndex: i, AttachmentID: a.ID, Page: new(page.Page), FileName: fmt.Sprintf("%s-page-%d.jpg", a.ID, page.Page)}, data); err != nil {
+						return err
+					} else {
+						shown.ImageID = pageID
+					}
+				}
+				attachment.Pages = append(attachment.Pages, shown)
 			}
-			messages = append(messages, message)
+			message.Attachments = append(message.Attachments, attachment)
 		}
-		chat["messages"] = messages
-		if err := b.add("cloud_chats", backupPath("cloud_chats", row.ID), chat); err != nil {
-			return err
-		}
-		b.counts["cloud_chats"] = integer(b.counts["cloud_chats"]) + 1
-		return nil
-	}, func(id string) {
-		if len(ids) == 0 || ids[id] {
-			b.omitRow("cloud_chat", id)
-		}
-	})
-	if err != nil {
+		entry.Messages = append(entry.Messages, message)
+	}
+	if err := b.addJSON(kind, backupEntityPath(kind, t.ID), entry); err != nil {
 		return err
 	}
-	if err := b.add("relationships", "relationships.json", relationships); err != nil {
-		return err
-	}
-	b.counts["relationships"] = len(arr(relationships["projectChats"])) + len(arr(relationships["projectDocuments"])) + len(arr(relationships["chatImages"]))
-	b.counts["files"] = len(b.files)
-	warnings := []any{}
-	if len(b.omissions) > 0 {
-		warnings = append(warnings, object{"code": "source_items_omitted", "category": "source_coverage", "count": len(b.omissions)})
+	if kind == "cloud_chats" {
+		b.manifest.Counts.CloudChats++
 	} else {
-		b.omissions = []any{}
+		b.manifest.Counts.LocalChats++
 	}
-	manifest := object{"format": "tinfoil-native-backup", "version": 2, "backup_id": uuid.NewString(), "created_at": timestamp(), "complete": len(b.omissions) == 0, "counts": b.counts, "notices": object{"contains_plaintext": true, "documents_are_extracted_text_only": true}, "files": b.files, "omissions": b.omissions, "warnings": warnings}
-	writer, err := b.zip.Create("manifest.json")
-	if err != nil {
-		return err
-	}
-	if _, err := writer.Write(raw(manifest)); err != nil {
-		return err
-	}
-	return b.zip.Close()
+	return nil
 }
 
-func (h *harness) backupImage(ctx context.Context, p *principal, b *backupWriter, relationships object, chatID string, index int, attachment, descriptor object, page any) (string, error) {
-	data, err := h.attachmentBytes(ctx, p, archiveAttachment(descriptor), false)
+// The conversations export is Claude's conversation format with Tinfoil's
+// attachments, as the web app wrote it: conversations.json, each image's
+// bytes under attachments/, and a manifest of them.
+
+type exportConversation struct {
+	UUID         string          `json:"uuid"`
+	Name         string          `json:"name"`
+	CreatedAt    string          `json:"created_at"`
+	UpdatedAt    string          `json:"updated_at"`
+	ProjectID    string          `json:"projectId,omitempty"`
+	ChatMessages []exportMessage `json:"chat_messages"`
+}
+
+type exportMessage struct {
+	UUID        string             `json:"uuid"`
+	Text        string             `json:"text"`
+	Sender      string             `json:"sender"`
+	CreatedAt   string             `json:"created_at"`
+	Content     []exportThinking   `json:"content,omitempty"`
+	Attachments []exportAttachment `json:"attachments,omitempty"`
+}
+
+type exportThinking struct {
+	Type     string `json:"type"`
+	Thinking string `json:"thinking"`
+}
+
+type exportAttachment struct {
+	ID          string `json:"id"`
+	Type        string `json:"type"`
+	FileName    string `json:"fileName"`
+	MimeType    string `json:"mimeType,omitempty"`
+	FileSize    *int64 `json:"fileSize,omitempty"`
+	ExportPath  string `json:"exportPath,omitempty"`
+	TextContent string `json:"textContent,omitempty"`
+}
+
+type conversationsManifest struct {
+	Version         int            `json:"version"`
+	CreatedAt       string         `json:"created_at"`
+	ChatCount       int            `json:"chat_count"`
+	AttachmentCount int            `json:"attachment_count"`
+	Attachments     []exportedFile `json:"attachments"`
+	Warnings        []string       `json:"warnings"`
+}
+
+type exportedFile struct {
+	ExportPath string `json:"exportPath"`
+	SHA256     string `json:"sha256"`
+	FileSize   int    `json:"fileSize"`
+}
+
+// conversationsExport writes images as it meets them and collects the
+// conversations in scratch space, to write them once all are read.
+type conversationsExport struct {
+	zip           *zip.Writer
+	conversations *scratchFile
+	used          map[string]bool
+	manifest      conversationsManifest
+}
+
+func (h *harness) writeConversations(ctx context.Context, p *principal, key *contentKey, form *exportForm, lease *scratchLease, out io.Writer) error {
+	text, err := lease.create()
 	if err != nil {
-		return "", err
+		return err
 	}
-	defer clear(data)
-	contentType := firstString(descriptor["mimeType"], http.DetectContentType(data))
-	switch contentType {
-	case "image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp":
-	default:
-		im, _, err := image.Decode(bytes.NewReader(data))
+	e := &conversationsExport{zip: zip.NewWriter(out), conversations: text, used: map[string]bool{}, manifest: conversationsManifest{Version: 1, Attachments: []exportedFile{}, Warnings: []string{}}}
+	device := map[string]bool{}
+	for i := range form.threads {
+		t, err := form.thread(i)
 		if err != nil {
-			return "", err
+			return err
 		}
-		var converted bytes.Buffer
-		if err := png.Encode(&converted, im); err != nil {
-			return "", err
+		device[t.ID] = true
+		if err := e.chat(&t, "", form.deviceImage, noDocument); err != nil {
+			return err
 		}
-		data = converted.Bytes()
-		defer clear(data)
-		contentType = "image/png"
 	}
-	imageID := chatID + "/" + strconv.Itoa(index) + "/" + strconv.Itoa(integer(b.counts["images"]))
-	meta := object{"id": imageID, "chatId": chatID, "messageIndex": index, "attachmentId": attachment["id"], "fileName": firstString(descriptor["fileName"], "image"), "mimeType": contentType, "sizeBytes": len(data)}
-	if page != nil {
-		meta["page"] = integer(page)
+	if key != nil {
+		err := h.eachRow(ctx, p, *key, "chat", "", func(row *storedRow) error {
+			t := readThreadRow(row).Thread
+			if device[t.ID] {
+				return nil
+			}
+			return e.chat(&t, valueOr(t.ProjectID, ""), h.cloudImage(ctx, p), h.cloudDocument(ctx, p))
+		})
+		if err != nil {
+			return err
+		}
 	}
-	if text := str(descriptor["description"]); text != "" {
-		meta["description"] = text
+	end := "\n]"
+	if e.manifest.ChatCount == 0 {
+		end = "[]"
 	}
-	name := strings.TrimSuffix(backupPath("images", imageID), ".json")
-	if err := b.add("images", name+".json", meta); err != nil {
-		return "", err
+	if _, err := io.WriteString(text, end); err != nil {
+		return err
 	}
-	if err := b.bytes("images", name+".bin", data); err != nil {
-		return "", err
+	w, err := e.zip.CreateHeader(&zip.FileHeader{Name: "conversations.json", Method: zip.Deflate, Modified: nowUTC()})
+	if err != nil {
+		return err
 	}
-	b.counts["images"] = integer(b.counts["images"]) + 1
-	relationships["chatImages"] = append(arr(relationships["chatImages"]), object{"chatId": chatID, "imageId": imageID})
-	return imageID, nil
+	if _, err := io.Copy(w, text.section(0, text.Size())); err != nil {
+		return err
+	}
+	e.manifest.CreatedAt = archiveTime(nowUTC())
+	e.manifest.AttachmentCount = len(e.manifest.Attachments)
+	manifest, err := indentedJSON(e.manifest, "")
+	if err != nil {
+		return err
+	}
+	if err := writeEntry(e.zip, manifestPath, manifest, true); err != nil {
+		return err
+	}
+	return e.zip.Close()
+}
+
+// indentedJSON is a value as JSON.stringify(value, null, 2) writes it,
+// each line after the first prefixed.
+func indentedJSON(v any, prefix string) ([]byte, error) {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent(prefix, "  ")
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(b.Bytes(), []byte("\n")), nil
+}
+
+func (e *conversationsExport) chat(t *Thread, projectID string, image func(*Attachment) ([]byte, error), document func(*Attachment) error) error {
+	c := exportConversation{UUID: t.ID, Name: t.Title, CreatedAt: exportTime(t.CreatedAt, t.UpdatedAt), UpdatedAt: exportTime(t.UpdatedAt, t.CreatedAt), ProjectID: projectID, ChatMessages: []exportMessage{}}
+	for index, m := range t.Messages {
+		sender := "assistant"
+		if m.Role == "user" {
+			sender = "human"
+		}
+		message := exportMessage{UUID: fmt.Sprintf("%s_msg_%d", t.ID, index), Text: m.Content, Sender: sender, CreatedAt: exportTime(m.CreatedAt, t.CreatedAt)}
+		if m.Role == "assistant" {
+			message.Text = cmp.Or(m.Content, timelineText(m.Timeline, "content"))
+			if thoughts := timelineText(m.Timeline, "thinking"); thoughts != "" {
+				message.Content = []exportThinking{{Type: "thinking", Thinking: thoughts}}
+			}
+		}
+		for _, a := range m.Attachments {
+			exported, err := e.attachment(a, image, document)
+			if err != nil {
+				return err
+			}
+			message.Attachments = append(message.Attachments, exported)
+		}
+		c.ChatMessages = append(c.ChatMessages, message)
+	}
+	encoded, err := indentedJSON(c, "  ")
+	if err != nil {
+		return err
+	}
+	separator := ",\n  "
+	if e.manifest.ChatCount == 0 {
+		separator = "[\n  "
+	}
+	e.manifest.ChatCount++
+	if _, err := io.WriteString(e.conversations, separator); err != nil {
+		return err
+	}
+	_, err = e.conversations.Write(encoded)
+	return err
+}
+
+func (e *conversationsExport) attachment(a Attachment, image func(*Attachment) ([]byte, error), document func(*Attachment) error) (exportAttachment, error) {
+	if !a.isImage() {
+		if !a.hasContent() {
+			if err := document(&a); missing(err) {
+				e.manifest.Warnings = append(e.manifest.Warnings, "Could not fetch document "+a.ID)
+			} else if err != nil {
+				return exportAttachment{}, err
+			}
+		}
+		return exportAttachment{ID: a.ID, Type: "document", FileName: a.FileName, MimeType: a.MimeType, FileSize: a.Size, TextContent: exportDocumentText(a.TextContent, a.Pages)}, nil
+	}
+	safeID := sanitizeFilename(a.ID, "attachment")
+	safeName := sanitizeFilename(a.FileName, safeID+".bin")
+	exportPath := e.uniquePath(safeID, safeName)
+	exported := exportAttachment{ID: a.ID, Type: "image", FileName: safeName, MimeType: a.MimeType, FileSize: a.Size}
+	data, err := image(&a)
+	if missing(err) {
+		e.manifest.Warnings = append(e.manifest.Warnings, "Could not fetch attachment "+a.ID)
+		return exported, nil
+	}
+	if err != nil {
+		return exportAttachment{}, err
+	}
+	if err := writeEntry(e.zip, exportPath, data, false); err != nil {
+		return exportAttachment{}, err
+	}
+	exported.ExportPath, exported.FileSize = exportPath, new(int64(len(data)))
+	e.manifest.Attachments = append(e.manifest.Attachments, exportedFile{ExportPath: exportPath, SHA256: hashHex(data), FileSize: len(data)})
+	return exported, nil
+}
+
+// uniquePath is where an image is written, numbered past any image of the
+// same id and name before it.
+func (e *conversationsExport) uniquePath(safeID, safeName string) string {
+	base := "attachments/" + safeID + "/" + safeName
+	if !e.used[base] {
+		e.used[base] = true
+		return base
+	}
+	root, extension := safeName, ""
+	if dot := strings.LastIndex(safeName, "."); dot > 0 {
+		root, extension = safeName[:dot], safeName[dot:]
+	}
+	for suffix := 2; ; suffix++ {
+		candidate := fmt.Sprintf("attachments/%s/%s-%d%s", safeID, root, suffix, extension)
+		if !e.used[candidate] {
+			e.used[candidate] = true
+			return candidate
+		}
+	}
+}
+
+// sanitizeFilename is a name made safe as one archive path segment, as the
+// web app made it: its last segment, with every character outside a small
+// set, counted in UTF-16 units, replaced.
+func sanitizeFilename(name, fallback string) string {
+	return cmp.Or(cleanFilename(name), cleanFilename(fallback), "file")
+}
+
+func cleanFilename(name string) string {
+	if i := strings.LastIndexAny(name, `/\`); i >= 0 {
+		name = name[i+1:]
+	}
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r < 0x20 || r == 0x7f:
+		case r < 0x80 && (r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("._ ()+-", r)):
+			b.WriteRune(r)
+		case r > 0xffff:
+			b.WriteString("__")
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return strings.Trim(strings.TrimLeft(b.String(), "."), " ")
+}
+
+// exportDocumentText is a document's text, or its pages' when it has none.
+func exportDocumentText(text string, pages []DocumentPage) string {
+	if strings.TrimSpace(text) != "" {
+		return text
+	}
+	var parts []string
+	for _, page := range pages {
+		if strings.TrimSpace(page.Text) != "" {
+			parts = append(parts, page.Text)
+		}
+	}
+	joined := strings.Join(parts, "\n\n---\n\n")
+	if strings.TrimSpace(joined) == "" {
+		return ""
+	}
+	return joined
+}
+
+// timelineText joins the text of a reply's blocks of one type.
+func timelineText(timeline []Block, kind string) string {
+	var b strings.Builder
+	for _, block := range timeline {
+		if block.Type == kind {
+			b.WriteString(block.Content)
+		}
+	}
+	return b.String()
+}
+
+// exportTime is the first time given that parses, written as JavaScript
+// writes a date, or the epoch when none does.
+func exportTime(values ...string) string {
+	for _, value := range values {
+		if t, err := time.Parse(time.RFC3339Nano, value); err == nil {
+			return archiveTime(t)
+		}
+	}
+	return archiveTime(time.UnixMilli(0))
+}
+
+// claudeProject is a project in Claude's export format, with its
+// documents' text.
+type claudeProject struct {
+	UUID           string           `json:"uuid"`
+	Name           string           `json:"name"`
+	Description    string           `json:"description"`
+	PromptTemplate string           `json:"prompt_template"`
+	CreatedAt      string           `json:"created_at"`
+	UpdatedAt      string           `json:"updated_at"`
+	Docs           []claudeDocument `json:"docs"`
+}
+
+type claudeDocument struct {
+	UUID      string `json:"uuid"`
+	Filename  string `json:"filename"`
+	Content   string `json:"content"`
+	CreatedAt string `json:"created_at"`
+}
+
+func (h *harness) claudeProjects(ctx context.Context, p *principal, key contentKey) ([]claudeProject, error) {
+	projects := []claudeProject{}
+	total := 0
+	err := h.eachRow(ctx, p, key, "project", "", func(row *storedRow) error {
+		docs, err := h.projectDocuments(ctx, p, key, row.ID)
+		if err != nil {
+			return err
+		}
+		project := readProject(row)
+		exported := claudeProject{UUID: project.ID, Name: project.Name, Description: project.Description, PromptTemplate: project.SystemInstructions, CreatedAt: project.CreatedAt, UpdatedAt: project.UpdatedAt, Docs: []claudeDocument{}}
+		for _, doc := range docs {
+			exported.Docs = append(exported.Docs, claudeDocument{UUID: doc.ID, Filename: doc.Filename, Content: doc.Content, CreatedAt: doc.CreatedAt})
+		}
+		if total += len(raw(exported)); total > maxProjectsExport {
+			return apiErr(413, "ATTACHMENT_TOO_LARGE", "The project export exceeds 64 MiB")
+		}
+		projects = append(projects, exported)
+		return nil
+	})
+	return projects, err
 }

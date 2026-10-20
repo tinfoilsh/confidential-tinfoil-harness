@@ -18,6 +18,9 @@ func (h *harness) handleTurn(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, err)
 		return
 	}
+	if in.Options.Locale == "" {
+		in.Options.Locale = r.Header.Get("Accept-Language")
+	}
 	if err := in.validate(); err != nil {
 		respond(w, nil, err)
 		return

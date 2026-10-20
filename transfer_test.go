@@ -62,6 +62,105 @@ func TestTranscriptRefusesToLoseContent(t *testing.T) {
 	}
 }
 
+func TestTranscriptWaitsForALiveReply(t *testing.T) {
+	model, release := heldModel()
+	h, _, key := testChatHarness(t, model)
+	t.Cleanup(release)
+	p := &principal{ID: "alice", JWT: "clerk-alice"}
+	run, err := h.acceptTurn(context.Background(), p, key, requestOf[turnRequest](sendInput(key)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitFrame(t, run.log, "TEXT_MESSAGE_CHUNK")
+	in := object{"key": key.base64(), "threadId": run.thread.id}
+	w := postRoute(h, "/v1/threads/transcript", in, "alice")
+	if w.Code != 409 || !strings.Contains(w.Body.String(), "RUN_IN_FLIGHT") {
+		t.Fatalf("a live reply could be left behind: %d %s", w.Code, w.Body.String())
+	}
+	release()
+	<-run.finished
+	w = postRoute(h, "/v1/threads/transcript", in, "alice")
+	var out struct {
+		Thread Thread `json:"thread"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &out) != nil || len(out.Thread.Messages) != 2 || out.Thread.Messages[1].Content == "" {
+		t.Fatalf("finished reply not transferred: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestTransferDeletionPreservesRepliesStartedAfterTheCopy(t *testing.T) {
+	model, release := heldModel()
+	h, rows, key := testChatHarness(t, model)
+	t.Cleanup(release)
+	in := sendInput(key)
+	id := str(in["threadId"])
+	storedThread(rows, "alice", id)
+	copy := postRoute(h, "/v1/threads/transcript", object{"key": key.base64(), "threadId": id}, "alice")
+	var copied struct {
+		Revision string `json:"revision"`
+	}
+	if copy.Code != 200 || json.Unmarshal(copy.Body.Bytes(), &copied) != nil || copied.Revision == "" {
+		t.Fatalf("copy: %s", copy.Body.String())
+	}
+	run, err := h.acceptTurn(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, key, requestOf[turnRequest](in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitFrame(t, run.log, "TEXT_MESSAGE_CHUNK")
+	deletion := object{"key": key.base64(), "id": id, "revision": copied.Revision}
+	if w := postRoute(h, "/v1/threads/delete", deletion, "alice"); w.Code != 409 || !strings.Contains(w.Body.String(), "RUN_IN_FLIGHT") {
+		t.Fatalf("active transfer: %d %s", w.Code, w.Body.String())
+	}
+	release()
+	<-run.finished
+	if w := postRoute(h, "/v1/threads/delete", deletion, "alice"); w.Code != 409 || !strings.Contains(w.Body.String(), "REVISION_CONFLICT") {
+		t.Fatalf("stale transfer: %d %s", w.Code, w.Body.String())
+	}
+	row, err := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", id)
+	if err != nil || len(readThreadRow(row).Messages) != 4 || readThreadRow(row).Messages[3].Content == "" {
+		t.Fatalf("reply lost: %v %+v", err, row)
+	}
+	deletion["revision"] = row.ETag
+	if w := postRoute(h, "/v1/threads/delete", deletion, "alice"); w.Code != 200 {
+		t.Fatalf("fresh transfer: %d %s", w.Code, w.Body.String())
+	}
+	if _, err := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", id); asAPIError(err).HTTP != 404 {
+		t.Fatal("transferred chat remains in the cloud")
+	}
+}
+
+func TestFavoriteReturnsWithAChatMovedBackToTheCloud(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	const id = "0000000000005_favorite"
+	storedThread(rows, "alice", id)
+	profileKey := "user:alice/profile/profile"
+	rows.rows[profileKey] = storedRow{ID: "profile", ETag: "1", Data: raw(object{"pinnedChatIds": []string{id}})}
+	copy := postRoute(h, "/v1/threads/transcript", object{"key": key.base64(), "threadId": id}, "alice")
+	var copied struct {
+		Thread   Thread `json:"thread"`
+		Revision string `json:"revision"`
+	}
+	if copy.Code != 200 || json.Unmarshal(copy.Body.Bytes(), &copied) != nil || !copied.Thread.Pinned {
+		t.Fatalf("favorite copy: %d %s", copy.Code, copy.Body.String())
+	}
+	if w := postRoute(h, "/v1/threads/delete", object{"key": key.base64(), "id": id, "revision": copied.Revision}, "alice"); w.Code != 200 {
+		t.Fatalf("transfer: %s", w.Body.String())
+	}
+	if len(readProfile(rows.rows[profileKey].Data).PinnedChatIDs) != 0 {
+		t.Fatal("device chat left in the cloud favorites index")
+	}
+	if w := postRoute(h, "/v1/threads/import", object{"key": key.base64(), "threadId": id, "thread": copied.Thread}, "alice"); w.Code != 200 {
+		t.Fatalf("return to cloud: %s", w.Body.String())
+	}
+	w := postRoute(h, "/v1/threads/list", object{"key": key.base64()}, "alice")
+	var page struct {
+		Pinned []threadSummary `json:"pinned"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Pinned) != 1 || page.Pinned[0].ID != id || !page.Pinned[0].Pinned {
+		t.Fatalf("favorite not restored: %s", w.Body.String())
+	}
+}
+
 func TestImportStoresTheDeviceChatUnderItsID(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	fake := newFakeSync(t, h)
@@ -104,7 +203,8 @@ func TestImportStoresTheDeviceChatUnderItsID(t *testing.T) {
 // reads them.
 func TestImportStatusReadsAsTheClientNamesIt(t *testing.T) {
 	h, _, _ := testChatHarness(t, nil)
-	newFakeSync(t, h)
+	f := newFakeSync(t, h)
+	f.imports["job-1"] = &fakeImport{status: object{"status": "failed", "imported": 0, "failed": 1, "total": 1, "job_id": "job-1", "failure_reason": "invalid_archive", "failure_detail": "Not a zip archive"}}
 	w := postRoute(h, "/v1/import/status", object{"jobId": "job-1"}, "alice")
 	if w.Code != 200 {
 		t.Fatalf("HTTP %d: %s", w.Code, w.Body.String())

@@ -76,17 +76,36 @@ type legacyMessage struct {
 }
 
 // legacyAttachment is an attachment under the names the web and iOS apps
-// stored it with: its kind as type, and its size and thumbnail.
+// stored it with: its kind as type, and its size and thumbnail. In a backup,
+// an image and a page's image name the image the backup holds.
 type legacyAttachment struct {
 	Attachment
-	Type            string `json:"type"`
-	FileSize        *int64 `json:"fileSize"`
-	ThumbnailBase64 string `json:"thumbnailBase64"`
+	Type            string       `json:"type"`
+	FileSize        *int64       `json:"fileSize"`
+	ThumbnailBase64 string       `json:"thumbnailBase64"`
+	ImageID         string       `json:"imageId"`
+	Pages           []legacyPage `json:"pages"`
+}
+
+type legacyPage struct {
+	DocumentPage
+	ImageID string `json:"imageId"`
+}
+
+// backupImages are the images a backup holds for one chat, by the id its
+// messages name each with.
+type backupImages map[string]heldImage
+
+// heldImage is an image a backup holds, its bytes base64 encoded.
+type heldImage struct {
+	FileName, MimeType, Description string
+	Size                            int64
+	Base64                          string
 }
 
 // upgrade is the attachment in the current form. Old rows name only images
 // and documents, by type; a row the harness wrote names audio by kind too.
-func (a legacyAttachment) upgrade() Attachment {
+func (a legacyAttachment) upgrade(images backupImages) Attachment {
 	upgraded := a.Attachment
 	switch {
 	case slices.Contains(attachmentKinds, a.Kind):
@@ -99,6 +118,21 @@ func (a legacyAttachment) upgrade() Attachment {
 		upgraded.Size = a.FileSize
 	}
 	upgraded.Thumbnail = cmp.Or(upgraded.Thumbnail, a.ThumbnailBase64)
+	if a.Pages != nil {
+		upgraded.Pages = make([]DocumentPage, len(a.Pages))
+		for i, page := range a.Pages {
+			if held, ok := images[page.ImageID]; ok && page.Image == "" {
+				page.Image = held.Base64
+			}
+			upgraded.Pages[i] = page.DocumentPage
+		}
+	}
+	if held, ok := images[a.ImageID]; ok && upgraded.Base64 == "" {
+		upgraded.Base64, upgraded.Size = held.Base64, &held.Size
+		upgraded.FileName = cmp.Or(upgraded.FileName, held.FileName)
+		upgraded.MimeType = cmp.Or(held.MimeType, upgraded.MimeType)
+		upgraded.Description = cmp.Or(upgraded.Description, held.Description)
+	}
 	return upgraded
 }
 
@@ -138,6 +172,7 @@ type legacyCodeCall struct {
 type legacyImage struct {
 	Base64   string `json:"base64"`
 	MimeType string `json:"mimeType"`
+	ImageID  string `json:"imageId"`
 }
 
 // readThread reads a chat row into the thread format.
@@ -145,6 +180,16 @@ func readThread(id string, data []byte) Thread { return upgradeThread(id, data, 
 
 // upgradeThread reads a chat, dated created when it holds no date.
 func upgradeThread(id string, data []byte, created string) Thread {
+	return readThreadWith(id, data, created, nil)
+}
+
+// readBackupThread reads a chat of a backup, whose images the backup holds
+// apart from it.
+func readBackupThread(id string, data []byte, images backupImages) Thread {
+	return readThreadWith(id, data, timestamp(), images)
+}
+
+func readThreadWith(id string, data []byte, created string, images backupImages) Thread {
 	var stored legacyThread
 	readLenient(data, &stored)
 	t := stored.Thread
@@ -164,7 +209,7 @@ func upgradeThread(id string, data []byte, created string) Thread {
 		m.ID = cmp.Or(m.ID, id+"-message-"+strconv.Itoa(i))
 		m.CreatedAt = cmp.Or(m.CreatedAt, string(item.Timestamp), t.CreatedAt)
 		m.Timeline = item.timeline(m)
-		m.Attachments = item.attachments(m.ID)
+		m.Attachments = item.attachments(m.ID, images)
 		t.Messages[i] = m
 	}
 	return t
@@ -286,12 +331,12 @@ func (c legacyCodeCall) arguments() string {
 
 // attachments are a message's attachments, made from the document text and
 // image bytes the apps once kept on the message itself. Each has an id.
-func (m *legacyMessage) attachments(messageID string) []Attachment {
+func (m *legacyMessage) attachments(messageID string, images backupImages) []Attachment {
 	var attachments []Attachment
 	if m.Attachments != nil {
 		attachments = make([]Attachment, len(m.Attachments))
 		for i, a := range m.Attachments {
-			attachments[i] = a.upgrade()
+			attachments[i] = a.upgrade(images)
 		}
 	}
 	if len(attachments) == 0 {
@@ -299,6 +344,9 @@ func (m *legacyMessage) attachments(messageID string) []Attachment {
 			attachments = append(attachments, Attachment{Kind: "document", FileName: "Attached document", TextContent: content})
 		}
 		for i, image := range m.ImageData {
+			if held, ok := images[image.ImageID]; ok && image.Base64 == "" {
+				image.Base64, image.MimeType = held.Base64, cmp.Or(held.MimeType, image.MimeType)
+			}
 			if image.Base64 != "" {
 				attachments = append(attachments, Attachment{Kind: "image", FileName: "image-" + strconv.Itoa(i), MimeType: cmp.Or(image.MimeType, "image/png"), Base64: image.Base64})
 			}
@@ -446,22 +494,28 @@ func (h *harness) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 
 // modelCopies gives each image of an upgraded chat the copy and thumbnail an
 // upload makes in place of its original, which its client keeps from the old
-// chat. An image that does not decode keeps no bytes, since no model reads it.
+// chat.
 func modelCopies(t *Thread) {
 	t.eachAttachment(func(a *Attachment) error {
-		if !a.isImage() || a.Base64 == "" {
-			return nil
-		}
-		original, err := base64.StdEncoding.DecodeString(a.Base64)
-		a.Base64 = ""
-		if err != nil {
-			return nil
-		}
-		resized, thumb, err := resizeImage(original)
-		clear(original)
-		if err == nil {
-			a.Base64, a.Thumbnail = base64.StdEncoding.EncodeToString(resized), base64.StdEncoding.EncodeToString(thumb)
+		if a.isImage() && a.Base64 != "" {
+			modelImageCopy(a)
 		}
 		return nil
 	})
+}
+
+// modelImageCopy gives an image the copy and thumbnail an upload makes in
+// place of its original. An image that does not decode keeps no bytes, since
+// no model reads it.
+func modelImageCopy(a *Attachment) {
+	original, err := base64.StdEncoding.DecodeString(a.Base64)
+	a.Base64 = ""
+	if err != nil {
+		return
+	}
+	resized, thumb, err := resizeImage(original)
+	clear(original)
+	if err == nil {
+		a.Base64, a.Thumbnail = base64.StdEncoding.EncodeToString(resized), base64.StdEncoding.EncodeToString(thumb)
+	}
 }

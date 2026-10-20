@@ -175,7 +175,7 @@ func TestTheComposerOffersWhatUploadsAccept(t *testing.T) {
 		return 0
 	}
 	if slices.Contains([]int{limitOf(offered.Attachments, ".png"), limitOf(offered.Attachments, ".pdf"), limitOf(offered.Attachments, ".mp3"), limitOf(offered.ProjectDocuments, ".pdf"), limitOf(offered.ProjectDocuments, ".txt")}, 0) ||
-		limitOf(offered.Attachments, ".txt") == limitOf(offered.Attachments, ".png") || limitOf(offered.ProjectDocuments, ".png") != 0 || offered.PasteAsFileChars == 0 || offered.DictationMaxSeconds == 0 {
+		limitOf(offered.Attachments, ".txt") == limitOf(offered.Attachments, ".png") || limitOf(offered.ProjectDocuments, ".png") == 0 || offered.PasteAsFileChars == 0 || offered.DictationMaxSeconds == 0 {
 		t.Fatalf("the composer offers %+v", offered)
 	}
 	refusal := func(name string, size int) apiError {

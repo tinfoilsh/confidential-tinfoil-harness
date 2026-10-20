@@ -5,9 +5,8 @@ import (
 	"slices"
 )
 
-// legacyPins are the favorites iOS kept in the profile before each chat
-// stored its own pin. A chat the profile lists reads as pinned.
-func (h *harness) legacyPins(ctx context.Context, p *principal, key contentKey) ([]string, error) {
+// pinnedIDs is the encrypted favorites index, independent of chat pagination.
+func (h *harness) pinnedIDs(ctx context.Context, p *principal, key contentKey) ([]string, error) {
 	profile, err := h.loadProfile(ctx, p, key)
 	if err != nil || profile == nil {
 		return nil, err
@@ -15,8 +14,8 @@ func (h *harness) legacyPins(ctx context.Context, p *principal, key contentKey) 
 	return profile.PinnedChatIDs, nil
 }
 
-func (h *harness) readLegacyPins(ctx context.Context, p *principal, key contentKey, rows []*threadRow) error {
-	pins, err := h.legacyPins(ctx, p, key)
+func (h *harness) applyPins(ctx context.Context, p *principal, key contentKey, rows []*threadRow) error {
+	pins, err := h.pinnedIDs(ctx, p, key)
 	if err != nil {
 		return err
 	}
@@ -28,15 +27,15 @@ func (h *harness) readLegacyPins(ctx context.Context, p *principal, key contentK
 	return nil
 }
 
-// unpinLegacy takes a chat the user unpins off the profile's list, which
-// would otherwise keep showing it pinned.
-func (h *harness) unpinLegacy(ctx context.Context, p *principal, key contentKey, id string) error {
-	pins, err := h.legacyPins(ctx, p, key)
-	if err != nil || !slices.Contains(pins, id) {
-		return err
-	}
-	_, err = h.mutateProfile(ctx, p, key, func(profile *storedProfile) {
+// setPin updates the encrypted favorites index so favorites can be fetched
+// without reading every page of chat history.
+func (h *harness) setPin(ctx context.Context, p *principal, key contentKey, id string, pinned bool) error {
+	_, err := h.mutateProfile(ctx, p, key, func(profile *storedProfile) error {
 		profile.PinnedChatIDs = slices.DeleteFunc(profile.PinnedChatIDs, func(pin string) bool { return pin == id })
+		if pinned {
+			profile.PinnedChatIDs = append(profile.PinnedChatIDs, id)
+		}
+		return nil
 	})
 	return err
 }

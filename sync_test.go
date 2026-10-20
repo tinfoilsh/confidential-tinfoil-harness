@@ -213,7 +213,7 @@ func TestListPullsInBatchesAndListsUnreadableRows(t *testing.T) {
 }
 
 // Sync finds a row's revision, retries a race and deletes rows no key can
-// open, so a deletion opens nothing and names no revision.
+// open. Favorites cleanup may read the profile; deletion never opens the chat.
 func TestDeletionsLeaveTheWorkToSync(t *testing.T) {
 	h, _, key := testChatHarness(t, nil)
 	var requests []object
@@ -224,6 +224,12 @@ func TestDeletionsLeaveTheWorkToSync(t *testing.T) {
 		in["path"] = r.URL.Path
 		requests = append(requests, in)
 		switch r.URL.Path {
+		case "/v1/sync/pull":
+			if in["scope"] != "profile" {
+				t.Fatalf("deletion opened a chat: %v", in)
+			}
+			requests = requests[:len(requests)-1]
+			return syncTestResponse(200, object{"items": []object{{"id": "profile", "ok": false, "code": "NOT_FOUND"}}})
 		case "/v1/sync/list-status":
 			return syncTestResponse(200, pages[str(in["cursor"])])
 		case "/v1/sync/delete-all-projects":
@@ -243,6 +249,7 @@ func TestDeletionsLeaveTheWorkToSync(t *testing.T) {
 		want []object
 	}{
 		{"/v1/threads/delete", object{"id": "missing"}, []object{deleted("chat", "missing")}},
+		{"/v1/threads/delete", object{"id": "transferred", "revision": "copied-revision"}, []object{{"path": "/v1/sync/delete", "scope": "chat", "id": "transferred", "key": key.base64(), "if_match": "copied-revision"}}},
 		{"/v1/projects/delete", object{"id": "project-1"}, []object{deleted("project", "project-1")}},
 		{"/v1/threads/delete-all", object{"projectId": "project-1"}, []object{
 			{"path": "/v1/sync/list-status", "scope": "chat", "project_id": "project-1", "cursor": "", "limit": float64(listStatusPage), "direction": "desc"},

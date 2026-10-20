@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/tiktoken-go/tokenizer"
+	"golang.org/x/text/language"
+	"golang.org/x/text/language/display"
 )
 
 type request struct {
@@ -43,6 +45,21 @@ const imageTokens = 1500
 
 // promptLanguage is the language a prompt names for a user who chose none.
 const promptLanguage = "English"
+
+const askInstruction = "The user highlighted a snippet from the prior conversation and wants you to elaborate on, clarify, or expand on that specific snippet. Use the prior conversation only as background context and focus your answer on the selected snippet."
+
+func responseLanguage(profile *Profile, locale string) string {
+	if selected := valueOr(profile.Language, ""); selected != "" && selected != defaultLanguage {
+		return selected
+	}
+	tags, _, err := language.ParseAcceptLanguage(locale)
+	if err == nil && len(tags) > 0 && tags[0] != language.Und {
+		if name := display.English.Tags().Name(tags[0]); name != "" {
+			return name
+		}
+	}
+	return promptLanguage
+}
 
 var encoder = sync.OnceValue(func() tokenizer.Codec {
 	enc, err := tokenizer.Get(tokenizer.Cl100kBase)
@@ -112,7 +129,7 @@ func projectPrompt(project *Project, documents []ProjectDocument) string {
 	}
 	return "\n\n<project_context>\n" + content + "\n</project_context>"
 }
-func systemPrompt(c *chatCatalog, thread *Thread, profile *Profile, project *Project, documents []ProjectDocument, displayName, timezone string) string {
+func systemPrompt(c *chatCatalog, thread *Thread, profile *Profile, project *Project, documents []ProjectDocument, displayName, timezone, locale string) string {
 	base, rules := c.Prompt, c.Rules
 	preset := ""
 	if id := thread.PresetID; id != nil {
@@ -133,11 +150,7 @@ func systemPrompt(c *chatCatalog, thread *Thread, profile *Profile, project *Pro
 			rules = ""
 		}
 	}
-	language := valueOr(profile.Language, "")
-	if language == defaultLanguage {
-		language = ""
-	}
-	replacer := strings.NewReplacer("{MODEL_NAME}", displayName, "{LANGUAGE}", cmp.Or(language, promptLanguage), "{TIMEZONE}", timezone, "{USER_PREFERENCES}", preferences(profile))
+	replacer := strings.NewReplacer("{MODEL_NAME}", displayName, "{LANGUAGE}", responseLanguage(profile, locale), "{TIMEZONE}", timezone, "{USER_PREFERENCES}", preferences(profile))
 	base = replacer.Replace(base) + projectPrompt(project, documents)
 	if rules != "" {
 		base += "\n" + replacer.Replace(rules)
@@ -217,7 +230,10 @@ func (h *harness) buildRequest(thread *Thread, profile *Profile, project *Projec
 	if in.Kind == "continue" {
 		reminder += "\n\n" + continueInstruction
 	}
-	req.system = systemPrompt(c, thread, profile, project, documents, display, zone)
+	req.system = systemPrompt(c, thread, profile, project, documents, display, zone, options.Locale)
+	if in.Kind == "ask" {
+		req.system += "\n\n" + askInstruction
+	}
 	req.window, req.policy = window, policy
 	req.piiCheck = valueOr(options.PIICheck, valueOr(profile.PIICheckEnabled, true))
 	req.webSearch = valueOr(options.WebSearch, thread.WebSearchEnabled)

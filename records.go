@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"slices"
 	"strings"
 )
@@ -11,6 +12,7 @@ import (
 func (h *harness) apiRoutes() []routeSpec {
 	routes := []routeSpec{
 		{"/v1/session", true, false, h.session},
+		{"/v1/changes", false, false, h.changes},
 		{"/v1/threads/list", false, true, decoded(h.listThreads)}, {"/v1/threads/get", false, true, decoded(h.getThread)},
 		{"/v1/threads/delete", false, true, decoded(h.deleteThread)},
 		{"/v1/threads/search", false, true, decoded(h.searchThreads)}, {"/v1/threads/cancel", true, false, decoded(h.cancelThread)},
@@ -18,6 +20,7 @@ func (h *harness) apiRoutes() []routeSpec {
 		{"/v1/threads/share/revoke", false, false, decoded(h.revokeShare)}, {"/v1/threads/share/status", false, false, decoded(h.shareStatus)},
 		{"/v1/threads/transcript", false, true, decoded(h.threadTranscript)},
 		{"/v1/profile/get", false, true, h.getProfile}, {"/v1/profile/update", false, true, decoded(h.updateProfile)}, {"/v1/profile/upgrade", true, false, decoded(h.upgradeDeviceProfile)},
+		{"/v1/profile/merge", false, true, decoded(h.mergeDeviceProfile)},
 		{"/v1/projects/list", false, true, decoded(h.listProjects)}, {"/v1/projects/get", false, true, decoded(h.getProject)},
 		{"/v1/projects/create", false, true, decoded(h.createProject)}, {"/v1/projects/update", false, true, decoded(h.updateProject)},
 		{"/v1/projects/delete", false, true, decoded(h.deleteProject)}, {"/v1/projects/documents/delete", false, true, decoded(h.deleteDocument)},
@@ -35,15 +38,29 @@ func (h *harness) apiRoutes() []routeSpec {
 	return routes
 }
 
+func (h *harness) changes(ctx context.Context, p *principal, _ contentKey, _ json.RawMessage) (any, error) {
+	return h.storageChanges(ctx, p)
+}
+
 // threadOperations change a stored chat or a device chat in one way each.
 func (h *harness) threadOperations() map[string]jsonEndpoint {
 	return map[string]jsonEndpoint{"/v1/threads/update": decoded(h.updateThread), "/v1/threads/fork": decoded(h.forkThread),
 		"/v1/threads/messages/delete": decoded(h.deleteMessage), "/v1/threads/messages/update": decoded(h.updateMessage)}
 }
 
-func (h *harness) session(ctx context.Context, p *principal, _ contentKey, _ json.RawMessage) (any, error) {
+func (h *harness) session(ctx context.Context, p *principal, _ contentKey, body json.RawMessage) (any, error) {
 	c := h.catalog.get()
-	credential, err := h.auth.inference(ctx, p)
+	var in struct {
+		RefreshCredentials bool `json:"refreshCredentials"`
+	}
+	if err := json.Unmarshal(body, &in); err != nil {
+		return nil, apiErr(400, "BAD_REQUEST", "Invalid session request")
+	}
+	exchange := h.auth.inference
+	if in.RefreshCredentials {
+		exchange = h.auth.refresh
+	}
+	credential, err := exchange(ctx, p)
 	if err != nil {
 		// A subscriber at the hourly cap still opens the app and sees when it resets.
 		if e := asAPIError(err); e.Code != "QUOTA_EXHAUSTED" || e.Kind != "hourly" {
@@ -74,7 +91,7 @@ func (h *harness) listThreads(ctx context.Context, p *principal, key contentKey,
 	if err != nil {
 		return nil, err
 	}
-	if err := h.readLegacyPins(ctx, p, key, rows); err != nil {
+	if err := h.applyPins(ctx, p, key, rows); err != nil {
 		return nil, err
 	}
 	flags := h.auth.flaggedChats(ctx, p)
@@ -83,17 +100,25 @@ func (h *harness) listThreads(ctx context.Context, p *principal, key contentKey,
 		flags.mark(&row.Thread)
 		list = append(list, summarize(&row.Thread))
 	}
+	var pinned []threadSummary
+	if in.Cursor == "" {
+		pinned, err = h.pinnedThreads(ctx, p, key, flags)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return struct {
 		Threads    []threadSummary `json:"threads"`
 		NextCursor string          `json:"nextCursor"`
-	}{list, next}, nil
+		Pinned     []threadSummary `json:"pinned"`
+	}{list, next, pinned}, nil
 }
 func (h *harness) getThread(ctx context.Context, p *principal, key contentKey, in *windowRequest) (any, error) {
 	row, err := h.loadThread(ctx, p, key, in.ID)
 	if err != nil {
 		return nil, err
 	}
-	if err := h.readLegacyPins(ctx, p, key, []*threadRow{row}); err != nil {
+	if err := h.applyPins(ctx, p, key, []*threadRow{row}); err != nil {
 		return nil, err
 	}
 	h.auth.flaggedChats(ctx, p).mark(&row.Thread)
@@ -130,12 +155,38 @@ func (h *harness) updateThread(ctx context.Context, p *principal, key contentKey
 	if in.Local {
 		return deviceReply(row), nil
 	}
-	if in.Pinned != nil && !*in.Pinned {
-		if err := h.unpinLegacy(ctx, p, key, in.ID); err != nil {
+	if in.Pinned != nil {
+		if err := h.setPin(ctx, p, key, in.ID, *in.Pinned); err != nil {
 			return nil, err
 		}
 	}
 	return summarize(&row.Thread), nil
+}
+
+func (h *harness) pinnedThreads(ctx context.Context, p *principal, key contentKey, flags chatFlags) ([]threadSummary, error) {
+	ids, err := h.pinnedIDs(ctx, p, key)
+	if err != nil {
+		return nil, err
+	}
+	threads := []threadSummary{}
+	rows, err := h.threadBatch(ctx, p, key, ids)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[string]*threadRow, len(rows))
+	for _, row := range rows {
+		byID[row.ID] = row
+	}
+	for _, id := range ids {
+		row := byID[id]
+		if row == nil {
+			continue
+		}
+		row.Pinned = true
+		flags.mark(&row.Thread)
+		threads = append(threads, summarize(&row.Thread))
+	}
+	return threads, nil
 }
 
 // changeThread applies change to a chat: a stored one as read now, saved
@@ -169,9 +220,21 @@ func deviceReply(row *threadRow) any {
 	}{deviceThread(&row.Thread)}
 }
 
-func (h *harness) deleteThread(ctx context.Context, p *principal, key contentKey, in *idRequest) (any, error) {
-	h.stopThread(p, in.ID)
-	return struct{}{}, h.removeRow(ctx, p, key, "chat", in.ID)
+func (h *harness) deleteThread(ctx context.Context, p *principal, key contentKey, in *deleteThreadRequest) (any, error) {
+	var err error
+	if in.Revision != "" {
+		err = h.finishTransfer(ctx, p, key, in)
+	} else {
+		h.stopThread(p, in.ID)
+		err = h.removeRow(ctx, p, key, "chat", in.ID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := h.setPin(ctx, p, key, in.ID, false); err != nil {
+		slog.Warn("could not remove a deleted chat from favorites", "error", err)
+	}
+	return struct{}{}, nil
 }
 func forkTitle(title string) string {
 	title = cmp.Or(title, "Untitled")
@@ -284,7 +347,7 @@ func (h *harness) deleteAllThreads(ctx context.Context, p *principal, key conten
 		return nil, err
 	}
 	for _, id := range ids {
-		if _, err := h.deleteThread(ctx, p, key, &idRequest{ID: id}); err != nil {
+		if _, err := h.deleteThread(ctx, p, key, &deleteThreadRequest{idRequest: idRequest{ID: id}}); err != nil {
 			return nil, err
 		}
 	}
@@ -332,16 +395,29 @@ func (h *harness) updateProfile(ctx context.Context, p *principal, key contentKe
 	if err != nil {
 		return nil, err
 	}
-	stored, err := h.mutateProfile(ctx, p, key, func(profile *storedProfile) {
+	stored, err := h.mutateProfile(ctx, p, key, func(profile *storedProfile) error {
 		profile.apply(patch)
 		if clearsDefault {
 			profile.DefaultPromptPresetID = nil
 		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	return h.viewProfile(stored), nil
+}
+
+func (h *harness) mergeDeviceProfile(ctx context.Context, p *principal, key contentKey, in *profileMergeRequest) (any, error) {
+	local := localProfile(in.Profile)
+	merged, err := h.mutateProfile(ctx, p, key, func(stored *storedProfile) error {
+		stored.Profile = mergeDeviceProfile(stored.Profile, *local, in.ChangedFields)
+		return stored.Profile.validate()
+	})
+	if err != nil {
+		return nil, err
+	}
+	return h.viewProfile(merged), nil
 }
 func (h *harness) listProjects(ctx context.Context, p *principal, key contentKey, in *listRequest) (any, error) {
 	projects, next, err := h.projectPage(ctx, p, key, in.Cursor, 50)

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -96,6 +98,27 @@ func (h *harness) loadThread(ctx context.Context, p *principal, key contentKey, 
 		return nil, err
 	}
 	return readThreadRow(row), nil
+}
+
+func (h *harness) threadBatch(ctx context.Context, p *principal, key contentKey, ids []string) ([]*threadRow, error) {
+	rows, failed, err := h.storeRows.pull(ctx, p, key, "chat", ids)
+	if err != nil {
+		return nil, err
+	}
+	for _, err := range failed {
+		if asAPIError(err).HTTP != 409 {
+			return nil, err
+		}
+	}
+	threads := make([]*threadRow, len(rows))
+	for i := range rows {
+		threads[i] = readThreadRow(&rows[i])
+	}
+	return threads, nil
+}
+
+func (h *harness) removeThreadRevision(ctx context.Context, p *principal, key contentKey, id, revision string) error {
+	return h.storeRows.removeRevision(ctx, p, key, id, revision)
 }
 
 // threadPage is one page of a user's chats, newest first, or of a project's.
@@ -212,20 +235,31 @@ func (h *harness) loadProfile(ctx context.Context, p *principal, key contentKey)
 	return &profile, nil
 }
 
-func (h *harness) mutateProfile(ctx context.Context, p *principal, key contentKey, change func(*storedProfile)) (storedProfile, error) {
+func (h *harness) mutateProfile(ctx context.Context, p *principal, key contentKey, change func(*storedProfile) error) (storedProfile, error) {
 	var profile storedProfile
 	err := h.commitRow(ctx, p, key, "profile", "profile", true, func(row *storedRow, exists bool) error {
 		profile = storedProfile{}
 		if exists {
 			profile = readProfile(row.Data)
 		}
-		change(&profile)
+		before := raw(profile)
+		if err := change(&profile); err != nil {
+			return err
+		}
+		if bytes.Equal(before, raw(profile)) {
+			return errProfileUnchanged
+		}
 		profile.UpdatedAt = timestamp()
 		row.Data = raw(profile)
 		return nil
 	})
+	if errors.Is(err, errProfileUnchanged) {
+		err = nil
+	}
 	return profile, err
 }
+
+var errProfileUnchanged = errors.New("profile unchanged")
 
 // Projects
 
@@ -307,6 +341,7 @@ func (h *harness) projectDocuments(ctx context.Context, p *principal, key conten
 func (h *harness) createProjectDocument(ctx context.Context, p *principal, key contentKey, doc ProjectDocument) (ProjectDocument, error) {
 	id := doc.ProjectID + "/" + doc.ID
 	err := h.commitRow(ctx, p, key, "project_document", id, true, func(row *storedRow, exists bool) error {
+		row.project, row.projectSet = &doc.ProjectID, true
 		doc.CreatedAt = timestamp()
 		if exists {
 			doc.CreatedAt = readProjectDocument(row, doc.ProjectID).CreatedAt
@@ -395,6 +430,26 @@ func (h *harness) openSealedShare(ctx context.Context, shareKey string, cipherte
 }
 
 // Keys and imports
+
+func (h *harness) authorizeArchive(ctx context.Context, p *principal, encodedKey, operation string) error {
+	if encodedKey == "" {
+		return nil
+	}
+	if p.Anonymous {
+		return errAnonymousCloud
+	}
+	key, err := decodeContentKey(encodedKey)
+	if err != nil {
+		return err
+	}
+	defer clear(key[:])
+	token, err := h.storeRows.authorizeStorage(ctx, p, key, operation, "")
+	if err != nil {
+		return err
+	}
+	p.SyncToken = token
+	return nil
+}
 
 // keyCall passes a key management request to sync as the client sent it.
 func (h *harness) keyCall(ctx context.Context, p *principal, path string, in json.RawMessage) (json.RawMessage, error) {

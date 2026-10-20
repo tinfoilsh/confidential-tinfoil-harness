@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -78,10 +79,7 @@ func openTools(ctx context.Context, req *request, model string, progress func(st
 		return set, nil
 	}
 	header := http.Header{"X-Tinfoil-Tool-Model": {model}, "X-Tinfoil-Tool-Route": {"/v1/threads/turn"}, "X-Tinfoil-Tool-Streaming": {"true"}}
-	// Absent leaves the enclave's default, which checks; false is never sent.
-	if req.piiCheck {
-		header.Set("X-Tinfoil-Tool-PII-Check", "true")
-	}
+	header.Set("X-Tinfoil-Tool-PII-Check", strconv.FormatBool(req.piiCheck))
 	opened, err := webSearch.dial(ctx, header, progress)
 	if err != nil {
 		return nil, fmt.Errorf("webSearch: %w", err)

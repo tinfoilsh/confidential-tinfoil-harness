@@ -63,6 +63,7 @@ func TestAFlaggedChatTakesNoTurns(t *testing.T) {
 	storedThread(rows, "alice", "fine")
 	// A flagged chat that takes no turn is flagged only by the control plane.
 	storedThread(rows, "alice", "listed")
+	rows.rows["user:alice/profile/profile"] = storedRow{ID: "profile", ETag: "1", Data: raw(object{"pinnedChatIds": []string{"listed", "fine"}})}
 	code := func(w *httptest.ResponseRecorder) string {
 		var refused struct {
 			Error apiError `json:"error"`
@@ -87,8 +88,16 @@ func TestAFlaggedChatTakesNoTurns(t *testing.T) {
 	}
 	var list struct {
 		Threads []threadSummary `json:"threads"`
+		Pinned  []threadSummary `json:"pinned"`
 	}
 	json.Unmarshal(postRoute(h, "/v1/threads/list", object{"key": key.base64()}, "alice").Body.Bytes(), &list)
+	pinned := map[string]bool{}
+	for _, summary := range list.Pinned {
+		pinned[summary.ID] = summary.Flagged
+	}
+	if !reflect.DeepEqual(pinned, map[string]bool{"listed": true, "fine": false}) {
+		t.Fatalf("favorite flags: %v", pinned)
+	}
 	listed := map[string]bool{}
 	for _, summary := range list.Threads {
 		listed[summary.ID] = summary.Flagged

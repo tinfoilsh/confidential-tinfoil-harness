@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"reflect"
 	"slices"
+	"strings"
+
+	"github.com/google/uuid"
 )
 
 // Profile is a user's settings: what the clients show and a prompt reads.
@@ -54,8 +57,7 @@ type CustomPreset struct {
 type storedProfile struct {
 	Profile
 	UpdatedAt string `json:"updatedAt,omitempty"`
-	// PinnedChatIDs are the favorites iOS kept here before each chat stored
-	// its own pin. A chat this lists reads as pinned.
+	// PinnedChatIDs makes favorites available outside the loaded history pages.
 	PinnedChatIDs []string `json:"pinnedChatIds,omitzero"`
 }
 
@@ -156,6 +158,61 @@ func (p *Profile) apply(patch Profile) {
 			to.Field(i).Set(from.Field(i))
 		}
 	}
+}
+
+// mergeDeviceProfile imports missing settings and prompts, with explicit
+// device edits taking precedence. Conflicting prompt text gets its own copy.
+func mergeDeviceProfile(remote, local Profile, changed []string) Profile {
+	merged := local
+	merged.apply(remote)
+	if slices.Contains(changed, "defaultPromptPresetId") {
+		merged.DefaultPromptPresetID = local.DefaultPromptPresetID
+	}
+	to, from := reflect.ValueOf(&merged).Elem(), reflect.ValueOf(local)
+	for i := range from.NumField() {
+		name, _, _ := strings.Cut(from.Type().Field(i).Tag.Get("json"), ",")
+		if slices.Contains(changed, name) && !from.Field(i).IsZero() {
+			to.Field(i).Set(from.Field(i))
+		}
+	}
+	presets := slices.Clone(remote.CustomPromptPresets)
+	remapped := map[string]string{}
+	for _, preset := range local.CustomPromptPresets {
+		index := slices.IndexFunc(presets, func(p CustomPreset) bool { return p.ID == preset.ID })
+		if index >= 0 {
+			kept, incoming := presets[index], preset
+			kept.CreatedAt, kept.UpdatedAt, incoming.CreatedAt, incoming.UpdatedAt = nil, nil, nil, nil
+			if reflect.DeepEqual(kept, incoming) {
+				continue
+			}
+			preset.ID = "user:" + uuid.NewSHA1(uuid.NameSpaceURL, raw(incoming)).String()
+			preset.Name += " (from this device)"
+			remapped[incoming.ID] = preset.ID
+			if slices.ContainsFunc(presets, func(p CustomPreset) bool { return p.ID == preset.ID }) {
+				continue
+			}
+		}
+		presets = append(presets, preset)
+	}
+	merged.CustomPromptPresets = presets
+	merged.FavoritePromptPresetIDs = slices.Clone(remote.FavoritePromptPresetIDs)
+	if slices.Contains(changed, "favoritePromptPresetIds") {
+		merged.FavoritePromptPresetIDs = []string{}
+	}
+	for _, id := range local.FavoritePromptPresetIDs {
+		if replacement := remapped[id]; replacement != "" {
+			id = replacement
+		}
+		if !slices.Contains(merged.FavoritePromptPresetIDs, id) {
+			merged.FavoritePromptPresetIDs = append(merged.FavoritePromptPresetIDs, id)
+		}
+	}
+	if (remote.DefaultPromptPresetID == nil || slices.Contains(changed, "defaultPromptPresetId")) && local.DefaultPromptPresetID != nil {
+		if replacement := remapped[*local.DefaultPromptPresetID]; replacement != "" {
+			merged.DefaultPromptPresetID = &replacement
+		}
+	}
+	return merged
 }
 
 // personalized reports whether the prompt carries the user's preferences.

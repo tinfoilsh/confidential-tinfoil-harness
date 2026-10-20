@@ -32,7 +32,9 @@ func (h *harness) handleFollow(w http.ResponseWriter, r *http.Request) {
 	}
 	if !p.Anonymous {
 		h.live.mu.Lock()
-		if live.thread.active == live {
+		if !live.ending && h.live.runs[liveKey(p, in.RunID)] == live {
+			p.SyncToken = live.principal.SyncToken
+			p.SyncExpires = live.principal.SyncExpires
 			live.principal = p
 		}
 		h.live.mu.Unlock()

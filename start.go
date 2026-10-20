@@ -174,6 +174,19 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	h.live.mu.Lock()
 	p := r.principal
 	h.live.mu.Unlock()
+	if !s.keyless && !p.SyncExpires.After(nowUTC().Add(runTimeout+commitTimeout)) {
+		fresh := *p
+		fresh.SyncToken = ""
+		grant, err := h.storeRows.authorizeRun(ctx, &fresh, r.key, r.input.ThreadID, r.input.ProjectID)
+		if err != nil {
+			return err
+		}
+		fresh.SyncToken, fresh.SyncExpires = grant.Token, grant.ExpiresAt
+		p = &fresh
+		h.live.mu.Lock()
+		r.principal = p
+		h.live.mu.Unlock()
+	}
 	ctx = context.WithValue(ctx, apiKeyKey{}, string(r.credential.Key))
 	ctx = context.WithValue(ctx, usageContextKey{}, usageForRun(r))
 	ctx = context.WithValue(ctx, usageSinkKey{}, r.out)
