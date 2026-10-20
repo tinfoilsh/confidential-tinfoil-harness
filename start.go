@@ -102,9 +102,10 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *principal, cre
 		if id := valueOr(profile.DefaultPromptPresetID, ""); !r.input.PresetID.set && id != "" {
 			preset = &id
 		}
-		t.Model = cmp.Or(valueOr(profile.SelectedModel, ""), autoModelName)
+		c := h.catalog.get()
+		t.Model = c.selectedModel(&profile)
 		t.WebSearchEnabled = valueOr(profile.WebSearchEnabled, t.WebSearchEnabled)
-		h.catalog.get().applyPreset(t, &profile, preset)
+		c.applyPreset(t, &profile, preset)
 	}
 	attachments, err := turnAttachments(turn, t)
 	if err != nil {

@@ -184,8 +184,9 @@ func localProfile(data []byte) *Profile {
 }
 
 // effectiveProfile is a profile as its client reads it: a saved prompt
-// keeps a model only while the control plane lists it, and every field the
-// profile leaves unset reads as its default.
+// keeps a model only while the control plane lists it, the selected model
+// is the one new chats start on, and every field the profile leaves unset
+// reads as its default.
 func (c *chatCatalog) effectiveProfile(p Profile) Profile {
 	p.CustomPromptPresets = slices.Clone(p.CustomPromptPresets)
 	for i := range p.CustomPromptPresets {
@@ -193,5 +194,15 @@ func (c *chatCatalog) effectiveProfile(p Profile) Profile {
 			p.CustomPromptPresets[i].Model = nil
 		}
 	}
+	p.SelectedModel = new(c.selectedModel(&p))
 	return p.withDefaults()
+}
+
+// selectedModel is the model new chats start on: the profile's while it is
+// offered, and Auto otherwise.
+func (c *chatCatalog) selectedModel(p *Profile) string {
+	if model := valueOr(p.SelectedModel, ""); c.offers(model) {
+		return model
+	}
+	return autoModelName
 }

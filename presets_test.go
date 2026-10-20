@@ -108,6 +108,22 @@ func TestANewChatTakesTheProfilesWebSearchSetting(t *testing.T) {
 	}
 }
 
+// A profile's model that is no longer offered reads as Auto, and a new chat
+// starts on Auto rather than failing.
+func TestAnUnofferedSelectedModelReadsAsAuto(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	rows.rows[rowMapKey(&principal{ID: "alice"}, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: raw(object{"selectedModel": "retired-model"})}
+	if profile := profileOf(t, postRoute(h, "/v1/profile/get", object{"key": key.base64()}, "alice")); profile["selectedModel"] != autoModelName {
+		t.Fatalf("the profile reads with model %v", profile["selectedModel"])
+	}
+	in := sendInput(key)
+	in["options"] = object{"webSearch": false}
+	events := finishedRun(t, h, "/v1/threads/turn", in)
+	if chat := storedChat(t, rows, key, events[0].ThreadID); chat.Model != autoModelName {
+		t.Fatalf("the chat started on %s", chat.Model)
+	}
+}
+
 func TestChoosingAPresetTakesTheSettingsTheRequestLeavesOut(t *testing.T) {
 	h, rows, key, _ := presetHarness(t)
 	rows.rows[rowMapKey(&principal{ID: "alice"}, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: raw(presetProfile())}
