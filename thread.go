@@ -64,6 +64,11 @@ type Block struct {
 	ResolvedAt json.RawMessage   `json:"resolvedAt,omitempty"`
 	Resolution json.RawMessage   `json:"resolution,omitempty"`
 	Display    *ToolDisplay      `json:"display,omitempty"`
+	// InvalidArguments marks a widget call whose arguments the widget's
+	// current declaration refuses, so its client offers to regenerate them.
+	// It is worked out again for whatever clients are sent, never taken
+	// from a row.
+	InvalidArguments bool `json:"invalidArguments,omitempty"`
 }
 
 // ToolDisplay is what a web search or page fetch shows its client, kept

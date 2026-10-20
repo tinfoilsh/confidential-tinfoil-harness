@@ -52,7 +52,7 @@ func (h *harness) shareThread(ctx context.Context, p *principal, _ contentKey, i
 	}
 	payload := sharePayload{V: 1, Title: t.Title, Messages: []shareMessage{}, CreatedAt: millis(t.CreatedAt)}
 	for _, m := range t.Messages {
-		shared := shareMessage{Role: m.Role, Content: m.Content, Timestamp: millis(m.CreatedAt), Timeline: m.Timeline, ModelDisplayName: m.ModelDisplayName, IsError: m.IsError, Quote: m.Quote}
+		shared := shareMessage{Role: m.Role, Content: m.Content, Timestamp: millis(m.CreatedAt), Timeline: checkedWidgets(m.Timeline), ModelDisplayName: m.ModelDisplayName, IsError: m.IsError, Quote: m.Quote}
 		for _, a := range m.Attachments {
 			view := viewAttachment(&a)
 			view.EncryptionKey = a.EncryptionKey

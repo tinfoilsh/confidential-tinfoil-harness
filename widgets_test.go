@@ -2,7 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -121,6 +125,72 @@ func TestCallersCopyReadsRepairedArguments(t *testing.T) {
 			t.Errorf("%s with arguments %q was shown as %s, want %s", tc.name, tc.args, got, tc.want)
 		}
 	}
+}
+
+// statsThread is a chat with a stat card whose arguments miss a required
+// field, and one whose arguments are valid. Its stored copy carries marks the
+// harness would not set now: on the valid card and on a widget no longer
+// declared.
+func statsThread() object {
+	return object{"title": "Stats", "createdAt": "2026-01-01T00:00:00Z", "model": "kimi-k3", "messages": []any{
+		object{"id": "u1", "role": "user", "content": "show the counts", "createdAt": "2026-01-01T00:00:01Z"},
+		object{"id": "a1", "role": "assistant", "content": "Here they are.", "createdAt": "2026-01-01T00:00:02Z", "timeline": []any{
+			object{"id": "bad", "toolCallId": "bad", "type": "tool_call", "name": "render_stat_cards", "arguments": `{"stats":[{"label":"Count"}]}`, "complete": true},
+			object{"id": "good", "toolCallId": "good", "type": "tool_call", "name": "render_stat_cards", "arguments": `{"stats":[{"label":"Count","value":1}]}`, "complete": true, "invalidArguments": true},
+			object{"id": "retired", "toolCallId": "retired", "type": "tool_call", "name": "render_retired", "arguments": `{}`, "complete": true, "invalidArguments": true},
+			object{"id": "text", "type": "content", "content": "Here they are."},
+		}},
+	}}
+}
+
+// A client offers to regenerate a widget's arguments when the widget's
+// current declaration refuses them, wherever it reads the chat from.
+func TestEveryViewMarksWidgetArgumentsTheDeclarationRefuses(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	fake := newFakeSync(t, h)
+	cp := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer cp.Close()
+	h.controlplane, h.cpClient = cp.URL, &http.Client{Transport: &callerAuth{inner: cp.Client().Transport}}
+	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: raw(statsThread())}
+	marks := func(view string, messages any) {
+		t.Helper()
+		list := arr(messages)
+		if len(list) < 2 {
+			t.Fatalf("%s holds %v", view, messages)
+		}
+		marked := map[string]any{}
+		for _, b := range arr(obj(list[1])["timeline"]) {
+			if flag, ok := obj(b)["invalidArguments"]; ok {
+				marked[str(obj(b)["id"])] = flag
+			}
+		}
+		if !reflect.DeepEqual(marked, map[string]any{"bad": true}) {
+			t.Fatalf("%s marked %v", view, marked)
+		}
+	}
+	body := func(w *httptest.ResponseRecorder) object {
+		t.Helper()
+		if w.Code != 200 {
+			t.Fatalf("HTTP %d %s", w.Code, w.Body.String())
+		}
+		return obj(decodeValue(w.Body.Bytes()))
+	}
+	marks("the thread view", body(postRoute(h, "/v1/threads/get", object{"key": key.base64(), "id": "chat-1"}, "alice"))["messages"])
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", continueInput(key, "chat-1"), "alice"))
+	marks("the run's snapshot", eventOfType(events, "MESSAGES_SNAPSHOT").Messages)
+	marks("the transcript", obj(body(postRoute(h, "/v1/threads/transcript", object{"key": key.base64(), "threadId": "chat-1"}, "alice"))["thread"])["messages"])
+	body(postRoute(h, "/v1/threads/share", object{"key": key.base64(), "threadId": "chat-1"}, "alice"))
+	if seals := fake.requests("/v1/share/seal"); len(seals) == 1 {
+		plaintext, _ := base64.StdEncoding.DecodeString(str(seals[0]["plaintext"]))
+		marks("the share", obj(decodeValue(plaintext))["messages"])
+	} else {
+		t.Fatalf("%d shares were sealed", len(seals))
+	}
+	marks("the device run", endedThread(t, h, localInput("", statsThread()), "RUN_FINISHED")["messages"])
+	marks("the device operation", deviceOperation(t, h, "/v1/threads/update", statsThread(), object{"id": "chat-2", "title": "Renamed"}, "")["messages"])
+	device := statsThread()
+	device["id"] = "chat-3"
+	marks("the upgrade", obj(upgraded(t, h, "", device)[0])["messages"])
 }
 
 func TestValidWidgetArgumentsAreAcknowledged(t *testing.T) {

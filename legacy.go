@@ -432,6 +432,7 @@ func (h *harness) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 		// The thread is one its client can send back with a turn.
 		thread := readDeviceThread(named.ID, item)
 		modelCopies(&thread)
+		thread.checkWidgets()
 		threads = append(threads, thread)
 	}
 	respond(w, struct {

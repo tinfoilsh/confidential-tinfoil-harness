@@ -9,6 +9,7 @@ const maxTurnBody = 64 << 20
 // fill the run's log: the client holds them and puts them back by id.
 func deviceThread(t *Thread) Thread {
 	thread := t.clone()
+	thread.checkWidgets()
 	thread.eachAttachment(func(a *Attachment) error {
 		a.Base64, a.inferenceMimeType = "", ""
 		for i := range a.Pages {

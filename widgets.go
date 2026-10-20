@@ -118,6 +118,33 @@ func widgetFailure(w widget, args string) json.RawMessage {
 	return raw(object{"status": "error", "error": fmt.Sprintf("The arguments for %s did not match the tool's parameter schema and the component was not displayed: %s. Call %s again with corrected arguments that match the schema exactly.", w.Name, problem, w.Name)})
 }
 
+// checkedWidgets is a copy of a timeline for its client, in which each widget
+// call is marked when its stored arguments fail the check new ones pass
+// before they are sent.
+func checkedWidgets(timeline []Block) []Block {
+	checked := clonedSlice(timeline)
+	for i := range checked {
+		b := &checked[i]
+		b.InvalidArguments = false
+		if b.Type != "tool_call" {
+			continue
+		}
+		for _, w := range widgetCatalog() {
+			if w.Name == b.Name {
+				b.InvalidArguments = widgetFailure(w, b.Arguments) != nil
+			}
+		}
+	}
+	return checked
+}
+
+// checkWidgets marks the widget calls of a thread its client is sent.
+func (t *Thread) checkWidgets() {
+	for i := range t.Messages {
+		t.Messages[i].Timeline = checkedWidgets(t.Messages[i].Timeline)
+	}
+}
+
 func resolveSchema(raw json.RawMessage) (*jsonschema.Resolved, error) {
 	var schema jsonschema.Schema
 	// zod-to-json-schema's OpenAPI target uses draft-4 exclusive bounds.

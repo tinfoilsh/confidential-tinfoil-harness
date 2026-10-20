@@ -105,7 +105,7 @@ func viewMessage(m *Message) messageView {
 	view := messageView{ID: m.ID, Role: m.Role, CreatedAt: m.CreatedAt, Quote: m.Quote, Model: m.Model, ModelDisplayName: m.ModelDisplayName,
 		IsError: m.IsError, IsInterrupted: m.IsInterrupted, Usage: m.Usage, Annotations: m.Annotations}
 	if m.Role == "assistant" {
-		view.Timeline = m.Timeline
+		view.Timeline = checkedWidgets(m.Timeline)
 		if view.Timeline == nil {
 			view.Timeline = []Block{}
 		}
