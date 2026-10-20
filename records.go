@@ -118,7 +118,7 @@ func threadSummary(t object) object {
 }
 func publicMessage(m object) object {
 	out := object{}
-	for _, key := range []string{"id", "role", "createdAt", "quote", "model", "modelDisplayName", "isError", "isInterrupted", "usage"} {
+	for _, key := range []string{"id", "role", "createdAt", "quote", "model", "modelDisplayName", "isError", "isInterrupted", "usage", "annotations"} {
 		if v, ok := m[key]; ok {
 			out[key] = v
 		}

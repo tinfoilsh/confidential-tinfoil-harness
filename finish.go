@@ -53,7 +53,7 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 	// client that stores the thread itself stores the same messages.
 	committed := []object{}
 	for _, m := range messages {
-		committed = append(committed, selectFields(m, "id model modelDisplayName usage isError isInterrupted"))
+		committed = append(committed, selectFields(m, "id model modelDisplayName usage isError isInterrupted annotations"))
 	}
 	commit := func(data object) error {
 		if r.retryTarget != nil && r.replacement != "" {

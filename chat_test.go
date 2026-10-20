@@ -1767,6 +1767,15 @@ func TestAnswersAnnotateTheSourcesTheyCite(t *testing.T) {
 	if got := obj(arr(row.Data["messages"])[1])["annotations"]; !reflect.DeepEqual(got, any(want)) {
 		t.Fatalf("stored annotations %v", got)
 	}
+	// Clients receive them with the run's end and with the stored chat.
+	if got := obj(arr(obj(decodeValue(events[len(events)-1].Metadata))["messages"])[0])["annotations"]; !reflect.DeepEqual(got, any(want)) {
+		t.Fatalf("the run committed annotations %v", got)
+	}
+	var stored object
+	json.Unmarshal(postRoute(h, "/v1/threads/get", object{"key": key.base64(), "id": events[0].ThreadID}, "alice").Body.Bytes(), &stored)
+	if got := obj(arr(stored["messages"])[1])["annotations"]; !reflect.DeepEqual(got, any(want)) {
+		t.Fatalf("the stored chat shows annotations %v", got)
+	}
 }
 
 func TestCutModelStreamDoesNotCompleteItsToolCall(t *testing.T) {
