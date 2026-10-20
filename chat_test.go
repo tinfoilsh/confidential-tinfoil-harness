@@ -38,6 +38,10 @@ type memoryRows struct {
 	calls  int
 }
 
+func (s *memoryRows) authorizeRun(_ context.Context, _ *principal, _ contentKey, id string, _ *string) (secret, error) {
+	return secret("run-for-" + id), nil
+}
+
 func randomKey() contentKey { var k contentKey; rand.Read(k[:]); return k }
 
 func rowMapKey(p *principal, scope, id string) string { return p.scope() + "/" + scope + "/" + id }

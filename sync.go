@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -35,6 +36,7 @@ type rowPage struct {
 	Unreadable []string
 }
 type rowStore interface {
+	authorizeRun(context.Context, *principal, contentKey, string, *string) (secret, error)
 	load(context.Context, *principal, contentKey, string, string) (*storedRow, error)
 	list(context.Context, *principal, contentKey, string, string, string, int) (rowPage, error)
 	push(context.Context, *principal, contentKey, string, *storedRow, string) (string, error)
@@ -70,7 +72,26 @@ func (s *syncClient) call(ctx context.Context, p *principal, path string, in, ou
 	defer cancel()
 	ctx = context.WithValue(ctx, apiKeyKey{}, "")
 	ctx = context.WithValue(ctx, usageContextKey{}, false)
-	return postJSONWithHeaders(ctx, s.Client, s.URL+path, string(p.JWT), map[string]string{"X-Sync-Protocol": syncProtocol}, in, out)
+	return postJSONWithHeaders(ctx, s.Client, s.URL+path, string(cmp.Or(p.SyncToken, p.JWT)), map[string]string{"X-Sync-Protocol": syncProtocol}, in, out)
+}
+
+func (s *syncClient) authorizeRun(ctx context.Context, p *principal, key contentKey, threadID string, projectID *string) (secret, error) {
+	var out struct {
+		Token     secret    `json:"token"`
+		ExpiresAt time.Time `json:"expires_at"`
+	}
+	err := s.call(ctx, p, "/v1/runs/authorize", struct {
+		ThreadID  string  `json:"thread_id"`
+		ProjectID *string `json:"project_id,omitempty"`
+		Key       string  `json:"key"`
+	}{threadID, projectID, key.base64()}, &out)
+	if err != nil {
+		return "", err
+	}
+	if out.Token == "" || !out.ExpiresAt.After(nowUTC().Add(runTimeout)) {
+		return "", apiErr(502, "UPSTREAM_REFUSED", "The storage service returned an invalid run credential")
+	}
+	return out.Token, nil
 }
 
 type pullItem struct {

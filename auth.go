@@ -32,6 +32,7 @@ func bearer(header string) string {
 type principal struct {
 	ID           string
 	JWT          secret
+	SyncToken    secret
 	Anonymous    bool
 	AnonymousID  string
 	InferenceKey secret
@@ -125,6 +126,28 @@ type authenticator struct {
 	credentials  map[string]inferenceCredential
 	capped       map[string]hourlyCap
 	refreshing   map[string]chan struct{}
+}
+
+func (a *authenticator) refresh(ctx context.Context, p *principal) (inferenceCredential, error) {
+	if !p.Anonymous {
+		for {
+			a.mu.Lock()
+			pending := a.refreshing[p.scope()]
+			if pending == nil {
+				delete(a.credentials, p.scope())
+				delete(a.capped, p.scope())
+				a.mu.Unlock()
+				break
+			}
+			a.mu.Unlock()
+			select {
+			case <-pending:
+			case <-ctx.Done():
+				return inferenceCredential{}, ctx.Err()
+			}
+		}
+	}
+	return a.inference(ctx, p)
 }
 
 func newAuthenticator(ctx context.Context, issuer, cp string) (*authenticator, error) {

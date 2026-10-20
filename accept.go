@@ -127,6 +127,15 @@ func (h *harness) admit(ctx context.Context, p *principal, key contentKey, in *t
 	}
 	id, local := in.ThreadID, in.Local
 	keyless := p.Anonymous || local
+	if !keyless {
+		granted, err := h.storeRows.authorizeRun(ctx, p, key, in.ThreadID, in.ProjectID)
+		if err != nil {
+			return err
+		}
+		copy := *p
+		copy.SyncToken = granted
+		p = &copy
+	}
 	var source *Thread
 	if in.Kind == "ask" {
 		if local {
