@@ -120,7 +120,7 @@ func TestOnlyCompletedFirstPartyChatsAreScreened(t *testing.T) {
 			}))
 			defer sidecar.Close()
 			h := &harness{safeguards: newSubmitter(sidecar.URL)}
-			r := &chatRun{thread: &threadSession{id: "chat-1"}, principal: &principal{ID: "alice"}, credential: chatToken,
+			r := &chatRun{thread: &threadSession{id: "chat-1"}, input: &turnRequest{Kind: "send"}, principal: &principal{ID: "alice"}, credential: chatToken,
 				screening: &screening{conversation: "chat-1", messages: []safeguardMessage{{Role: "user", Content: "hi"}}}}
 			tc.change(r)
 			h.screen(r, tc.reply, tc.err)

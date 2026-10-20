@@ -5,13 +5,13 @@ import (
 	"slices"
 )
 
-func (h *harness) cancelThread(ctx context.Context, p *principal, _ contentKey, in object) (any, error) {
-	key, err := requestKey(in)
+func (h *harness) cancelThread(ctx context.Context, p *principal, _ contentKey, in *runRequest) (any, error) {
+	key, err := requestKey(in.Key)
 	if err != nil {
 		return nil, err
 	}
 	defer clear(key[:])
-	r, err := h.authorizedRun(p, key, in)
+	r, err := h.authorizedRun(p, key, in.ThreadID, in.RunID)
 	if err != nil {
 		return nil, err
 	}
@@ -22,19 +22,17 @@ func (h *harness) cancelThread(ctx context.Context, p *principal, _ contentKey, 
 	}
 	r.cancelled = true
 	r.log.stop()
-	return object{}, nil
+	return struct{}{}, nil
 }
 
 // Move the selected queued turn first, then finish the active run normally.
-func (h *harness) sendQueued(ctx context.Context, p *principal, _ contentKey, in object) (any, error) {
-	key, err := requestKey(in)
+func (h *harness) sendQueued(ctx context.Context, p *principal, _ contentKey, in *runRequest) (any, error) {
+	key, err := requestKey(in.Key)
 	if err != nil {
 		return nil, err
 	}
 	defer clear(key[:])
-	copy := clone(in)
-	copy["runId"] = in["queueId"]
-	r, err := h.authorizedRun(p, key, copy)
+	r, err := h.authorizedRun(p, key, in.ThreadID, in.QueueID)
 	if err != nil {
 		return nil, err
 	}
@@ -53,25 +51,23 @@ func (h *harness) sendQueued(ctx context.Context, p *principal, _ contentKey, in
 			s.active.log.stop()
 		}
 		h.live.mu.Unlock()
-		return object{}, nil
+		return struct{}{}, nil
 	}
 	// After a stop the queue waits, so there is no run to yield.
 	s.queue = s.queue[1:]
 	h.makeActive(s, r)
 	h.live.mu.Unlock()
 	h.runQueue(r)
-	return object{}, nil
+	return struct{}{}, nil
 }
 
-func (h *harness) removeQueued(ctx context.Context, p *principal, _ contentKey, in object) (any, error) {
-	key, err := requestKey(in)
+func (h *harness) removeQueued(ctx context.Context, p *principal, _ contentKey, in *runRequest) (any, error) {
+	key, err := requestKey(in.Key)
 	if err != nil {
 		return nil, err
 	}
 	defer clear(key[:])
-	copy := clone(in)
-	copy["runId"] = in["queueId"]
-	r, err := h.authorizedRun(p, key, copy)
+	r, err := h.authorizedRun(p, key, in.ThreadID, in.QueueID)
 	if err != nil {
 		return nil, err
 	}
@@ -87,7 +83,7 @@ func (h *harness) removeQueued(ctx context.Context, p *principal, _ contentKey, 
 	h.endQueued(r, removedTurn)
 	queueChanged(s)
 	h.dropIdle(s)
-	return object{}, nil
+	return struct{}{}, nil
 }
 
 // stopThread stops a chat being deleted: its running reply is cancelled and

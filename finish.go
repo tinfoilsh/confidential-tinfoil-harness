@@ -30,7 +30,7 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 	spend, sources, reply := r.out.spend, r.out.sources, r.out.replyID
 	r.out.observe, r.out.sources = nil, nil
 	r.out.mu.Unlock()
-	continued := r.input["kind"] == "continue"
+	continued := r.input.Kind == "continue"
 	committed := []committedReply{}
 	for i := range messages {
 		m := &messages[i]
@@ -52,7 +52,7 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 	}
 	commit := func(t *Thread) error {
 		if r.retryTarget != nil && r.replacement != "" {
-			if err := replaceWidget(t, r.retryTarget.parentID, str(r.input["toolCallId"]), r.retryTarget.block.Arguments, r.replacement); err != nil {
+			if err := replaceWidget(t, r.retryTarget.parentID, r.input.ToolCallID, r.retryTarget.block.Arguments, r.replacement); err != nil {
 				return err
 			}
 		} else {
@@ -94,7 +94,7 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 	summary := summarize(&r.row.Thread)
 	metadata := runMetadata{Messages: committed}
 	// A device chat's client stores the thread the run leaves as it is.
-	if s.local && r.input["kind"] != "ask" {
+	if s.local && r.input.Kind != "ask" {
 		metadata.Thread = new(deviceThread(&r.row.Thread))
 	}
 	h.live.mu.Lock()
@@ -105,7 +105,7 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 	next := h.advance(r, !cancelled || r.yielded)
 	deleted = s.deleted
 	h.live.mu.Unlock()
-	r.out.emit(event{Type: "STATE_SNAPSHOT", Snapshot: object{"thread": summary, "queue": queue, "rateLimit": limit}})
+	r.out.emit(event{Type: "STATE_SNAPSHOT", Snapshot: stateSnapshot{summary, queue, limit}})
 	if runErr != nil && !cancelled {
 		e := asAPIError(runErr)
 		r.out.emit(event{Type: "RUN_ERROR", ThreadID: s.id, RunID: r.log.id, Message: e.Message, Code: e.Code, Kind: e.Kind, ResetsAt: e.ResetsAt, RetryAfter: e.RetryAfter, Metadata: raw(metadata)})

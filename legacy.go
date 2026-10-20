@@ -315,33 +315,36 @@ func (h *harness) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, err)
 		return
 	}
-	in, err := decodeJSONWithin(w, r, maxTurnBody)
+	body, err := readBody(w, r, maxTurnBody)
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
-	rows, ok := in["threads"].([]any)
-	if !ok {
+	var in upgradeRequest
+	if err := decodeRequest(body, &in); err != nil || in.Threads == nil {
 		respond(w, nil, apiErr(400, "BAD_REQUEST", "threads must be an array"))
 		return
 	}
-	threads := make([]Thread, 0, len(rows))
-	for _, item := range rows {
-		if !validObject(item) {
+	threads := make([]Thread, 0, len(*in.Threads))
+	for _, item := range *in.Threads {
+		if !isObject(item) {
 			respond(w, nil, apiErr(400, "BAD_REQUEST", "Each thread must be an object"))
 			return
 		}
-		id, err := requiredID(obj(item), "id")
-		if err != nil {
+		var named idRequest
+		json.Unmarshal(item, &named)
+		if err := named.validate(); err != nil {
 			respond(w, nil, err)
 			return
 		}
-		if err := validateLocalThread(obj(item)); err != nil {
+		if err := validateLocalThread(item); err != nil {
 			respond(w, nil, err)
 			return
 		}
 		// The thread is one its client can send back with a turn.
-		threads = append(threads, readDeviceThread(id, raw(item)))
+		threads = append(threads, readDeviceThread(named.ID, item))
 	}
-	respond(w, map[string]any{"threads": threads}, nil)
+	respond(w, struct {
+		Threads []Thread `json:"threads"`
+	}{threads}, nil)
 }

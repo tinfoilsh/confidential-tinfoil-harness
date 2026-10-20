@@ -64,7 +64,7 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, apiErr(400, "BAD_REQUEST", "Expected multipart form data"))
 		return
 	}
-	fields := object{}
+	fields := map[string]string{}
 	var file []byte
 	filename := ""
 	for count := 0; ; count++ {
@@ -131,15 +131,15 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 		}{viewUpload(&descriptor)}, nil)
 		return
 	}
-	key, err := decodeContentKey(str(fields["key"]))
+	key, err := decodeContentKey(fields["key"])
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
 	defer clear(key[:])
 	if r.URL.Path == "/v1/projects/documents/upload" {
-		projectID, err := requiredID(fields, "projectId")
-		if err != nil {
+		projectID := fields["projectId"]
+		if err := requireID("projectId", projectID); err != nil {
 			respond(w, nil, err)
 			return
 		}
@@ -157,15 +157,12 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// sentAttachment is the stored form of an attachment a turn sends whole:
-// an upload's descriptor, and an image's bytes while its client holds them.
-func sentAttachment(d object) Attachment {
-	a := Attachment{ID: str(d["id"]), Type: "document", FileName: str(d["fileName"]), MimeType: str(d["mimeType"]), ThumbnailBase64: str(d["thumbnail"]), TextContent: str(d["textContent"]), Description: str(d["description"]), Base64: str(d["base64"])}
-	if size, ok := d["size"].(float64); ok {
-		a.FileSize = new(int64(size))
-	}
-	readLenient(raw(d["pages"]), &a.Pages)
-	switch d["kind"] {
+// stored is the form of an attachment a turn sends whole that its chat
+// stores: an upload's descriptor, and an image's bytes while its client
+// holds them.
+func (d *sentAttachment) stored() Attachment {
+	a := Attachment{ID: d.ID, Type: "document", FileName: d.FileName, MimeType: d.MimeType, FileSize: d.Size, ThumbnailBase64: valueOr(d.Thumbnail, ""), TextContent: d.TextContent, Description: d.Description, Pages: d.Pages, Base64: d.Base64}
+	switch d.Kind {
 	case "image":
 		a.Type = "image"
 	case "audio":
@@ -311,11 +308,11 @@ func capacityDelay(err error) time.Duration {
 	return time.Duration(e.RetryAfter) * time.Second
 }
 
-func multipartCall(ctx context.Context, service *downstreamService, path, fileField, name string, data []byte, fields object) ([]byte, error) {
+func multipartCall(ctx context.Context, service *downstreamService, path, fileField, name string, data []byte, fields map[string]string) ([]byte, error) {
 	var buffer bytes.Buffer
 	writer := multipart.NewWriter(&buffer)
 	for key, value := range fields {
-		if err := writer.WriteField(key, str(value)); err != nil {
+		if err := writer.WriteField(key, value); err != nil {
 			return nil, err
 		}
 	}
@@ -366,13 +363,15 @@ func (h *harness) transcribe(ctx context.Context, filename string, data []byte) 
 	if router == nil {
 		return "", apiErr(503, "TOOL_UNAVAILABLE", "Transcription is unavailable")
 	}
-	b, err := multipartCall(ctx, router, "/v1/audio/transcriptions", "file", filename, data, object{"model": "voxtral-small-24b", "response_format": "text"})
+	b, err := multipartCall(ctx, router, "/v1/audio/transcriptions", "file", filename, data, map[string]string{"model": "voxtral-small-24b", "response_format": "text"})
 	if err != nil {
 		return "", err
 	}
-	var response object
+	var response struct {
+		Text string `json:"text"`
+	}
 	if json.Unmarshal(b, &response) == nil {
-		return str(response["text"]), nil
+		return response.Text, nil
 	}
 	return string(b), nil
 }
@@ -462,7 +461,7 @@ func (h *harness) legacyAttachmentBytes(ctx context.Context, id, encodedKey stri
 }
 
 func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
-	in, err := decodeJSON(w, r)
+	body, err := readBody(w, r, maxRequestBody)
 	if err != nil {
 		respond(w, nil, err)
 		return
@@ -473,37 +472,33 @@ func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, err)
 		return
 	}
-	id, err := requiredID(in, "id")
-	if err != nil {
+	var in attachmentRequest
+	if err := decodeRequest(body, &in); err != nil {
 		respond(w, nil, err)
 		return
 	}
-	threadID := str(in["threadId"])
-	if threadID != "" {
-		if _, err := requiredID(in, "threadId"); err != nil {
-			respond(w, nil, err)
-			return
-		}
+	if err := in.validate(); err != nil {
+		respond(w, nil, err)
+		return
 	}
 	var descriptor *Attachment
 	var data []byte
 	if public {
-		if _, err := decodeContentKey(str(in["attKey"])); err != nil {
+		if _, err := decodeContentKey(in.AttKey); err != nil {
 			respond(w, nil, err)
 			return
 		}
 		// A share's client names the attachment and the key its link carries.
-		descriptor = &Attachment{ID: id, EncryptionKey: str(in["attKey"]), Type: str(in["type"]), Kind: str(in["kind"]), FileName: str(in["fileName"]), MimeType: str(in["mimeType"]), TextContent: str(in["textContent"])}
-		readLenient(raw(in["pages"]), &descriptor.Pages)
+		descriptor = &Attachment{ID: in.ID, EncryptionKey: in.AttKey, Type: in.Type, Kind: in.Kind, FileName: in.FileName, MimeType: in.MimeType, TextContent: in.TextContent, Pages: in.Pages}
 		data, err = h.attachmentBytes(r.Context(), &principal{Anonymous: true}, descriptor, true)
 	} else {
-		key, keyErr := requestKey(in)
+		key, keyErr := requestKey(in.Key)
 		if keyErr != nil {
 			respond(w, nil, keyErr)
 			return
 		}
 		defer clear(key[:])
-		descriptor, data, err = h.attachment(r.Context(), p, key, id, threadID)
+		descriptor, data, err = h.attachment(r.Context(), p, key, in.ID, in.ThreadID)
 	}
 	if err != nil {
 		respond(w, nil, err)
@@ -546,15 +541,15 @@ func documentRequest(a *Attachment, data []byte) bool {
 
 // turnAttachments resolves the attachments a turn names: an upload sent
 // whole, or by id one the thread already holds, as an edit sends it.
-func turnAttachments(in object, t *Thread) ([]Attachment, error) {
+func turnAttachments(in *turnRequest, t *Thread) ([]Attachment, error) {
 	result := []Attachment{}
-	for _, value := range arr(in["attachments"]) {
-		sent := obj(value)
-		if _, whole := sent["kind"]; whole {
-			result = append(result, sentAttachment(sent))
+	for i := range in.Attachments {
+		sent := &in.Attachments[i]
+		if sent.whole() {
+			result = append(result, sent.stored())
 			continue
 		}
-		held := t.attachment(str(sent["id"]))
+		held := t.attachment(sent.ID)
 		if held == nil {
 			return nil, apiErr(404, "THREAD_NOT_FOUND", "The attachment was not found")
 		}

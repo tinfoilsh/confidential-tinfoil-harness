@@ -147,14 +147,14 @@ func timeReminder(now time.Time, zone string) (string, error) {
 	return "<system-reminder>Current time: " + englishTime(now.In(loc), zone) + " (" + zone + ")</system-reminder>", nil
 }
 
-func (h *harness) buildRequest(thread *Thread, profile *Profile, project *Project, documents []ProjectDocument, in object, runID string) (*request, *model, error) {
+func (h *harness) buildRequest(thread *Thread, profile *Profile, project *Project, documents []ProjectDocument, in *turnRequest, runID string) (*request, *model, error) {
 	c := h.catalog.get()
-	options := obj(in["options"])
+	options := in.Options
 	name := cmp.Or(thread.Model, "auto")
 	req := &request{threadID: thread.ID, runID: runID, model: name}
 	req.conversation = req.threadID
-	if in["kind"] == "ask" {
-		req.conversation = str(in["threadId"])
+	if in.Kind == "ask" {
+		req.conversation = in.ThreadID
 	}
 	def, display, policy, window := c.definition(name), "Auto", "none", 0
 	var picked *model
@@ -178,7 +178,7 @@ func (h *harness) buildRequest(thread *Thread, profile *Profile, project *Projec
 		if window == 0 {
 			window = c.Fallback
 		}
-		level, err := intelligence(cmp.Or(str(options["autoIntelligence"]), valueOr(profile.AutoIntelligence, ""), "high"))
+		level, err := intelligence(cmp.Or(options.AutoIntelligence, valueOr(profile.AutoIntelligence, ""), "high"))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -190,33 +190,33 @@ func (h *harness) buildRequest(thread *Thread, profile *Profile, project *Projec
 		display, window = str(def["name"]), integer(def["budgetWindow"])
 		reason := obj(obj(def["chatConfig"])["reasoningConfig"])
 		policy = firstString(reason["reasoningHistoryPolicy"], "none")
-		effort := cmp.Or(str(options["reasoningEffort"]), valueOr(profile.ReasoningEffort, ""), "medium")
+		effort := cmp.Or(options.ReasoningEffort, valueOr(profile.ReasoningEffort, ""), "medium")
 		if !slices.Contains(reasoningEfforts, effort) {
 			return nil, nil, apiErr(400, "BAD_REQUEST", "Unknown reasoning effort")
 		}
-		req.params = modelParams(def, boolean(options["thinking"], valueOr(profile.ThinkingEnabled, boolean(reason["defaultEnabled"], true))), effort)
+		req.params = modelParams(def, valueOr(options.Thinking, valueOr(profile.ThinkingEnabled, boolean(reason["defaultEnabled"], true))), effort)
 	}
 	if picked == nil || picked.client == nil {
 		return nil, nil, apiErr(404, "MODEL_UNAVAILABLE", "The selected model has no attested transport")
 	}
-	zone := firstString(options["timezone"], "UTC")
+	zone := cmp.Or(options.Timezone, "UTC")
 	reminder, err := timeReminder(nowUTC(), zone)
 	if err != nil {
 		return nil, nil, err
 	}
 	// As the web client does, the continue instruction shares the reminder's
 	// turn: some chat templates refuse two user messages in a row.
-	if in["kind"] == "continue" {
+	if in.Kind == "continue" {
 		reminder += "\n\n" + continueInstruction
 	}
 	req.system = systemPrompt(c, thread, profile, project, documents, display, zone)
 	req.window, req.policy = window, policy
-	req.piiCheck = boolean(options["piiCheck"], valueOr(profile.PIICheckEnabled, true))
-	req.webSearch = boolean(options["webSearch"], thread.WebSearchEnabled)
+	req.piiCheck = valueOr(options.PIICheck, valueOr(profile.PIICheckEnabled, true))
+	req.webSearch = valueOr(options.WebSearch, thread.WebSearchEnabled)
 	if req.webSearch && webSearch.client == nil {
 		return nil, nil, apiErr(503, "TOOL_UNAVAILABLE", "webSearch is unavailable")
 	}
-	widgets := c.selectedWidgets(arr(in["widgets"]), boolean(options["genUI"], valueOr(profile.GenUIEnabled, true)))
+	widgets := c.selectedWidgets(in.Widgets, valueOr(options.GenUI, valueOr(profile.GenUIEnabled, true)))
 	if len(widgets) > 0 {
 		req.widgetHint = c.WidgetHeader
 		for _, w := range widgets {

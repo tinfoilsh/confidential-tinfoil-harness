@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -68,13 +67,6 @@ func integer(v any) int {
 	return 0
 }
 
-// optionalString is a request's string field that may be null.
-func optionalString(v any) *string {
-	if s, ok := v.(string); ok {
-		return &s
-	}
-	return nil
-}
 func nowUTC() time.Time { return time.Now().UTC() }
 func timestamp() string { return nowUTC().Format(time.RFC3339Nano) }
 func firstString(values ...any) string {
@@ -145,36 +137,27 @@ const maxRequestBody = 8 << 20
 // or an attachment, base64 encoded.
 const maxResponseBody = 96 << 20
 
-func decodeJSON(w http.ResponseWriter, r *http.Request) (object, error) {
-	return decodeJSONWithin(w, r, maxRequestBody)
+type jsonEndpoint func(context.Context, *principal, contentKey, json.RawMessage) (any, error)
+
+// validated is a request that checks itself once decoded.
+type validated interface{ validate() error }
+
+// decoded is a route whose handler takes its request decoded and checked.
+func decoded[T any](handle func(context.Context, *principal, contentKey, *T) (any, error)) jsonEndpoint {
+	return func(ctx context.Context, p *principal, key contentKey, body json.RawMessage) (any, error) {
+		in := new(T)
+		if err := decodeRequest(body, in); err != nil {
+			return nil, err
+		}
+		if check, ok := any(in).(validated); ok {
+			if err := check.validate(); err != nil {
+				return nil, err
+			}
+		}
+		return handle(ctx, p, key, in)
+	}
 }
 
-func decodeJSONWithin(w http.ResponseWriter, r *http.Request, limit int64) (object, error) {
-	r.Body = http.MaxBytesReader(w, r.Body, limit)
-	decoder := json.NewDecoder(r.Body)
-	var in object
-	if err := decoder.Decode(&in); err != nil {
-		return nil, bodyError(err, "Expected a JSON object")
-	}
-	if in == nil {
-		return nil, apiErr(400, "BAD_REQUEST", "Expected a JSON object")
-	}
-	if err := decoder.Decode(new(any)); err != io.EOF {
-		return nil, bodyError(err, "Expected one JSON object")
-	}
-	return in, nil
-}
-
-// bodyError tells a body over the size limit from a malformed one.
-func bodyError(err error, malformed string) *apiError {
-	var tooLarge *http.MaxBytesError
-	if errors.As(err, &tooLarge) {
-		return apiErr(http.StatusRequestEntityTooLarge, "PAYLOAD_TOO_LARGE", "The request exceeds the size limit")
-	}
-	return apiErr(400, "BAD_REQUEST", malformed)
-}
-
-type jsonEndpoint func(context.Context, *principal, contentKey, object) (any, error)
 type routeSpec struct {
 	path        string
 	public, key bool
@@ -186,7 +169,7 @@ func (h *harness) routes() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { respond(w, object{"ok": true}, nil) })
 	for _, spec := range h.apiRoutes() {
 		mux.HandleFunc("POST "+spec.path, func(w http.ResponseWriter, r *http.Request) {
-			in, err := decodeJSON(w, r)
+			body, err := readBody(w, r, maxRequestBody)
 			if err != nil {
 				respond(w, nil, err)
 				return
@@ -198,14 +181,19 @@ func (h *harness) routes() http.Handler {
 			}
 			var key contentKey
 			if spec.key {
-				key, err = decodeContentKey(str(in["key"]))
+				var keyed struct {
+					Key any `json:"key"`
+				}
+				json.Unmarshal(body, &keyed)
+				text, _ := keyed.Key.(string)
+				key, err = decodeContentKey(text)
 				if err != nil {
 					respond(w, nil, err)
 					return
 				}
 				defer clear(key[:])
 			}
-			result, err := spec.handler(r.Context(), p, key, in)
+			result, err := spec.handler(r.Context(), p, key, body)
 			respond(w, result, err)
 		})
 	}
@@ -309,42 +297,6 @@ func postJSONWithHeaders(ctx context.Context, client *http.Client, url, auth str
 		return err
 	}
 	return json.NewDecoder(io.LimitReader(resp.Body, maxResponseBody)).Decode(out)
-}
-
-// maxIDLength bounds the ids a caller names its rows with. A thread id is
-// echoed into every frame of its run's log, so an unbounded one is an
-// unbounded frame.
-const maxIDLength = 128
-
-// identifier holds a caller's id to printable ASCII, short of the length at
-// which it stops being a name.
-func identifier(s string) bool {
-	if len(s) > maxIDLength {
-		return false
-	}
-	for _, r := range s {
-		if r < ' ' || r > '~' {
-			return false
-		}
-	}
-	return true
-}
-
-// A missing key is checked against the run: keyless threads accept it, and
-// every other thread compares the key's fingerprint.
-func requestKey(in object) (contentKey, error) {
-	if str(in["key"]) == "" {
-		return contentKey{}, nil
-	}
-	return decodeContentKey(str(in["key"]))
-}
-
-func requiredID(in object, field string) (string, error) {
-	id := str(in[field])
-	if id == "" || !identifier(id) || strings.ContainsAny(id, "/\\?#") {
-		return "", apiErr(400, "BAD_REQUEST", field+" must be a valid identifier")
-	}
-	return id, nil
 }
 
 var uploadSlots = make(chan struct{}, 4)

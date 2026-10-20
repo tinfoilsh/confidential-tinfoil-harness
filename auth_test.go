@@ -134,7 +134,7 @@ func TestAnonymousReconnectUsesKeyPossessionInsteadOfIP(t *testing.T) {
 	model, release := heldModel()
 	h, _, _ := testChatHarness(t, model)
 	t.Cleanup(release)
-	run, err := h.acceptTurn(context.Background(), &principal{Anonymous: true, AnonymousID: hashHex([]byte("free_anonymous-key")), InferenceKey: "free_anonymous-key"}, contentKey{}, localInput("", object{}))
+	run, err := h.acceptTurn(context.Background(), &principal{Anonymous: true, AnonymousID: hashHex([]byte("free_anonymous-key")), InferenceKey: "free_anonymous-key"}, contentKey{}, requestOf[turnRequest](localInput("", object{})))
 	if err != nil {
 		t.Fatal(err)
 	}

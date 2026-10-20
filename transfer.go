@@ -14,12 +14,8 @@ import (
 // threadTranscript is a stored chat in the form the device keeps: every
 // attachment's content inline and no server bookkeeping. It refuses when any
 // attachment cannot be read, so moving the chat never loses content.
-func (h *harness) threadTranscript(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
-	id, err := requiredID(in, "threadId")
-	if err != nil {
-		return nil, err
-	}
-	row, err := h.loadThread(ctx, p, key, id)
+func (h *harness) threadTranscript(ctx context.Context, p *principal, key contentKey, in *threadRequest) (any, error) {
+	row, err := h.loadThread(ctx, p, key, in.ThreadID)
 	if err != nil {
 		return nil, err
 	}
@@ -69,33 +65,32 @@ func (h *harness) handleThreadImport(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, err)
 		return
 	}
-	in, err := decodeJSONWithin(w, r, maxTurnBody)
+	body, err := readBody(w, r, maxTurnBody)
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
-	key, err := decodeContentKey(str(in["key"]))
+	var in threadImportRequest
+	if err := decodeRequest(body, &in); err != nil {
+		respond(w, nil, err)
+		return
+	}
+	key, err := decodeContentKey(in.Key)
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
 	defer clear(key[:])
-	result, err := h.importThread(r.Context(), p, key, in)
+	result, err := h.importThread(r.Context(), p, key, &in)
 	respond(w, result, err)
 }
 
-func (h *harness) importThread(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
-	id, err := requiredID(in, "threadId")
-	if err != nil {
+func (h *harness) importThread(ctx context.Context, p *principal, key contentKey, in *threadImportRequest) (any, error) {
+	if err := in.validate(); err != nil {
 		return nil, err
 	}
-	if !validObject(in["thread"]) {
-		return nil, apiErr(400, "BAD_REQUEST", "thread must be an object")
-	}
-	if err := validateLocalThread(obj(in["thread"])); err != nil {
-		return nil, err
-	}
-	row := &threadRow{Thread: readDeviceThread(id, raw(in["thread"])), restore: true}
+	id := in.ThreadID
+	row := &threadRow{Thread: readDeviceThread(id, in.Thread), restore: true}
 	if err := h.placeAttachments(ctx, p, id, &row.Thread); err != nil {
 		return nil, err
 	}

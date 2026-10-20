@@ -325,7 +325,7 @@ func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *
 		return apiErr(502, "UPSTREAM_REFUSED", "The replacement widget arguments do not match the schema")
 	}
 	r.replacement = content
-	id := str(r.input["toolCallId"])
+	id := r.input.ToolCallID
 	r.out.callStart(id, declaration.Name, r.retryTarget.parentID)
 	r.out.callArgs(id, content)
 	r.out.callEnd(id)

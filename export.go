@@ -33,22 +33,13 @@ const chatURL = "https://chat.tinfoil.sh"
 // transcript, with no content key. As from the web client, that share holds
 // image thumbnails and document text, so the transcript may omit image bytes.
 // No attachment is uploaded for it: sync holds no chat to keep one under.
-func (h *harness) shareThread(ctx context.Context, p *principal, _ contentKey, in object) (any, error) {
-	id, err := requiredID(in, "threadId")
-	if err != nil {
-		return nil, err
-	}
+func (h *harness) shareThread(ctx context.Context, p *principal, _ contentKey, in *shareRequest) (any, error) {
+	id := in.ThreadID
 	var t Thread
-	if boolean(in["local"], false) {
-		if !validObject(in["thread"]) {
-			return nil, apiErr(400, "BAD_REQUEST", "A local thread requires its transcript")
-		}
-		if err := validateLocalThread(obj(in["thread"])); err != nil {
-			return nil, err
-		}
-		t = readDeviceThread(id, raw(in["thread"]))
+	if in.Local {
+		t = readDeviceThread(id, in.Thread)
 	} else {
-		key, err := decodeContentKey(str(in["key"]))
+		key, err := decodeContentKey(in.Key)
 		if err != nil {
 			return nil, err
 		}
@@ -108,23 +99,15 @@ func (h *harness) shareRequest(ctx context.Context, p *principal, method, id str
 	return b, nil
 }
 
-func (h *harness) revokeShare(ctx context.Context, p *principal, _ contentKey, in object) (any, error) {
-	id, err := requiredID(in, "threadId")
-	if err != nil {
-		return nil, err
-	}
-	if _, err := h.shareRequest(ctx, p, http.MethodDelete, id, nil); err != nil && asAPIError(err).HTTP != 404 {
+func (h *harness) revokeShare(ctx context.Context, p *principal, _ contentKey, in *threadRequest) (any, error) {
+	if _, err := h.shareRequest(ctx, p, http.MethodDelete, in.ThreadID, nil); err != nil && asAPIError(err).HTTP != 404 {
 		return nil, err
 	}
 	return struct{}{}, nil
 }
 
-func (h *harness) shareStatus(ctx context.Context, p *principal, _ contentKey, in object) (any, error) {
-	id, err := requiredID(in, "threadId")
-	if err != nil {
-		return nil, err
-	}
-	b, err := h.shareRequest(ctx, p, http.MethodGet, id, nil)
+func (h *harness) shareStatus(ctx context.Context, p *principal, _ contentKey, in *threadRequest) (any, error) {
+	b, err := h.shareRequest(ctx, p, http.MethodGet, in.ThreadID, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -154,12 +137,9 @@ func sharedThreadView(id string, payload []byte) sharedThread {
 	return shared
 }
 
-func (h *harness) openShare(ctx context.Context, _ *principal, _ contentKey, in object) (any, error) {
-	id, err := requiredID(in, "shareId")
-	if err != nil {
-		return nil, err
-	}
-	fragment, ok := strings.CutPrefix(str(in["fragment"]), "v2:")
+func (h *harness) openShare(ctx context.Context, _ *principal, _ contentKey, in *openShareRequest) (any, error) {
+	id := in.ShareID
+	fragment, ok := strings.CutPrefix(in.Fragment, "v2:")
 	if !ok {
 		return nil, apiErr(400, "BAD_REQUEST", "A v2 share fragment is required")
 	}
@@ -191,11 +171,13 @@ func (h *harness) openShare(ctx context.Context, _ *principal, _ contentKey, in 
 }
 
 func (h *harness) handleExport(w http.ResponseWriter, r *http.Request) {
-	in, err := decodeJSON(w, r)
+	body, err := readBody(w, r, maxRequestBody)
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
+	var in object
+	json.Unmarshal(body, &in)
 	p, err := h.auth.authenticate(r, false)
 	if err != nil {
 		respond(w, nil, err)

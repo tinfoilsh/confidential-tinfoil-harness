@@ -188,7 +188,7 @@ func TestTitleRunsBeforeAnswerFinishes(t *testing.T) {
 	}))
 	defer server.Close()
 	h.services["summarizer"] = &downstreamService{URL: server.URL, Client: server.Client()}
-	run, err := h.acceptTurn(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, key, sendInput(key))
+	run, err := h.acceptTurn(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, key, requestOf[turnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +289,7 @@ func TestShutdownCommitsPartialOutput(t *testing.T) {
 		close(started)
 		<-r.Context().Done()
 	})
-	run, err := h.acceptTurn(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, key, sendInput(key))
+	run, err := h.acceptTurn(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, key, requestOf[turnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,7 +307,7 @@ func TestShutdownCommitsPartialOutput(t *testing.T) {
 	if rowJSON(row)["activeRun"] != nil {
 		t.Fatal("shutdown left an active marker")
 	}
-	if _, err := h.acceptTurn(context.Background(), &principal{ID: "alice"}, key, sendInput(key)); err == nil {
+	if _, err := h.acceptTurn(context.Background(), &principal{ID: "alice"}, key, requestOf[turnRequest](sendInput(key))); err == nil {
 		t.Fatal("accepted a turn during shutdown")
 	}
 }

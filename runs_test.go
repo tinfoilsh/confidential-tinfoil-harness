@@ -59,7 +59,7 @@ func TestAQueuedTurnThatCannotStartDoesNotStallTheQueue(t *testing.T) {
 	h, _, key := testChatHarness(t, model)
 	t.Cleanup(release)
 	p := &principal{ID: "alice", JWT: "clerk-alice"}
-	first, err := h.acceptTurn(context.Background(), p, key, sendInput(key))
+	first, err := h.acceptTurn(context.Background(), p, key, requestOf[turnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestAQueuedTurnThatCannotStartDoesNotStallTheQueue(t *testing.T) {
 	broken["kind"], broken["messageId"] = "edit", "no-such-message"
 	queue := []*chatRun{}
 	for _, in := range []object{broken, continueInput(key, first.thread.id)} {
-		run, err := h.acceptTurn(context.Background(), p, key, in)
+		run, err := h.acceptTurn(context.Background(), p, key, requestOf[turnRequest](in))
 		if err != nil || !run.queued {
 			t.Fatalf("turn not queued: %v", err)
 		}
@@ -90,12 +90,12 @@ func TestDeletingAChatEndsItsQueuedTurns(t *testing.T) {
 	h, rows, key := testChatHarness(t, model)
 	t.Cleanup(release)
 	p := &principal{ID: "alice", JWT: "clerk-alice"}
-	first, err := h.acceptTurn(context.Background(), p, key, sendInput(key))
+	first, err := h.acceptTurn(context.Background(), p, key, requestOf[turnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	awaitFrame(t, first.log, "TEXT_MESSAGE_CHUNK")
-	queued, err := h.acceptTurn(context.Background(), p, key, continueInput(key, first.thread.id))
+	queued, err := h.acceptTurn(context.Background(), p, key, requestOf[turnRequest](continueInput(key, first.thread.id)))
 	if err != nil || !queued.queued {
 		t.Fatalf("turn not queued: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestAFinishingRunsWritesBlockNothing(t *testing.T) {
 		return nil
 	}
 	p := &principal{ID: "alice", JWT: "clerk-alice"}
-	run, err := h.acceptTurn(context.Background(), p, key, sendInput(key))
+	run, err := h.acceptTurn(context.Background(), p, key, requestOf[turnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func TestAFinishingRunsWritesBlockNothing(t *testing.T) {
 		return nil
 	})
 	within(t, "cancelling", func() error {
-		if _, err := h.cancelThread(context.Background(), p, key, object{"key": key.base64(), "threadId": run.thread.id, "runId": run.log.id}); asAPIError(err).Code != "RUN_IN_FLIGHT" {
+		if _, err := h.cancelThread(context.Background(), p, key, requestOf[runRequest](object{"key": key.base64(), "threadId": run.thread.id, "runId": run.log.id})); asAPIError(err).Code != "RUN_IN_FLIGHT" {
 			return fmt.Errorf("a finishing run answered %v", err)
 		}
 		return nil
@@ -184,7 +184,7 @@ func TestFollowReplaysALiveRunFromItsFirstFrame(t *testing.T) {
 	model, release := heldModel()
 	h, _, key := testChatHarness(t, model)
 	t.Cleanup(release)
-	run, err := h.acceptTurn(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, key, sendInput(key))
+	run, err := h.acceptTurn(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, key, requestOf[turnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +223,7 @@ func TestARetriedRequestFollowsItsRunOrIsAlreadyApplied(t *testing.T) {
 	t.Cleanup(release)
 	p := &principal{ID: "alice", JWT: "clerk-alice"}
 	in := sendInput(key)
-	run, err := h.acceptTurn(context.Background(), p, key, in)
+	run, err := h.acceptTurn(context.Background(), p, key, requestOf[turnRequest](in))
 	if err != nil {
 		t.Fatal(err)
 	}

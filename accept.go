@@ -9,8 +9,8 @@ var errAlreadyApplied = apiErr(409, "ALREADY_APPLIED", "This request was already
 // maxQueuedTurns bounds the turns one chat holds behind its running reply.
 const maxQueuedTurns = 32
 
-func (h *harness) acceptTurn(ctx context.Context, p *principal, key contentKey, in object) (*chatRun, error) {
-	nonce, digest := str(in["clientRequestId"]), requestDigest(in)
+func (h *harness) acceptTurn(ctx context.Context, p *principal, key contentKey, in *turnRequest) (*chatRun, error) {
+	nonce, digest := in.ClientRequestID, in.digest()
 	var r *chatRun
 	for r == nil {
 		h.live.mu.Lock()
@@ -97,7 +97,7 @@ func askThread(id string, source *Thread) *threadRow {
 
 // admit gives a turn its chat: it starts now if the chat has no running
 // reply, or waits in the chat's queue.
-func (h *harness) admit(ctx context.Context, p *principal, key contentKey, in object, r *chatRun) error {
+func (h *harness) admit(ctx context.Context, p *principal, key contentKey, in *turnRequest, r *chatRun) error {
 	credential, err := h.auth.inference(ctx, p)
 	if err != nil {
 		return err
@@ -105,12 +105,12 @@ func (h *harness) admit(ctx context.Context, p *principal, key contentKey, in ob
 	if credential.Limit.exhausted() {
 		return quotaExhausted(credential.Limit)
 	}
-	id, local := str(in["threadId"]), boolean(in["local"], false)
+	id, local := in.ThreadID, in.Local
 	keyless := p.Anonymous || local
 	var source *Thread
-	if in["kind"] == "ask" {
+	if in.Kind == "ask" {
 		if local {
-			source = new(readDeviceThread(id, raw(in["thread"])))
+			source = new(readDeviceThread(id, in.Thread))
 		} else {
 			row, err := h.loadThread(ctx, p, key, id)
 			if err != nil {
@@ -121,8 +121,8 @@ func (h *harness) admit(ctx context.Context, p *principal, key contentKey, in ob
 		id = ""
 	}
 	// A stored chat's project is read as its first turn starts.
-	if source == nil && str(in["projectId"]) != "" {
-		if _, err := requiredID(in, "projectId"); err != nil {
+	if project := valueOr(in.ProjectID, ""); source == nil && project != "" {
+		if err := requireID("projectId", project); err != nil {
 			return err
 		}
 	}
@@ -133,27 +133,24 @@ func (h *harness) admit(ctx context.Context, p *principal, key contentKey, in ob
 	// edited since the last turn. A queued turn continues the active run's row.
 	// An ask is a new thread that hides the copy it starts from.
 	var seed *threadRow
-	if thread, ok := in["thread"]; ok && local && source == nil {
-		seed = &threadRow{Thread: readDeviceThread(id, raw(thread))}
+	if in.Thread != nil && local && source == nil {
+		seed = &threadRow{Thread: readDeviceThread(id, in.Thread)}
 		if seed.LastRequestID == r.nonce {
 			return errAlreadyApplied
 		}
 	}
-	clean := clone(in)
-	delete(clean, "key")
+	if local {
+		r.profile = localProfile(in.Profile)
+	}
+	clean := *in
 	// The transcript seeds the row; holding it again per run would double a
 	// local thread's memory while it waits in the queue.
-	delete(clean, "thread")
-	delete(clean, "profile")
-	clean["createdAt"] = timestamp()
+	clean.Key, clean.Thread, clean.Profile = "", nil, nil
 	stopped, stop := context.WithCancel(context.Background())
 	r.log = newRun(token())
 	r.log.stop = stop
 	// The user message a turn adds is named by the client's request.
-	r.stopped, r.input, r.principal, r.key, r.messageID, r.credential, r.assembler = stopped, clean, p, key, r.nonce, credential, newMessageAssembler()
-	if local {
-		r.profile = localProfile(raw(in["profile"]))
-	}
+	r.stopped, r.input, r.received, r.principal, r.key, r.messageID, r.credential, r.assembler = stopped, &clean, timestamp(), p, key, r.nonce, credential, newMessageAssembler()
 	r.out = &stream{run: r.log}
 
 	h.live.mu.Lock()
@@ -182,7 +179,7 @@ func (h *harness) admit(ctx context.Context, p *principal, key contentKey, in ob
 	if s.active != nil {
 		r.queued = true
 		s.queue = append(s.queue, r)
-		r.out.emit(event{Type: "STATE_DELTA", ThreadID: id, RunID: r.log.id, Delta: []statePatch{{"add", "/queue/-", queueItem(r)}}})
+		r.out.emit(event{Type: "STATE_DELTA", ThreadID: id, RunID: r.log.id, Delta: []statePatch{{"add", "/queue/-", r.queueItem()}}})
 		queueChanged(s)
 		return nil
 	}

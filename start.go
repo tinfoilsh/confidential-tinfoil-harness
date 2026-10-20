@@ -55,7 +55,7 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *principal) (*t
 			return nil, err
 		}
 		if err != nil {
-			row = &threadRow{Thread: newThread(s.id, optionalString(r.input["projectId"]), optionalString(r.input["presetId"]))}
+			row = &threadRow{Thread: newThread(s.id, r.input.ProjectID, r.input.PresetID.value)}
 		}
 		if row.LastRequestID == r.nonce {
 			return nil, errAlreadyApplied
@@ -76,7 +76,7 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *principal) (*t
 	created := row.etag == "" && len(t.Messages) == 0
 	// A new chat starts with the default prompt preset, as the web client
 	// stamps a blank chat. A first turn naming a preset, or null, overrides it.
-	if _, named := r.input["presetId"]; !named && !s.local && created {
+	if !r.input.PresetID.set && !s.local && created {
 		if preset := valueOr(profile.DefaultPromptPresetID, ""); preset != "" {
 			t.PresetID = &preset
 		}
@@ -88,14 +88,12 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *principal) (*t
 	if err := applyTurn(t, r.input, r.messageID, attachments); err != nil {
 		return nil, err
 	}
-	options := obj(r.input["options"])
+	options := r.input.Options
 	if created {
 		t.Model = cmp.Or(valueOr(profile.SelectedModel, ""), "auto")
 	}
-	t.Model = cmp.Or(str(options["model"]), t.Model, "auto")
-	if enabled, ok := options["webSearch"]; ok {
-		t.WebSearchEnabled = boolean(enabled, false)
-	}
+	t.Model = cmp.Or(options.Model, t.Model, "auto")
+	t.WebSearchEnabled = valueOr(options.WebSearch, t.WebSearchEnabled)
 	// Sync stores a chat only if every attachment it names is stored under the
 	// chat. An ask's stored source has attachments in sync; a keyless thread
 	// carries its own. Image descriptions are stored, image bytes are not.
@@ -122,10 +120,10 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *principal) (*t
 		return nil, err
 	}
 	plan := &turnPlan{row: row, request: request, model: model, titleText: titleSource(&working)}
-	if r.input["kind"] == "retryToolCall" {
+	if r.input.Kind == "retryToolCall" {
 		for _, message := range t.Messages {
 			for _, block := range message.Timeline {
-				if block.callID() == str(r.input["toolCallId"]) {
+				if block.callID() == r.input.ToolCallID {
 					plan.retryTarget = &retryTarget{block: block, parentID: message.ID}
 				}
 			}
@@ -133,7 +131,7 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *principal) (*t
 		if plan.retryTarget == nil {
 			return nil, apiErr(404, "THREAD_NOT_FOUND", "The widget call was not found")
 		}
-		if !slices.ContainsFunc(h.catalog.get().selectedWidgets(arr(r.input["widgets"]), true), func(w widget) bool { return w.Name == plan.retryTarget.block.Name }) {
+		if !slices.ContainsFunc(h.catalog.get().selectedWidgets(r.input.Widgets, true), func(w widget) bool { return w.Name == plan.retryTarget.block.Name }) {
 			return nil, apiErr(503, "TOOL_UNAVAILABLE", "This widget is not enabled for the client")
 		}
 	}
@@ -191,7 +189,7 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 		return credential, err
 	}
 	// A continuation streams into the reply it extends, which RUN_STARTED names.
-	if r.input["kind"] == "continue" {
+	if r.input.Kind == "continue" {
 		reply := row.Messages[len(row.Messages)-1]
 		r.assembler.seed(reply)
 		r.out.replyID = reply.ID
@@ -210,7 +208,7 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	// Framed under the lock, so no queue change reaches the run before them.
 	r.out.emit(event{Type: "RUN_STARTED", ThreadID: s.id, RunID: r.log.id, MessageID: r.out.replyID})
 	r.out.emit(event{Type: "MESSAGES_SNAPSHOT", Messages: shown.Messages, HasOlder: &shown.HasOlder})
-	r.out.emit(event{Type: "STATE_SNAPSHOT", Snapshot: object{"thread": shown.threadSummary, "queue": queueItems(s), "rateLimit": r.credential.Limit}})
+	r.out.emit(event{Type: "STATE_SNAPSHOT", Snapshot: stateSnapshot{shown.threadSummary, queueItems(s), r.credential.Limit}})
 	r.out.mu.Lock()
 	r.out.observe = r.assembler.apply
 	r.out.mu.Unlock()
@@ -227,7 +225,7 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 		defer close(r.titleDone)
 		defer func() { rescued("title", recover()) }()
 		// An ask's thread is discarded with its run.
-		if r.input["kind"] != "ask" {
+		if r.input.Kind != "ask" {
 			titleCtx, stop := context.WithTimeout(runCtx, 30*time.Second)
 			defer stop()
 			h.generateTitle(titleCtx, r, &titlePrincipal, titleState, titleText)

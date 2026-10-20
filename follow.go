@@ -4,7 +4,7 @@ import "net/http"
 
 // handleFollow re-attaches a client to a run that is live on this instance.
 func (h *harness) handleFollow(w http.ResponseWriter, r *http.Request) {
-	in, err := decodeJSON(w, r)
+	body, err := readBody(w, r, maxRequestBody)
 	if err != nil {
 		respond(w, nil, err)
 		return
@@ -14,13 +14,18 @@ func (h *harness) handleFollow(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, err)
 		return
 	}
-	key, err := requestKey(in)
+	var in runRequest
+	if err := decodeRequest(body, &in); err != nil {
+		respond(w, nil, err)
+		return
+	}
+	key, err := requestKey(in.Key)
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
 	defer clear(key[:])
-	live, err := h.authorizedRun(p, key, in)
+	live, err := h.authorizedRun(p, key, in.ThreadID, in.RunID)
 	if err != nil {
 		respond(w, nil, err)
 		return

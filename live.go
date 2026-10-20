@@ -52,7 +52,8 @@ type chatRun struct {
 	thread                   *threadSession
 	log                      *run
 	out                      *stream
-	input                    object
+	input                    *turnRequest
+	received                 string // when the turn's request arrived
 	principal                *principal
 	key                      contentKey
 	credential               inferenceCredential
@@ -85,13 +86,11 @@ func (r *chatRun) release() {
 	r.credential.Key = ""
 }
 
-func (h *harness) authorizedRun(p *principal, key contentKey, in object) (*chatRun, error) {
-	id, err := requiredID(in, "threadId")
-	if err != nil {
+func (h *harness) authorizedRun(p *principal, key contentKey, id, runID string) (*chatRun, error) {
+	if err := requireID("threadId", id); err != nil {
 		return nil, err
 	}
-	runID, err := requiredID(in, "runId")
-	if err != nil {
+	if err := requireID("runId", runID); err != nil {
 		return nil, err
 	}
 	h.live.mu.Lock()
@@ -123,18 +122,18 @@ func queueChanged(s *threadSession) {
 	}
 }
 
-func queueItem(r *chatRun) object {
-	attachments := []any{}
-	for _, a := range arr(r.input["attachments"]) {
-		attachments = append(attachments, selectFields(obj(a), "id kind fileName mimeType size thumbnail"))
+func (r *chatRun) queueItem() queueItem {
+	attachments := []queuedAttachment{}
+	for _, a := range r.input.Attachments {
+		attachments = append(attachments, queuedAttachment{ID: a.ID, Kind: a.Kind, FileName: a.FileName, MimeType: a.MimeType, Size: a.Size, Thumbnail: a.Thumbnail})
 	}
-	return object{"queueId": r.log.id, "kind": r.input["kind"], "content": r.input["content"], "quote": r.input["quote"], "attachments": attachments, "createdAt": r.input["createdAt"]}
+	return queueItem{QueueID: r.log.id, Kind: r.input.Kind, Content: r.input.Content, Quote: r.input.Quote, Attachments: attachments, CreatedAt: r.received}
 }
 
-func queueItems(s *threadSession) []object {
-	out := []object{}
+func queueItems(s *threadSession) []queueItem {
+	out := []queueItem{}
 	for _, r := range s.queue {
-		out = append(out, queueItem(r))
+		out = append(out, r.queueItem())
 	}
 	return out
 }

@@ -287,7 +287,7 @@ func TestMissingAttachmentsAreRepairedBeforeRetrying(t *testing.T) {
 		}
 		return nil
 	}
-	if _, err := h.updateThread(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, key, object{"id": "chat-1", "title": "Renamed"}); err != nil {
+	if _, err := h.updateThread(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, key, requestOf[updateThreadRequest](object{"id": "chat-1", "title": "Renamed"})); err != nil {
 		t.Fatal(err)
 	}
 	if refused != 1 {
@@ -495,7 +495,7 @@ func TestAStoredChatIsSharedFromItsRow(t *testing.T) {
 	cp := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer cp.Close()
 	h.controlplane, h.cpClient = cp.URL, &http.Client{Transport: &callerAuth{inner: cp.Client().Transport}}
-	if _, err := h.shareThread(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, contentKey{}, object{"key": key.base64(), "threadId": "chat-1"}); err != nil {
+	if _, err := h.shareThread(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, contentKey{}, requestOf[shareRequest](object{"key": key.base64(), "threadId": "chat-1"})); err != nil {
 		t.Fatal(err)
 	}
 	var shared object

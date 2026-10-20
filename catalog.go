@@ -211,13 +211,13 @@ func (c *chatCatalog) displayModels() []object {
 	}
 	return models
 }
-func (c *chatCatalog) selectedWidgets(requested []any, enabled bool) []widget {
+func (c *chatCatalog) selectedWidgets(requested []string, enabled bool) []widget {
 	result := []widget{}
 	if !enabled {
 		return result
 	}
 	for _, widget := range widgetCatalog() {
-		if slices.Contains(c.EnabledWidgets, widget.Name) && slices.ContainsFunc(requested, func(v any) bool { return str(v) == widget.Name }) {
+		if slices.Contains(c.EnabledWidgets, widget.Name) && slices.Contains(requested, widget.Name) {
 			result = append(result, widget)
 		}
 	}

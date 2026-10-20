@@ -230,13 +230,9 @@ func (h *harness) stageImport(ctx context.Context, p *principal, key contentKey,
 	err = h.syncImport(ctx, p, "start", object{"job_id": created["job_id"], "key": key.base64()}, &result)
 	return object{"jobId": created["job_id"]}, err
 }
-func (h *harness) importStatus(ctx context.Context, p *principal, _ contentKey, in object) (any, error) {
-	id, err := requiredID(in, "jobId")
-	if err != nil {
-		return nil, err
-	}
+func (h *harness) importStatus(ctx context.Context, p *principal, _ contentKey, in *importStatusRequest) (any, error) {
 	var result object
-	err = h.syncImport(ctx, p, "status", object{"job_id": id}, &result)
+	err := h.syncImport(ctx, p, "status", object{"job_id": in.JobID}, &result)
 	if err != nil {
 		return nil, err
 	}

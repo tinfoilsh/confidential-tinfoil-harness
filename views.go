@@ -250,3 +250,29 @@ type committedReply struct {
 	IsInterrupted    *bool           `json:"isInterrupted,omitempty"`
 	Annotations      []Annotation    `json:"annotations,omitempty"`
 }
+
+// queueItem is a turn waiting behind its chat's running reply.
+type queueItem struct {
+	QueueID     string             `json:"queueId"`
+	Kind        string             `json:"kind"`
+	Content     *string            `json:"content"`
+	Quote       *string            `json:"quote"`
+	Attachments []queuedAttachment `json:"attachments"`
+	CreatedAt   string             `json:"createdAt"`
+}
+
+type queuedAttachment struct {
+	ID        string  `json:"id,omitempty"`
+	Kind      string  `json:"kind,omitempty"`
+	FileName  string  `json:"fileName,omitempty"`
+	MimeType  string  `json:"mimeType,omitempty"`
+	Size      *int64  `json:"size,omitempty"`
+	Thumbnail *string `json:"thumbnail,omitempty"`
+}
+
+// stateSnapshot is a run's chat, its queue, and the caller's quota.
+type stateSnapshot struct {
+	Thread    threadSummary `json:"thread"`
+	Queue     []queueItem   `json:"queue"`
+	RateLimit rateLimit     `json:"rateLimit"`
+}

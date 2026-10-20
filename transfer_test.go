@@ -113,7 +113,7 @@ func TestImportMayReuseADeletedChatID(t *testing.T) {
 	})}}
 	h, _, key := testChatHarness(t, nil)
 	h.storeRows = client
-	if _, err := h.importThread(context.Background(), &principal{ID: "alice", JWT: "jwt"}, key, object{"threadId": "chat-1", "thread": object{"messages": []any{}}}); err != nil {
+	if _, err := h.importThread(context.Background(), &principal{ID: "alice", JWT: "jwt"}, key, requestOf[threadImportRequest](object{"threadId": "chat-1", "thread": object{"messages": []any{}}})); err != nil {
 		t.Fatal(err)
 	}
 	if metadata["restoreDeleted"] != true {

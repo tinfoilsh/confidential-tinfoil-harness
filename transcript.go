@@ -3,52 +3,51 @@ package main
 // applyTurn makes the change a turn's kind makes to a transcript before its
 // reply: a new or edited question, a resolved tool call, or the cut a
 // regeneration or continuation starts from.
-func applyTurn(t *Thread, in object, messageID string, attachments []Attachment) error {
+func applyTurn(t *Thread, in *turnRequest, messageID string, attachments []Attachment) error {
 	if t.messageIndex(messageID) >= 0 {
 		return nil
 	}
 	messages := t.Messages
-	kind := str(in["kind"])
-	content, quote := str(in["content"]), str(in["quote"])
-	if kind == "edit" || kind == "regenerate" || kind == "continue" {
-		index := t.messageIndex(str(in["messageId"]))
+	content, quote := valueOr(in.Content, ""), valueOr(in.Quote, "")
+	if in.Kind == "edit" || in.Kind == "regenerate" || in.Kind == "continue" {
+		index := t.messageIndex(in.MessageID)
 		// A continuation names its reply or extends the last message.
-		if kind == "continue" && str(in["messageId"]) == "" {
+		if in.Kind == "continue" && in.MessageID == "" {
 			index = len(messages) - 1
 		}
 		if index < 0 {
 			return apiErr(404, "THREAD_NOT_FOUND", "The message was not found")
 		}
 		role := "user"
-		if kind != "edit" {
+		if in.Kind != "edit" {
 			role = "assistant"
 		}
 		if messages[index].Role != role {
 			return apiErr(400, "BAD_REQUEST", "The turn kind does not match the message role")
 		}
-		if kind == "edit" {
-			if _, present := in["attachments"]; !present {
+		if in.Kind == "edit" {
+			if in.Attachments == nil {
 				attachments = messages[index].Attachments
 				if attachments == nil {
 					attachments = []Attachment{}
 				}
 			}
-			if _, present := in["quote"]; !present {
+			if in.Quote == nil {
 				quote = messages[index].Quote
 			}
 		}
 		// As on the web client, the continued reply becomes the last message.
-		if kind == "continue" {
+		if in.Kind == "continue" {
 			index++
 		}
 		messages = messages[:index]
 	}
-	if kind == "resolve" {
+	if in.Kind == "resolve" {
 		found := false
 		for i := range messages {
 			for j := range messages[i].Timeline {
-				if block := &messages[i].Timeline[j]; block.callID() == str(in["toolCallId"]) {
-					block.Resolution, block.ResolvedAt = raw(in["resolution"]), raw(timestamp())
+				if block := &messages[i].Timeline[j]; block.callID() == in.ToolCallID {
+					block.Resolution, block.ResolvedAt = in.Resolution, raw(timestamp())
 					found = true
 				}
 			}
@@ -56,12 +55,12 @@ func applyTurn(t *Thread, in object, messageID string, attachments []Attachment)
 		if !found {
 			return apiErr(404, "THREAD_NOT_FOUND", "The tool call was not found")
 		}
-		content = str(obj(in["resolution"])["text"])
+		content, _ = in.resolution()
 	}
-	if kind == "ask" {
-		content, quote = str(in["quote"]), ""
+	if in.Kind == "ask" {
+		content, quote = valueOr(in.Quote, ""), ""
 	}
-	if kind != "regenerate" && kind != "retryToolCall" && kind != "continue" {
+	if in.Kind != "regenerate" && in.Kind != "retryToolCall" && in.Kind != "continue" {
 		messages = append(messages, Message{ID: messageID, Role: "user", Content: content, Quote: quote, Attachments: attachments, CreatedAt: timestamp()})
 	}
 	t.Messages = messages
