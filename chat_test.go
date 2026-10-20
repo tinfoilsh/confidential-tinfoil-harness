@@ -891,13 +891,12 @@ func TestPrioritySendStartsTheChosenTurnNext(t *testing.T) {
 
 func prioritySend(t *testing.T, stopped bool) {
 	var calls atomic.Int32
-	started, latest := make(chan struct{}), make(chan any, 2)
+	latest := make(chan any, 2)
 	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		messages := lastRequest(r)
 		if calls.Add(1) == 1 {
 			io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
 			w.(http.Flusher).Flush()
-			close(started)
 			<-r.Context().Done()
 			return
 		}
@@ -914,7 +913,9 @@ func prioritySend(t *testing.T, stopped bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	<-started
+	// Waiting on the harness rather than the fake gives the yielded run a
+	// partial reply to commit.
+	awaitFrame(t, run.log, "TEXT_MESSAGE_CHUNK")
 	queue := func(content string) *chatRun {
 		in := sendInput(key)
 		in["threadId"], in["content"] = run.thread.id, content
