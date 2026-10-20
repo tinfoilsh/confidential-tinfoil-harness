@@ -11,6 +11,7 @@ require (
 	github.com/tiktoken-go/tokenizer v0.5.1
 	github.com/tinfoilsh/tinfoil-go v0.16.3
 	github.com/tinfoilsh/usage-reporting-go v0.1.4
+	github.com/yuin/goldmark v1.8.6
 	golang.org/x/image v0.38.0
 )
 

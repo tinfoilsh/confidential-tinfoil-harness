@@ -376,8 +376,31 @@ type faviconRequest struct {
 	URL string `json:"url"`
 }
 
+// speechRequest names a message to read aloud: one of a stored chat, named
+// with the content key, or of a device chat its client sends. Text a client
+// selected is read as it is.
 type speechRequest struct {
-	Text string `json:"text"`
+	threadSource
+	Key       string  `json:"key"`
+	ThreadID  string  `json:"threadId"`
+	MessageID string  `json:"messageId"`
+	Text      *string `json:"text"`
+}
+
+func (in *speechRequest) validate() error {
+	if in.MessageID == "" {
+		if strings.TrimSpace(valueOr(in.Text, "")) == "" {
+			return apiErr(400, "BAD_REQUEST", "A message or text is required")
+		}
+		return nil
+	}
+	if err := requireID("threadId", in.ThreadID); err != nil {
+		return err
+	}
+	if err := requireID("messageId", in.MessageID); err != nil {
+		return err
+	}
+	return in.threadSource.validate()
 }
 
 // threadImportRequest stores a device chat in the cloud under its id.
