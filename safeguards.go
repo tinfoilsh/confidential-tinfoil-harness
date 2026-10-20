@@ -36,8 +36,9 @@ type submission struct {
 }
 
 // submitter delivers a conversation from the run that produced it, after the
-// run's terminal frame and within safeguardsTimeout, so it never delays or
-// fails the run.
+// run's terminal frame, so the reply is already delivered. The run waits up
+// to safeguardsTimeout for the delivery before it releases what it holds,
+// and a failed delivery never fails it.
 type submitter struct {
 	endpoint string
 	client   *http.Client
