@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1369,11 +1370,13 @@ func toolResult(events []event, id string) object {
 
 func TestToolSessionsCarryTheEnclaveHeaders(t *testing.T) {
 	sessions := map[string]bool{}
+	// A client that does not say checks, as the web client defaults to.
 	for _, tc := range []struct {
-		route string
-		pii   bool
-	}{{"/v1/threads/turn", false}, {"/v1/threads/turn", true}} {
-		t.Run(tc.route+"/"+strconv.FormatBool(tc.pii), func(t *testing.T) {
+		route  string
+		option any
+		pii    bool
+	}{{"/v1/threads/turn", false, false}, {"/v1/threads/turn", true, true}, {"/v1/threads/turn", nil, true}} {
+		t.Run(tc.route+"/"+fmt.Sprint(tc.option), func(t *testing.T) {
 			enclave := serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) { return nil, object{"results": []object{}} })
 			bodies := make(chan object, 2)
 			answer := toolTurns(toolCallChunk(0, "one", "web_search", `{"query":"cats"}`)+toolCallChunk(1, "two", "web_search", `{"query":"dogs"}`), nil)
@@ -1384,7 +1387,9 @@ func TestToolSessionsCarryTheEnclaveHeaders(t *testing.T) {
 				answer(w, r)
 			})
 			in := searchInput(key)
-			obj(in["options"])["piiCheck"] = tc.pii
+			if tc.option != nil {
+				obj(in["options"])["piiCheck"] = tc.option
+			}
 			events := finishedRun(t, h, tc.route, in)
 			calls := enclave.list()
 			if len(calls) != 2 {

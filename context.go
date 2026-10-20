@@ -209,7 +209,7 @@ func (h *harness) buildRequest(thread, profile, project object, documents []obje
 	}
 	req.system = systemPrompt(c, thread, profile, project, documents, display, zone)
 	req.window, req.policy = window, policy
-	req.piiCheck = boolean(options["piiCheck"], boolean(profile["piiCheckEnabled"], false))
+	req.piiCheck = boolean(options["piiCheck"], boolean(profile["piiCheckEnabled"], true))
 	req.webSearch = boolean(options["webSearch"], boolean(thread["webSearchEnabled"], boolean(profile["webSearchEnabled"], true)))
 	if req.webSearch && webSearch.client == nil {
 		return nil, nil, apiErr(503, "TOOL_UNAVAILABLE", "webSearch is unavailable")
