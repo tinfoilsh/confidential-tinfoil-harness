@@ -34,6 +34,21 @@ func optionsPart(options object) formPart { return formPart{name: "options", dat
 func threadPart(thread any) formPart      { return formPart{name: "thread", data: raw(thread)} }
 
 func archiveRoute(h *harness, path, user string, parts ...formPart) *httptest.ResponseRecorder {
+	body, contentType := archiveForm(parts...)
+	r := httptest.NewRequest("POST", path, bytes.NewReader(body))
+	r.Header.Set("Content-Type", contentType)
+	if user != "" {
+		r.Header.Set("Authorization", "Bearer clerk-"+user)
+	} else {
+		r.Header.Set("Authorization", "Bearer free_anonymous-key")
+	}
+	w := httptest.NewRecorder()
+	h.routes().ServeHTTP(w, r)
+	return w
+}
+
+// archiveForm is a multipart body of parts and its content type.
+func archiveForm(parts ...formPart) ([]byte, string) {
 	var body bytes.Buffer
 	form := multipart.NewWriter(&body)
 	for _, part := range parts {
@@ -46,16 +61,7 @@ func archiveRoute(h *harness, path, user string, parts ...formPart) *httptest.Re
 		w.Write(part.data)
 	}
 	form.Close()
-	r := httptest.NewRequest("POST", path, &body)
-	r.Header.Set("Content-Type", form.FormDataContentType())
-	if user != "" {
-		r.Header.Set("Authorization", "Bearer clerk-"+user)
-	} else {
-		r.Header.Set("Authorization", "Bearer free_anonymous-key")
-	}
-	w := httptest.NewRecorder()
-	h.routes().ServeHTTP(w, r)
-	return w
+	return body.Bytes(), form.FormDataContentType()
 }
 
 func fixture(t *testing.T, name string) []byte {
@@ -819,38 +825,11 @@ func TestStalledArchivesFreeTheirSpace(t *testing.T) {
 	h.scratch.wait, h.scratch.idle = time.Millisecond, 500*time.Millisecond
 	server := httptest.NewServer(h.routes())
 	t.Cleanup(server.Close)
-	post := func(contentType string, length int) net.Conn {
-		conn, err := net.Dial("tcp", server.Listener.Addr().String())
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { conn.Close() })
-		fmt.Fprintf(conn, "POST /v1/import HTTP/1.1\r\nHost: harness\r\nAuthorization: Bearer clerk-alice\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n", contentType, length)
-		return conn
-	}
-	response := func(conn net.Conn) (*http.Response, string) {
-		conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-		r, err := http.ReadResponse(bufio.NewReader(conn), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		body, _ := io.ReadAll(r.Body)
-		return r, string(body)
-	}
 
 	// The stalled import declares a body the space fits and sends part of it.
-	stalled := post("multipart/form-data; boundary=stall", 30<<10)
+	stalled := postRaw(t, server, "/v1/import", "multipart/form-data; boundary=stall", 30<<10)
 	fmt.Fprintf(stalled, "--stall\r\nContent-Disposition: form-data; name=\"file\"; filename=\"chats.json\"\r\n\r\n%s", strings.Repeat(" ", 4<<10))
-	for start := time.Now(); ; time.Sleep(time.Millisecond) {
-		if spooled, _ := filepath.Glob(filepath.Join(dir, "harness-archive-*")); len(spooled) > 0 {
-			if info, err := os.Stat(spooled[0]); err == nil && info.Size() > 0 {
-				break
-			}
-		}
-		if time.Since(start) > 10*time.Second {
-			t.Fatal("the stalled import never spooled its bytes")
-		}
-	}
+	waitForSpooled(t, dir, 1)
 	var form bytes.Buffer
 	writer := multipart.NewWriter(&form)
 	options, _ := writer.CreateFormField("options")
@@ -858,7 +837,7 @@ func TestStalledArchivesFreeTheirSpace(t *testing.T) {
 	file, _ := writer.CreateFormFile("file", "conversations.json")
 	file.Write(raw([]object{{"uuid": "slow-chat", "name": "Slow", "chat_messages": []object{{"sender": "human", "text": "hi"}}}}))
 	writer.Close()
-	slow := post(writer.FormDataContentType(), form.Len())
+	slow := postRaw(t, server, "/v1/import", writer.FormDataContentType(), form.Len())
 	trickled := make(chan struct{})
 	go func() {
 		defer close(trickled)
@@ -873,16 +852,105 @@ func TestStalledArchivesFreeTheirSpace(t *testing.T) {
 	if w := archiveRoute(h, "/v1/export", "", optionsPart(object{"format": "conversations"}), thread); w.Code != 200 {
 		t.Fatalf("an export waited for a stalled import's space: HTTP %d %s", w.Code, w.Body.String())
 	}
-	if r, body := response(stalled); r.StatusCode != http.StatusRequestTimeout || !strings.Contains(body, "REQUEST_TIMEOUT") {
+	if r, body := rawResponse(t, stalled); r.StatusCode != http.StatusRequestTimeout || !strings.Contains(body, "REQUEST_TIMEOUT") {
 		t.Fatalf("the stalled import: HTTP %d %s", r.StatusCode, body)
 	}
 	<-trickled
-	if r, body := response(slow); r.StatusCode != 200 || !strings.Contains(body, `"title":"Slow"`) || !strings.Contains(body, `"done"`) {
+	if r, body := rawResponse(t, slow); r.StatusCode != 200 || !strings.Contains(body, `"title":"Slow"`) || !strings.Contains(body, `"done"`) {
 		t.Fatalf("an import whose body kept arriving: HTTP %d %s", r.StatusCode, body)
 	}
 	for start := time.Now(); !h.scratch.sem.TryAcquire(h.scratch.size); time.Sleep(time.Millisecond) {
 		if time.Since(start) > 10*time.Second {
 			t.Fatal("the stalled import kept its space")
+		}
+	}
+}
+
+// Two archives that each hold space and together need more than there is
+// do not wait for each other: the one that cannot grow is told to retry at
+// once, and the space it frees lets the other finish.
+func TestArchivesHoldingSpaceDoNotWaitForMore(t *testing.T) {
+	h, _, _ := testChatHarness(t, nil)
+	dir := t.TempDir()
+	h.scratch = newScratchSpace(dir, 64<<10)
+	server := httptest.NewServer(h.routes())
+	t.Cleanup(server.Close)
+	chat := func(id string) formPart {
+		return threadPart(object{"id": id, "title": id, "messages": []any{object{"id": "m", "role": "user", "content": strings.Repeat("x", 24<<10)}}})
+	}
+	// Each export sends its first chat and holds the space it takes, and
+	// keeps back its second.
+	start := func(name string) (net.Conn, []byte) {
+		second := chat(name + "-2")
+		body, contentType := archiveForm(optionsPart(object{"format": "native"}), chat(name+"-1"), second)
+		split := bytes.Index(body, second.data)
+		conn := postRaw(t, server, "/v1/export", contentType, len(body))
+		conn.Write(body[:split])
+		return conn, body[split:]
+	}
+	first, firstRest := start("first")
+	second, secondRest := start("second")
+	waitForSpooled(t, dir, 2)
+
+	first.Write(firstRest)
+	if r, body := rawResponse(t, first); r.StatusCode != http.StatusServiceUnavailable || r.Header.Get("Retry-After") == "" || !strings.Contains(body, "TEMP_SPACE_BUSY") {
+		t.Fatalf("the export that could not grow: HTTP %d %s", r.StatusCode, body)
+	}
+	second.Write(secondRest)
+	r, body := rawResponse(t, second)
+	if r.StatusCode != 200 {
+		t.Fatalf("the export left the space: HTTP %d %s", r.StatusCode, body)
+	}
+	files, _ := unzipped(t, []byte(body))
+	var manifest backupManifest
+	json.Unmarshal(files[manifestPath], &manifest)
+	if manifest.Counts.LocalChats != 2 {
+		t.Fatalf("the export left the space holds %+v", manifest.Counts)
+	}
+}
+
+// postRaw starts a request to server whose body the caller writes to the
+// connection it returns.
+func postRaw(t *testing.T, server *httptest.Server, path, contentType string, length int) net.Conn {
+	t.Helper()
+	conn, err := net.Dial("tcp", server.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	fmt.Fprintf(conn, "POST %s HTTP/1.1\r\nHost: harness\r\nAuthorization: Bearer clerk-alice\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n", path, contentType, length)
+	return conn
+}
+
+// rawResponse reads the response to a request postRaw started, failing a
+// test whose request is not answered promptly.
+func rawResponse(t *testing.T, conn net.Conn) (*http.Response, string) {
+	t.Helper()
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	r, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(r.Body)
+	return r, string(body)
+}
+
+// waitForSpooled waits until count archives have spooled bytes to dir.
+func waitForSpooled(t *testing.T, dir string, count int) {
+	t.Helper()
+	for start := time.Now(); ; time.Sleep(time.Millisecond) {
+		spooled, _ := filepath.Glob(filepath.Join(dir, "harness-archive-*"))
+		written := 0
+		for _, name := range spooled {
+			if info, err := os.Stat(name); err == nil && info.Size() > 0 {
+				written++
+			}
+		}
+		if written >= count {
+			return
+		}
+		if time.Since(start) > 10*time.Second {
+			t.Fatalf("%d of %d archives spooled their bytes", written, count)
 		}
 	}
 }

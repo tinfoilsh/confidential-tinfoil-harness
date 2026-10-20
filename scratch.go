@@ -15,9 +15,12 @@ import (
 // Archives are spooled to the temporary directory: a tmpfs whose size the
 // enclave's configuration sets, held in the confidential VM's encrypted
 // memory, which has no swap device. A request takes space as the bytes it
-// spools arrive, and waits while other requests hold it. A request that
-// could never fit is refused at once, and one whose body stops arriving is
-// ended, freeing what it holds.
+// spools arrive. Until it holds some, it waits while other requests hold
+// it; once it does, it never waits for more, since two requests could then
+// each wait for the space the other holds. One that cannot grow is told to
+// retry, freeing what it holds. A request that could never fit is refused
+// at once, and one whose body stops arriving is ended, freeing what it
+// holds.
 
 const (
 	// scratchWait bounds how long a request waits for space before it is
@@ -79,6 +82,9 @@ func (l *scratchLease) take(n int64) error {
 	if l.space.sem.TryAcquire(n) {
 		l.held += n
 		return nil
+	}
+	if l.held > 0 {
+		return errScratchBusy
 	}
 	waitCtx, cancel := context.WithTimeout(l.ctx, l.space.wait)
 	defer cancel()
