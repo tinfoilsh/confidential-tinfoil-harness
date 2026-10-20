@@ -88,7 +88,8 @@ func TestADeviceProfileUpgradesAsAStoredOneReads(t *testing.T) {
 		ProfileDefaults object `json:"profileDefaults"`
 	}
 	json.Unmarshal(postRoute(h, "/v1/session", object{}, "").Body.Bytes(), &session)
-	if session.ProfileDefaults["piiCheckEnabled"] != true || session.ProfileDefaults["selectedModel"] != "auto" {
+	// Thinking left unset follows each model's default, so it has none here.
+	if _, thinking := session.ProfileDefaults["thinkingEnabled"]; thinking || session.ProfileDefaults["piiCheckEnabled"] != true || session.ProfileDefaults["selectedModel"] != "auto" {
 		t.Fatalf("the session defaults are %v", session.ProfileDefaults)
 	}
 	if empty := profileOf(t, postRoute(h, "/v1/profile/get", object{"key": key.base64()}, "alice")); !reflect.DeepEqual(empty, session.ProfileDefaults) {
