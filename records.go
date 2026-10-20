@@ -18,7 +18,7 @@ func (h *harness) apiRoutes() []routeSpec {
 		{"/v1/threads/queue/send", true, false, decoded(h.sendQueued)}, {"/v1/threads/queue/remove", true, false, decoded(h.removeQueued)}, {"/v1/threads/share", false, false, decoded(h.shareThread)},
 		{"/v1/threads/share/revoke", false, false, decoded(h.revokeShare)}, {"/v1/threads/share/status", false, false, decoded(h.shareStatus)},
 		{"/v1/threads/transcript", false, true, decoded(h.threadTranscript)},
-		{"/v1/profile/get", false, true, h.getProfile}, {"/v1/profile/update", false, true, decoded(h.updateProfile)},
+		{"/v1/profile/get", false, true, h.getProfile}, {"/v1/profile/update", false, true, decoded(h.updateProfile)}, {"/v1/profile/upgrade", true, false, decoded(h.upgradeDeviceProfile)},
 		{"/v1/projects/list", false, true, decoded(h.listProjects)}, {"/v1/projects/get", false, true, decoded(h.getProject)},
 		{"/v1/projects/create", false, true, decoded(h.createProject)}, {"/v1/projects/update", false, true, decoded(h.updateProject)},
 		{"/v1/projects/delete", false, true, decoded(h.deleteProject)}, {"/v1/projects/documents/delete", false, true, decoded(h.deleteDocument)},
@@ -51,14 +51,15 @@ func (h *harness) session(ctx context.Context, p *principal, _ contentKey, _ jso
 		presets = []preset{}
 	}
 	return sessionView{
-		User:         sessionUser{ID: p.ID, Anonymous: p.Anonymous},
-		RateLimit:    credential.Limit,
-		Models:       c.displayModels(),
-		Auto:         autoView{Multimodal: true, Default: "high", Levels: intelligenceLevels},
-		DefaultModel: "auto",
-		Widgets:      c.EnabledWidgets,
-		Presets:      presets,
-		Features:     map[string]bool{"webSearch": webSearch.client != nil, "transcription": h.serviceReady("router"), "speech": h.serviceReady("router")},
+		User:            sessionUser{ID: p.ID, Anonymous: p.Anonymous},
+		RateLimit:       credential.Limit,
+		Models:          c.displayModels(),
+		Auto:            autoView{Multimodal: true, Default: defaultIntelligence, Levels: intelligenceLevels},
+		DefaultModel:    autoModelName,
+		Widgets:         c.EnabledWidgets,
+		ProfileDefaults: defaultProfile(),
+		Presets:         presets,
+		Features:        map[string]bool{"webSearch": webSearch.client != nil, "transcription": h.serviceReady("router"), "speech": h.serviceReady("router")},
 	}, nil
 }
 
@@ -224,21 +225,30 @@ func (h *harness) profile(ctx context.Context, p *principal, key contentKey) (Pr
 	if err != nil || stored == nil {
 		return Profile{}, err
 	}
-	return viewProfile(*stored).Profile, nil
+	return stored.Profile, nil
 }
 
 // viewProfile is a stored profile as its client reads it.
-func viewProfile(stored storedProfile) profileView {
-	view := profileView{Profile: stored.Profile, UpdatedAt: stored.UpdatedAt}
-	view.SelectedModel = new(normalizeModel(valueOr(view.SelectedModel, "")))
-	return view
+func (h *harness) viewProfile(stored storedProfile) profileView {
+	return profileView{Profile: h.catalog.get().effectiveProfile(stored.Profile), UpdatedAt: stored.UpdatedAt}
 }
 func (h *harness) getProfile(ctx context.Context, p *principal, key contentKey, _ json.RawMessage) (any, error) {
 	stored, err := h.loadProfile(ctx, p, key)
-	if err != nil || stored == nil {
-		return profileView{}, err
+	if err != nil {
+		return nil, err
 	}
-	return viewProfile(*stored), nil
+	if stored == nil {
+		stored = &storedProfile{}
+	}
+	return h.viewProfile(*stored), nil
+}
+
+// upgradeDeviceProfile reads the settings a client keeps on its device as
+// the profile a stored one reads as. It stores nothing.
+func (h *harness) upgradeDeviceProfile(_ context.Context, _ *principal, _ contentKey, in *profileUpgradeRequest) (any, error) {
+	return struct {
+		Profile Profile `json:"profile"`
+	}{h.catalog.get().effectiveProfile(*localProfile(in.Profile))}, nil
 }
 func (h *harness) updateProfile(ctx context.Context, p *principal, key contentKey, in *profileUpdateRequest) (any, error) {
 	patch, clearsDefault, err := in.patch()
@@ -254,7 +264,7 @@ func (h *harness) updateProfile(ctx context.Context, p *principal, key contentKe
 	if err != nil {
 		return nil, err
 	}
-	return viewProfile(stored), nil
+	return h.viewProfile(stored), nil
 }
 func (h *harness) listProjects(ctx context.Context, p *principal, key contentKey, in *listRequest) (any, error) {
 	projects, next, err := h.projectPage(ctx, p, key, in.Cursor, 50)

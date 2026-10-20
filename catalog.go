@@ -72,6 +72,7 @@ func (w widget) declaration() json.RawMessage {
 type chatCatalog struct {
 	Models                      []object
 	Deprecated                  []object
+	Listed                      []string // every chat model the control plane lists, offered or not
 	Prompt, Rules, WidgetHeader string
 	EnabledWidgets              []string
 	Presets                     []preset
@@ -127,6 +128,7 @@ func buildCatalog(config []object, prompt object, models []*model) *chatCatalog 
 			continue
 		}
 		name, repo := str(definition["modelName"]), str(definition["repo"])
+		c.Listed = append(c.Listed, name)
 		if boolean(definition["deprecated"], false) {
 			c.Deprecated = append(c.Deprecated, definition)
 			continue
@@ -178,9 +180,21 @@ func (c *chatCatalog) vision(name string) bool {
 	return name == "auto" || boolean(c.definition(name)["multimodal"], false)
 }
 
+// retired reports whether the control plane no longer lists a chat model.
+func (c *chatCatalog) retired(name string) bool {
+	return name != autoModelName && c.definition(name) == nil && !slices.Contains(c.Listed, name)
+}
+
+// autoModelName is the model that has the router choose one per turn.
+const autoModelName = "auto"
+
+// legacyAutoModels are the Auto tiers of an earlier design, which old chats
+// and settings name.
+var legacyAutoModels = []string{"auto-smart", "auto-fast"}
+
 func normalizeModel(name string) string {
-	if name == "" || name == "auto-smart" || name == "auto-fast" {
-		return "auto"
+	if name == "" || slices.Contains(legacyAutoModels, name) {
+		return autoModelName
 	}
 	return name
 }

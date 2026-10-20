@@ -41,6 +41,9 @@ func cacheScope(apiKey string) string {
 // imageTokens is what one image costs; sizing its base64 as text fits nothing.
 const imageTokens = 1500
 
+// promptLanguage is the language a prompt names for a user who chose none.
+const promptLanguage = "English"
+
 var encoder = sync.OnceValue(func() tokenizer.Codec {
 	enc, err := tokenizer.Get(tokenizer.Cl100kBase)
 	if err != nil {
@@ -130,7 +133,11 @@ func systemPrompt(c *chatCatalog, thread *Thread, profile *Profile, project *Pro
 			rules = ""
 		}
 	}
-	replacer := strings.NewReplacer("{MODEL_NAME}", displayName, "{LANGUAGE}", cmp.Or(valueOr(profile.Language, ""), "English"), "{TIMEZONE}", timezone, "{USER_PREFERENCES}", preferences(profile))
+	language := valueOr(profile.Language, "")
+	if language == defaultLanguage {
+		language = ""
+	}
+	replacer := strings.NewReplacer("{MODEL_NAME}", displayName, "{LANGUAGE}", cmp.Or(language, promptLanguage), "{TIMEZONE}", timezone, "{USER_PREFERENCES}", preferences(profile))
 	base = replacer.Replace(base) + projectPrompt(project, documents)
 	if rules != "" {
 		base += "\n" + replacer.Replace(rules)

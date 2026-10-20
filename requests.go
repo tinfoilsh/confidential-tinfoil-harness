@@ -259,6 +259,18 @@ func (in *profileUpdateRequest) patch() (Profile, bool, error) {
 	return patch, preset.DefaultPromptPresetID.set && preset.DefaultPromptPresetID.value == nil, nil
 }
 
+// profileUpgradeRequest names the settings a client keeps on its device.
+type profileUpgradeRequest struct {
+	Profile json.RawMessage `json:"profile"`
+}
+
+func (in *profileUpgradeRequest) validate() error {
+	if !isObject(in.Profile) {
+		return apiErr(400, "BAD_REQUEST", "profile must be an object")
+	}
+	return nil
+}
+
 type projectRequest struct {
 	ID                 string  `json:"id"`
 	Name               *string `json:"name"`
@@ -463,15 +475,6 @@ func (in *turnRequest) validateContent() error {
 	}
 	if in.Thread != nil {
 		if err := validateLocalThread(in.Thread); err != nil {
-			return err
-		}
-	}
-	if in.Profile != nil {
-		var profile Profile
-		if err := decodeRequest(in.Profile, &profile); err != nil {
-			return err
-		}
-		if err := profile.validate(); err != nil {
 			return err
 		}
 	}

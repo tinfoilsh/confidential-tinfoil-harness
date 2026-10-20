@@ -279,14 +279,15 @@ type stateSnapshot struct {
 
 // sessionView is what a client opens the app with.
 type sessionView struct {
-	User         sessionUser     `json:"user"`
-	RateLimit    rateLimit       `json:"rateLimit"`
-	Models       []object        `json:"models"`
-	Auto         autoView        `json:"auto"`
-	DefaultModel string          `json:"defaultModel"`
-	Widgets      []string        `json:"widgets"`
-	Presets      []preset        `json:"presets"`
-	Features     map[string]bool `json:"features"`
+	User            sessionUser     `json:"user"`
+	RateLimit       rateLimit       `json:"rateLimit"`
+	Models          []object        `json:"models"`
+	Auto            autoView        `json:"auto"`
+	DefaultModel    string          `json:"defaultModel"`
+	Widgets         []string        `json:"widgets"`
+	ProfileDefaults Profile         `json:"profileDefaults"`
+	Presets         []preset        `json:"presets"`
+	Features        map[string]bool `json:"features"`
 }
 
 type sessionUser struct {

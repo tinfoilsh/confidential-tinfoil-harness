@@ -74,31 +74,79 @@ var (
 	chatFonts  = []string{"system", "serif", "mono", "dyslexic"}
 )
 
+// The defaults of profile fields that hold a choice.
+const (
+	defaultLanguage     = "System"
+	defaultIntelligence = "high"
+	defaultEffort       = "medium"
+	defaultTheme        = "system"
+	defaultFont         = "system"
+)
+
+// defaultProfile holds the value of every profile field a profile leaves
+// unset. An empty default prompt preset is none.
+func defaultProfile() Profile {
+	return Profile{ThemeMode: new(defaultTheme), ChatFont: new(defaultFont), Language: new(defaultLanguage), Nickname: new(""), Profession: new(""), Traits: []string{}, AdditionalContext: new(""),
+		IsUsingPersonalization: new(true), IsUsingCustomPrompt: new(false), CustomSystemPrompt: new(""), CustomPromptPresets: []CustomPreset{}, FavoritePromptPresetIDs: []string{}, DefaultPromptPresetID: new(""),
+		SelectedModel: new(autoModelName), AutoIntelligence: new(defaultIntelligence), ReasoningEffort: new(defaultEffort), ThinkingEnabled: new(true), WebSearchEnabled: new(true), CodeExecutionEnabled: new(false),
+		PIICheckEnabled: new(true), GenUIEnabled: new(true), PixelateSidebarChatTitlesEnabled: new(false), BrowserTabChatTitleEnabled: new(true), EnterToNewlineEnabled: new(false),
+		HasSeenOnboarding: new(false), HasSeenWebSearchIntro: new(false), Dismissed: map[string]bool{}}
+}
+
+// withDefaults is the profile with every field it leaves unset at its default.
+func (p Profile) withDefaults() Profile {
+	filled := defaultProfile()
+	filled.apply(p)
+	return filled
+}
+
 func (p *Profile) validate() error {
-	for _, choice := range []struct {
-		name    string
-		value   *string
-		choices []string
-	}{{"themeMode", p.ThemeMode, themeModes}, {"chatFont", p.ChatFont, chatFonts}, {"reasoningEffort", p.ReasoningEffort, reasoningEfforts}, {"autoIntelligence", p.AutoIntelligence, intelligenceIDs()}} {
-		if choice.value != nil && !slices.Contains(choice.choices, *choice.value) {
-			return apiErr(400, "BAD_REQUEST", "Invalid "+choice.name)
-		}
-	}
-	for _, list := range []struct {
-		name   string
-		length int
-	}{{"traits", len(p.Traits)}, {"favoritePromptPresetIds", len(p.FavoritePromptPresetIDs)}, {"customPromptPresets", len(p.CustomPromptPresets)}} {
-		if list.length > maxProfileList {
-			return apiErr(400, "BAD_REQUEST", list.name+" has too many entries")
-		}
-	}
-	for _, preset := range p.CustomPromptPresets {
-		if preset.ID == "" || preset.Name == "" {
-			return apiErr(400, "BAD_REQUEST", "A custom preset requires an id and name")
-		}
+	checked := *p
+	if invalid := checked.dropInvalid(); invalid != nil {
+		return invalid
 	}
 	return nil
 }
+
+// dropInvalid clears each field whose value a client may not set, and
+// reports the first.
+func (p *Profile) dropInvalid() *apiError {
+	var first *apiError
+	refuse := func(message string) {
+		if first == nil {
+			first = apiErr(400, "BAD_REQUEST", message)
+		}
+	}
+	for _, choice := range []struct {
+		name    string
+		value   **string
+		choices []string
+	}{{"themeMode", &p.ThemeMode, themeModes}, {"chatFont", &p.ChatFont, chatFonts}, {"reasoningEffort", &p.ReasoningEffort, reasoningEfforts}, {"autoIntelligence", &p.AutoIntelligence, intelligenceIDs()}} {
+		if *choice.value != nil && !slices.Contains(choice.choices, **choice.value) {
+			refuse("Invalid " + choice.name)
+			*choice.value = nil
+		}
+	}
+	if len(p.Traits) > maxProfileList {
+		refuse("traits has too many entries")
+		p.Traits = nil
+	}
+	if len(p.FavoritePromptPresetIDs) > maxProfileList {
+		refuse("favoritePromptPresetIds has too many entries")
+		p.FavoritePromptPresetIDs = nil
+	}
+	if len(p.CustomPromptPresets) > maxProfileList {
+		refuse("customPromptPresets has too many entries")
+		p.CustomPromptPresets = nil
+	}
+	if slices.ContainsFunc(p.CustomPromptPresets, unnamedPreset) {
+		refuse("A custom preset requires an id and name")
+		p.CustomPromptPresets = slices.DeleteFunc(slices.Clone(p.CustomPromptPresets), unnamedPreset)
+	}
+	return first
+}
+
+func unnamedPreset(preset CustomPreset) bool { return preset.ID == "" || preset.Name == "" }
 
 // apply sets every field the patch sets.
 func (p *Profile) apply(patch Profile) {
@@ -125,10 +173,25 @@ func (p *Profile) preset(id string) *CustomPreset {
 	return nil
 }
 
-// localProfile is the settings a device chat's client sends with its turn.
+// localProfile is the settings a device chat's client sends with a request,
+// without the fields it may not set, which never refuse the request.
 func localProfile(data []byte) *Profile {
 	var profile Profile
 	readLenient(data, &profile)
-	profile.SelectedModel = new(normalizeModel(valueOr(profile.SelectedModel, "")))
+	upgradeProfile(&profile, nowUTC())
+	profile.dropInvalid()
 	return &profile
+}
+
+// effectiveProfile is a profile as its client reads it: a saved prompt
+// keeps a model only while the control plane lists it, and every field the
+// profile leaves unset reads as its default.
+func (c *chatCatalog) effectiveProfile(p Profile) Profile {
+	p.CustomPromptPresets = slices.Clone(p.CustomPromptPresets)
+	for i := range p.CustomPromptPresets {
+		if model := p.CustomPromptPresets[i].Model; model != nil && c.retired(*model) {
+			p.CustomPromptPresets[i].Model = nil
+		}
+	}
+	return p.withDefaults()
 }

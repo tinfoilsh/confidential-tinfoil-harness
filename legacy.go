@@ -4,6 +4,8 @@ import (
 	"cmp"
 	"encoding/json"
 	"net/http"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -275,7 +277,51 @@ func readProfile(data []byte) storedProfile {
 	readLenient(data, &stored)
 	profile := stored.storedProfile
 	profile.UpdatedAt = string(stored.UpdatedAt)
+	// The migrated prompt is dated by the profile, so each read of a profile
+	// not yet stored again makes the same one.
+	written, err := time.Parse(time.RFC3339Nano, profile.UpdatedAt)
+	if err != nil {
+		written = nowUTC()
+	}
+	upgradeProfile(&profile.Profile, written)
 	return profile
+}
+
+// migratedPromptPresetID names the saved prompt an old custom default
+// prompt becomes, as the iOS app names it.
+const migratedPromptPresetID = "user:migrated-custom-prompt"
+
+// systemTags are the tags old clients wrapped a custom prompt in.
+var systemTags = regexp.MustCompile(`^<system>\s*\n?|\n?</system>\s*$`)
+
+// upgradeProfile reads settings old clients wrote as current ones: Auto's
+// earlier tiers are Auto, and an enabled custom default prompt becomes a
+// saved prompt that new chats start with, unless another default was
+// chosen. The old setting is turned off either way.
+func upgradeProfile(p *Profile, now time.Time) {
+	if p.SelectedModel != nil {
+		p.SelectedModel = new(normalizeModel(*p.SelectedModel))
+	}
+	p.CustomPromptPresets = slices.Clone(p.CustomPromptPresets)
+	for i := range p.CustomPromptPresets {
+		if model := p.CustomPromptPresets[i].Model; model != nil {
+			p.CustomPromptPresets[i].Model = new(normalizeModel(*model))
+		}
+	}
+	if !valueOr(p.IsUsingCustomPrompt, false) {
+		return
+	}
+	prompt := valueOr(p.CustomSystemPrompt, "")
+	p.IsUsingCustomPrompt, p.CustomSystemPrompt = new(false), new("")
+	if strings.TrimSpace(systemTags.ReplaceAllString(prompt, "")) == "" || valueOr(p.DefaultPromptPresetID, "") != "" {
+		return
+	}
+	if p.preset(migratedPromptPresetID) == nil {
+		date := raw(now.UnixMilli())
+		p.CustomPromptPresets = append(p.CustomPromptPresets, CustomPreset{ID: migratedPromptPresetID, Name: "My default prompt", Description: new("Migrated from the custom default prompt setting"),
+			SystemPrompt: &prompt, CreatedAt: date, UpdatedAt: date})
+	}
+	p.DefaultPromptPresetID = new(migratedPromptPresetID)
 }
 
 // readProject reads a project row.
