@@ -41,7 +41,7 @@ func (h *harness) handleTurn(w http.ResponseWriter, r *http.Request) {
 	}
 	accepted, err := h.acceptTurn(r.Context(), p, key, in)
 	if err != nil {
-		respond(w, nil, err)
+		respond(w, nil, h.withQuota(p, err))
 		return
 	}
 	follow(w, r, accepted.log)

@@ -84,10 +84,10 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 	}
 	limit := h.auth.currentLimit(p)
 	if r.out.modelAccepted {
-		limit = h.auth.consumed(p)
+		limit = h.auth.debit(p, spend)
 	}
-	if p.Anonymous && runErr != nil && asAPIError(runErr).Code == "QUOTA_EXHAUSTED" {
-		limit = exhaustedLimit("free_daily")
+	if runErr != nil && asAPIError(runErr).Code == "QUOTA_EXHAUSTED" {
+		limit = h.auth.exhausted(p)
 	}
 	summary := summarize(&r.row.Thread)
 	metadata := runMetadata{Messages: committed}
@@ -104,11 +104,12 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 	deleted = s.deleted
 	h.live.mu.Unlock()
 	r.out.emit(event{Type: "STATE_SNAPSHOT", Snapshot: stateSnapshot{summary, queue, limit}})
+	metadata.RateLimit = &limit
 	if runErr != nil && !cancelled {
 		e := asAPIError(runErr)
 		r.out.emit(event{Type: "RUN_ERROR", ThreadID: s.id, RunID: r.log.id, Message: e.Message, Code: e.Code, Kind: e.Kind, ResetsAt: e.ResetsAt, RetryAfter: e.RetryAfter, Metadata: raw(metadata)})
 	} else {
-		metadata.Usage, metadata.RateLimit, metadata.Cancelled = &spend, &limit, &cancelled
+		metadata.Usage, metadata.Cancelled = &spend, &cancelled
 		r.out.emit(event{Type: "RUN_FINISHED", ThreadID: s.id, RunID: r.log.id, Metadata: raw(metadata)})
 	}
 	r.log.log.close(errDone)

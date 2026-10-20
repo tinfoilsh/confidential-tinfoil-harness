@@ -337,7 +337,7 @@ func (a *authenticator) refused(p *principal, status int, header http.Header, bo
 		limit.MaxRequests, limit.Remaining = new(0), new(0)
 		limit.ResetsAt = firstString(detail["resets_at"], limit.ResetsAt)
 		e := apiErr(429, "QUOTA_EXHAUSTED", firstString(detail["error"], "The hourly usage limit is reached"))
-		e.Kind, e.ResetsAt, e.RetryAfter = "hourly", limit.ResetsAt, retryAfter(header)
+		e.Kind, e.ResetsAt, e.RetryAfter, e.RateLimit = "hourly", limit.ResetsAt, retryAfter(header), &limit
 		until := nowUTC().Add(time.Minute)
 		if at, err := time.Parse(time.RFC3339, limit.ResetsAt); err == nil && at.After(nowUTC()) {
 			until = at
@@ -378,15 +378,54 @@ func (a *authenticator) refused(p *principal, status int, header http.Header, bo
 	return withRetryAfter(downstreamError(status, body), header)
 }
 
-func (a *authenticator) consumed(p *principal) rateLimit {
+// debit counts a run's request and the tokens it spent against the caller's
+// quota, and returns the quota left.
+func (a *authenticator) debit(p *principal, spent usage) rateLimit {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	cred := a.credentials[p.scope()]
-	if cred.Limit.Remaining != nil && *cred.Limit.Remaining > 0 {
-		cred.Limit.Remaining = new(*cred.Limit.Remaining - 1)
-		a.credentials[p.scope()] = cred
+	cred, ok := a.credentials[p.scope()]
+	if !ok {
+		return rateLimit{}
 	}
+	limit := &cred.Limit
+	if limit.Remaining != nil {
+		limit.Remaining = new(max(0, *limit.Remaining-1))
+	}
+	limit.InputTokens = limit.InputTokens.spend(spent.Prompt)
+	limit.OutputTokens = limit.OutputTokens.spend(spent.Completion)
+	a.credentials[p.scope()] = cred
 	return cred.Limit
+}
+
+// spend is a token budget after tokens are spent from it.
+func (b *tokenBudget) spend(tokens int64) *tokenBudget {
+	if b == nil {
+		return nil
+	}
+	return &tokenBudget{Max: b.Max, Used: b.Used + int(tokens), Remaining: max(0, b.Remaining-int(tokens))}
+}
+
+// exhausted is the caller's quota once a model or service refused it as
+// spent. A free key counts no further request; a subscriber is capped
+// until the reset its budgets name.
+func (a *authenticator) exhausted(p *principal) rateLimit {
+	if p.Anonymous {
+		return exhaustedLimit("free_daily")
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if capped, ok := a.capped[p.scope()]; ok && nowUTC().Before(capped.until) {
+		return capped.limit
+	}
+	cred, ok := a.credentials[p.scope()]
+	if ok && cred.Limit.Remaining != nil {
+		cred.Limit.Remaining = new(0)
+		a.credentials[p.scope()] = cred
+		return cred.Limit
+	}
+	limit := cred.Limit
+	limit.MaxRequests, limit.Remaining = new(0), new(0)
+	return limit
 }
 
 func (a *authenticator) currentLimit(p *principal) rateLimit {

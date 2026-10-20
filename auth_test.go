@@ -253,8 +253,8 @@ func TestOnlyAMissingSubscriptionFallsBackToAFreeKey(t *testing.T) {
 	if err != nil || credential.Key != "free_key" || !reflect.DeepEqual(credential.Limit, want) {
 		t.Fatalf("free key %q limit %+v, err %v", credential.Key, credential.Limit, err)
 	}
-	if limit := h.auth.consumed(p); *limit.Remaining != 6 || *credential.Limit.Remaining != 7 {
-		t.Fatal("a consumed request was not counted once")
+	if limit := h.auth.debit(p, usage{Prompt: 100}); *limit.Remaining != 6 || limit.InputTokens.Used != 1100 || *credential.Limit.Remaining != 7 || credential.Limit.InputTokens.Used != 1000 {
+		t.Fatal("a run's spend was not counted once")
 	}
 }
 
@@ -368,5 +368,61 @@ func TestOnlyChatTokenChatsAreScreened(t *testing.T) {
 				t.Fatalf("subscribed %v: the sidecar received %+v", subscribed, got)
 			}
 		})
+	}
+}
+
+// A run's request and tokens come off the caller's quota, which every run's
+// end and every refusal for a spent quota report.
+func TestARunsSpendComesOffTheQuotaItReports(t *testing.T) {
+	var refuse atomic.Bool
+	quotaRefusal := `{"error":{"message":"Daily request limit reached.","type":"insufficient_quota","code":"insufficient_quota"}}`
+	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if refuse.Load() {
+			w.WriteHeader(http.StatusPaymentRequired)
+			io.WriteString(w, quotaRefusal)
+			return
+		}
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\ndata: {\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3}}\n\ndata: [DONE]\n\n")
+	})
+	resets := nowUTC().Add(5 * time.Hour).Format(time.RFC3339)
+	credential := h.auth.credentials["user:alice"]
+	credential.Limit = rateLimit{Kind: "free_daily", MaxRequests: new(10), Remaining: new(7), InputTokens: &tokenBudget{1000, 100, 900}, OutputTokens: &tokenBudget{500, 0, 500}, ResetsAt: resets}
+	h.auth.credentials["user:alice"] = credential
+	reported := func(e event) rateLimit {
+		var metadata runMetadata
+		json.Unmarshal(e.Metadata, &metadata)
+		return valueOr(metadata.RateLimit, rateLimit{})
+	}
+	events := finishedRun(t, h, "/v1/threads/turn", sendInput(key))
+	want := `{"kind":"free_daily","maxRequests":10,"remaining":6,"inputTokens":{"max":1000,"used":112,"remaining":888},"outputTokens":{"max":500,"used":3,"remaining":497},"resetsAt":"` + resets + `"}`
+	var session struct {
+		RateLimit json.RawMessage `json:"rateLimit"`
+	}
+	json.Unmarshal(postRoute(h, "/v1/session", object{}, "alice").Body.Bytes(), &session)
+	if got := string(raw(reported(events[len(events)-1]))); got != want || string(session.RateLimit) != want {
+		t.Fatalf("the run reported %s and the session %s, want %s", got, session.RateLimit, want)
+	}
+	refuse.Store(true)
+	events = eventsIn(t, postRoute(h, "/v1/threads/turn", sendInput(key), "alice"))
+	if last := events[len(events)-1]; last.Code != "QUOTA_EXHAUSTED" || valueOr(reported(last).Remaining, -1) != 0 || valueOr(reported(last).MaxRequests, -1) != 10 {
+		t.Fatalf("the refused run ended %+v", last)
+	}
+	refusalOf := func(w *httptest.ResponseRecorder) apiError {
+		var refused struct {
+			Error apiError `json:"error"`
+		}
+		json.Unmarshal(w.Body.Bytes(), &refused)
+		return refused.Error
+	}
+	if w := postRoute(h, "/v1/threads/turn", sendInput(key), "alice"); w.Code != 429 || refusalOf(w).RateLimit == nil || valueOr(refusalOf(w).RateLimit.Remaining, -1) != 0 {
+		t.Fatalf("a turn on a spent quota: HTTP %d %s", w.Code, w.Body.String())
+	}
+	// A service's refusal reports the quota too.
+	router := routerHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusPaymentRequired)
+		io.WriteString(w, quotaRefusal)
+	})
+	if w := uploadRoute(router, "/v1/transcriptions", "memo.mp3", []byte("ID3 audio"), nil, "alice"); w.Code != 429 || refusalOf(w).RateLimit == nil {
+		t.Fatalf("a refused transcription: HTTP %d %s", w.Code, w.Body.String())
 	}
 }

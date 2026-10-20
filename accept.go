@@ -1,6 +1,9 @@
 package main
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 // errAlreadyApplied answers a retried request whose turn its chat holds, once
 // the run it started is no longer live.
@@ -78,8 +81,20 @@ func (h *harness) acceptTurn(ctx context.Context, p *principal, key contentKey, 
 func quotaExhausted(limit rateLimit) error {
 	e := apiErr(429, "QUOTA_EXHAUSTED", "The daily quota is exhausted")
 	e.Kind, _ = limit.Kind.(string)
-	e.ResetsAt = limit.ResetsAt
+	e.ResetsAt, e.RateLimit = limit.ResetsAt, &limit
 	return e
+}
+
+// withQuota gives a refusal for an exhausted quota the caller's quota as the
+// refusal leaves it.
+func (h *harness) withQuota(p *principal, err error) error {
+	var e *apiError
+	if p == nil || !errors.As(err, &e) || e.Code != "QUOTA_EXHAUSTED" || e.RateLimit != nil {
+		return err
+	}
+	refused, limit := *e, h.auth.exhausted(p)
+	refused.RateLimit = &limit
+	return &refused
 }
 
 // newThread is a chat's first form, filed under a project and preset.
@@ -171,7 +186,9 @@ func (h *harness) admit(ctx context.Context, p *principal, key contentKey, in *t
 		return apiErr(404, "THREAD_NOT_FOUND", "The thread is unavailable")
 	}
 	if s != nil && s.active != nil && len(s.queue) >= maxQueuedTurns {
-		return apiErr(429, "QUOTA_EXHAUSTED", "The turn queue is full")
+		full := apiErr(429, "QUOTA_EXHAUSTED", "The turn queue is full")
+		full.RateLimit = &credential.Limit
+		return full
 	}
 	if (s == nil || s.active == nil) && local && source == nil && seed == nil {
 		return apiErr(400, "BAD_REQUEST", "A local thread requires its transcript")

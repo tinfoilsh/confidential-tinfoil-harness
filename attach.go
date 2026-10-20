@@ -108,18 +108,18 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	cred, err := h.auth.inference(r.Context(), p)
 	if err != nil {
-		respond(w, nil, err)
+		respond(w, nil, h.withQuota(p, err))
 		return
 	}
 	ctx := context.WithValue(r.Context(), apiKeyKey{}, string(cred.Key))
 	if r.URL.Path == "/v1/transcriptions" {
 		text, err := h.transcribe(ctx, filename, file)
-		respond(w, object{"text": text}, err)
+		respond(w, object{"text": text}, h.withQuota(p, err))
 		return
 	}
 	descriptor, err := h.preprocess(ctx, filename, file)
 	if err != nil {
-		respond(w, nil, err)
+		respond(w, nil, h.withQuota(p, err))
 		return
 	}
 	// An upload is only converted. Its client sends the descriptor back with

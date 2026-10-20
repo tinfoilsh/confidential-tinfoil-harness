@@ -82,6 +82,8 @@ type apiError struct {
 	Status     int    `json:"status,omitempty"`
 	KeyID      string `json:"keyId,omitempty"`
 	Upstream   string `json:"upstreamCode,omitempty"`
+	// RateLimit is the caller's quota as an exhausted one's refusal leaves it.
+	RateLimit *rateLimit `json:"rateLimit,omitempty"`
 
 	missing []string // attachment ids sync did not find under the pushed chat
 }
@@ -188,7 +190,7 @@ func (h *harness) routes() http.Handler {
 				defer clear(key[:])
 			}
 			result, err := spec.handler(r.Context(), p, key, body)
-			respond(w, result, err)
+			respond(w, result, h.withQuota(p, err))
 		})
 	}
 	for path, handler := range h.threadOperations() {
@@ -242,7 +244,7 @@ func (h *harness) threadOperation(handler jsonEndpoint) http.HandlerFunc {
 			defer clear(key[:])
 		}
 		result, err := handler(r.Context(), p, key, body)
-		respond(w, result, err)
+		respond(w, result, h.withQuota(p, err))
 	}
 }
 
