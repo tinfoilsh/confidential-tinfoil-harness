@@ -62,12 +62,12 @@ func (h *harness) handleSpeech(w http.ResponseWriter, r *http.Request) {
 	}
 	credential, err := h.auth.inference(r.Context(), p)
 	if err != nil {
-		respond(w, nil, h.withQuota(p, err))
+		respond(w, nil, h.withQuota(p, credential.Limit, err))
 		return
 	}
 	ctx := context.WithValue(r.Context(), apiKeyKey{}, string(credential.Key))
 	if err := streamSpeech(ctx, w, router, pieces); err != nil {
-		respond(w, nil, h.withQuota(p, err))
+		respond(w, nil, h.withQuota(p, credential.Limit, err))
 	}
 }
 

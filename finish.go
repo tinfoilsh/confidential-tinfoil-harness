@@ -18,7 +18,7 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 	s := r.thread
 	h.live.mu.Lock()
 	r.ending = true
-	p, cancelled, deleted := r.principal, r.cancelled, s.deleted
+	p, cancelled, deleted, held := r.principal, r.cancelled, s.deleted, r.credential.Limit
 	h.live.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), commitTimeout)
 	defer cancel()
@@ -86,12 +86,12 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 			}
 		}
 	}
-	limit := h.auth.currentLimit(p)
+	limit := h.auth.currentLimit(p, held)
 	if r.out.modelAccepted {
-		limit = h.auth.debit(p, spend)
+		limit = h.auth.debit(p, held, spend)
 	}
 	if runErr != nil && asAPIError(runErr).Code == "QUOTA_EXHAUSTED" {
-		limit = h.auth.spent(p)
+		limit = h.auth.spent(p, held)
 	}
 	summary := summarize(&r.row.Thread)
 	metadata := runMetadata{Messages: committed}

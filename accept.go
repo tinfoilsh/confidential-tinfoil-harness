@@ -66,6 +66,7 @@ func (h *harness) acceptTurn(ctx context.Context, p *principal, key contentKey, 
 	}
 	if !r.queued {
 		if err := h.launch(ctx, r); err != nil {
+			err = h.withQuota(p, r.credential.Limit, err)
 			if next := h.endUnstarted(r, err); next != nil {
 				go h.runQueue(next)
 			}
@@ -86,13 +87,13 @@ func quotaExhausted(limit rateLimit) error {
 }
 
 // withQuota gives a refusal for an exhausted quota the caller's quota as the
-// refusal leaves it.
-func (h *harness) withQuota(p *principal, err error) error {
+// refusal leaves it. A signed-out caller's is the one its request held.
+func (h *harness) withQuota(p *principal, held rateLimit, err error) error {
 	var e *apiError
 	if p == nil || !errors.As(err, &e) || e.Code != "QUOTA_EXHAUSTED" || e.RateLimit != nil {
 		return err
 	}
-	refused, limit := *e, h.auth.exhausted(p)
+	refused, limit := *e, h.auth.exhausted(p, held)
 	refused.RateLimit = &limit
 	return &refused
 }

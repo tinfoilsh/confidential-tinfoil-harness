@@ -3,8 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"image"
+	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -21,7 +24,7 @@ func TestAnonymousInferenceValidatesTheClientKey(t *testing.T) {
 	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		var body object
-		if r.Method != http.MethodPost || r.URL.Path != "/api/shim/validate-key" || json.NewDecoder(r.Body).Decode(&body) != nil || str(body["api_key"]) != "free_client-key" {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/shim/validate-key" || json.NewDecoder(r.Body).Decode(&body) != nil || str(body["api_key"]) != "free_client-key" || body["include_rate_limit"] != true {
 			t.Error("did not validate the supplied key using the existing endpoint")
 			w.WriteHeader(http.StatusBadRequest)
 			return
@@ -198,7 +201,7 @@ func TestSubscribersHaveTokenBudgetsButNoRequestQuota(t *testing.T) {
 	if last := events[len(events)-1]; last.Type != "RUN_FINISHED" {
 		t.Fatalf("a subscriber without a request quota was refused: %+v", last)
 	}
-	if limit := h.auth.currentLimit(&principal{ID: "alice"}); limit.MaxRequests != nil || limit.Remaining != nil {
+	if limit := h.auth.currentLimit(&principal{ID: "alice"}, rateLimit{}); limit.MaxRequests != nil || limit.Remaining != nil {
 		t.Fatal("a finished run invented a request quota")
 	}
 }
@@ -253,7 +256,7 @@ func TestOnlyAMissingSubscriptionFallsBackToAFreeKey(t *testing.T) {
 	if err != nil || credential.Key != "free_key" || !reflect.DeepEqual(credential.Limit, want) {
 		t.Fatalf("free key %q limit %+v, err %v", credential.Key, credential.Limit, err)
 	}
-	if limit := h.auth.debit(p, usage{Prompt: 100}); *limit.Remaining != 6 || limit.InputTokens.Used != 1100 || *credential.Limit.Remaining != 7 || credential.Limit.InputTokens.Used != 1000 {
+	if limit := h.auth.debit(p, rateLimit{}, usage{Prompt: 100}); *limit.Remaining != 6 || limit.InputTokens.Used != 1100 || *credential.Limit.Remaining != 7 || credential.Limit.InputTokens.Used != 1000 {
 		t.Fatal("a run's spend was not counted once")
 	}
 }
@@ -424,5 +427,80 @@ func TestARunsSpendComesOffTheQuotaItReports(t *testing.T) {
 	})
 	if w := uploadRoute(router, "/v1/transcriptions", "memo.mp3", []byte("ID3 audio"), nil, "alice"); w.Code != 429 || refusalOf(w).RateLimit == nil {
 		t.Fatalf("a refused transcription: HTTP %d %s", w.Code, w.Body.String())
+	}
+}
+
+// A free key's validation reports the key's quota, which the session shows
+// and each run's spend comes off, as a subscriber's does. A control plane
+// that reports none still validates the key.
+func TestASignedOutCallersQuotaComesFromItsKey(t *testing.T) {
+	var refuse atomic.Bool
+	quotaRefusal := `{"error":{"message":"Daily request limit reached.","type":"insufficient_quota","code":"insufficient_quota"}}`
+	refusing := func(w http.ResponseWriter) bool {
+		if refuse.Load() {
+			w.WriteHeader(http.StatusPaymentRequired)
+			io.WriteString(w, quotaRefusal)
+		}
+		return refuse.Load()
+	}
+	h, _, _ := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if !refusing(w) {
+			io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\ndata: {\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3}}\n\ndata: [DONE]\n\n")
+		}
+	})
+	router := routerHarness(t, func(w http.ResponseWriter, r *http.Request) { refusing(w) })
+	resets := nowUTC().Add(5 * time.Hour).Format(time.RFC3339)
+	cp := httptest.NewServer(unflagged(func(w http.ResponseWriter, r *http.Request) {
+		var in object
+		json.NewDecoder(r.Body).Decode(&in)
+		if in["include_rate_limit"] != true {
+			io.WriteString(w, "OK")
+			return
+		}
+		json.NewEncoder(w).Encode(object{"ok": true, "rate_limit": object{"max_requests": 10, "remaining": 7, "max_input_tokens": 1000, "input_tokens_used": 100, "input_tokens_remaining": 900,
+			"max_output_tokens": 500, "output_tokens_used": 0, "output_tokens_remaining": 500, "resets_at": resets}})
+	}))
+	defer cp.Close()
+	for _, harness := range []*harness{h, router} {
+		harness.auth.client, harness.auth.controlplane = cp.Client(), cp.URL
+	}
+	var session struct {
+		RateLimit json.RawMessage `json:"rateLimit"`
+	}
+	json.Unmarshal(postRoute(h, "/v1/session", object{}, "").Body.Bytes(), &session)
+	if want := `{"kind":"free_daily","maxRequests":10,"remaining":7,"inputTokens":{"max":1000,"used":100,"remaining":900},"outputTokens":{"max":500,"used":0,"remaining":500},"resetsAt":"` + resets + `"}`; string(session.RateLimit) != want {
+		t.Fatalf("the session reports %s, want %s", session.RateLimit, want)
+	}
+	reported := func(e event) rateLimit {
+		var metadata runMetadata
+		json.Unmarshal(e.Metadata, &metadata)
+		return valueOr(metadata.RateLimit, rateLimit{})
+	}
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", localInput("", object{}), ""))
+	want := `{"kind":"free_daily","maxRequests":10,"remaining":6,"inputTokens":{"max":1000,"used":112,"remaining":888},"outputTokens":{"max":500,"used":3,"remaining":497},"resetsAt":"` + resets + `"}`
+	if last := events[len(events)-1]; last.Type != "RUN_FINISHED" || string(raw(reported(last))) != want {
+		t.Fatalf("the run ended %s reporting %s, want %s", last.Type, raw(reported(last)), want)
+	}
+	refuse.Store(true)
+	events = eventsIn(t, postRoute(h, "/v1/threads/turn", localInput("", object{}), ""))
+	spent := `{"kind":"free_daily","maxRequests":10,"remaining":0,"inputTokens":{"max":1000,"used":100,"remaining":900},"outputTokens":{"max":500,"used":0,"remaining":500},"resetsAt":"` + resets + `"}`
+	if last := events[len(events)-1]; last.Code != "QUOTA_EXHAUSTED" || string(raw(reported(last))) != spent {
+		t.Fatalf("the refused run ended %s reporting %s", last.Code, raw(reported(last)))
+	}
+	// A refusal before a run starts, as when a model is asked to describe an
+	// image, or from another service reports the same quota.
+	var photo bytes.Buffer
+	png.Encode(&photo, image.NewRGBA(image.Rect(0, 0, 4, 4)))
+	h.offer.models = append(h.offer.models, &model{name: "gemma4-31b", vision: true, context: 8192, client: h.offer.models[0].client})
+	described := localInput("", object{})
+	described["attachments"] = []any{object{"id": "att_photo", "kind": "image", "fileName": "photo.png", "mimeType": "image/png", "base64": base64.StdEncoding.EncodeToString(photo.Bytes())}}
+	for _, w := range []*httptest.ResponseRecorder{postRoute(h, "/v1/threads/turn", described, ""), uploadRoute(router, "/v1/transcriptions", "memo.mp3", []byte("ID3 audio"), nil, "")} {
+		var refused struct {
+			Error apiError `json:"error"`
+		}
+		json.Unmarshal(w.Body.Bytes(), &refused)
+		if w.Code != 429 || string(raw(refused.Error.RateLimit)) != spent {
+			t.Fatalf("a refusal: HTTP %d %s", w.Code, w.Body.String())
+		}
 	}
 }

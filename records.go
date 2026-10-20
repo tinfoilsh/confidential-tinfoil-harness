@@ -49,7 +49,7 @@ func (h *harness) session(ctx context.Context, p *principal, _ contentKey, _ jso
 		if e := asAPIError(err); e.Code != "QUOTA_EXHAUSTED" || e.Kind != "hourly" {
 			return nil, err
 		}
-		credential.Limit = h.auth.currentLimit(p)
+		credential.Limit = h.auth.currentLimit(p, credential.Limit)
 	}
 	presets := c.Presets
 	if presets == nil {

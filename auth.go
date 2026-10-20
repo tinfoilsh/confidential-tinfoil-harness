@@ -179,13 +179,27 @@ func (a *authenticator) authenticate(r *http.Request, anonymous bool) (*principa
 	return &principal{ID: id, JWT: secret(token)}, nil
 }
 
+// keyValidation asks the control plane whether a free key is valid, and
+// for the quota it has left.
+type keyValidation struct {
+	APIKey           secret `json:"api_key"`
+	IncludeRateLimit bool   `json:"include_rate_limit"`
+}
+
+// validatedKey is a valid key's validation, with a free chat key's quota.
+type validatedKey struct {
+	OK        bool   `json:"ok"`
+	RateLimit *quota `json:"rate_limit"`
+}
+
 func (a *authenticator) anonymousInference(ctx context.Context, p *principal) (inferenceCredential, error) {
 	if p.InferenceKey == "" {
 		return inferenceCredential{}, apiErr(401, "UNAUTHENTICATED", "An anonymous chat key is required")
 	}
-	// Reuse the validation endpoint already used by shims on Tinfoil hosts.
-	// No key issuance, client IP, expiry, or quota metadata comes from this call.
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.controlplane+"/api/shim/validate-key", bytes.NewReader(raw(object{"api_key": p.InferenceKey})))
+	// Reuse the validation endpoint already used by shims on Tinfoil hosts,
+	// asking it for the key's quota. No key issuance, client IP, or expiry
+	// metadata comes from this call.
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.controlplane+"/api/shim/validate-key", bytes.NewReader(raw(keyValidation{APIKey: p.InferenceKey, IncludeRateLimit: true})))
 	if err != nil {
 		return inferenceCredential{}, err
 	}
@@ -199,10 +213,18 @@ func (a *authenticator) anonymousInference(ctx context.Context, p *principal) (i
 	if err != nil {
 		return inferenceCredential{}, err
 	}
+	// Downstream shims still check validity, model access, and quota on each
+	// call. A control plane that does not report the quota answers "OK".
 	if resp.StatusCode == http.StatusOK && string(body) == "OK" {
-		// Downstream shims still check validity, model access, and quota on
-		// each call. The browser's issuance metadata is only for its display.
 		return inferenceCredential{Key: p.InferenceKey}, nil
+	}
+	var validated validatedKey
+	if resp.StatusCode == http.StatusOK && json.Unmarshal(body, &validated) == nil && validated.OK {
+		credential := inferenceCredential{Key: p.InferenceKey}
+		if validated.RateLimit != nil {
+			credential.Limit = validated.RateLimit.limit("free_daily")
+		}
+		return credential, nil
 	}
 	var detail object
 	json.Unmarshal(body, &detail)
@@ -378,23 +400,44 @@ func (a *authenticator) refused(p *principal, status int, header http.Header, bo
 	return withRetryAfter(downstreamError(status, body), header)
 }
 
+// A subscriber's quota is remembered with its credential. A signed-out
+// caller's is held by the request or run that validated its key, and is
+// passed in as held.
+
 // debit counts a run's request and the tokens it spent against the caller's
 // quota, and returns the quota left.
-func (a *authenticator) debit(p *principal, spent usage) rateLimit {
+func (a *authenticator) debit(p *principal, held rateLimit, spent usage) rateLimit {
+	if p.Anonymous {
+		return held.debited(spent)
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	cred, ok := a.credentials[p.scope()]
 	if !ok {
 		return rateLimit{}
 	}
-	limit := &cred.Limit
-	if limit.Remaining != nil {
-		limit.Remaining = new(max(0, *limit.Remaining-1))
-	}
-	limit.InputTokens = limit.InputTokens.spend(spent.Prompt)
-	limit.OutputTokens = limit.OutputTokens.spend(spent.Completion)
+	cred.Limit = cred.Limit.debited(spent)
 	a.credentials[p.scope()] = cred
 	return cred.Limit
+}
+
+// debited is the quota after a run's request and the tokens it spent.
+func (l rateLimit) debited(spent usage) rateLimit {
+	if l.Remaining != nil {
+		l.Remaining = new(max(0, *l.Remaining-1))
+	}
+	l.InputTokens = l.InputTokens.spend(spent.Prompt)
+	l.OutputTokens = l.OutputTokens.spend(spent.Completion)
+	return l
+}
+
+// none is the quota with no request left.
+func (l rateLimit) none() rateLimit {
+	if l.MaxRequests == nil {
+		l.MaxRequests = new(0)
+	}
+	l.Remaining = new(0)
+	return l
 }
 
 // spend is a token budget after tokens are spent from it.
@@ -408,36 +451,35 @@ func (b *tokenBudget) spend(tokens int64) *tokenBudget {
 // exhausted is the caller's quota as a refusal for a spent one leaves it: a
 // free key has no request left, and a subscriber is capped until the reset
 // its budgets name.
-func (a *authenticator) exhausted(p *principal) rateLimit {
+func (a *authenticator) exhausted(p *principal, held rateLimit) rateLimit {
 	if p.Anonymous {
-		return exhaustedLimit("free_daily")
+		held.Kind = "free_daily"
+		return held.none()
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if capped, ok := a.capped[p.scope()]; ok && nowUTC().Before(capped.until) {
 		return capped.limit
 	}
-	limit := a.credentials[p.scope()].Limit
-	if limit.MaxRequests == nil {
-		limit.MaxRequests = new(0)
-	}
-	limit.Remaining = new(0)
-	return limit
+	return a.credentials[p.scope()].Limit.none()
 }
 
 // spent records that a model refused the caller's free key as spent, so
 // its next turn is refused before it reaches one.
-func (a *authenticator) spent(p *principal) rateLimit {
+func (a *authenticator) spent(p *principal, held rateLimit) rateLimit {
 	a.mu.Lock()
 	if cred, ok := a.credentials[p.scope()]; ok && cred.Limit.Remaining != nil {
 		cred.Limit.Remaining = new(0)
 		a.credentials[p.scope()] = cred
 	}
 	a.mu.Unlock()
-	return a.exhausted(p)
+	return a.exhausted(p, held)
 }
 
-func (a *authenticator) currentLimit(p *principal) rateLimit {
+func (a *authenticator) currentLimit(p *principal, held rateLimit) rateLimit {
+	if p.Anonymous {
+		return held
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if capped, ok := a.capped[p.scope()]; ok && nowUTC().Before(capped.until) {

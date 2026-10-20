@@ -190,7 +190,7 @@ func (h *harness) routes() http.Handler {
 				defer clear(key[:])
 			}
 			result, err := spec.handler(r.Context(), p, key, body)
-			respond(w, result, h.withQuota(p, err))
+			respond(w, result, h.withQuota(p, rateLimit{}, err))
 		})
 	}
 	for path, handler := range h.threadOperations() {
@@ -244,7 +244,7 @@ func (h *harness) threadOperation(handler jsonEndpoint) http.HandlerFunc {
 			defer clear(key[:])
 		}
 		result, err := handler(r.Context(), p, key, body)
-		respond(w, result, h.withQuota(p, err))
+		respond(w, result, h.withQuota(p, rateLimit{}, err))
 	}
 }
 
