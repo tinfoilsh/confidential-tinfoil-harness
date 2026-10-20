@@ -9,20 +9,23 @@ import (
 // Thread is a chat in the thread format: what the harness stores in sync,
 // what a device keeps, and what a device chat's run returns.
 type Thread struct {
-	ID               string        `json:"id"`
-	Title            string        `json:"title"`
-	TitleState       string        `json:"titleState"`
-	CreatedAt        string        `json:"createdAt,omitempty"`
-	UpdatedAt        string        `json:"updatedAt,omitempty"`
-	Model            string        `json:"model"`
-	ProjectID        *string       `json:"projectId"`
-	PresetID         *string       `json:"presetId"`
-	Pinned           bool          `json:"pinned"`
-	WebSearchEnabled bool          `json:"webSearchEnabled"`
-	Messages         []Message     `json:"messages"`
-	LastRequestID    string        `json:"lastRequestId,omitempty"`
-	ActiveRun        *ActiveRun    `json:"activeRun"`
-	ContextUsage     *ContextUsage `json:"contextUsage,omitempty"`
+	ID               string    `json:"id"`
+	Title            string    `json:"title"`
+	TitleState       string    `json:"titleState"`
+	CreatedAt        string    `json:"createdAt,omitempty"`
+	UpdatedAt        string    `json:"updatedAt,omitempty"`
+	Model            string    `json:"model"`
+	ProjectID        *string   `json:"projectId"`
+	PresetID         *string   `json:"presetId"`
+	Pinned           bool      `json:"pinned"`
+	WebSearchEnabled bool      `json:"webSearchEnabled"`
+	Messages         []Message `json:"messages"`
+	LastRequestID    string    `json:"lastRequestId,omitempty"`
+	// LastRequestKind is the kind of turn that request carried out, which a
+	// retry repeats when its reply failed.
+	LastRequestKind string        `json:"lastRequestKind,omitempty"`
+	ActiveRun       *ActiveRun    `json:"activeRun"`
+	ContextUsage    *ContextUsage `json:"contextUsage,omitempty"`
 	// HiddenCount is how many leading messages an ask's thread holds as
 	// context without showing them.
 	HiddenCount int `json:"harnessHiddenCount,omitempty"`

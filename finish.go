@@ -30,7 +30,7 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 	spend, sources, reply := r.out.spend, r.out.sources, r.out.replyID
 	r.out.observe, r.out.sources = nil, nil
 	r.out.mu.Unlock()
-	continued := r.input.Kind == "continue"
+	continued := r.turn.Kind == "continue"
 	committed := []committedReply{}
 	for i := range messages {
 		m := &messages[i]

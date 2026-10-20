@@ -16,6 +16,7 @@ const commitTimeout = time.Minute
 // the form it is stored, and the request its run makes.
 type turnPlan struct {
 	row         *threadRow
+	turn        *turnRequest // the turn carried out: a retry is the turn it repeats
 	request     *request
 	model       *model
 	titleText   string
@@ -73,6 +74,13 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *principal) (*t
 		}
 	}
 	t := &row.Thread
+	turn := r.input
+	if turn.Kind == "retry" {
+		var err error
+		if turn, err = retried(t, r.input); err != nil {
+			return nil, err
+		}
+	}
 	// A new chat starts on the user's model and default prompt preset, whose
 	// settings it takes. A first turn naming a preset, or null, overrides
 	// the default, and the turn's own settings override the preset's.
@@ -84,11 +92,11 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *principal) (*t
 		t.Model = cmp.Or(valueOr(profile.SelectedModel, ""), autoModelName)
 		h.catalog.get().applyPreset(t, &profile, preset)
 	}
-	attachments, err := turnAttachments(r.input, t)
+	attachments, err := turnAttachments(turn, t)
 	if err != nil {
 		return nil, err
 	}
-	if err := applyTurn(t, r.input, r.messageID, attachments); err != nil {
+	if err := applyTurn(t, turn, r.messageID, attachments); err != nil {
 		return nil, err
 	}
 	options := r.input.Options
@@ -112,14 +120,14 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *principal) (*t
 			return nil, err
 		}
 	}
-	request, model, err := h.buildRequest(&working, &profile, project, docs, r.input, r.log.id)
+	request, model, err := h.buildRequest(&working, &profile, project, docs, turn, r.log.id)
 	if err != nil {
 		return nil, err
 	}
 	if err := preflightBudget(request); err != nil {
 		return nil, err
 	}
-	plan := &turnPlan{row: row, request: request, model: model, titleText: titleSource(&working)}
+	plan := &turnPlan{row: row, turn: turn, request: request, model: model, titleText: titleSource(&working)}
 	if r.input.Kind == "retryToolCall" {
 		for _, message := range t.Messages {
 			for _, block := range message.Timeline {
@@ -136,7 +144,7 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *principal) (*t
 		}
 	}
 	t.ContextUsage = requestContextUsage(request)
-	t.ActiveRun, t.LastRequestID = activeRun(r.log.id), r.nonce
+	t.ActiveRun, t.LastRequestID, t.LastRequestKind = activeRun(r.log.id), r.nonce, turn.Kind
 	if !s.local {
 		stripInlineAttachments(t)
 	}
@@ -173,7 +181,7 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 		}
 	}
 	row, request, model, titleText := plan.row, plan.request, plan.model, plan.titleText
-	r.screening, r.retryTarget = h.screening(request), plan.retryTarget
+	r.screening, r.retryTarget, r.turn = h.screening(request), plan.retryTarget, plan.turn
 	request.cacheScope = cacheScope(p.scope())
 	request.refreshAuth = func(ctx context.Context) (inferenceCredential, error) {
 		h.live.mu.Lock()
@@ -189,7 +197,7 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 		return credential, err
 	}
 	// A continuation streams into the reply it extends, which RUN_STARTED names.
-	if r.input.Kind == "continue" {
+	if r.turn.Kind == "continue" {
 		reply := row.Messages[len(row.Messages)-1]
 		r.assembler.seed(reply)
 		r.out.replyID = reply.ID

@@ -476,7 +476,7 @@ type sentAttachment struct {
 }
 
 var (
-	turnKinds       = []string{"send", "edit", "regenerate", "continue", "resolve", "retryToolCall", "ask"}
+	turnKinds       = []string{"send", "edit", "regenerate", "continue", "resolve", "retryToolCall", "ask", "retry"}
 	attachmentKinds = []string{"image", "document", "audio"}
 )
 

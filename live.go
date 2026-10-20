@@ -53,7 +53,8 @@ type chatRun struct {
 	log                      *run
 	out                      *stream
 	input                    *turnRequest
-	received                 string // when the turn's request arrived
+	turn                     *turnRequest // the turn as carried out, once started
+	received                 string       // when the turn's request arrived
 	principal                *principal
 	key                      contentKey
 	credential               inferenceCredential
@@ -80,7 +81,7 @@ type chatRun struct {
 // release drops what a run holds of its caller once nothing reads it.
 func (r *chatRun) release() {
 	clear(r.key[:])
-	r.input, r.retryTarget, r.assembler, r.screening, r.profile = nil, nil, nil, nil, nil
+	r.input, r.turn, r.retryTarget, r.assembler, r.screening, r.profile = nil, nil, nil, nil, nil, nil
 	r.replacement = ""
 	r.principal = &principal{ID: r.principal.ID, AnonymousID: r.principal.AnonymousID, Anonymous: r.principal.Anonymous}
 	r.credential.Key = ""

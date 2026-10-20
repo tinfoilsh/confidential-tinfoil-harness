@@ -2,7 +2,8 @@ package main
 
 // applyTurn makes the change a turn's kind makes to a transcript before its
 // reply: a new or edited question, a resolved tool call, or the cut a
-// regeneration or continuation starts from.
+// regeneration or continuation starts from. An answer to the last question
+// changes nothing.
 func applyTurn(t *Thread, in *turnRequest, messageID string, attachments []Attachment) error {
 	if t.messageIndex(messageID) >= 0 {
 		return nil
@@ -60,9 +61,28 @@ func applyTurn(t *Thread, in *turnRequest, messageID string, attachments []Attac
 	if in.Kind == "ask" {
 		content, quote = valueOr(in.Quote, ""), ""
 	}
-	if in.Kind != "regenerate" && in.Kind != "retryToolCall" && in.Kind != "continue" {
+	if in.Kind != "regenerate" && in.Kind != "retryToolCall" && in.Kind != "continue" && in.Kind != "answer" {
 		messages = append(messages, Message{ID: messageID, Role: "user", Content: content, Quote: quote, Attachments: attachments, CreatedAt: timestamp()})
 	}
 	t.Messages = messages
 	return nil
+}
+
+// retried is the turn a retry carries out, which the chat decides: a failed
+// or stopped continuation continues again, any other last reply is
+// regenerated, and a last question without a reply is answered.
+func retried(t *Thread, in *turnRequest) (*turnRequest, error) {
+	if len(t.Messages) == 0 {
+		return nil, apiErr(400, "BAD_REQUEST", "The chat has nothing to retry")
+	}
+	turn, last := *in, t.Messages[len(t.Messages)-1]
+	switch {
+	case last.Role == "user":
+		turn.Kind, turn.MessageID = "answer", ""
+	case t.LastRequestKind == "continue" && (valueOr(last.IsError, false) || valueOr(last.IsInterrupted, false)):
+		turn.Kind, turn.MessageID = "continue", last.ID
+	default:
+		turn.Kind, turn.MessageID = "regenerate", last.ID
+	}
+	return &turn, nil
 }
