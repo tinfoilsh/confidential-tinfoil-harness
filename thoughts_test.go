@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // reasoningChunk is one streamed chunk of a reply's reasoning.
@@ -66,7 +67,11 @@ func TestAThinkingReplysReasoningIsSummarized(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		<-summarized
+		select {
+		case <-summarized:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("failing %v: the reasoning was never summarized", failing)
+		}
 		if !failing {
 			awaitFrame(t, run.log, "REASONING_SUMMARY")
 		}
