@@ -242,9 +242,6 @@ func (h *harness) preprocess(ctx context.Context, filename string, data []byte) 
 		if json.Unmarshal(result, &converted) != nil {
 			return nil, apiErr(502, "UPSTREAM_REFUSED", "Invalid document response")
 		}
-		if results := arr(converted["results"]); len(results) > 0 {
-			converted = obj(results[0])
-		}
 		if document := obj(converted["document"]); len(document) > 0 {
 			converted = document
 		}
@@ -300,22 +297,14 @@ func resizeImage(data []byte) ([]byte, []byte, error) {
 	return resized, thumb, err
 }
 
-// The document service converts four files at once and queues sixteen for
-// every user, so conversions take two slots and wait out capacity rejections
-// while the retry still fits a deadline that starts once a slot is free.
-var conversionSlots = make(chan struct{}, 2)
+// The document service queues conversions itself and answers a full queue
+// with a delay, which a conversion waits out while it fits the deadline.
 var conversionDeadline = 10 * time.Minute
 
 func (h *harness) convert(ctx context.Context, filename string, data []byte) ([]byte, error) {
 	router := h.services["router"]
 	if router == nil {
 		return nil, apiErr(503, "TOOL_UNAVAILABLE", "Document conversion is unavailable")
-	}
-	select {
-	case conversionSlots <- struct{}{}:
-		defer func() { <-conversionSlots }()
-	case <-ctx.Done():
-		return nil, ctx.Err()
 	}
 	ctx, cancel := context.WithTimeout(ctx, conversionDeadline)
 	defer cancel()

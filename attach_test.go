@@ -3,11 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -120,59 +118,6 @@ func TestDocumentConversionStopsWaitingWithItsCaller(t *testing.T) {
 	_, err := h.convert(ctx, "report.pdf", []byte("%PDF-1.7 report"))
 	if asAPIError(err).Code != "RATE_LIMITED" || calls.Load() != 1 || time.Since(began) < 100*time.Millisecond || time.Since(began) > 2*time.Second {
 		t.Fatalf("waited %v after its caller left: calls=%d err=%v", time.Since(began), calls.Load(), err)
-	}
-}
-
-func TestDocumentConversionsTakeTwoSlots(t *testing.T) {
-	var active, peak, calls atomic.Int32
-	release := make(chan struct{})
-	var released sync.Once
-	unblock := func() { released.Do(func() { close(release) }) }
-	h := routerHarness(t, func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		now := active.Add(1)
-		for seen := peak.Load(); now > seen && !peak.CompareAndSwap(seen, now); seen = peak.Load() {
-		}
-		select {
-		case <-release:
-		case <-r.Context().Done():
-		}
-		active.Add(-1)
-		io.WriteString(w, `{"document":{"md_content":"converted"},"status":"success"}`)
-	})
-	// Registered after the router's cleanup, so it runs first: a failed
-	// assertion must not leave the handlers holding the server open.
-	t.Cleanup(unblock)
-	ctx := context.WithValue(context.Background(), apiKeyKey{}, "free_anonymous-key")
-	var wg sync.WaitGroup
-	errs := make(chan error, 3)
-	for range 3 {
-		wg.Go(func() {
-			_, err := h.convert(ctx, "report.pdf", []byte("%PDF-1.7 report"))
-			errs <- err
-		})
-	}
-	for calls.Load() < 2 {
-		time.Sleep(time.Millisecond)
-	}
-	canceled, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
-	defer cancel()
-	if _, err := h.convert(canceled, "report.pdf", []byte("%PDF-1.7 report")); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("a conversion waiting for a slot ignored its context: %v", err)
-	}
-	if calls.Load() != 2 {
-		t.Fatalf("%d conversions reached the router at once", calls.Load())
-	}
-	unblock()
-	wg.Wait()
-	close(errs)
-	for err := range errs {
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	if calls.Load() != 3 || peak.Load() != 2 {
-		t.Fatalf("calls=%d peak=%d, want 3 calls at most 2 at a time", calls.Load(), peak.Load())
 	}
 }
 
