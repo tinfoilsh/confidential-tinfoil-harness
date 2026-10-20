@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -134,6 +135,62 @@ func TestDeletingAChatEndsItsQueuedTurns(t *testing.T) {
 	if threads, runs, requests := liveCount(h); threads+runs+requests != 0 {
 		t.Fatalf("the deleted chat left %d chats, %d runs and %d requests behind", threads, runs, requests)
 	}
+}
+
+// A chat deleted while its turn starts stays deleted, whether this instance
+// deletes it or another does between the turn's read and its write.
+func TestAChatDeletedAsItsTurnStartsStaysDeleted(t *testing.T) {
+	t.Run("here", func(t *testing.T) {
+		h, rows, key := testChatHarness(t, nil)
+		// The turn's flag lookup is held while the chat is deleted.
+		asked, answer := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			once.Do(func() {
+				close(asked)
+				<-answer
+			})
+			io.WriteString(w, `{"flags":[]}`)
+		}))
+		t.Cleanup(cp.Close)
+		release := sync.OnceFunc(func() { close(answer) })
+		t.Cleanup(release)
+		h.auth.client, h.auth.controlplane = cp.Client(), cp.URL
+		in := sendInput(key)
+		refused := make(chan *httptest.ResponseRecorder, 1)
+		go func() { refused <- postRoute(h, "/v1/threads/turn", in, "alice") }()
+		<-asked
+		if w := postRoute(h, "/v1/threads/delete", object{"key": key.base64(), "id": in["threadId"]}, "alice"); w.Code != 200 {
+			t.Fatalf("delete: HTTP %d %s", w.Code, w.Body.String())
+		}
+		release()
+		if w := <-refused; w.Code != 404 {
+			t.Fatalf("a turn on a deleted chat: HTTP %d %s", w.Code, w.Body.String())
+		}
+		if _, err := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", str(in["threadId"])); asAPIError(err).HTTP != 404 {
+			t.Fatalf("the deleted chat came back: %v", err)
+		}
+	})
+	t.Run("elsewhere", func(t *testing.T) {
+		h, rows, key := testChatHarness(t, nil)
+		id := rowID()
+		name := rowMapKey(&principal{ID: "alice"}, "chat", id)
+		rows.rows[name] = storedRow{ID: id, ETag: "1", Data: raw(object{"title": "Old", "messages": []any{}})}
+		// Sync removes the chat for another instance just before the
+		// turn's write, which then conflicts.
+		rows.refuse = func(*storedRow) error {
+			delete(rows.rows, name)
+			rows.refuse = nil
+			return nil
+		}
+		in := continueInput(key, id)
+		if w := postRoute(h, "/v1/threads/turn", in, "alice"); w.Code != 404 {
+			t.Fatalf("a turn on a deleted chat: HTTP %d %s", w.Code, w.Body.String())
+		}
+		if _, err := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", id); asAPIError(err).HTTP != 404 {
+			t.Fatalf("the deleted chat came back: %v", err)
+		}
+	})
 }
 
 // within fails the test if call does not return promptly, or fails.

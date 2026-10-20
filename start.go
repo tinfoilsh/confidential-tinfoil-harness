@@ -30,9 +30,13 @@ type retryTarget struct {
 	parentID string
 }
 
+// errThreadDeleted refuses a turn on a chat deleted while the turn started.
+var errThreadDeleted = apiErr(404, "THREAD_NOT_FOUND", "The thread was deleted")
+
 // prepareTurn applies a turn to its chat as read now. A stored chat's
-// attachments are placed under it; the prompt reads their content.
-func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *principal) (*turnPlan, error) {
+// attachments are placed under it; the prompt reads their content. With
+// create, a new chat's missing row is made.
+func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *principal, create bool) (*turnPlan, error) {
 	s := r.thread
 	var row *threadRow
 	var profile Profile
@@ -53,7 +57,7 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *principal) (*t
 		}
 		// A new chat's first turn creates its row under the client's id.
 		row, err = h.loadThread(ctx, p, r.key, s.id)
-		if err != nil && (asAPIError(err).HTTP != 404 || !rowIDPattern.MatchString(s.id)) {
+		if err != nil && (asAPIError(err).HTTP != 404 || !rowIDPattern.MatchString(s.id) || !create) {
 			return nil, err
 		}
 		if err != nil {
@@ -168,13 +172,20 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	}
 	var plan *turnPlan
 	// A chat another writer changed since it was read takes the turn again.
+	// One that writer removed was deleted, so only a first attempt creates it.
 	for attempt := 1; ; attempt++ {
 		var err error
-		if plan, err = h.prepareTurn(ctx, r, p); err != nil {
+		if plan, err = h.prepareTurn(ctx, r, p, attempt == 1); err != nil {
 			return err
 		}
 		if s.local {
 			break
+		}
+		h.live.mu.Lock()
+		deleted := s.deleted
+		h.live.mu.Unlock()
+		if deleted {
+			return errThreadDeleted
 		}
 		err = h.saveThread(ctx, p, r.key, plan.row)
 		if err == nil {
@@ -210,7 +221,7 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	h.live.mu.Lock()
 	if s.deleted {
 		h.live.mu.Unlock()
-		return apiErr(404, "THREAD_NOT_FOUND", "The thread was deleted")
+		return errThreadDeleted
 	}
 	if h.live.closing {
 		h.live.mu.Unlock()
