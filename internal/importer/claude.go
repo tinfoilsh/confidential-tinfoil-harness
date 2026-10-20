@@ -118,12 +118,13 @@ func claudeAttachments(msg *claudeMessage, index *Index) []Attachment {
 			continue
 		}
 		seen[key] = true
-		name, ok := index.Exact(f.FileName)
+		// A file's id names it alone; its name may be one any file has.
+		name, ok := index.ByIDPrefix(f.FileUUID)
+		if !ok {
+			name, ok = index.Exact(f.FileName)
+		}
 		if !ok {
 			name, ok = index.Basename(f.FileName)
-		}
-		if !ok && f.FileUUID != "" {
-			name, ok = index.ByIDPrefix(f.FileUUID)
 		}
 		if ok && isImage("", name) {
 			out = append(out, Attachment{Image: true, FileName: path.Base(name), MimeType: imageType(name), Entry: name})

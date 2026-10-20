@@ -585,6 +585,28 @@ func TestChatGPTRepliesKeepTheirTurnsReasoning(t *testing.T) {
 	}
 }
 
+// A Claude image is found by its file id before its name, which another
+// conversation's image may share.
+func TestClaudeImagesAreFoundByTheirID(t *testing.T) {
+	h, _, _ := testChatHarness(t, nil)
+	ours, theirs := pngFixture(t, 3, 3, 200), pngFixture(t, 2, 2, 10)
+	conversation := object{"uuid": "photo-chat", "name": "Photo", "chat_messages": []object{{"sender": "human", "text": "Look", "files": []object{{"file_name": "image.png", "file_uuid": "file-ours"}}}}}
+	var archive bytes.Buffer
+	zw := zip.NewWriter(&archive)
+	for name, data := range map[string][]byte{"conversations.json": raw([]object{conversation}), "image.png": theirs, "file-ours.png": ours} {
+		w, _ := zw.Create(name)
+		w.Write(data)
+	}
+	zw.Close()
+	result := importOf(t, h, "", archive.Bytes(), "claude.zip", object{"target": "device"})
+	if len(result.threads) != 1 || len(result.threads[0].Messages[0].Attachments) != 1 {
+		t.Fatalf("threads: %s", raw(result.threads))
+	}
+	if image := result.threads[0].Messages[0].Attachments[0]; !bytes.Equal(result.originals[image.ID], ours) {
+		t.Fatalf("the chat holds another image of %d bytes", len(result.originals[image.ID]))
+	}
+}
+
 // Claude's projects go to the cloud with their documents' text; on the
 // device alone they cannot be imported.
 func TestClaudeProjectsRequireTheCloud(t *testing.T) {
