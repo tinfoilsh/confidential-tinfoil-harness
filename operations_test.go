@@ -76,9 +76,10 @@ func TestDeviceAndStoredChatsChangeTheSameWay(t *testing.T) {
 	}
 	// The harness names a fork, which keeps its attachments' ids.
 	source := tripThread()
+	source["flagged"], source["lastRequestId"], source["lastRequestKind"] = true, "6f1c4a8e-0d55-4b8f-9a8e-2f0c7b9d1e11", "continue"
 	fork := deviceOperation(t, h, "/v1/threads/fork", source, object{"threadId": "chat-1", "messageId": "a1"}, "")
 	forked := arr(fork["messages"])
-	if id := str(fork["id"]); !rowIDPattern.MatchString(id) || fork["title"] != "Trip (fork)" || len(forked) != 2 || obj(arr(obj(forked[0])["attachments"])[0])["id"] != "img" || obj(arr(obj(forked[0])["attachments"])[0])["base64"] != nil {
+	if id := str(fork["id"]); !rowIDPattern.MatchString(id) || fork["title"] != "Trip (fork)" || len(forked) != 2 || fork["flagged"] != nil || fork["lastRequestKind"] != nil || obj(arr(obj(forked[0])["attachments"])[0])["id"] != "img" || obj(arr(obj(forked[0])["attachments"])[0])["base64"] != nil {
 		t.Fatalf("the device fork is %v", fork)
 	}
 	if w := postRoute(h, "/v1/threads/update", object{"id": "chat-1", "title": "x"}, ""); w.Code != 401 {

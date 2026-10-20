@@ -128,7 +128,7 @@ func (h *harness) updateThread(ctx context.Context, p *principal, key contentKey
 	}
 	h.auth.flaggedChats(ctx, p).mark(&row.Thread)
 	if in.Local {
-		return h.deviceReply(row), nil
+		return deviceReply(row), nil
 	}
 	if in.Pinned != nil && !*in.Pinned {
 		if err := h.unpinLegacy(ctx, p, key, in.ID); err != nil {
@@ -163,7 +163,7 @@ func (h *harness) sourceProfile(ctx context.Context, p *principal, key contentKe
 
 // deviceReply answers an operation on a device chat with the chat its client
 // stores, which leaves out the images the client holds.
-func (h *harness) deviceReply(row *threadRow) any {
+func deviceReply(row *threadRow) any {
 	return struct {
 		Thread Thread `json:"thread"`
 	}{deviceThread(&row.Thread)}
@@ -194,7 +194,8 @@ func forkedCount(t *Thread, messageID string) (int, error) {
 // startFork leaves out of a fork what belongs to the chat it was copied
 // from. Its title is the one it was given.
 func startFork(t *Thread) {
-	t.ActiveRun, t.ContextUsage, t.Pinned, t.LastRequestID, t.TitleState = nil, nil, false, "", "manual"
+	t.ActiveRun, t.ContextUsage, t.Pinned, t.Flagged, t.TitleState = nil, nil, false, false, "manual"
+	t.LastRequestID, t.LastRequestKind = "", ""
 }
 
 // forkThread starts a new chat from a chat's messages through the given one,
@@ -210,7 +211,7 @@ func (h *harness) forkThread(ctx context.Context, p *principal, key contentKey, 
 		fork := source.clone()
 		fork.ID, fork.Title, fork.Messages, fork.CreatedAt, fork.UpdatedAt = rowID(), forkTitle(source.Title), fork.Messages[:count], timestamp(), timestamp()
 		startFork(&fork)
-		return h.deviceReply(&threadRow{Thread: fork}), nil
+		return deviceReply(&threadRow{Thread: fork}), nil
 	}
 	row, err := h.loadThread(ctx, p, key, in.ThreadID)
 	if err != nil {
@@ -271,7 +272,7 @@ func (h *harness) changeMessages(ctx context.Context, p *principal, key contentK
 	}
 	h.auth.flaggedChats(ctx, p).mark(&row.Thread)
 	if in.Local {
-		return h.deviceReply(row), nil
+		return deviceReply(row), nil
 	}
 	return window(row, "", messageWindow), nil
 }
