@@ -84,6 +84,29 @@ func TestAQueuedTurnThatCannotStartDoesNotStallTheQueue(t *testing.T) {
 	}
 }
 
+// A turn past a chat's full queue is refused as such, not as the caller's
+// exhausted quota.
+func TestAFullQueueIsNotAnExhaustedQuota(t *testing.T) {
+	model, release := heldModel()
+	h, _, key := testChatHarness(t, model)
+	t.Cleanup(release)
+	p := &principal{ID: "alice", JWT: "clerk-alice"}
+	first, err := h.acceptTurn(context.Background(), p, key, requestOf[turnRequest](sendInput(key)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitFrame(t, first.log, "TEXT_MESSAGE_CHUNK")
+	for range maxQueuedTurns {
+		if run, err := h.acceptTurn(context.Background(), p, key, requestOf[turnRequest](continueInput(key, first.thread.id))); err != nil || !run.queued {
+			t.Fatalf("turn not queued: %v", err)
+		}
+	}
+	_, err = h.acceptTurn(context.Background(), p, key, requestOf[turnRequest](continueInput(key, first.thread.id)))
+	if e := asAPIError(err); e.HTTP != 429 || e.Code != "QUEUE_FULL" {
+		t.Fatalf("a turn past a full queue was refused with %v", err)
+	}
+}
+
 // Deleting a chat ends every turn queued on it with a terminal frame.
 func TestDeletingAChatEndsItsQueuedTurns(t *testing.T) {
 	model, release := heldModel()

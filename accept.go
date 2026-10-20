@@ -12,6 +12,10 @@ var errAlreadyApplied = apiErr(409, "ALREADY_APPLIED", "This request was already
 // maxQueuedTurns bounds the turns one chat holds behind its running reply.
 const maxQueuedTurns = 32
 
+// errQueueFull refuses a turn past a full queue. It is not the caller's
+// quota, which stays as it was.
+var errQueueFull = apiErr(429, "QUEUE_FULL", "The turn queue is full")
+
 func (h *harness) acceptTurn(ctx context.Context, p *principal, key contentKey, in *turnRequest) (*chatRun, error) {
 	nonce, digest := in.ClientRequestID, in.digest()
 	var r *chatRun
@@ -187,9 +191,7 @@ func (h *harness) admit(ctx context.Context, p *principal, key contentKey, in *t
 		return apiErr(404, "THREAD_NOT_FOUND", "The thread is unavailable")
 	}
 	if s != nil && s.active != nil && len(s.queue) >= maxQueuedTurns {
-		full := apiErr(429, "QUOTA_EXHAUSTED", "The turn queue is full")
-		full.RateLimit = &credential.Limit
-		return full
+		return errQueueFull
 	}
 	if (s == nil || s.active == nil) && local && source == nil && seed == nil {
 		return apiErr(400, "BAD_REQUEST", "A local thread requires its transcript")
