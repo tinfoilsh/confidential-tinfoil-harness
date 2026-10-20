@@ -1,5 +1,5 @@
-// Regenerate the server declarations from a checked-out webapp.
-// Usage: node scripts/check-widgets.cjs ../tinfoil-webapp
+// Check that a web client's widget renderers validate what widgets.json
+// declares. Usage: node scripts/check-widgets.cjs ../tinfoil-webapp
 const fs = require('node:fs')
 const path = require('node:path')
 const vm = require('node:vm')
