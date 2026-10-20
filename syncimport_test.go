@@ -283,10 +283,11 @@ func (f *fakeSync) importedChat(data []byte, projectSource, id string, blobs map
 	for i, message := range messages {
 		var role string
 		var attachments []map[string]json.RawMessage
-		json.Unmarshal(message["role"], &role)
-		json.Unmarshal(message["attachments"], &attachments)
-		if role == "" || !validTime(message["timestamp"]) {
+		if json.Unmarshal(message["role"], &role) != nil || role == "" || !validTime(message["timestamp"]) {
 			return nil, errors.New("invalid message")
+		}
+		if listed, ok := message["attachments"]; ok && json.Unmarshal(listed, &attachments) != nil {
+			return nil, errors.New("invalid attachments")
 		}
 		kept := []map[string]json.RawMessage{}
 		for j, attachment := range attachments {
