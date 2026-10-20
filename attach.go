@@ -44,6 +44,10 @@ const (
 	thumbnailSide  = 256
 )
 
+// Resizing decodes an image whole, so the images a turn sends larger than
+// the copy models read hold together no more pixels than one image may.
+const maxTurnResizePixels = maxImagePixels
+
 // An upload's form holds its file and a few short fields.
 const (
 	maxFormParts = 12
@@ -286,6 +290,19 @@ func (d *sentAttachment) stored() (Attachment, error) {
 	}
 	a.Base64, a.Thumbnail = base64.StdEncoding.EncodeToString(resized), base64.StdEncoding.EncodeToString(thumb)
 	return a, nil
+}
+
+// resizePixels is how many pixels storing the attachment decodes to resize
+// it: an image's, when it is larger than the copy models read.
+func (d *sentAttachment) resizePixels() int64 {
+	if d.Kind != "image" || d.Base64 == "" {
+		return 0
+	}
+	cfg, _, err := image.DecodeConfig(base64.NewDecoder(base64.StdEncoding, strings.NewReader(d.Base64)))
+	if err != nil || max(cfg.Width, cfg.Height) <= modelImageSide {
+		return 0
+	}
+	return int64(cfg.Width) * int64(cfg.Height)
 }
 
 func (h *harness) preprocess(ctx context.Context, filename string, data []byte) (Attachment, error) {

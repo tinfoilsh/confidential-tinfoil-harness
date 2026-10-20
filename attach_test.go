@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"hash/crc32"
 	"image"
 	"image/png"
 	"io"
@@ -277,6 +279,47 @@ func TestATurnsUploadIsHeldToWhatUploadsMake(t *testing.T) {
 	}
 	if content, err := decodeDocument(fake.blobs[held[0].ID].data); err != nil || content.TextContent != strings.Repeat("x", 64) {
 		t.Fatalf("the stored document holds %+v: %v", content, err)
+	}
+}
+
+// declaredPNG is a PNG that declares its size but holds one pixel, so only
+// decoding it whole fails.
+func declaredPNG(width, height int) []byte {
+	var b bytes.Buffer
+	png.Encode(&b, image.NewGray(image.Rect(0, 0, 1, 1)))
+	data := b.Bytes()
+	binary.BigEndian.PutUint32(data[16:], uint32(width))
+	binary.BigEndian.PutUint32(data[20:], uint32(height))
+	binary.BigEndian.PutUint32(data[29:], crc32.ChecksumIEEE(data[12:29]))
+	return data
+}
+
+// The images a turn sends to be resized hold together no more pixels than
+// one image may, and a turn past that is refused before any is decoded.
+func TestATurnResizesNoMorePixelsThanOneImageHolds(t *testing.T) {
+	h, _, key := testChatHarness(t, nil)
+	const width = 5000
+	for _, tc := range []struct {
+		height, status int
+		code           string
+	}{
+		{maxTurnResizePixels / 2 / width, 415, "ATTACHMENT_UNSUPPORTED"},
+		{maxTurnResizePixels/2/width + 1, 413, "ATTACHMENT_TOO_LARGE"},
+	} {
+		encoded := base64.StdEncoding.EncodeToString(declaredPNG(width, tc.height))
+		in := sendInput(key)
+		in["attachments"] = []any{
+			object{"id": "att_first", "kind": "image", "fileName": "first.png", "base64": encoded},
+			object{"id": "att_second", "kind": "image", "fileName": "second.png", "base64": encoded},
+		}
+		w := postRoute(h, "/v1/threads/turn", in, "alice")
+		var refused struct {
+			Error apiError `json:"error"`
+		}
+		json.Unmarshal(w.Body.Bytes(), &refused)
+		if w.Code != tc.status || refused.Error.Code != tc.code {
+			t.Errorf("two images of %dx%d: HTTP %d %s", width, tc.height, w.Code, w.Body.String())
+		}
 	}
 }
 

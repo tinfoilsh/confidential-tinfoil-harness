@@ -559,10 +559,15 @@ func (in *turnRequest) validateContent() error {
 			return err
 		}
 	}
+	pixels := int64(0)
 	for i := range in.Attachments {
 		if err := in.Attachments[i].validate(); err != nil {
 			return err
 		}
+		pixels += in.Attachments[i].resizePixels()
+	}
+	if pixels > maxTurnResizePixels {
+		return apiErr(413, "ATTACHMENT_TOO_LARGE", "The turn's images hold more pixels than one turn can resize")
 	}
 	if in.Kind == "send" && strings.TrimSpace(valueOr(in.Content, "")) == "" && len(in.Attachments) == 0 {
 		return apiErr(400, "BAD_REQUEST", "A message or attachment is required")
