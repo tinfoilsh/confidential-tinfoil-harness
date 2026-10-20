@@ -191,6 +191,9 @@ func (h *harness) routes() http.Handler {
 			respond(w, result, err)
 		})
 	}
+	for path, handler := range h.threadOperations() {
+		mux.HandleFunc("POST "+path, h.threadOperation(handler))
+	}
 	mux.HandleFunc("POST /v1/threads/turn", h.handleTurn)
 	mux.HandleFunc("POST /v1/threads/import", h.handleThreadImport)
 	mux.HandleFunc("POST /v1/threads/follow", h.handleFollow)
@@ -205,6 +208,46 @@ func (h *harness) routes() http.Handler {
 	}
 	return mux
 }
+
+// threadOperation serves a route that changes a stored chat, named by id
+// with the content key, or a device chat, which its client sends as a turn
+// sends it, and which needs no account.
+func (h *harness) threadOperation(handler jsonEndpoint) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		p, err := h.auth.authenticate(r, true)
+		if err != nil {
+			respond(w, nil, err)
+			return
+		}
+		body, err := readBody(w, r, maxTurnBody)
+		if err != nil {
+			respond(w, nil, err)
+			return
+		}
+		var target struct {
+			Key   string `json:"key"`
+			Local bool   `json:"local"`
+		}
+		json.Unmarshal(body, &target)
+		var key contentKey
+		if !target.Local {
+			if p.Anonymous {
+				respond(w, nil, errAnonymousCloud)
+				return
+			}
+			if key, err = decodeContentKey(target.Key); err != nil {
+				respond(w, nil, err)
+				return
+			}
+			defer clear(key[:])
+		}
+		result, err := handler(r.Context(), p, key, body)
+		respond(w, result, err)
+	}
+}
+
+// errAnonymousCloud refuses a signed-out caller a stored chat.
+var errAnonymousCloud = apiErr(401, "UNAUTHENTICATED", "Anonymous chats are kept on the device")
 
 func downstreamError(status int, body []byte) *apiError {
 	var in object

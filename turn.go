@@ -23,7 +23,7 @@ func (h *harness) handleTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if p.Anonymous && !in.Local {
-		respond(w, nil, apiErr(401, "UNAUTHENTICATED", "Anonymous chats are kept on the device"))
+		respond(w, nil, errAnonymousCloud)
 		return
 	}
 	var key contentKey

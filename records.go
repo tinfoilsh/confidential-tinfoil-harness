@@ -12,8 +12,7 @@ func (h *harness) apiRoutes() []routeSpec {
 	routes := []routeSpec{
 		{"/v1/session", true, false, h.session},
 		{"/v1/threads/list", false, true, decoded(h.listThreads)}, {"/v1/threads/get", false, true, decoded(h.getThread)},
-		{"/v1/threads/update", false, true, decoded(h.updateThread)}, {"/v1/threads/delete", false, true, decoded(h.deleteThread)}, {"/v1/threads/fork", false, true, decoded(h.forkThread)},
-		{"/v1/threads/messages/delete", false, true, decoded(h.deleteMessage)}, {"/v1/threads/messages/update", false, true, decoded(h.updateMessage)},
+		{"/v1/threads/delete", false, true, decoded(h.deleteThread)},
 		{"/v1/threads/search", false, true, decoded(h.searchThreads)}, {"/v1/threads/cancel", true, false, decoded(h.cancelThread)},
 		{"/v1/threads/queue/send", true, false, decoded(h.sendQueued)}, {"/v1/threads/queue/remove", true, false, decoded(h.removeQueued)}, {"/v1/threads/share", false, false, decoded(h.shareThread)},
 		{"/v1/threads/share/revoke", false, false, decoded(h.revokeShare)}, {"/v1/threads/share/status", false, false, decoded(h.shareStatus)},
@@ -34,6 +33,12 @@ func (h *harness) apiRoutes() []routeSpec {
 		}})
 	}
 	return routes
+}
+
+// threadOperations change a stored chat or a device chat in one way each.
+func (h *harness) threadOperations() map[string]jsonEndpoint {
+	return map[string]jsonEndpoint{"/v1/threads/update": decoded(h.updateThread), "/v1/threads/fork": decoded(h.forkThread),
+		"/v1/threads/messages/delete": decoded(h.deleteMessage), "/v1/threads/messages/update": decoded(h.updateMessage)}
 }
 
 func (h *harness) session(ctx context.Context, p *principal, _ contentKey, _ json.RawMessage) (any, error) {
@@ -91,7 +96,7 @@ func (h *harness) getThread(ctx context.Context, p *principal, key contentKey, i
 	return window(row, in.Before, in.Limit), nil
 }
 func (h *harness) updateThread(ctx context.Context, p *principal, key contentKey, in *updateThreadRequest) (any, error) {
-	if in.Model != nil && *in.Model != "auto" && h.catalog.get().definition(*in.Model) == nil {
+	if in.Model != nil && *in.Model != autoModelName && h.catalog.get().definition(*in.Model) == nil {
 		return nil, apiErr(404, "MODEL_UNAVAILABLE", "Unknown model")
 	}
 	if project := valueOr(in.ProjectID.value, ""); project != "" {
@@ -102,11 +107,11 @@ func (h *harness) updateThread(ctx context.Context, p *principal, key contentKey
 	var profile Profile
 	if in.PresetID.value != nil {
 		var err error
-		if profile, err = h.profile(ctx, p, key); err != nil {
+		if profile, err = h.sourceProfile(ctx, p, key, in.threadSource); err != nil {
 			return nil, err
 		}
 	}
-	row, err := h.mutateThread(ctx, p, key, in.ID, func(t *Thread) error {
+	row, err := h.changeThread(ctx, p, key, in.threadSource, in.ID, func(t *Thread) error {
 		in.apply(t, h.catalog.get(), &profile)
 		t.Pinned = valueOr(in.Pinned, t.Pinned)
 		if in.ProjectID.set {
@@ -117,6 +122,9 @@ func (h *harness) updateThread(ctx context.Context, p *principal, key contentKey
 	if err != nil {
 		return nil, err
 	}
+	if in.Local {
+		return h.deviceReply(row), nil
+	}
 	if in.Pinned != nil && !*in.Pinned {
 		if err := h.unpinLegacy(ctx, p, key, in.ID); err != nil {
 			return nil, err
@@ -124,6 +132,38 @@ func (h *harness) updateThread(ctx context.Context, p *principal, key contentKey
 	}
 	return summarize(&row.Thread), nil
 }
+
+// changeThread applies change to a chat: a stored one as read now, saved
+// once changed, or the device chat its client sent.
+func (h *harness) changeThread(ctx context.Context, p *principal, key contentKey, source threadSource, id string, change func(*Thread) error) (*threadRow, error) {
+	if !source.Local {
+		return h.mutateThread(ctx, p, key, id, change)
+	}
+	row := &threadRow{Thread: readDeviceThread(id, source.Thread)}
+	if err := change(&row.Thread); err != nil {
+		return nil, err
+	}
+	row.UpdatedAt = timestamp()
+	return row, nil
+}
+
+// sourceProfile is the settings a chat's prompt reads: the stored profile,
+// or the one a device chat's client sends.
+func (h *harness) sourceProfile(ctx context.Context, p *principal, key contentKey, source threadSource) (Profile, error) {
+	if !source.Local {
+		return h.profile(ctx, p, key)
+	}
+	return *localProfile(source.Profile), nil
+}
+
+// deviceReply answers an operation on a device chat with the chat its client
+// stores, which leaves out the images the client holds.
+func (h *harness) deviceReply(row *threadRow) any {
+	return struct {
+		Thread Thread `json:"thread"`
+	}{deviceThread(&row.Thread)}
+}
+
 func (h *harness) deleteThread(ctx context.Context, p *principal, key contentKey, in *idRequest) (any, error) {
 	h.stopThread(p, in.ID)
 	return struct{}{}, h.removeRow(ctx, p, key, "chat", in.ID)
@@ -136,16 +176,44 @@ func forkTitle(title string) string {
 	return title + " (fork)"
 }
 
-// forkThread starts a new stored chat from a chat's messages through the
-// given one. Sync makes the copy, with its own copies of the attachments.
+// forkedCount is how many leading messages of a chat a fork through the
+// given one copies.
+func forkedCount(t *Thread, messageID string) (int, error) {
+	count := 1 + t.messageIndex(messageID)
+	if count == 0 {
+		return 0, apiErr(404, "THREAD_NOT_FOUND", "The message was not found")
+	}
+	return count, nil
+}
+
+// startFork leaves out of a fork what belongs to the chat it was copied
+// from. Its title is the one it was given.
+func startFork(t *Thread) {
+	t.ActiveRun, t.ContextUsage, t.Pinned, t.LastRequestID, t.TitleState = nil, nil, false, "", "manual"
+}
+
+// forkThread starts a new chat from a chat's messages through the given one,
+// under an id the harness makes. Sync copies a stored chat, with its own
+// copies of the attachments; a device chat's fork keeps their ids.
 func (h *harness) forkThread(ctx context.Context, p *principal, key contentKey, in *messageRequest) (any, error) {
+	if in.Local {
+		source := readDeviceThread(in.ThreadID, in.Thread)
+		count, err := forkedCount(&source, in.MessageID)
+		if err != nil {
+			return nil, err
+		}
+		fork := source.clone()
+		fork.ID, fork.Title, fork.Messages, fork.CreatedAt, fork.UpdatedAt = rowID(), forkTitle(source.Title), fork.Messages[:count], timestamp(), timestamp()
+		startFork(&fork)
+		return h.deviceReply(&threadRow{Thread: fork}), nil
+	}
 	row, err := h.loadThread(ctx, p, key, in.ThreadID)
 	if err != nil {
 		return nil, err
 	}
-	count := 1 + row.messageIndex(in.MessageID)
-	if count == 0 {
-		return nil, apiErr(404, "THREAD_NOT_FOUND", "The message was not found")
+	count, err := forkedCount(&row.Thread, in.MessageID)
+	if err != nil {
+		return nil, err
 	}
 	target := rowID()
 	if err := h.forkStored(ctx, p, key, in.ThreadID, target, forkTitle(row.Title), count); err != nil {
@@ -153,7 +221,7 @@ func (h *harness) forkThread(ctx context.Context, p *principal, key contentKey, 
 	}
 	// Sync leaves out the web client's bookkeeping, not the harness's.
 	forked, err := h.mutateThread(ctx, p, key, target, func(t *Thread) error {
-		t.ActiveRun, t.ContextUsage, t.Pinned = nil, nil, false
+		startFork(t)
 		return nil
 	})
 	if err != nil {
@@ -162,8 +230,7 @@ func (h *harness) forkThread(ctx context.Context, p *principal, key contentKey, 
 	return summarize(&forked.Thread), nil
 }
 
-// Message actions change a stored chat's transcript. A local thread's client
-// changes its own copy, which its next turn sends.
+// Message actions change a chat's transcript.
 func (h *harness) deleteMessage(ctx context.Context, p *principal, key contentKey, in *messageRequest) (any, error) {
 	return h.changeMessages(ctx, p, key, in, func(t *Thread, index int) error {
 		// As on the web client, a chat keeps its last message.
@@ -187,7 +254,7 @@ func (h *harness) updateMessage(ctx context.Context, p *principal, key contentKe
 	})
 }
 func (h *harness) changeMessages(ctx context.Context, p *principal, key contentKey, in *messageRequest, change func(*Thread, int) error) (any, error) {
-	row, err := h.mutateThread(ctx, p, key, in.ThreadID, func(t *Thread) error {
+	row, err := h.changeThread(ctx, p, key, in.threadSource, in.ThreadID, func(t *Thread) error {
 		index := t.messageIndex(in.MessageID)
 		if index < 0 {
 			return apiErr(404, "THREAD_NOT_FOUND", "The message was not found")
@@ -196,6 +263,9 @@ func (h *harness) changeMessages(ctx context.Context, p *principal, key contentK
 	})
 	if err != nil {
 		return nil, err
+	}
+	if in.Local {
+		return h.deviceReply(row), nil
 	}
 	return window(row, "", messageWindow), nil
 }

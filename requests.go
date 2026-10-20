@@ -185,7 +185,33 @@ type windowRequest struct {
 
 func (in *windowRequest) validate() error { return requireID("id", in.ID) }
 
+// threadSource is where the chat an operation changes is kept: in the cloud,
+// named by id with the content key, or on the device that sends it with
+// the settings its prompt reads.
+type threadSource struct {
+	Local   bool            `json:"local"`
+	Thread  json.RawMessage `json:"thread"`
+	Profile json.RawMessage `json:"profile"`
+}
+
+func (s *threadSource) validate() error {
+	if !s.Local {
+		if s.Thread != nil || s.Profile != nil {
+			return apiErr(400, "BAD_REQUEST", "thread and profile are only accepted for local threads")
+		}
+		return nil
+	}
+	if !isObject(s.Thread) {
+		return apiErr(400, "BAD_REQUEST", "A local thread requires its transcript")
+	}
+	if s.Profile != nil && !isObject(s.Profile) {
+		return apiErr(400, "BAD_REQUEST", "profile must be an object")
+	}
+	return validateLocalThread(s.Thread)
+}
+
 type updateThreadRequest struct {
+	threadSource
 	ID               string           `json:"id"`
 	Title            *string          `json:"title"`
 	Model            *string          `json:"model"`
@@ -196,7 +222,10 @@ type updateThreadRequest struct {
 }
 
 func (in *updateThreadRequest) validate() error {
-	return cmp.Or(in.ProjectID.check("projectId"), in.PresetID.check("presetId"), requireID("id", in.ID))
+	if in.Local && (in.Pinned != nil || in.ProjectID.set) {
+		return apiErr(400, "BAD_REQUEST", "Pins and projects require cloud storage")
+	}
+	return cmp.Or(in.ProjectID.check("projectId"), in.PresetID.check("presetId"), requireID("id", in.ID), in.threadSource.validate())
 }
 
 // apply makes the settings change a chat's client asks for. Choosing another
@@ -212,8 +241,9 @@ func (in *updateThreadRequest) apply(t *Thread, c *chatCatalog, profile *Profile
 	t.WebSearchEnabled = valueOr(in.WebSearchEnabled, t.WebSearchEnabled)
 }
 
-// messageRequest names a message of a stored chat; an edit sends its text.
+// messageRequest names a message of a chat; an edit sends its text.
 type messageRequest struct {
+	threadSource
 	ThreadID  string  `json:"threadId"`
 	MessageID string  `json:"messageId"`
 	Content   *string `json:"content"`
@@ -223,7 +253,10 @@ func (in *messageRequest) validate() error {
 	if err := requireID("threadId", in.ThreadID); err != nil {
 		return err
 	}
-	return requireID("messageId", in.MessageID)
+	if err := requireID("messageId", in.MessageID); err != nil {
+		return err
+	}
+	return in.threadSource.validate()
 }
 
 type searchRequest struct {
