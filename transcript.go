@@ -69,7 +69,7 @@ func applyTurn(thread, in object, messageID string, attachments []any) error {
 		quote = nil
 	}
 	if kind != "regenerate" && kind != "retryToolCall" && kind != "continue" {
-		messages = append(messages, object{"id": messageID, "role": "user", "content": content, "quote": quote, "attachments": attachments, "createdAt": timestamp(), "timestamp": timestamp()})
+		messages = append(messages, object{"id": messageID, "role": "user", "content": content, "quote": quote, "attachments": attachments, "createdAt": timestamp()})
 	}
 	thread["messages"] = messages
 	return nil

@@ -363,9 +363,6 @@ func TestNewChatsStartWithTheDefaultPromptPreset(t *testing.T) {
 		json.Unmarshal(w.Body.Bytes(), &profile)
 		return profile
 	}
-	if value, ok := update(object{"defaultPromptPresetId": nil})["defaultPromptPresetId"]; !ok || value != "" {
-		t.Fatalf("a cleared default was stored as %v", value)
-	}
 	profile := update(object{"customPromptPresets": []any{pirate}, "defaultPromptPresetId": "user:pirate"})
 	if profile["defaultPromptPresetId"] != "user:pirate" || !reflect.DeepEqual(arr(profile["customPromptPresets"])[0], decodeValue(raw(pirate))) {
 		t.Fatalf("profile update lost the default or the preset's settings: %v", profile)

@@ -38,7 +38,7 @@ func (a *messageAssembler) message(id string) object {
 	if m := a.byID[id]; m != nil {
 		return m
 	}
-	m := object{"id": id, "role": "assistant", "content": "", "createdAt": timestamp(), "timestamp": timestamp(), "timeline": []any{}}
+	m := object{"id": id, "role": "assistant", "content": "", "createdAt": timestamp(), "timeline": []any{}}
 	a.byID[id] = m
 	a.ordered = append(a.ordered, m)
 	return m
@@ -47,7 +47,7 @@ func (a *messageAssembler) message(id string) object {
 // stamp dates a reply by its first event; a continued reply keeps its date.
 func (a *messageAssembler) stamp(id string, m object, at string) {
 	if _, seeded := a.sealed[id]; at != "" && !seeded && len(arr(m["timeline"])) == 0 {
-		m["createdAt"], m["timestamp"] = at, at
+		m["createdAt"] = at
 	}
 }
 func (a *messageAssembler) apply(e event) {
@@ -72,8 +72,6 @@ func (a *messageAssembler) apply(e event) {
 		b["content"] = str(b["content"]) + str(e.Delta)
 		if kind == "content" {
 			m["content"] = str(m["content"]) + str(e.Delta)
-		} else {
-			m["thoughts"] = str(m["thoughts"]) + str(e.Delta)
 		}
 	case "TOOL_CALL_START":
 		parent := e.ParentID

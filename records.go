@@ -413,11 +413,6 @@ func (h *harness) updateProfile(ctx context.Context, p *principal, key contentKe
 	if err := validateProfile(patch); err != nil {
 		return nil, err
 	}
-	// The web client stores a cleared default as an empty string and ignores
-	// a synced profile that holds null.
-	if value, ok := patch["defaultPromptPresetId"]; ok && value == nil {
-		patch["defaultPromptPresetId"] = ""
-	}
 	for f := range patch {
 		if !slices.Contains(profileFields, f) {
 			return nil, apiErr(400, "BAD_REQUEST", "Unknown profile field: "+f)

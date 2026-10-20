@@ -223,7 +223,11 @@ func (h *harness) hydrateDocuments(ctx context.Context, p *principal, thread obj
 	for _, item := range arr(thread["messages"]) {
 		for _, value := range arr(obj(item)["attachments"]) {
 			a := obj(value)
-			if isImage(a) || documentContent(a) || attachmentKey(a) == "" {
+			if isImage(a) || documentContent(a) {
+				continue
+			}
+			if attachmentKey(a) == "" {
+				a["textContent"] = unavailableDocument(a)
 				continue
 			}
 			if err := h.inflateDocument(ctx, p, a); err != nil {
@@ -276,15 +280,12 @@ func (h *harness) repairAttachments(ctx context.Context, p *principal, row *stor
 	return nil
 }
 
-// An image without its blob keeps its thumbnail. A document keeps a note in
-// place of its content, since the web client refuses to push an empty one.
+// An attachment without its blob keeps its metadata, and an image its
+// thumbnail.
 func retireAttachment(a object) {
 	delete(a, "encryptionKey")
 	delete(a, "key")
 	delete(a, "storageThreadId")
-	if !isImage(a) && !documentContent(a) {
-		a["textContent"] = unavailableDocument(a)
-	}
 }
 
 func containsString(values []string, value string) bool {
