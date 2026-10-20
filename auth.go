@@ -95,10 +95,16 @@ func budget(limit, used, remaining *int) *tokenBudget {
 	return &tokenBudget{*limit, *used, *remaining}
 }
 
+// chatTokenPath mints a subscriber's Tinfoil Chat access token.
+const chatTokenPath = "/api/chat/token"
+
 type inferenceCredential struct {
 	Key     secret
 	Expires time.Time
 	Limit   rateLimit
+	// firstParty marks a credential minted for Tinfoil Chat, the only one
+	// whose conversations are screened.
+	firstParty bool
 }
 
 // hourlyCap is a subscriber's refused exchange, remembered until the cap resets.
@@ -249,7 +255,7 @@ func (a *authenticator) inference(ctx context.Context, p *principal) (inferenceC
 	a.refreshing[p.scope()] = make(chan struct{})
 	a.mu.Unlock()
 	defer func() { a.mu.Lock(); close(a.refreshing[p.scope()]); delete(a.refreshing, p.scope()); a.mu.Unlock() }()
-	paths := []string{"/api/chat/token", "/api/keys/chat"}
+	paths := []string{chatTokenPath, "/api/keys/chat"}
 	for i, path := range paths {
 		req, _ := http.NewRequestWithContext(ctx, "GET", a.controlplane+path, nil)
 		if p.JWT != "" {
@@ -285,7 +291,7 @@ func (a *authenticator) inference(ctx context.Context, p *principal) (inferenceC
 		if err != nil || !exp.After(nowUTC()) {
 			return inferenceCredential{}, errors.New("invalid inference credential expiry")
 		}
-		cred := inferenceCredential{Key: in.Key, Expires: exp}
+		cred := inferenceCredential{Key: in.Key, Expires: exp, firstParty: path == chatTokenPath}
 		switch {
 		case in.Rate != nil && i == 0:
 			cred.Limit = in.Rate.limit("hourly")

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -343,5 +344,29 @@ func TestOversizedBodiesAreRefusedAsTooLarge(t *testing.T) {
 	json.Unmarshal(w.Body.Bytes(), &refused)
 	if w.Code != http.StatusRequestEntityTooLarge || refused.Error.Code != "PAYLOAD_TOO_LARGE" {
 		t.Fatalf("an oversized body: HTTP %d %s", w.Code, w.Body.String())
+	}
+}
+
+// A chat is screened when its credential is the Tinfoil Chat token the
+// control plane mints for subscribers, never a free key.
+func TestOnlyChatTokenChatsAreScreened(t *testing.T) {
+	for _, subscribed := range []bool{true, false} {
+		t.Run(strconv.FormatBool(subscribed), func(t *testing.T) {
+			h, key := subscriberHarness(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == chatTokenPath && !subscribed {
+					w.WriteHeader(http.StatusPaymentRequired)
+					return
+				}
+				json.NewEncoder(w).Encode(object{"key": "opaque-" + r.URL.Path, "expires_at": nowUTC().Add(time.Hour).Format(time.RFC3339)})
+			})
+			delete(h.auth.credentials, "user:alice")
+			drained := screenedBy(t, h)
+			delete(h.auth.credentials, "user:alice")
+			finishedRun(t, h, "/v1/threads/turn", sendInput(key))
+			got := drained()
+			if subscribed && (len(got) != 1 || got[0].Credential != "opaque-"+chatTokenPath) || !subscribed && len(got) != 0 {
+				t.Fatalf("subscribed %v: the sidecar received %+v", subscribed, got)
+			}
+		})
 	}
 }

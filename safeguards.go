@@ -2,16 +2,13 @@ package main
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
-	"slices"
 	"strings"
 	"time"
-	"unicode/utf8"
 )
 
 // Completed first-party chat conversations are submitted to the safeguards
@@ -19,10 +16,12 @@ import (
 // chats it serves. Ported from the router's safeguards package.
 
 const (
-	safeguardsTimeout    = 5 * time.Second
-	maxSubmissionBytes   = 1 << 20
-	messageJSONOverhead  = len(`{"role":"","content":""},`)
-	maxConversationIDLen = 128
+	safeguardsTimeout = 5 * time.Second
+	// maxSubmissionBytes is the sidecar's request cap, MAX_REQUEST_BYTES in
+	// tinfoil-config.yml. The sidecar reads only a transcript's tail.
+	maxSubmissionBytes = 4 << 20
+	// jsonEscapeGrowth is the most one byte grows when encoded, as \u00XX.
+	jsonEscapeGrowth = 6
 )
 
 type safeguardMessage struct {
@@ -61,115 +60,31 @@ func (s *submitter) submit(credential, conversationID string, messages []safegua
 	if s == nil || len(messages) == 0 || messages[len(messages)-1].Role != "assistant" || messages[len(messages)-1].Content == "" {
 		return
 	}
-	if len(conversationID) > maxConversationIDLen {
-		conversationID = ""
-	}
-	body, ok := encodeSubmission(credential, conversationID, messages)
-	if !ok {
-		return
-	}
-	s.deliver(body)
+	s.deliver(encodeSubmission(credential, conversationID, messages))
 }
 
-// encodeSubmission serializes within maxSubmissionBytes, trimming the oldest
-// history when all of it does not fit. It fails only when not even part of the
-// latest turn fits.
-func encodeSubmission(credential, conversationID string, messages []safeguardMessage) ([]byte, bool) {
-	if fitsSubmission(credential, conversationID, messages) {
-		body, _ := json.Marshal(submission{Credential: credential, ConversationID: conversationID, Messages: messages})
-		if len(body) <= maxSubmissionBytes {
-			return body, true
-		}
-	}
-	messages = trimToFit(credential, conversationID, messages)
-	if len(messages) == 0 {
-		return nil, false
-	}
-	body, _ := json.Marshal(submission{Credential: credential, ConversationID: conversationID, Messages: messages})
-	return body, len(body) <= maxSubmissionBytes
-}
-
-// trimToFit keeps the newest messages that fit, cutting the oldest one kept
-// from the front, so the latest turns always reach the classifier.
-func trimToFit(credential, conversationID string, messages []safeguardMessage) []safeguardMessage {
+// encodeSubmission keeps the newest messages that fit the sidecar's cap, and
+// cuts the newest from the front when it alone does not fit.
+func encodeSubmission(credential, conversationID string, messages []safeguardMessage) []byte {
 	envelope, _ := json.Marshal(submission{Credential: credential, ConversationID: conversationID, Messages: []safeguardMessage{}})
-	remaining := maxSubmissionBytes - len(envelope)
-	var kept []safeguardMessage
-	for i := len(messages) - 1; i >= 0; i-- {
-		if len(kept) > 0 {
-			remaining -= len(",")
-		}
-		m, size, ok := fitMessage(messages[i], remaining)
-		if !ok {
+	room, start := maxSubmissionBytes-len(envelope), len(messages)
+	for ; start > 0; start-- {
+		encoded, _ := json.Marshal(messages[start-1])
+		if len(encoded)+len(",") > room {
 			break
 		}
-		kept = append(kept, m)
-		remaining -= size
-		if len(m.Content) < len(messages[i].Content) {
-			break
-		}
+		room -= len(encoded) + len(",")
 	}
-	slices.Reverse(kept)
-	return kept
-}
-
-// fitMessage returns m, or m with its content cut from the front, encoding
-// within budget bytes, with that encoded size; ok is false when none fits.
-func fitMessage(m safeguardMessage, budget int) (safeguardMessage, int, bool) {
-	if len(m.Role)+len(m.Content)+messageJSONOverhead <= budget {
-		if b, _ := json.Marshal(m); len(b) <= budget {
-			return m, len(b), true
-		}
+	kept := messages[start:]
+	if len(kept) == 0 {
+		last := messages[len(messages)-1]
+		empty, _ := json.Marshal(safeguardMessage{Role: last.Role})
+		keep := min(len(last.Content), max(0, room-len(empty))/jsonEscapeGrowth)
+		last.Content = strings.ToValidUTF8(last.Content[len(last.Content)-keep:], "")
+		kept = []safeguardMessage{last}
 	}
-	empty, _ := json.Marshal(safeguardMessage{Role: m.Role})
-	// JSON encodes a byte as at most 6 (\u00XX, \ufffd), so a sixth of the
-	// room fits however it escapes. Cloned so the tail does not pin the original.
-	cut := safeguardMessage{Role: m.Role, Content: strings.Clone(tail(m.Content, (budget-len(empty))/6))}
-	b, _ := json.Marshal(cut)
-	if len(b) > budget || cut.Content == "" {
-		return safeguardMessage{}, 0, false
-	}
-	return cut, len(b), true
-}
-
-// tail is at most n trailing bytes of s, without splitting a UTF-8 sequence.
-func tail(s string, n int) string {
-	if n <= 0 {
-		return ""
-	}
-	if n >= len(s) {
-		return s
-	}
-	start := len(s) - n
-	for start < len(s) && !utf8.RuneStart(s[start]) {
-		start++
-	}
-	return s[start:]
-}
-
-// fitsSubmission bounds the input before encoding; escaping can grow the
-// encoding, so its length is checked separately.
-func fitsSubmission(credential, conversationID string, messages []safeguardMessage) bool {
-	remaining := maxSubmissionBytes
-	for _, value := range []string{credential, conversationID} {
-		if len(value) > remaining {
-			return false
-		}
-		remaining -= len(value)
-	}
-	for _, message := range messages {
-		if messageJSONOverhead > remaining {
-			return false
-		}
-		remaining -= messageJSONOverhead
-		for _, value := range []string{message.Role, message.Content} {
-			if len(value) > remaining {
-				return false
-			}
-			remaining -= len(value)
-		}
-	}
-	return true
+	body, _ := json.Marshal(submission{Credential: credential, ConversationID: conversationID, Messages: kept})
+	return body
 }
 
 func (s *submitter) deliver(body []byte) {
@@ -220,34 +135,6 @@ func flattenContent(content any) string {
 	return ""
 }
 
-// isFirstPartyChatAccessJWT recognises Tinfoil Chat's own access tokens, the
-// only credentials whose conversations are classified.
-func isFirstPartyChatAccessJWT(token string) bool {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
-		return false
-	}
-	header, err := base64.RawURLEncoding.DecodeString(parts[0])
-	if err != nil {
-		return false
-	}
-	var metadata struct {
-		Type string `json:"typ"`
-	}
-	if json.Unmarshal(header, &metadata) != nil || strings.TrimPrefix(strings.ToLower(metadata.Type), "application/") != "at+jwt" {
-		return false
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return false
-	}
-	var claims struct {
-		ClientID string `json:"client_id"`
-		Product  string `json:"product"`
-	}
-	return json.Unmarshal(payload, &claims) == nil && claims.ClientID == "tinfoil-chat" && claims.Product == "chat"
-}
-
 // screening is what a run submits for classification once it completes.
 type screening struct {
 	conversation string
@@ -276,9 +163,6 @@ func (h *harness) screening(req *request) *screening {
 			}
 		}
 	}
-	if !fitsSubmission("", "", messages) {
-		messages = trimToFit("", "", messages)
-	}
 	return &screening{conversation: req.conversation, messages: messages}
 }
 
@@ -288,7 +172,7 @@ func (h *harness) screen(r *chatRun, reply []object, runErr error) {
 	h.live.mu.Lock()
 	deleted := r.thread.deleted
 	h.live.mu.Unlock()
-	if r.screening == nil || runErr != nil || r.cancelled || deleted || r.retryTarget != nil || r.principal.Anonymous || !isFirstPartyChatAccessJWT(string(r.credential.Key)) {
+	if r.screening == nil || runErr != nil || r.cancelled || deleted || r.retryTarget != nil || r.principal.Anonymous || !r.credential.firstParty {
 		return
 	}
 	var text []string

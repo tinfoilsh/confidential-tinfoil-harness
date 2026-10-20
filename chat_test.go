@@ -1661,7 +1661,9 @@ func heldScreening(t *testing.T, h *harness, hold chan struct{}) func() []submis
 	}))
 	t.Cleanup(sidecar.Close)
 	h.safeguards = newSubmitter(sidecar.URL)
-	h.auth.credentials["user:alice"] = inferenceCredential{Key: secret(accessJWT("tinfoil-chat", "chat")), Expires: nowUTC().Add(time.Hour)}
+	credential := chatToken
+	credential.Expires = nowUTC().Add(time.Hour)
+	h.auth.credentials["user:alice"] = credential
 	// As deployed, auto is the router, not one of the gateway's models.
 	h.autoModel = &model{name: "auto", client: h.offer.get()[0].client}
 	return func() []submission {
@@ -1706,7 +1708,7 @@ func TestACompletedFirstPartyChatIsScreenedOnce(t *testing.T) {
 					t.Fatalf("an ask stored %d rows", len(rows.rows))
 				}
 			}
-			if len(got) != 1 || got[0].Credential != accessJWT("tinfoil-chat", "chat") || got[0].ConversationID != conversation {
+			if len(got) != 1 || got[0].Credential != string(chatToken.Key) || got[0].ConversationID != conversation {
 				t.Fatalf("the sidecar received %+v", got)
 			}
 			messages := got[0].Messages

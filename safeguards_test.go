@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -14,11 +13,8 @@ import (
 	"unicode/utf8"
 )
 
-func accessJWT(clientID, product string) string {
-	header, _ := json.Marshal(map[string]string{"alg": "none", "typ": "at+jwt"})
-	payload, _ := json.Marshal(map[string]string{"client_id": clientID, "product": product})
-	return base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(payload) + ".signature"
-}
+// chatToken is a subscriber's Tinfoil Chat credential.
+var chatToken = inferenceCredential{Key: "chat-token", firstParty: true}
 
 func TestSubmitter_DeliversCompletedConversation(t *testing.T) {
 	var mu sync.Mutex
@@ -49,25 +45,20 @@ func TestSubmitter_TrimsOversizedHistory(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		messages []safeguardMessage
+		kept     int
 	}{
-		{"history", []safeguardMessage{{Role: "user", Content: big + "the question"}, {Role: "assistant", Content: "reply"}}},
-		{"older turns", []safeguardMessage{{Role: "user", Content: big}, {Role: "assistant", Content: big}, {Role: "user", Content: "latest"}, {Role: "assistant", Content: "reply"}}},
-		{"escaping", []safeguardMessage{{Role: "assistant", Content: strings.Repeat("<\x00", maxSubmissionBytes/2)}}},
-		{"escaped reply", []safeguardMessage{{Role: "user", Content: big}, {Role: "assistant", Content: strings.Repeat("<", maxSubmissionBytes/3)}}},
-		{"multibyte", []safeguardMessage{{Role: "user", Content: strings.Repeat("é", maxSubmissionBytes)}, {Role: "assistant", Content: "reply"}}},
-		{"many messages", append(make([]safeguardMessage, maxSubmissionBytes/messageJSONOverhead), safeguardMessage{Role: "assistant", Content: "reply"})},
+		{"older turns", []safeguardMessage{{Role: "user", Content: big}, {Role: "assistant", Content: big}, {Role: "user", Content: "latest"}, {Role: "assistant", Content: "reply"}}, 2},
+		{"escaped reply", []safeguardMessage{{Role: "user", Content: "question"}, {Role: "assistant", Content: strings.Repeat("<\x00", maxSubmissionBytes/2)}}, 1},
+		{"multibyte reply", []safeguardMessage{{Role: "assistant", Content: strings.Repeat("é", maxSubmissionBytes)}}, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			body, ok := encodeSubmission("token", "chat", tc.messages)
-			if !ok {
-				t.Fatal("oversized history must be trimmed, not dropped")
-			}
+			body := encodeSubmission("token", "chat", tc.messages)
 			if len(body) > maxSubmissionBytes {
 				t.Fatalf("body is %d bytes, want at most %d", len(body), maxSubmissionBytes)
 			}
 			var got submission
-			if err := json.Unmarshal(body, &got); err != nil {
-				t.Fatal(err)
+			if err := json.Unmarshal(body, &got); err != nil || len(got.Messages) != tc.kept {
+				t.Fatalf("kept %d messages, want %d (%v)", len(got.Messages), tc.kept, err)
 			}
 			offset := len(tc.messages) - len(got.Messages)
 			for i, m := range got.Messages {
@@ -84,22 +75,6 @@ func TestSubmitter_TrimsOversizedHistory(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestIsFirstPartyChatAccessJWT(t *testing.T) {
-	if !isFirstPartyChatAccessJWT(accessJWT("tinfoil-chat", "chat")) {
-		t.Fatal("expected first-party Chat at+jwt token to be recognized")
-	}
-	header, _ := json.Marshal(map[string]string{"typ": "application/at+jwt"})
-	payload, _ := json.Marshal(map[string]string{"client_id": "tinfoil-chat", "product": "chat"})
-	if !isFirstPartyChatAccessJWT(base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(payload) + ".signature") {
-		t.Fatal("expected the application/at+jwt type to be recognized")
-	}
-	for _, token := range []string{"opaque-key", "e30.e30.signature", "bad.payload.signature", "free_anonymous-key", accessJWT("third-party", "chat"), accessJWT("tinfoil-chat", "api")} {
-		if isFirstPartyChatAccessJWT(token) {
-			t.Fatalf("ineligible credential %q must not be classified", token)
-		}
 	}
 }
 
@@ -133,7 +108,7 @@ func TestOnlyCompletedFirstPartyChatsAreScreened(t *testing.T) {
 		"deleted":      {func(r *chatRun) { r.thread.deleted = true }, reply, nil, false},
 		"widget retry": {func(r *chatRun) { r.retryTarget = object{"name": "render_chart"} }, reply, nil, false},
 		"anonymous":    {func(r *chatRun) { r.principal.Anonymous = true }, reply, nil, false},
-		"api key":      {func(r *chatRun) { r.credential.Key = "tk_api_key" }, reply, nil, false},
+		"api key":      {func(r *chatRun) { r.credential.firstParty = false }, reply, nil, false},
 		"not captured": {func(r *chatRun) { r.screening = nil }, reply, nil, false},
 		"no reply":     {func(*chatRun) {}, []object{{"content": ""}}, nil, false},
 	} {
@@ -145,7 +120,7 @@ func TestOnlyCompletedFirstPartyChatsAreScreened(t *testing.T) {
 			}))
 			defer sidecar.Close()
 			h := &harness{safeguards: newSubmitter(sidecar.URL)}
-			r := &chatRun{thread: &threadSession{id: "chat-1"}, principal: &principal{ID: "alice"}, credential: inferenceCredential{Key: secret(accessJWT("tinfoil-chat", "chat"))},
+			r := &chatRun{thread: &threadSession{id: "chat-1"}, principal: &principal{ID: "alice"}, credential: chatToken,
 				screening: &screening{conversation: "chat-1", messages: []safeguardMessage{{Role: "user", Content: "hi"}}}}
 			tc.change(r)
 			h.screen(r, tc.reply, tc.err)
