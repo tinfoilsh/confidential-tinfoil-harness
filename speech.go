@@ -135,8 +135,8 @@ func (a *speechAudio) from(offset int) ([]byte, bool, error, <-chan struct{}) {
 
 // streamSpeech writes the audio of each piece in order. A piece is
 // synthesized once a slot frees up, and its slot frees up once its audio
-// is written. A failure before any audio is returned; one after ends the
-// stream.
+// is written. A failure before any audio is returned; one after aborts the
+// response, so its client reads the audio as incomplete.
 func streamSpeech(ctx context.Context, w http.ResponseWriter, router *downstreamService, pieces []string) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -177,7 +177,7 @@ func streamSpeech(ctx context.Context, w http.ResponseWriter, router *downstream
 				return err
 			}
 			if err != nil {
-				return nil
+				panic(http.ErrAbortHandler)
 			}
 			if done {
 				break

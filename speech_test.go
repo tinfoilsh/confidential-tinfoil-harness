@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -196,6 +197,40 @@ func TestAMessageIsReadAloudInOrderWithoutItsCode(t *testing.T) {
 	// A device chat's message reads the same, without an account.
 	if device, _ := read(object{"local": true, "threadId": "chat-1", "thread": thread, "messageId": "short"}, ""); !strings.HasPrefix(device, "<Trip plan\n") {
 		t.Fatalf("the device chat's reply was read as %q", device)
+	}
+}
+
+// A piece that fails once audio has streamed cuts the response short, so
+// its client does not take the audio for the whole message.
+func TestSpeechThatFailsPartwayEndsIncomplete(t *testing.T) {
+	h := routerHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Input string `json:"input"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		if !strings.HasPrefix(body.Input, "Sentence 1 ") {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "audio/pcm")
+		io.WriteString(w, "<first>")
+	})
+	server := httptest.NewServer(h.routes())
+	t.Cleanup(server.Close)
+	var long strings.Builder
+	for i := 1; i <= 12; i++ {
+		fmt.Fprintf(&long, "Sentence %d walks through the plan in enough detail to fill a piece. ", i)
+	}
+	req, _ := http.NewRequest("POST", server.URL+"/v1/speech", bytes.NewReader(raw(object{"text": long.String()})))
+	req.Header.Set("Authorization", "Bearer clerk-alice")
+	resp, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	audio, err := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 || string(audio) != "<first>" || !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("HTTP %d streamed %q and ended with %v", resp.StatusCode, audio, err)
 	}
 }
 
