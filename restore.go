@@ -145,20 +145,30 @@ func (b *nativeBackup) listed(kind string) []*zip.File {
 	return files
 }
 
-// chat reads one of the backup's chats with its images.
-func (b *nativeBackup) chat(f *zip.File) (string, Thread, error) {
+// chatData reads one of the backup's chats, which must be filed under its
+// id. Its images were checked when the backup was opened.
+func chatData(f *zip.File) (string, []byte, error) {
 	data, err := readEntry(f, maxArchiveJSONEntry)
 	if err != nil {
-		return "", Thread{}, err
+		return "", nil, err
 	}
 	var head struct {
 		ID string `json:"id"`
 	}
 	if json.Unmarshal(data, &head) != nil || head.ID == "" || backupEntityPath(backupKind(f.Name), head.ID) != f.Name {
-		return "", Thread{}, errInvalidBackup("a chat is filed under another id")
+		return "", nil, errInvalidBackup("a chat is filed under another id")
+	}
+	return head.ID, data, nil
+}
+
+// chat reads one of the backup's chats with its images.
+func (b *nativeBackup) chat(f *zip.File) (string, Thread, error) {
+	chatID, data, err := chatData(f)
+	if err != nil {
+		return "", Thread{}, err
 	}
 	images := backupImages{}
-	for _, id := range b.chatImages[head.ID] {
+	for _, id := range b.chatImages[chatID] {
 		bytes, err := readEntry(b.entries[backupImagePath(id, ".bin")], maxArchiveImage)
 		if err != nil {
 			return "", Thread{}, err
@@ -168,7 +178,7 @@ func (b *nativeBackup) chat(f *zip.File) (string, Thread, error) {
 			images[id] = heldImage{FileName: meta.FileName, MimeType: kind, Description: meta.Description, Size: int64(len(bytes)), Base64: base64.StdEncoding.EncodeToString(bytes)}
 		}
 	}
-	return head.ID, readBackupThread(head.ID, data, images), nil
+	return chatID, readBackupThread(chatID, data, images), nil
 }
 
 // native restores a backup. With cloud storage its projects, documents and
@@ -183,13 +193,20 @@ func (j *importRun) native(ctx context.Context, b *nativeBackup) error {
 	}
 	device := append(b.listed("cloud_chats"), b.listed("local_chats")...)
 	if j.key != nil {
+		device = b.listed("local_chats")
+		// A device chat that cannot be read fails the restore before the
+		// cloud's part is stored.
+		for _, f := range device {
+			if _, _, err := chatData(f); err != nil {
+				return err
+			}
+		}
 		if err := j.nativeCloud(b); err != nil {
 			return err
 		}
 		if err := j.complete(ctx); err != nil {
 			return err
 		}
-		device = b.listed("local_chats")
 	} else {
 		j.warnings.projectsSkipped += b.manifest.Counts.Projects
 	}

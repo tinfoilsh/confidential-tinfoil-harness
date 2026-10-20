@@ -333,6 +333,39 @@ func TestBackupsHoldWhatRestoresTake(t *testing.T) {
 	}
 }
 
+// A device chat a backup cannot restore fails the restore before anything
+// goes to the cloud.
+func TestARestoreReadsDeviceChatsBeforeStoringTheCloud(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	newFakeSync(t, h)
+	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: raw(object{"title": "Stored", "messages": []any{object{"id": "m", "role": "user", "content": "hi"}}})}
+	device := object{"id": "local-chat", "title": "On my device", "messages": []any{object{"id": "d", "role": "user", "content": "hello"}}}
+	w := archiveRoute(h, "/v1/export", "alice", optionsPart(object{"format": "native", "key": key.base64()}), threadPart(device))
+	if w.Code != 200 {
+		t.Fatalf("export: HTTP %d %s", w.Code, w.Body.String())
+	}
+	files, _ := unzipped(t, w.Body.Bytes())
+	local, misfiled := backupEntityPath("local_chats", "local-chat"), raw(object{"id": "another-chat", "title": "On my device"})
+	var manifest backupManifest
+	json.Unmarshal(files[manifestPath], &manifest)
+	for i, file := range manifest.Files {
+		if file.Path == local {
+			manifest.Files[i].SHA256, manifest.Files[i].SizeBytes = hashHex(misfiled), int64(len(misfiled))
+		}
+	}
+	archive := withEntries(t, w.Body.Bytes(), map[string][]byte{local: misfiled, manifestPath: raw(manifest)})
+
+	restored, restoredRows, _ := testChatHarness(t, nil)
+	newFakeSync(t, restored)
+	r := archiveRoute(restored, "/v1/import", "alice", optionsPart(object{"target": "cloud", "key": key.base64()}), formPart{name: "file", filename: "backup.zip", data: archive})
+	if r.Code != 400 || !strings.Contains(r.Body.String(), "a chat is filed under another id") {
+		t.Fatalf("restore: HTTP %d %s", r.Code, r.Body.String())
+	}
+	if stored := storedChats(restoredRows, "alice"); len(stored) != 0 {
+		t.Fatalf("a failed restore stored the cloud's chats: %v", stored)
+	}
+}
+
 // Backups the web app made before the harness wrote them hold chats in its
 // old format, including chats it kept on the device.
 func TestWebAppBackupsRestore(t *testing.T) {
