@@ -62,6 +62,32 @@ func TestTranscriptRefusesToLoseContent(t *testing.T) {
 	}
 }
 
+func TestTranscriptWaitsForALiveReply(t *testing.T) {
+	model, release := heldModel()
+	h, _, key := testChatHarness(t, model)
+	t.Cleanup(release)
+	p := &principal{ID: "alice", JWT: "clerk-alice"}
+	run, err := h.acceptTurn(context.Background(), p, key, requestOf[turnRequest](sendInput(key)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitFrame(t, run.log, "TEXT_MESSAGE_CHUNK")
+	in := object{"key": key.base64(), "threadId": run.thread.id}
+	w := postRoute(h, "/v1/threads/transcript", in, "alice")
+	if w.Code != 409 || !strings.Contains(w.Body.String(), "RUN_IN_FLIGHT") {
+		t.Fatalf("a live reply could be left behind: %d %s", w.Code, w.Body.String())
+	}
+	release()
+	<-run.finished
+	w = postRoute(h, "/v1/threads/transcript", in, "alice")
+	var out struct {
+		Thread Thread `json:"thread"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &out) != nil || len(out.Thread.Messages) != 2 || out.Thread.Messages[1].Content == "" {
+		t.Fatalf("finished reply not transferred: %d %s", w.Code, w.Body.String())
+	}
+}
+
 func TestImportStoresTheDeviceChatUnderItsID(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	fake := newFakeSync(t, h)

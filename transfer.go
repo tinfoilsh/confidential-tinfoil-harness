@@ -15,6 +15,13 @@ import (
 // attachment's content inline and no server bookkeeping. It refuses when any
 // attachment cannot be read, so moving the chat never loses content.
 func (h *harness) threadTranscript(ctx context.Context, p *principal, key contentKey, in *threadRequest) (any, error) {
+	h.live.mu.Lock()
+	live := h.live.threads[liveKey(p, in.ThreadID)]
+	running := live != nil && live.active != nil
+	h.live.mu.Unlock()
+	if running {
+		return nil, apiErr(409, "RUN_IN_FLIGHT", "Wait for the reply to finish before moving this chat")
+	}
 	row, err := h.loadThread(ctx, p, key, in.ThreadID)
 	if err != nil {
 		return nil, err
