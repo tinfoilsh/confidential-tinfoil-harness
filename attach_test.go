@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -134,5 +135,30 @@ func TestRecordingsTranscribeThroughTheRouter(t *testing.T) {
 	response := uploadRoute(h, "/v1/transcriptions", "memo.mp3", []byte("ID3 audio"), nil, "alice")
 	if response.Code != 200 || response.Body.String() != "{\"text\":\"the transcript\\n\"}\n" {
 		t.Fatalf("HTTP %d %s", response.Code, response.Body.String())
+	}
+}
+
+// Every file type the session's composer offers is one uploads convert.
+func TestTheComposerOffersWhatUploadsAccept(t *testing.T) {
+	h := routerHarness(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) })
+	var session struct {
+		Composer composerView `json:"composer"`
+	}
+	json.Unmarshal(postRoute(h, "/v1/session", object{}, "").Body.Bytes(), &session)
+	offered := session.Composer
+	if offered.Attachments.MaxBytes != maxUploadBytes || offered.Attachments.MaxTextBytes != maxTextBytes || offered.PasteAsFileChars == 0 || offered.DictationMaxSeconds == 0 || len(offered.ProjectDocuments.Accept) == 0 {
+		t.Fatalf("the composer offers %+v", offered)
+	}
+	refusedAsUnknown := func(name string) bool {
+		w := uploadRoute(h, "/v1/attachments/upload", name, []byte("x"), nil, "alice")
+		return strings.Contains(w.Body.String(), "Unsupported file type")
+	}
+	if !refusedAsUnknown("file.exe") {
+		t.Fatal("an unknown file type was not refused as one")
+	}
+	for _, ext := range append(offered.Attachments.Accept, offered.ProjectDocuments.Accept...) {
+		if refusedAsUnknown("file" + ext) {
+			t.Errorf("uploads refuse %s, which the composer offers", ext)
+		}
 	}
 }

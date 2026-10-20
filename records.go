@@ -63,6 +63,7 @@ func (h *harness) session(ctx context.Context, p *principal, _ contentKey, _ jso
 		DefaultModel:    autoModelName,
 		Widgets:         c.EnabledWidgets,
 		ProfileDefaults: defaultProfile(),
+		Composer:        composer(),
 		Presets:         presets,
 		Features:        map[string]bool{"webSearch": webSearch.client != nil, "transcription": h.serviceReady("router"), "speech": h.serviceReady("router")},
 	}, nil

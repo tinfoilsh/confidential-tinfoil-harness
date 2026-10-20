@@ -46,6 +46,45 @@ var documentExtensions = strings.Fields(".pdf .docx .pptx .xlsx")
 var audioExtensions = strings.Fields(".mp3 .wav .ogg .m4a .aac .flac .webm .wma")
 var textExtensions = strings.Fields(".txt .md .py .js .jsx .ts .tsx .css .json .xml .yaml .yml .toml .sh .bash .rb .java .cpp .c .h .hpp .go .rs .swift .kt .kts .r .sql .lua .pl .php .cs .csx .vb .fs .fsx .scala .dart .ex .exs .erl .hs .ml .mli .clj .cljs .groovy .gradle .m .mm .zig .nim .jl .ps1 .psm1 .bat .cmd .asm .s .proto .graphql .gql .tf .tfvars .dockerfile .makefile .cmake .tex .bib .svg .properties .lock .diff .patch .env .ini .cfg .conf .log .rtf .html .htm .xhtml .csv .tsv .qfx .qif .ofx .ifs .qbo .qbx .bai .bai2 .mt940 .sta .ics .vcf")
 
+// What a client's composer does before anything reaches the harness: a
+// paste longer than pasteAsFileChars becomes a text file, and dictation
+// stops after dictationMaxSeconds.
+const (
+	pasteAsFileChars    = 3000
+	dictationMaxSeconds = 10 * 60
+)
+
+// composerView is what a client's composer accepts, read from the types
+// and limits uploads are checked against.
+type composerView struct {
+	Attachments         attachmentLimits `json:"attachments"`
+	ProjectDocuments    documentLimits   `json:"projectDocuments"`
+	PasteAsFileChars    int              `json:"pasteAsFileChars"`
+	DictationMaxSeconds int              `json:"dictationMaxSeconds"`
+}
+
+type attachmentLimits struct {
+	Accept       []string `json:"accept"`
+	MaxBytes     int      `json:"maxBytes"`
+	MaxTextBytes int      `json:"maxTextBytes"`
+}
+
+type documentLimits struct {
+	Accept   []string `json:"accept"`
+	MaxBytes int      `json:"maxBytes"`
+}
+
+// composer is what uploads accept. A project document is read for its
+// text, which images do not have.
+func composer() composerView {
+	return composerView{
+		Attachments:         attachmentLimits{Accept: slices.Concat(imageExtensions, documentExtensions, audioExtensions, textExtensions), MaxBytes: maxUploadBytes, MaxTextBytes: maxTextBytes},
+		ProjectDocuments:    documentLimits{Accept: slices.Concat(documentExtensions, textExtensions), MaxBytes: maxUploadBytes},
+		PasteAsFileChars:    pasteAsFileChars,
+		DictationMaxSeconds: dictationMaxSeconds,
+	}
+}
+
 func randomBytes(n int) []byte { b := make([]byte, n); rand.Read(b); return b }
 
 func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {

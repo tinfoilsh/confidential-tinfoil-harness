@@ -287,6 +287,7 @@ type sessionView struct {
 	DefaultModel    string          `json:"defaultModel"`
 	Widgets         []string        `json:"widgets"`
 	ProfileDefaults Profile         `json:"profileDefaults"`
+	Composer        composerView    `json:"composer"`
 	Presets         []preset        `json:"presets"`
 	Features        map[string]bool `json:"features"`
 }
