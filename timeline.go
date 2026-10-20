@@ -106,6 +106,13 @@ func (a *messageAssembler) apply(e event) {
 			if len(e.Metadata) > 0 {
 				b.Metadata = e.Metadata
 			}
+			if e.Display != nil {
+				b.Display = e.Display
+			}
+		}
+	case "ACTIVITY_SNAPSHOT":
+		if call, ok := a.calls[strings.TrimPrefix(e.MessageID, "act_")]; ok && e.Display != nil {
+			call.block().Display = e.Display
 		}
 	case "ACTIVITY_DELTA":
 		if call, ok := a.calls[strings.TrimPrefix(e.MessageID, "act_")]; ok {

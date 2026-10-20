@@ -32,6 +32,7 @@ type event struct {
 	Patch      json.RawMessage `json:"patch,omitempty"`
 	Message    string          `json:"message,omitempty"`
 	Metadata   json.RawMessage `json:"metadata,omitempty"`
+	Display    *ToolDisplay    `json:"display,omitempty"`
 }
 
 type usage struct {
@@ -97,7 +98,7 @@ func (s *stream) activity(call toolCall) {
 	if err != nil {
 		return
 	}
-	s.emit(event{Type: "ACTIVITY_SNAPSHOT", MessageID: "act_" + call.id, Activity: activityTool, Content: content})
+	s.emit(event{Type: "ACTIVITY_SNAPSHOT", MessageID: "act_" + call.id, Activity: activityTool, Content: content, Display: searchDisplay(call.name, call.args, nil)})
 }
 
 // output is a list because RFC 6902 cannot grow a string.

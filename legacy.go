@@ -233,6 +233,13 @@ func (m *legacyMessage) timeline(message Message) []Block {
 			blocks = append(blocks, block.Block)
 		}
 	}
+	// What a search shows is kept with it since the harness reported it;
+	// one stored before shows what its arguments and result say.
+	for i := range blocks {
+		if b := &blocks[i]; b.Type == "tool_call" && b.Display == nil {
+			b.Display = searchDisplay(b.Name, b.Arguments, b.Result)
+		}
+	}
 	return blocks
 }
 

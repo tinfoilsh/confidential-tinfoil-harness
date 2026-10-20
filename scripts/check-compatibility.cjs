@@ -23,7 +23,7 @@ const input = JSON.parse(fs.readFileSync(0, 'utf8'))
 const { initialChat, reduceEvent } = load(path.join(root, 'src/services/harness/reducer.ts'))
 let state = initialChat()
 input.events.forEach((event, id) => { state = reduceEvent(state, { event, id }) })
-const fields = ['id', 'type', 'content', 'toolCallId', 'name', 'arguments', 'result', 'progress', 'resolution', 'resolvedAt', 'complete']
+const fields = ['id', 'type', 'content', 'toolCallId', 'name', 'arguments', 'result', 'progress', 'resolution', 'resolvedAt', 'complete', 'display']
 const messages = value => value.map(m => ({ id: m.id, role: m.role, ...(m.role === 'user' ? { content: m.content } : {}), timeline: (m.timeline ?? []).map(b => Object.fromEntries(fields.filter(f => b[f] !== undefined).map(f => [f, b[f]]))) }))
 assert.deepEqual(messages(state.messages), messages(input.expectedMessages))
 process.stdout.write('Reference compatibility checks passed.\n')

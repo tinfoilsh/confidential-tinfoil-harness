@@ -64,6 +64,65 @@ type Block struct {
 	Activity   json.RawMessage   `json:"activity,omitempty"`
 	ResolvedAt json.RawMessage   `json:"resolvedAt,omitempty"`
 	Resolution json.RawMessage   `json:"resolution,omitempty"`
+	Display    *ToolDisplay      `json:"display,omitempty"`
+}
+
+// ToolDisplay is what a web search or page fetch shows its client, kept
+// current while the call runs.
+type ToolDisplay struct {
+	Query   string          `json:"query,omitempty"`
+	URL     string          `json:"url,omitempty"`
+	Status  string          `json:"status"`
+	Sources []displaySource `json:"sources"`
+}
+
+type displaySource struct {
+	URL     string `json:"url"`
+	Title   string `json:"title"`
+	Snippet string `json:"snippet,omitempty"`
+}
+
+// searchDisplay is what a web search or page fetch shows, read from its
+// arguments and the result its client was sent: a call without a result is
+// running, and one whose result is an error failed. Other calls show none.
+func searchDisplay(name, args string, result json.RawMessage) *ToolDisplay {
+	if name != "web_search" && name != "web_fetch" {
+		return nil
+	}
+	var arguments struct {
+		Query string   `json:"query"`
+		URL   string   `json:"url"`
+		URLs  []string `json:"urls"`
+	}
+	readLenient([]byte(historyArgs(args)), &arguments)
+	var shown struct {
+		Query   string          `json:"query"`
+		URL     string          `json:"url"`
+		Error   json.RawMessage `json:"error"`
+		Results []displaySource `json:"results"`
+		Pages   []displaySource `json:"pages"`
+	}
+	readLenient(result, &shown)
+	display := &ToolDisplay{Status: "completed", Sources: []displaySource{}}
+	switch {
+	case len(result) == 0 || string(result) == "null":
+		display.Status = "running"
+	case shown.Error != nil:
+		display.Status = "failed"
+	}
+	if name == "web_search" {
+		display.Query = cmp.Or(shown.Query, arguments.Query)
+		display.Sources = append(display.Sources, shown.Results...)
+		return display
+	}
+	display.URL = cmp.Or(shown.URL, arguments.URL)
+	if display.URL == "" && len(arguments.URLs) > 0 {
+		display.URL = arguments.URLs[0]
+	}
+	for _, page := range shown.Pages {
+		display.Sources = append(display.Sources, displaySource{URL: page.URL, Title: page.Title})
+	}
+	return display
 }
 
 // Attachment is a file a message carries, in the form sync protocol 3

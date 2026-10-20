@@ -588,7 +588,8 @@ func TestEditingAReplyCollapsesItsText(t *testing.T) {
 	// A reply stored with flat fields keeps its thinking, search, code and widgets.
 	windowIDs(t, update("a2", "Rain."))
 	want = decodeValue(raw([]any{object{"type": "thinking", "id": "a2-thinking", "content": "look it up"},
-		object{"type": "tool_call", "id": "a2-search", "toolCallId": "a2-search", "name": "web_search", "arguments": `{"query":"weather"}`, "result": object{"query": "weather", "results": []any{}}, "complete": true},
+		object{"type": "tool_call", "id": "a2-search", "toolCallId": "a2-search", "name": "web_search", "arguments": `{"query":"weather"}`, "result": object{"query": "weather", "results": []any{}}, "complete": true,
+			"display": object{"query": "weather", "status": "completed", "sources": []any{}}},
 		object{"type": "tool_call", "id": "x1", "toolCallId": "x1", "name": "bash", "arguments": `{"command":"date"}`, "result": object{"output": "Mon"}, "complete": true},
 		object{"id": "w1", "type": "tool_call", "toolCallId": "w1", "name": "render_clock", "arguments": "{}"}, object{"type": "content", "id": "a2-content", "content": "Rain."}}))
 	if a2 := reply(3); a2["content"] != "Rain." || !reflect.DeepEqual(a2["timeline"], want) || a2["thoughts"] != nil {

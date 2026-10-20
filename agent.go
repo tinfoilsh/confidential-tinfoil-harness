@@ -212,7 +212,7 @@ func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) (mess
 	} else {
 		shown = normalizeToolResult(call, content)
 	}
-	out.emit(event{Type: "TOOL_CALL_RESULT", MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: raw(shown), Metadata: meta})
+	out.emit(event{Type: "TOOL_CALL_RESULT", MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: raw(shown), Metadata: meta, Display: searchDisplay(call.name, call.args, raw(shown))})
 	return answered(call.id, clip(read, maxToolOutput))
 }
 
