@@ -1,7 +1,6 @@
 package main
 
 import (
-	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/aes"
@@ -37,11 +36,12 @@ type fakeSync struct {
 	puts     []object
 	received map[string][]object
 	server   *httptest.Server
+	imports  map[string]*fakeImport
 }
 
 func newFakeSync(t *testing.T, h *harness) *fakeSync {
 	t.Helper()
-	f := &fakeSync{blobs: map[string]fakeBlob{}, received: map[string][]object{}}
+	f := &fakeSync{blobs: map[string]fakeBlob{}, received: map[string][]object{}, imports: map[string]*fakeImport{}}
 	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Sync-Protocol") != "3" {
 			w.WriteHeader(426)
@@ -93,10 +93,12 @@ func newFakeSync(t *testing.T, h *harness) *fakeSync {
 				return
 			}
 			json.NewEncoder(w).Encode(object{"ok": true, "plaintext": base64.StdEncoding.EncodeToString(blob.data)})
+		case "/v1/import/create", "/v1/import/upload", "/v1/import/start", "/v1/import/status":
+			status, out := f.importStep(t, h, r, in)
+			w.WriteHeader(status)
+			json.NewEncoder(w).Encode(out)
 		case "/v1/share/seal":
 			json.NewEncoder(w).Encode(object{"ok": true, "share_key": strings.Repeat("ab", 32), "ciphertext": base64.StdEncoding.EncodeToString([]byte("sealed"))})
-		case "/v1/import/status":
-			json.NewEncoder(w).Encode(object{"status": "failed", "imported": 0, "failed": 1, "total": 1, "job_id": in["job_id"], "failure_reason": "invalid_archive", "failure_detail": "Not a zip archive"})
 		default:
 			w.WriteHeader(404)
 		}
@@ -347,29 +349,6 @@ func TestDocumentDownloadReturnsExtractedText(t *testing.T) {
 	w := postRoute(h, "/v1/attachments/get", object{"key": key.base64(), "id": id, "threadId": "chat-1"}, "alice")
 	if w.Code != 200 || w.Body.String() != "page one" || !strings.HasPrefix(w.Header().Get("Content-Type"), "text/markdown") || !strings.Contains(w.Header().Get("Content-Disposition"), "scan.md") {
 		t.Fatalf("download was not the extracted text: %d %q %v", w.Code, w.Body.String(), w.Header())
-	}
-}
-
-func TestBackupListsUnavailableBlobsAsOmissions(t *testing.T) {
-	h, rows, key := testChatHarness(t, nil)
-	newFakeSync(t, h)
-	storedThread(rows, "alice", "chat-1", object{"id": strings.Repeat("c", 36), "type": "image", "fileName": "lost.png", "mimeType": "image/png", "encryptionKey": "gone"})
-	var archive bytes.Buffer
-	if err := h.writeBackup(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, key, object{}, &archive); err != nil {
-		t.Fatal(err)
-	}
-	reader, _ := zip.NewReader(bytes.NewReader(archive.Bytes()), int64(archive.Len()))
-	var manifest object
-	for _, file := range reader.File {
-		if file.Name == "manifest.json" {
-			f, _ := file.Open()
-			json.NewDecoder(f).Decode(&manifest)
-			f.Close()
-		}
-	}
-	omissions := arr(manifest["omissions"])
-	if manifest["complete"] != false || len(omissions) != 1 || obj(omissions[0])["source_id"] != strings.Repeat("c", 36) || obj(omissions[0])["parent_source_id"] != "chat-1" || len(arr(manifest["warnings"])) != 1 {
-		t.Fatalf("the unavailable image was not listed: %v", manifest)
 	}
 }
 

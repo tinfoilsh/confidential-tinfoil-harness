@@ -1,0 +1,225 @@
+{
+  "device": [
+    {
+      "id": "9999998000000_aaaaaaaa-0000-4000-8000-000000000001",
+      "title": "Trip 🌅 plans",
+      "titleState": "generated",
+      "createdAt": "2026-06-01T10:00:00.000Z",
+      "updatedAt": "2026-06-01T10:05:00.000Z",
+      "model": "auto",
+      "projectId": null,
+      "presetId": null,
+      "pinned": false,
+      "webSearchEnabled": true,
+      "activeRun": null,
+      "messages": [
+        {
+          "id": "m1",
+          "role": "user",
+          "createdAt": "2026-06-01T10:00:00.000Z",
+          "content": "Plan around this <photo> & notes",
+          "attachments": [
+            {
+              "id": "att-photo",
+              "kind": "image",
+              "fileName": "../sunrise 🌅 photo.png",
+              "mimeType": "image/png",
+              "size": 900,
+              "thumbnail": "dGh1bWI=",
+              "base64": "iVBORw0KGgoAAAANSUhEUgAAAAYAAAAECAIAAAAiZtkUAAAAEUlEQVR4nGP4tcUGDTGQKwQA5BYt8WNZeZcAAAAASUVORK5CYII="
+            },
+            {
+              "id": "att-scan",
+              "kind": "document",
+              "fileName": "scan.pdf",
+              "mimeType": "application/pdf",
+              "size": 4000,
+              "textContent": "",
+              "pages": [
+                {
+                  "page": 1,
+                  "text": "First page",
+                  "is_scanned": true,
+                  "image": ""
+                },
+                {
+                  "page": 2,
+                  "text": "   ",
+                  "is_scanned": true,
+                  "image": ""
+                },
+                {
+                  "page": 3,
+                  "text": "Third page",
+                  "is_scanned": false,
+                  "image": ""
+                }
+              ]
+            },
+            {
+              "id": "att-lost",
+              "kind": "image",
+              "fileName": "lost.png",
+              "mimeType": "image/png",
+              "size": 10,
+              "thumbnail": "dGh1bWI="
+            }
+          ]
+        },
+        {
+          "id": "m2",
+          "role": "assistant",
+          "createdAt": "2026-06-01T10:01:00.000Z",
+          "content": "",
+          "model": "kimi-k3",
+          "timeline": [
+            {
+              "id": "m2_thinking_0",
+              "type": "thinking",
+              "content": "Consider the weather. "
+            },
+            {
+              "id": "b1",
+              "type": "tool_call",
+              "toolCallId": "call-1",
+              "name": "web_search",
+              "arguments": "{\"query\":\"weather\"}",
+              "complete": true,
+              "result": {
+                "query": "weather",
+                "results": []
+              }
+            },
+            {
+              "id": "m2_thinking_1",
+              "type": "thinking",
+              "content": "Then pack."
+            },
+            {
+              "id": "b2",
+              "type": "content",
+              "content": "Bring "
+            },
+            {
+              "id": "b3",
+              "type": "content",
+              "content": "sunscreen."
+            }
+          ]
+        },
+        {
+          "id": "m3",
+          "role": "user",
+          "createdAt": "not a date",
+          "content": "Thanks",
+          "quote": "Bring sunscreen."
+        }
+      ]
+    },
+    {
+      "id": "9999997000000_aaaaaaaa-0000-4000-8000-000000000002",
+      "title": "Trip 🌅 plans (fork)",
+      "titleState": "manual",
+      "createdAt": "2026-06-01T10:10:00.000Z",
+      "updatedAt": "2026-06-01T10:10:00.000Z",
+      "model": "auto",
+      "projectId": null,
+      "presetId": null,
+      "pinned": false,
+      "webSearchEnabled": true,
+      "activeRun": null,
+      "messages": [
+        {
+          "id": "m1",
+          "role": "user",
+          "createdAt": "2026-06-01T10:00:00.000Z",
+          "content": "Plan around this <photo> & notes",
+          "attachments": [
+            {
+              "id": "att-photo",
+              "kind": "image",
+              "fileName": "../sunrise 🌅 photo.png",
+              "mimeType": "image/png",
+              "size": 900,
+              "thumbnail": "dGh1bWI=",
+              "base64": "iVBORw0KGgoAAAANSUhEUgAAAAYAAAAECAIAAAAiZtkUAAAAEUlEQVR4nGP4tcUGDTGQKwQA5BYt8WNZeZcAAAAASUVORK5CYII="
+            },
+            {
+              "id": "att-notes",
+              "kind": "document",
+              "fileName": "notes.txt",
+              "mimeType": "text/plain",
+              "size": 5
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "9999996000000_aaaaaaaa-0000-4000-8000-000000000003",
+      "title": "New Chat",
+      "titleState": "placeholder",
+      "createdAt": "2026-06-01T10:20:00.000Z",
+      "updatedAt": "2026-06-01T10:20:00.000Z",
+      "model": "auto",
+      "projectId": null,
+      "presetId": null,
+      "pinned": false,
+      "webSearchEnabled": true,
+      "activeRun": null,
+      "messages": []
+    }
+  ],
+  "stored": {
+    "id": "9999995000000_bbbbbbbb-0000-4000-8000-000000000004",
+    "title": "Quarterly chart",
+    "titleState": "manual",
+    "createdAt": "2026-06-01T10:30:00.000Z",
+    "updatedAt": "2026-06-01T10:31:00.000Z",
+    "model": "gpt-oss-120b",
+    "projectId": "project-q",
+    "presetId": null,
+    "pinned": true,
+    "webSearchEnabled": false,
+    "activeRun": null,
+    "messages": [
+      {
+        "id": "c1",
+        "role": "user",
+        "createdAt": "2026-06-01T10:30:00.000Z",
+        "content": "Explain",
+        "attachments": [
+          {
+            "id": "cloud-chart",
+            "kind": "image",
+            "fileName": "chart.png",
+            "mimeType": "image/png",
+            "size": 1200,
+            "base64": "iVBORw0KGgoAAAANSUhEUgAAAAQAAAAGCAIAAABrW6giAAAAEElEQVR4nGOQizoBRwyUcgCCmh4BnXST6AAAAABJRU5ErkJggg=="
+          },
+          {
+            "id": "cloud-report",
+            "kind": "document",
+            "fileName": "report.md",
+            "mimeType": "text/markdown",
+            "size": 21,
+            "textContent": "# Report\nRevenue grew."
+          }
+        ]
+      },
+      {
+        "id": "c2",
+        "role": "assistant",
+        "createdAt": "2026-06-01T10:31:00.000Z",
+        "content": "Revenue grew.",
+        "timeline": [
+          {
+            "id": "c2-content",
+            "type": "content",
+            "content": "Revenue grew."
+          }
+        ]
+      }
+    ]
+  }
+}

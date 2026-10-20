@@ -141,10 +141,6 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, err)
 		return
 	}
-	if r.URL.Path == "/v1/import" {
-		boundedHandler(archiveSlots, func(w http.ResponseWriter, r *http.Request) { h.handleImport(w, r, p) })(w, r)
-		return
-	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxTextBytes+(1<<20))
 	reader, err := r.MultipartReader()
 	if err != nil {

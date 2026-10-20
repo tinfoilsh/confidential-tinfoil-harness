@@ -104,7 +104,8 @@ func TestImportStoresTheDeviceChatUnderItsID(t *testing.T) {
 // reads them.
 func TestImportStatusReadsAsTheClientNamesIt(t *testing.T) {
 	h, _, _ := testChatHarness(t, nil)
-	newFakeSync(t, h)
+	f := newFakeSync(t, h)
+	f.imports["job-1"] = &fakeImport{status: object{"status": "failed", "imported": 0, "failed": 1, "total": 1, "job_id": "job-1", "failure_reason": "invalid_archive", "failure_detail": "Not a zip archive"}}
 	w := postRoute(h, "/v1/import/status", object{"jobId": "job-1"}, "alice")
 	if w.Code != 200 {
 		t.Fatalf("HTTP %d: %s", w.Code, w.Body.String())

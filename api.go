@@ -12,7 +12,7 @@ import (
 )
 
 // object is JSON whose shape the harness does not own: tool output, model
-// messages, downstream errors, the model catalog, and archives.
+// messages, downstream errors, and the model catalog.
 type object map[string]any
 
 func raw(v any) json.RawMessage { b, _ := json.Marshal(v); return b }
@@ -198,10 +198,11 @@ func (h *harness) routes() http.Handler {
 	mux.HandleFunc("POST /v1/threads/follow", h.handleFollow)
 	mux.HandleFunc("POST /v1/threads/upgrade", h.handleUpgrade)
 	mux.HandleFunc("POST /v1/speech", h.handleSpeech)
-	for _, path := range []string{"/v1/attachments/upload", "/v1/projects/documents/upload", "/v1/transcriptions", "/v1/import"} {
+	for _, path := range []string{"/v1/attachments/upload", "/v1/projects/documents/upload", "/v1/transcriptions"} {
 		mux.HandleFunc("POST "+path, boundedHandler(uploadSlots, h.handleUpload))
 	}
-	mux.HandleFunc("POST /v1/export", boundedHandler(archiveSlots, h.handleExport))
+	mux.HandleFunc("POST /v1/import", h.handleImport)
+	mux.HandleFunc("POST /v1/export", h.handleExport)
 	for _, path := range []string{"/v1/attachments/get", "/v1/attachments/get-public"} {
 		mux.HandleFunc("POST "+path, h.handleAttachmentGet)
 	}
@@ -336,7 +337,6 @@ func postJSONWithHeaders(ctx context.Context, client *http.Client, url, auth str
 }
 
 var uploadSlots = make(chan struct{}, 4)
-var archiveSlots = make(chan struct{}, 1)
 
 func boundedHandler(slots chan struct{}, handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

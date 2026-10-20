@@ -59,6 +59,7 @@ type harness struct {
 	services     map[string]*downstreamService
 	safeguards   *submitter // nil unless SAFEGUARDS_URL names the sidecar
 	live         liveRuns
+	scratch      *scratchSpace
 }
 
 // listenAddr is the shim's upstream port in tinfoil-config.yml, which also
@@ -80,10 +81,16 @@ func main() {
 	ctx, shutdown := context.WithCancel(context.Background())
 	defer shutdown()
 	attestWebSearch(ctx, usageSecret)
+	scratch, err := measuredScratch()
+	if err != nil {
+		slog.Error("measure the temporary directory", "error", err)
+		os.Exit(1)
+	}
 	h := &harness{gateway: gw,
 		controlplane: controlplane,
 		cpClient:     &http.Client{Transport: &callerAuth{inner: http.DefaultTransport}},
-		safeguards:   newSubmitter(os.Getenv("SAFEGUARDS_URL"))}
+		safeguards:   newSubmitter(os.Getenv("SAFEGUARDS_URL")),
+		scratch:      scratch}
 
 	if err := h.bootChat(ctx, usageSecret); err != nil {
 		slog.Error("initialize chat service", "error", err)

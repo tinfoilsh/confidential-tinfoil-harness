@@ -31,8 +31,10 @@ containers:
     secrets:
       - USAGE_CONTEXT_SECRET
     read_only: true
-    # Imports may hold the input and transformed archive simultaneously.
-    # Every byte written here has already been encrypted by sealedSpool.
+    # Archives spool here for the request that sends or builds them. The
+    # harness budgets requests to this size, and an import holds its upload
+    # and the cloud import it writes at once. The tmpfs lives in the
+    # confidential VM's encrypted memory; the image has no swap device.
     tmpfs:
       /tmp: rw,noexec,nosuid,nodev,size=1100m
     restart: always

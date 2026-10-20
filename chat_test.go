@@ -1,7 +1,6 @@
 package main
 
 import (
-	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -12,7 +11,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"reflect"
 	"slices"
 	"strconv"
@@ -187,7 +185,7 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 	}))
 	t.Cleanup(cp.Close)
 	rows := &memoryRows{rows: map[string]storedRow{}, sealed: map[string]contentKey{}}
-	h := &harness{gateway: server.URL, controlplane: cp.URL, cpClient: cp.Client(), storeRows: rows, services: map[string]*downstreamService{}}
+	h := &harness{gateway: server.URL, controlplane: cp.URL, cpClient: cp.Client(), storeRows: rows, services: map[string]*downstreamService{}, scratch: newScratchSpace(t.TempDir(), 1<<30)}
 	h.auth = &authenticator{verify: func(_ context.Context, s string) (string, error) {
 		if !strings.HasPrefix(s, "clerk-") {
 			return "", errors.New("bad session")
@@ -1125,86 +1123,6 @@ func TestPromptEscapingReasoningAndBudget(t *testing.T) {
 		t.Fatal("tool reasoning policy lost")
 	}
 }
-func TestSealedArchiveRandomAccessAndNativeRoundTrip(t *testing.T) {
-	h, rows, key := testChatHarness(t, nil)
-	p := &principal{ID: "alice"}
-	rows.rows[rowMapKey(p, "chat", "chat")] = storedRow{ID: "chat", ETag: "1", Data: raw(object{"title": "Title", "messages": []any{object{"id": "m", "role": "user", "content": "secret archive message", "createdAt": "2026-09-01T00:00:00Z"}}, "createdAt": "2026-09-01T00:00:00Z", "updatedAt": "2026-09-01T00:00:00Z"})}
-	spool, err := newSealedSpool()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer spool.Close()
-	if err := h.writeBackup(context.Background(), p, key, object{}, spool); err != nil {
-		t.Fatal(err)
-	}
-	if err := spool.Finish(); err != nil {
-		t.Fatal(err)
-	}
-	disk, err := os.ReadFile(spool.file.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Contains(disk, []byte("secret archive message")) || bytes.HasPrefix(disk, []byte("PK")) {
-		t.Fatal("plaintext archive on disk")
-	}
-	zr, err := zip.NewReader(spool, spool.Size())
-	if err != nil {
-		t.Fatal(err)
-	}
-	found := false
-	for _, file := range zr.File {
-		if file.Name == "manifest.json" {
-			b, _ := zipBytes(file)
-			var manifest object
-			json.Unmarshal(b, &manifest)
-			if integer(manifest["version"]) != 2 || integer(obj(manifest["counts"])["cloud_chats"]) != 1 {
-				t.Fatal("wrong backup manifest")
-			}
-			found = true
-		}
-	}
-	if !found {
-		t.Fatal("manifest missing")
-	}
-	converted, native, err := convertNativeArchive(spool)
-	if err != nil || !native {
-		t.Fatal(native, err)
-	}
-	defer converted.Close()
-	zr, err = zip.NewReader(converted, converted.Size())
-	if err != nil {
-		t.Fatal(err)
-	}
-	found = false
-	for _, file := range zr.File {
-		if file.Name == "manifest.json" {
-			b, _ := zipBytes(file)
-			if !bytes.Contains(b, []byte("tinfoil-native-cloud-import")) {
-				t.Fatal("wrong import format")
-			}
-			found = true
-		}
-	}
-	if !found {
-		t.Fatal("converted manifest missing")
-	}
-	large, _ := newSealedSpool()
-	defer large.Close()
-	original := bytes.Repeat([]byte("test chunk boundaries"), 100000)
-	for i := 0; i < len(original); i += 10000 {
-		if _, err := large.Write(original[i:min(i+10000, len(original))]); err != nil {
-			t.Fatal(err)
-		}
-	}
-	large.Finish()
-	part := make([]byte, 50000)
-	if _, err := large.ReadAt(part, spoolChunk-100); err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(part, original[spoolChunk-100:spoolChunk-100+len(part)]) {
-		t.Fatal("random archive read crossed a bad chunk")
-	}
-}
 func TestTypedErrors(t *testing.T) {
 	for _, code := range []string{"STALE_KEY", "EXISTING_DATA_UNDER_OTHER_KEY"} {
 		e := downstreamError(409, raw(object{"code": code, "current_key_id": "kid"}))
@@ -1930,7 +1848,7 @@ func TestBusySlotTellsTheClientWhenToRetry(t *testing.T) {
 	slots := make(chan struct{}, 1)
 	slots <- struct{}{}
 	w := httptest.NewRecorder()
-	boundedHandler(slots, func(http.ResponseWriter, *http.Request) { t.Error("ran without a free slot") })(w, httptest.NewRequest("POST", "/v1/import", nil))
+	boundedHandler(slots, func(http.ResponseWriter, *http.Request) { t.Error("ran without a free slot") })(w, httptest.NewRequest("POST", "/v1/attachments/upload", nil))
 	var body struct {
 		Error apiError `json:"error"`
 	}
