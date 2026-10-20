@@ -1,6 +1,11 @@
 package importer
 
-import "testing"
+import (
+	"fmt"
+	"runtime"
+	"strings"
+	"testing"
+)
 
 // A file id finds the one entry it names: its whole basename, its basename
 // less the extension, or the start of its basename before a separator. An
@@ -30,5 +35,27 @@ func TestByIDPrefixFindsOnlyOneEntry(t *testing.T) {
 		if got, ok := index.ByIDPrefix(tc.id); got != tc.want || ok != (tc.want != "") {
 			t.Errorf("%s found %q, %v; want %q", tc.id, got, ok, tc.want)
 		}
+	}
+}
+
+// Indexing names full of separators takes memory in proportion to the
+// names, not to the ids each could start with.
+func TestIndexOfLongNamesStaysSmall(t *testing.T) {
+	const entries, separators, maxGrowth = 200, 2048, 4
+	names := make([]string, entries)
+	size := 0
+	for k := range names {
+		names[k] = fmt.Sprintf("media/%04d", k) + strings.Repeat(".a", separators)
+		size += len(names[k])
+	}
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	index := NewIndex(names)
+	runtime.ReadMemStats(&after)
+	if grew := after.TotalAlloc - before.TotalAlloc; grew > uint64(maxGrowth*size) {
+		t.Errorf("indexing %d bytes of names allocated %d bytes", size, grew)
+	}
+	if got, ok := index.ByIDPrefix("0123"); got != names[123] || !ok {
+		t.Errorf("0123 found %q, %v", got, ok)
 	}
 }

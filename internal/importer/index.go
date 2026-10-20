@@ -2,6 +2,7 @@ package importer
 
 import (
 	"path"
+	"slices"
 	"strings"
 )
 
@@ -11,11 +12,16 @@ import (
 type Index struct {
 	byName map[string]struct{}
 	byBase map[string]string
-	// byStem and byPrefix find the entries a file id names: those whose
-	// basename less its extension is the id, and those whose basename is
-	// the id followed by a separator and more.
-	byStem, byPrefix map[string]idMatch
+	// byStem finds the entries whose basename less its extension is a file
+	// id.
+	byStem map[string]idMatch
+	// sorted holds each entry once, ordered by basename, so the entries
+	// whose basename is a file id followed by a separator and more form a
+	// range found by binary search.
+	sorted []indexEntry
 }
+
+type indexEntry struct{ base, name string }
 
 // idMatch is the first entry a file id finds and how many it finds.
 type idMatch struct {
@@ -46,7 +52,7 @@ const idSeparators = ".-_"
 // NewIndex indexes entry names. The first entry with a basename claims it,
 // which is deterministic for a given archive.
 func NewIndex(names []string) *Index {
-	idx := &Index{byName: make(map[string]struct{}, len(names)), byBase: make(map[string]string, len(names)), byStem: map[string]idMatch{}, byPrefix: map[string]idMatch{}}
+	idx := &Index{byName: make(map[string]struct{}, len(names)), byBase: make(map[string]string, len(names)), byStem: map[string]idMatch{}}
 	for _, n := range names {
 		clean := normalizeEntry(n)
 		if clean == "" {
@@ -61,13 +67,27 @@ func NewIndex(names []string) *Index {
 			idx.byBase[base] = clean
 		}
 		addID(idx.byStem, strings.TrimSuffix(base, path.Ext(base)), clean)
-		for k := 1; k < len(base); k++ {
-			if strings.IndexByte(idSeparators, base[k]) >= 0 {
-				addID(idx.byPrefix, base[:k], clean)
+		idx.sorted = append(idx.sorted, indexEntry{base: base, name: clean})
+	}
+	slices.SortFunc(idx.sorted, func(a, b indexEntry) int { return strings.Compare(a.base, b.base) })
+	return idx
+}
+
+// byPrefix finds the entries whose basename is id followed by a separator
+// and more, counting no further than a second.
+func (i *Index) byPrefix(id string) idMatch {
+	var m idMatch
+	for _, sep := range idSeparators {
+		prefix := id + string(sep)
+		k, _ := slices.BinarySearchFunc(i.sorted, prefix, func(e indexEntry, p string) int { return strings.Compare(e.base, p) })
+		for ; k < len(i.sorted) && m.count < 2 && strings.HasPrefix(i.sorted[k].base, prefix); k++ {
+			if m.count == 0 {
+				m.name = i.sorted[k].name
 			}
+			m.count++
 		}
 	}
-	return idx
+	return m
 }
 
 func normalizeEntry(name string) string {
@@ -112,7 +132,7 @@ func (i *Index) ByIDPrefix(id string) (string, bool) {
 	if name, ok := i.byStem[id].unique(); ok {
 		return name, true
 	}
-	return i.byPrefix[id].unique()
+	return i.byPrefix(id).unique()
 }
 
 // imageTypes are the image types an export's file names imply.
