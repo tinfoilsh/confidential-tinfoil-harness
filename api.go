@@ -142,15 +142,24 @@ func decodeJSONWithin(w http.ResponseWriter, r *http.Request, limit int64) (obje
 	decoder := json.NewDecoder(r.Body)
 	var in object
 	if err := decoder.Decode(&in); err != nil {
-		return nil, apiErr(400, "BAD_REQUEST", "Expected a JSON object within the request size limit")
+		return nil, bodyError(err, "Expected a JSON object")
 	}
 	if in == nil {
 		return nil, apiErr(400, "BAD_REQUEST", "Expected a JSON object")
 	}
 	if err := decoder.Decode(new(any)); err != io.EOF {
-		return nil, apiErr(400, "BAD_REQUEST", "Expected one JSON object")
+		return nil, bodyError(err, "Expected one JSON object")
 	}
 	return in, nil
+}
+
+// bodyError tells a body over the size limit from a malformed one.
+func bodyError(err error, malformed string) *apiError {
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		return apiErr(http.StatusRequestEntityTooLarge, "PAYLOAD_TOO_LARGE", "The request exceeds the size limit")
+	}
+	return apiErr(400, "BAD_REQUEST", malformed)
 }
 
 type jsonEndpoint func(context.Context, *principal, contentKey, object) (any, error)

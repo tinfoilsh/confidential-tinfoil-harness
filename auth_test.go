@@ -314,3 +314,34 @@ func TestAnonymousRunThatExhaustsItsQuotaReportsNoneLeft(t *testing.T) {
 		t.Fatalf("run ended %s with rateLimit %s", last.Code, limit)
 	}
 }
+
+// endlessJSON is a JSON object whose one string never ends.
+type endlessJSON struct{ opened bool }
+
+func (b *endlessJSON) Read(p []byte) (int, error) {
+	n := 0
+	if !b.opened {
+		b.opened, n = true, copy(p, `{"pad":"`)
+	}
+	for i := n; i < len(p); i++ {
+		p[i] = 'a'
+	}
+	return len(p), nil
+}
+
+// A body over the size limit is refused as too large, not as malformed, so
+// clients need not measure what they send.
+func TestOversizedBodiesAreRefusedAsTooLarge(t *testing.T) {
+	h, _, _ := testChatHarness(t, nil)
+	r := httptest.NewRequest(http.MethodPost, "/v1/threads/get", &endlessJSON{})
+	r.Header.Set("Authorization", "Bearer clerk-alice")
+	w := httptest.NewRecorder()
+	h.routes().ServeHTTP(w, r)
+	var refused struct {
+		Error apiError `json:"error"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &refused)
+	if w.Code != http.StatusRequestEntityTooLarge || refused.Error.Code != "PAYLOAD_TOO_LARGE" {
+		t.Fatalf("an oversized body: HTTP %d %s", w.Code, w.Body.String())
+	}
+}
