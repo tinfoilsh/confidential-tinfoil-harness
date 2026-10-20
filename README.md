@@ -1,6 +1,6 @@
 # Confidential Tinfoil Harness
 
-Tinfoil's chat harness is the enclave that runs conversations for [Tinfoil Chat](https://docs.tinfoil.sh/chat/overview). It builds prompts and runs tool calls and model turns. Cloud chats are stored encrypted through the [sync enclave](https://github.com/tinfoilsh/confidential-sync); a chat kept on a device is sent with each turn and returned when the run ends. The harness never logs or persists a client's key, and it keeps nothing once a run ends.
+Tinfoil's chat harness is the enclave that runs conversations for [Tinfoil Chat](https://docs.tinfoil.sh/chat/overview). It builds prompts and runs tool calls and model turns. Cloud chats are stored encrypted through the [sync enclave](https://github.com/tinfoilsh/confidential-sync); a chat kept on a device is sent with each turn and returned when the run ends. The harness never logs or persists a client's key, and it keeps no chat state once a run ends.
 
 ## Development
 
