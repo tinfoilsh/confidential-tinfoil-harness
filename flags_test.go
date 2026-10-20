@@ -2,13 +2,45 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"sync/atomic"
 	"testing"
+	"time"
 )
+
+// A flag lookup the control plane is slow to answer flags nothing rather
+// than holding up the chats it was for.
+func TestASlowFlagLookupFlagsNothing(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	stuck := make(chan struct{})
+	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-stuck:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(cp.Close)
+	t.Cleanup(func() { close(stuck) })
+	h.auth.client, h.auth.controlplane = cp.Client(), cp.URL
+	saved := flagsTimeout
+	flagsTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { flagsTimeout = saved })
+	storedThread(rows, "alice", "chat-1")
+	within(t, "listing", func() error {
+		var list struct {
+			Threads []threadSummary `json:"threads"`
+		}
+		w := postRoute(h, "/v1/threads/list", object{"key": key.base64()}, "alice")
+		if json.Unmarshal(w.Body.Bytes(), &list); len(list.Threads) != 1 || list.Threads[0].ID != "chat-1" || list.Threads[0].Flagged {
+			return fmt.Errorf("HTTP %d %s", w.Code, w.Body.String())
+		}
+		return nil
+	})
+}
 
 // A chat the safeguards flagged takes no more turns, on the device or in
 // the cloud, and every view of it says so.

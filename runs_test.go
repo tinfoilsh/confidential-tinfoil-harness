@@ -204,7 +204,7 @@ func within(t *testing.T, what string, call func() error) {
 			t.Fatalf("%s: %v", what, err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatalf("%s waited for the finishing run", what)
+		t.Fatalf("%s did not return promptly", what)
 	}
 }
 
