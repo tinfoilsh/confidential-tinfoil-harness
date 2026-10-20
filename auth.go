@@ -117,7 +117,7 @@ type authenticator struct {
 	refreshing   map[string]chan struct{}
 }
 
-func newAuthenticator(ctx context.Context, issuer, audience, cp string) (*authenticator, error) {
+func newAuthenticator(ctx context.Context, issuer, cp string) (*authenticator, error) {
 	if !strings.HasPrefix(issuer, "https://") {
 		return nil, errors.New("CLERK_ISSUER must be an HTTPS issuer URL")
 	}
@@ -127,9 +127,6 @@ func newAuthenticator(ctx context.Context, issuer, audience, cp string) (*authen
 		return nil, err
 	}
 	options := []jwt.ParserOption{jwt.WithValidMethods([]string{"RS256", "RS384", "RS512", "ES256", "ES384", "ES512"}), jwt.WithIssuer(issuer), jwt.WithExpirationRequired(), jwt.WithLeeway(30 * time.Second)}
-	if audience != "" {
-		options = append(options, jwt.WithAudience(audience))
-	}
 	a := &authenticator{client: &http.Client{
 		Timeout:       15 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },

@@ -30,7 +30,7 @@ type toolEnclave struct {
 type tool struct{ remote, as string }
 
 var webSearch = &toolEnclave{
-	repo: "tinfoilsh/confidential-websearch", enclave: "websearch.tinfoil.sh",
+	repo:  "tinfoilsh/confidential-websearch",
 	tools: []tool{{"search", "web_search"}, {"fetch", "web_fetch"}},
 }
 

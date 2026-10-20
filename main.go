@@ -7,7 +7,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -62,24 +61,27 @@ type harness struct {
 	live         liveRuns
 }
 
-func main() {
-	addr := flag.String("addr", ":8081", "listen address")
-	gateway := flag.String("gateway", env("TINFOIL_GATEWAY_URL", "https://inference-gateway.tinfoil.sh"), "tinfoil-gateway base URL")
-	controlplane := flag.String("controlplane", env("TINFOIL_CONTROLPLANE_URL", "https://api.tinfoil.sh"), "control plane base URL")
-	flag.Parse()
+// listenAddr is the shim's upstream port in tinfoil-config.yml, which also
+// sets every host this harness reaches.
+const listenAddr = ":8081"
 
+func main() {
 	usageSecret := os.Getenv("USAGE_CONTEXT_SECRET")
 	if usageSecret == "" {
 		slog.Error("USAGE_CONTEXT_SECRET is required: without it every turn of a run bills as its own request")
 		os.Exit(1)
 	}
+	gw, controlplane := strings.TrimRight(os.Getenv("TINFOIL_GATEWAY_URL"), "/"), strings.TrimRight(os.Getenv("TINFOIL_CONTROLPLANE_URL"), "/")
+	if gw == "" || controlplane == "" {
+		slog.Error("TINFOIL_GATEWAY_URL and TINFOIL_CONTROLPLANE_URL are required")
+		os.Exit(1)
+	}
 
 	ctx, shutdown := context.WithCancel(context.Background())
 	defer shutdown()
-	gw := strings.TrimRight(*gateway, "/")
 	attestWebSearch(ctx, usageSecret)
 	h := &harness{gateway: gw,
-		controlplane: strings.TrimRight(*controlplane, "/"),
+		controlplane: controlplane,
 		cpClient:     &http.Client{Transport: &callerAuth{inner: http.DefaultTransport}},
 		safeguards:   newSubmitter(os.Getenv("SAFEGUARDS_URL"))}
 
@@ -88,7 +90,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	srv := &http.Server{Addr: *addr, Handler: h.routes(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: time.Minute}
+	srv := &http.Server{Addr: listenAddr, Handler: h.routes(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: time.Minute}
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	stopped := make(chan struct{})
@@ -102,19 +104,12 @@ func main() {
 		h.waitRuns(ctx)
 	}()
 
-	slog.Info("listening", "addr", *addr, "gateway", gw, "models", served(h.offer.get()), "safeguards", h.safeguards != nil)
+	slog.Info("listening", "addr", listenAddr, "gateway", gw, "models", served(h.offer.get()), "safeguards", h.safeguards != nil)
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		slog.Error("serve", "error", err)
 		os.Exit(1)
 	}
 	<-stopped
-}
-
-func env(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }
 
 // Requests without a caller's own cache secret fall back to this one, so the
@@ -144,10 +139,14 @@ func newGateway(gateway string, catalog func() tinfoil.Catalog) (*tinfoil.Gatewa
 	return tinfoil.NewGateway(gateway+"/v1/", catalog, tinfoil.GatewayOptions{ClientOptions: []tinfoil.ClientOption{cacheFallback}, ModelPins: pins, PinnedModelsOnly: true})
 }
 
-// Web search is opt-in per run, so an enclave that does not verify is
-// skipped, not fatal.
+// Web search is opt-in per run, so an enclave that is not configured or does
+// not verify is skipped, not fatal.
 func attestWebSearch(ctx context.Context, usageSecret string) {
-	webSearch.enclave = env("TINFOIL_TOOLS_ENCLAVE", webSearch.enclave)
+	webSearch.enclave = os.Getenv("TINFOIL_TOOLS_ENCLAVE")
+	if webSearch.enclave == "" {
+		slog.Warn("no web search enclave is configured")
+		return
+	}
 	client, err := attest(ctx, webSearch.enclave, webSearch.repo, usageSecret)
 	if err != nil {
 		slog.Warn("tool enclave did not verify", "enclave", webSearch.enclave, "error", err)

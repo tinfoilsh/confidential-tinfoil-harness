@@ -26,6 +26,9 @@ func millis(value any) int64 {
 	return int64(integer(value))
 }
 
+// chatURL is where a share link opens.
+const chatURL = "https://chat.tinfoil.sh"
+
 // A signed-in client can also share a chat it keeps itself by sending the
 // transcript, with no content key. As from the web client, that share holds
 // image thumbnails and document text, so the transcript may omit image bytes.
@@ -95,7 +98,7 @@ func (h *harness) shareThread(ctx context.Context, p *principal, _ contentKey, i
 	if _, err := h.shareRequest(ctx, p, http.MethodPut, id, ciphertext); err != nil {
 		return nil, err
 	}
-	return object{"url": strings.TrimRight(env("TINFOIL_CHAT_URL", "https://chat.tinfoil.sh"), "/") + "/share/" + url.PathEscape(id) + "#v2:" + str(sealed["share_key"])}, nil
+	return object{"url": chatURL + "/share/" + url.PathEscape(id) + "#v2:" + str(sealed["share_key"])}, nil
 }
 
 // The share endpoints authenticate the owner's Clerk session.

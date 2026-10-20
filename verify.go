@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -16,7 +17,7 @@ type downstreamService struct {
 }
 
 func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
-	auth, err := newAuthenticator(ctx, env("CLERK_ISSUER", "https://clerk.tinfoil.sh"), env("CLERK_AUDIENCE", ""), h.controlplane)
+	auth, err := newAuthenticator(ctx, os.Getenv("CLERK_ISSUER"), h.controlplane)
 	if err != nil {
 		return err
 	}
@@ -29,15 +30,22 @@ func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
 	h.modelClient = &http.Client{Transport: &callerAuth{inner: gw.HTTPClient().Transport, usageSecret: usageSecret}}
 	h.services = map[string]*downstreamService{}
 	for _, config := range []struct {
-		role, repo, host, variable string
-		required                   bool
+		role, repo, variable string
+		required             bool
 	}{
-		{"sync", "tinfoilsh/confidential-sync", "sync.tinfoil.sh", "TINFOIL_SYNC_ENCLAVE", true},
-		{"summarizer", "tinfoilsh/confidential-summarizer", "summarizer.tinfoil.sh", "TINFOIL_SUMMARIZER_ENCLAVE", false},
-		{"metadata", "tinfoilsh/confidential-website-metadata-fetcher", "opengraph-metadata.tinfoil.sh", "TINFOIL_METADATA_ENCLAVE", false},
-		{"router", "tinfoilsh/confidential-model-router", "inference.tinfoil.sh", "TINFOIL_ROUTER_ENCLAVE", true},
+		{"sync", "tinfoilsh/confidential-sync", "TINFOIL_SYNC_ENCLAVE", true},
+		{"summarizer", "tinfoilsh/confidential-summarizer", "TINFOIL_SUMMARIZER_ENCLAVE", false},
+		{"metadata", "tinfoilsh/confidential-website-metadata-fetcher", "TINFOIL_METADATA_ENCLAVE", false},
+		{"router", "tinfoilsh/confidential-model-router", "TINFOIL_ROUTER_ENCLAVE", true},
 	} {
-		host := env(config.variable, config.host)
+		host := os.Getenv(config.variable)
+		if host == "" && config.required {
+			return fmt.Errorf("%s is required", config.variable)
+		}
+		if host == "" {
+			slog.Warn("downstream enclave not configured", "role", config.role)
+			continue
+		}
 		client, err := attest(ctx, host, config.repo, usageSecret)
 		if err != nil {
 			if config.required {
