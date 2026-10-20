@@ -54,7 +54,7 @@ func (h *harness) session(ctx context.Context, p *principal, _ contentKey, _ jso
 		User:            sessionUser{ID: p.ID, Anonymous: p.Anonymous},
 		RateLimit:       credential.Limit,
 		Models:          c.displayModels(),
-		Auto:            autoView{Multimodal: true, Default: defaultIntelligence, Levels: intelligenceLevels},
+		Auto:            autoView{Multimodal: true, Default: defaultIntelligence, Levels: autoLevels()},
 		DefaultModel:    autoModelName,
 		Widgets:         c.EnabledWidgets,
 		ProfileDefaults: defaultProfile(),

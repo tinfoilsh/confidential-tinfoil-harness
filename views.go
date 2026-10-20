@@ -281,7 +281,7 @@ type stateSnapshot struct {
 type sessionView struct {
 	User            sessionUser     `json:"user"`
 	RateLimit       rateLimit       `json:"rateLimit"`
-	Models          []object        `json:"models"`
+	Models          []sessionModel  `json:"models"`
 	Auto            autoView        `json:"auto"`
 	DefaultModel    string          `json:"defaultModel"`
 	Widgets         []string        `json:"widgets"`

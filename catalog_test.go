@@ -7,6 +7,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync/atomic"
 	"testing"
 )
@@ -130,5 +131,33 @@ func TestHarnessStartsBeforeTheGatewayOffersAModel(t *testing.T) {
 	offered.Store(true)
 	if err := h.refreshCatalog(context.Background()); err != nil || h.catalog.get().definition("kimi-k3") == nil {
 		t.Fatalf("a model the gateway now offers was not advertised: %v", err)
+	}
+}
+
+func TestSessionModelsAreReadyToDisplay(t *testing.T) {
+	h, _, _ := testChatHarness(t, nil)
+	c := h.catalog.get()
+	c.Models = []object{
+		{"modelName": "kimi-k3", "name": "Kimi K3", "paid": true, "experimental": true, "chatConfig": object{"reasoningConfig": object{"supportsToggle": true}}},
+		{"modelName": "gpt-oss-120b", "name": "Free", "paid": false},
+	}
+	c.Deprecated = []object{{"modelName": "old", "name": "Old", "nameShort": "O", "deprecated": true, "deprecationDate": "2026-12-01"}}
+	var session struct {
+		Models []sessionModel `json:"models"`
+		Auto   autoView       `json:"auto"`
+	}
+	json.Unmarshal(postRoute(h, "/v1/session", object{}, "").Body.Bytes(), &session)
+	if len(session.Models) != 2 || session.Models[0].ID != "kimi-k3" || session.Models[1].ID != "old" {
+		t.Fatalf("the session offers %+v", session.Models)
+	}
+	kimi, old := session.Models[0], session.Models[1]
+	if kimi.NameShort != "Kimi K3" || kimi.Attributes == nil || kimi.Reasoning == nil || !kimi.Reasoning.Toggle || !kimi.Reasoning.DefaultEnabled || len(kimi.Badges) != 1 || kimi.Badges[0].Kind != "experimental" {
+		t.Fatalf("kimi-k3 is offered as %+v", kimi)
+	}
+	if old.NameShort != "O" || len(old.Badges) != 1 || old.Badges[0].Tooltip != "This model will be taken offline on 2026-12-01." {
+		t.Fatalf("the deprecated model is offered as %+v", old)
+	}
+	if level := session.Auto.Levels[slices.IndexFunc(session.Auto.Levels, func(l intelligenceLevel) bool { return l.ID == "high" })]; level.Label != "High" || level.DisplayLabel != "Auto · High" {
+		t.Fatalf("Auto's high level reads %+v", level)
 	}
 }

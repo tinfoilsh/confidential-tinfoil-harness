@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	_ "embed"
 	"encoding/json"
@@ -201,13 +202,27 @@ func normalizeModel(name string) string {
 
 var reasoningEfforts = []string{"low", "medium", "high"}
 
-// intelligenceLevel is one setting of how hard Auto works, as clients label it.
+// intelligenceLevel is one setting of how hard Auto works, as clients label
+// it alone and as the model a chat runs on.
 type intelligenceLevel struct {
-	ID    string `json:"id"`
-	Label string `json:"label"`
+	ID           string `json:"id"`
+	Label        string `json:"label"`
+	DisplayLabel string `json:"displayLabel,omitempty"`
 }
 
-var intelligenceLevels = []intelligenceLevel{{"instant", "Instant"}, {"low", "Low"}, {"medium", "Med"}, {"high", "High"}, {"extra", "Extra"}, {"max", "Max"}}
+var intelligenceLevels = []intelligenceLevel{{ID: "instant", Label: "Instant"}, {ID: "low", Label: "Low"}, {ID: "medium", Label: "Med"}, {ID: "high", Label: "High"}, {ID: "extra", Label: "Extra"}, {ID: "max", Label: "Max"}}
+
+// autoLabel is what clients call Auto.
+const autoLabel = "Auto"
+
+// autoLevels are Auto's levels, each labeled as the model a chat runs on.
+func autoLevels() []intelligenceLevel {
+	levels := slices.Clone(intelligenceLevels)
+	for i := range levels {
+		levels[i].DisplayLabel = autoLabel + " · " + levels[i].Label
+	}
+	return levels
+}
 
 func intelligenceIDs() []string {
 	ids := []string{}
@@ -229,19 +244,95 @@ func intelligence(level string) (int, error) {
 	return 0, apiErr(400, "BAD_REQUEST", "Unknown Auto intelligence level")
 }
 
-func (c *chatCatalog) displayModels() []object {
-	models := []object{}
+// modelConfig is what a client shows of a model the control plane configures.
+type modelConfig struct {
+	ModelName       string  `json:"modelName"`
+	Name            string  `json:"name"`
+	NameShort       string  `json:"nameShort"`
+	Description     string  `json:"description"`
+	Image           string  `json:"image"`
+	Multimodal      bool    `json:"multimodal"`
+	Paid            *bool   `json:"paid"`
+	Experimental    bool    `json:"experimental"`
+	Deprecated      bool    `json:"deprecated"`
+	DeprecationDate *string `json:"deprecationDate"`
+	ChatConfig      struct {
+		DescriptionShort string   `json:"descriptionShort"`
+		Attributes       []string `json:"attributes"`
+		ReasoningConfig  *struct {
+			SupportsToggle bool  `json:"supportsToggle"`
+			SupportsEffort bool  `json:"supportsEffort"`
+			DefaultEnabled *bool `json:"defaultEnabled"`
+		} `json:"reasoningConfig"`
+	} `json:"chatConfig"`
+}
+
+// sessionModel is a chat model as a client offers it, every field ready to
+// show.
+type sessionModel struct {
+	ID               string           `json:"id"`
+	Name             string           `json:"name"`
+	NameShort        string           `json:"nameShort"`
+	Description      string           `json:"description"`
+	DescriptionShort string           `json:"descriptionShort"`
+	Image            string           `json:"image"`
+	Attributes       []string         `json:"attributes"`
+	Multimodal       bool             `json:"multimodal"`
+	Paid             *bool            `json:"paid,omitempty"`
+	Experimental     bool             `json:"experimental"`
+	Deprecated       bool             `json:"deprecated"`
+	DeprecationDate  *string          `json:"deprecationDate"`
+	Reasoning        *reasoningView   `json:"reasoning"`
+	Badges           []lifecycleBadge `json:"badges"`
+}
+
+type reasoningView struct {
+	Toggle         bool `json:"toggle"`
+	Effort         bool `json:"effort"`
+	DefaultEnabled bool `json:"defaultEnabled"`
+}
+
+// lifecycleBadge marks a model that may go away.
+type lifecycleBadge struct {
+	Kind    string `json:"kind"`
+	Label   string `json:"label"`
+	Tooltip string `json:"tooltip"`
+}
+
+const (
+	experimentalTooltip   = "Support and availability are not guaranteed. This model can be deprecated at any time."
+	deprecatedTooltip     = "This model is deprecated. An offline date has not been announced."
+	deprecatedDateTooltip = "This model will be taken offline on %s."
+)
+
+// displayModels are the models a client offers. A model configured as not
+// paid serves free keys behind Auto and is never offered.
+func (c *chatCatalog) displayModels() []sessionModel {
+	models := []sessionModel{}
 	for _, m := range append(slices.Clone(c.Models), c.Deprecated...) {
-		display := object{"id": m["modelName"], "reasoning": nil, "deprecationDate": nil}
-		for _, field := range []string{"name", "nameShort", "description", "image", "multimodal", "paid", "experimental", "deprecated", "deprecationDate"} {
-			if value, ok := m[field]; ok {
-				display[field] = value
-			}
+		var config modelConfig
+		readLenient(raw(m), &config)
+		if config.Paid != nil && !*config.Paid {
+			continue
 		}
-		cfg := obj(m["chatConfig"])
-		display["descriptionShort"], display["attributes"] = cfg["descriptionShort"], cfg["attributes"]
-		if reason := obj(cfg["reasoningConfig"]); len(reason) > 0 {
-			display["reasoning"] = object{"toggle": boolean(reason["supportsToggle"], false), "effort": boolean(reason["supportsEffort"], false), "defaultEnabled": boolean(reason["defaultEnabled"], true)}
+		display := sessionModel{ID: config.ModelName, Name: config.Name, NameShort: cmp.Or(config.NameShort, config.Name), Description: config.Description, DescriptionShort: config.ChatConfig.DescriptionShort,
+			Image: config.Image, Attributes: config.ChatConfig.Attributes, Multimodal: config.Multimodal, Paid: config.Paid, Experimental: config.Experimental, Deprecated: config.Deprecated,
+			DeprecationDate: config.DeprecationDate, Badges: []lifecycleBadge{}}
+		if display.Attributes == nil {
+			display.Attributes = []string{}
+		}
+		if reason := config.ChatConfig.ReasoningConfig; reason != nil {
+			display.Reasoning = &reasoningView{Toggle: reason.SupportsToggle, Effort: reason.SupportsEffort, DefaultEnabled: valueOr(reason.DefaultEnabled, true)}
+		}
+		if config.Experimental {
+			display.Badges = append(display.Badges, lifecycleBadge{"experimental", "Experimental", experimentalTooltip})
+		}
+		if config.Deprecated {
+			tooltip := deprecatedTooltip
+			if date := valueOr(config.DeprecationDate, ""); date != "" {
+				tooltip = fmt.Sprintf(deprecatedDateTooltip, date)
+			}
+			display.Badges = append(display.Badges, lifecycleBadge{"deprecated", "Deprecated", tooltip})
 		}
 		models = append(models, display)
 	}
