@@ -265,7 +265,9 @@ func TestADeviceChatRunReturnsItsUpdatedThread(t *testing.T) {
 	in := localInput("", object{"messages": []any{}})
 	id := str(in["threadId"])
 	in["content"] = "what is this?"
-	in["attachments"] = []any{object{"id": "att_photo", "kind": "image", "fileName": "photo.png", "mimeType": "image/png", "size": 9, "thumbnail": "dGh1bWI=", "description": "a cat", "base64": base64.StdEncoding.EncodeToString([]byte("png bytes"))},
+	var picture bytes.Buffer
+	png.Encode(&picture, image.NewRGBA(image.Rect(0, 0, 4, 4)))
+	in["attachments"] = []any{object{"id": "att_photo", "kind": "image", "fileName": "photo.png", "mimeType": "image/png", "size": picture.Len(), "thumbnail": "dGh1bWI=", "description": "a cat", "base64": base64.StdEncoding.EncodeToString(picture.Bytes())},
 		object{"id": "att_scan", "kind": "document", "fileName": "scan.pdf", "mimeType": "application/pdf", "size": 3, "pages": []any{object{"page": 1, "text": "page text", "image": "cGFnZQ==", "is_scanned": true}}}}
 	thread := endedThread(t, h, in, "RUN_FINISHED")
 	messages := arr(thread["messages"])

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/png"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -197,6 +199,76 @@ func TestTheComposerOffersWhatUploadsAccept(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// An upload a turn sends back is held to what uploads make: a file of a
+// type they take, of a kind its type makes, no larger than they take, and an
+// image no larger than the copy an upload makes for models. A copy already
+// within it is kept as it is.
+func TestATurnsUploadIsHeldToWhatUploadsMake(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	fake := newFakeSync(t, h)
+	picture := func(width int) []byte {
+		var b bytes.Buffer
+		png.Encode(&b, image.NewRGBA(image.Rect(0, 0, width, 10)))
+		return b.Bytes()
+	}
+	turn := func(attachments ...object) *httptest.ResponseRecorder {
+		in := sendInput(key)
+		obj(in["options"])["model"] = "auto"
+		sent := []any{}
+		for _, a := range attachments {
+			sent = append(sent, a)
+		}
+		in["attachments"] = sent
+		return postRoute(h, "/v1/threads/turn", in, "alice")
+	}
+	large, small := picture(2000), picture(100)
+	events := eventsIn(t, turn(object{"id": "att_large", "kind": "image", "fileName": "large.png", "mimeType": "image/png", "base64": base64.StdEncoding.EncodeToString(large), "thumbnail": "dGh1bWI="},
+		object{"id": "att_small", "kind": "image", "fileName": "small.png", "mimeType": "image/png", "base64": base64.StdEncoding.EncodeToString(small), "thumbnail": "dGh1bWI="}))
+	chat := storedChat(t, rows, key, events[0].ThreadID)
+	dimensions := func(encoded []byte) string {
+		config, format, err := image.DecodeConfig(bytes.NewReader(encoded))
+		return fmt.Sprintf("%s %dx%d %v", format, config.Width, config.Height, err)
+	}
+	stored := chat.Messages[0].Attachments
+	thumbnail, _ := base64.StdEncoding.DecodeString(stored[0].Thumbnail)
+	if copied := fake.blobs[stored[0].ID].data; dimensions(copied) != "jpeg 1536x7 <nil>" || dimensions(thumbnail) != "jpeg 256x1 <nil>" {
+		t.Fatalf("a large image was kept as %s with a thumbnail of %s", dimensions(copied), dimensions(thumbnail))
+	}
+	if !bytes.Equal(fake.blobs[stored[1].ID].data, small) || stored[1].Thumbnail != "dGh1bWI=" {
+		t.Fatalf("an image within the bounds was changed: %+v", stored[1])
+	}
+	// Small limits stand in for the real ones, which take tens of MiB to reach.
+	for _, g := range []*uploadGroup{&textUploads, &imageUploads} {
+		saved := g.MaxBytes
+		g.MaxBytes = 64
+		t.Cleanup(func() { g.MaxBytes = saved })
+	}
+	for _, tc := range []struct {
+		name       string
+		attachment object
+		code       string
+	}{
+		{"unknown type", object{"kind": "document", "fileName": "run.exe", "textContent": "text"}, "ATTACHMENT_UNSUPPORTED"},
+		{"wrong kind", object{"kind": "image", "fileName": "notes.txt", "textContent": "text"}, "ATTACHMENT_UNSUPPORTED"},
+		{"long text", object{"kind": "document", "fileName": "notes.txt", "textContent": strings.Repeat("x", 65)}, "ATTACHMENT_TOO_LARGE"},
+		{"large image", object{"kind": "image", "fileName": "small.png", "base64": base64.StdEncoding.EncodeToString(small)}, "ATTACHMENT_TOO_LARGE"},
+		{"not an image", object{"kind": "image", "fileName": "photo.png", "base64": base64.StdEncoding.EncodeToString([]byte("not an image"))}, "ATTACHMENT_UNSUPPORTED"},
+	} {
+		tc.attachment["id"] = "att_refused"
+		w := turn(tc.attachment)
+		var refused struct {
+			Error apiError `json:"error"`
+		}
+		json.Unmarshal(w.Body.Bytes(), &refused)
+		if refused.Error.Code != tc.code {
+			t.Errorf("%s: HTTP %d %s", tc.name, w.Code, w.Body.String())
+		}
+	}
+	if events := eventsIn(t, turn(object{"id": "att_text", "kind": "document", "fileName": "notes.txt", "textContent": strings.Repeat("x", 64)})); events[len(events)-1].Type != "RUN_FINISHED" {
+		t.Fatalf("text at the limit ended with %+v", events[len(events)-1])
 	}
 }
 

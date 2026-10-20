@@ -586,6 +586,9 @@ func (a *sentAttachment) validate() error {
 	if a.Kind != "" && !slices.Contains(attachmentKinds, a.Kind) {
 		return apiErr(400, "BAD_REQUEST", "An attachment kind must be image, document, or audio")
 	}
+	if a.whole() {
+		return a.fitsUpload()
+	}
 	return nil
 }
 

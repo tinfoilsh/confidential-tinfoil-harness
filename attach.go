@@ -37,6 +37,13 @@ const maxUploadBytes = 33 << 20
 const maxTextBytes = 50 << 20
 const maxImagePixels = 40_000_000
 
+// An image is kept as the copy models read, no longer on either side than
+// modelImageSide, with a thumbnail no longer than thumbnailSide.
+const (
+	modelImageSide = 1536
+	thumbnailSide  = 256
+)
+
 // An upload's form holds its file and a few short fields.
 const (
 	maxFormParts = 12
@@ -48,13 +55,14 @@ const (
 type uploadGroup struct {
 	Accept   []string `json:"accept"`
 	MaxBytes int      `json:"maxBytes"`
+	kind     string   // the kind of attachment an upload of the group makes
 }
 
 var (
-	textUploads     = uploadGroup{Accept: strings.Fields(".txt .md .py .js .jsx .ts .tsx .css .json .xml .yaml .yml .toml .sh .bash .rb .java .cpp .c .h .hpp .go .rs .swift .kt .kts .r .sql .lua .pl .php .cs .csx .vb .fs .fsx .scala .dart .ex .exs .erl .hs .ml .mli .clj .cljs .groovy .gradle .m .mm .zig .nim .jl .ps1 .psm1 .bat .cmd .asm .s .proto .graphql .gql .tf .tfvars .dockerfile .makefile .cmake .tex .bib .svg .properties .lock .diff .patch .env .ini .cfg .conf .log .rtf .html .htm .xhtml .csv .tsv .qfx .qif .ofx .ifs .qbo .qbx .bai .bai2 .mt940 .sta .ics .vcf"), MaxBytes: maxTextBytes}
-	imageUploads    = uploadGroup{Accept: strings.Fields(".jpg .jpeg .png .gif .webp .bmp .tiff .tif"), MaxBytes: maxUploadBytes}
-	documentUploads = uploadGroup{Accept: strings.Fields(".pdf .docx .pptx .xlsx"), MaxBytes: maxUploadBytes}
-	audioUploads    = uploadGroup{Accept: strings.Fields(".mp3 .wav .ogg .m4a .aac .flac .webm .wma"), MaxBytes: maxUploadBytes}
+	textUploads     = uploadGroup{Accept: strings.Fields(".txt .md .py .js .jsx .ts .tsx .css .json .xml .yaml .yml .toml .sh .bash .rb .java .cpp .c .h .hpp .go .rs .swift .kt .kts .r .sql .lua .pl .php .cs .csx .vb .fs .fsx .scala .dart .ex .exs .erl .hs .ml .mli .clj .cljs .groovy .gradle .m .mm .zig .nim .jl .ps1 .psm1 .bat .cmd .asm .s .proto .graphql .gql .tf .tfvars .dockerfile .makefile .cmake .tex .bib .svg .properties .lock .diff .patch .env .ini .cfg .conf .log .rtf .html .htm .xhtml .csv .tsv .qfx .qif .ofx .ifs .qbo .qbx .bai .bai2 .mt940 .sta .ics .vcf"), MaxBytes: maxTextBytes, kind: "document"}
+	imageUploads    = uploadGroup{Accept: strings.Fields(".jpg .jpeg .png .gif .webp .bmp .tiff .tif"), MaxBytes: maxUploadBytes, kind: "image"}
+	documentUploads = uploadGroup{Accept: strings.Fields(".pdf .docx .pptx .xlsx"), MaxBytes: maxUploadBytes, kind: "document"}
+	audioUploads    = uploadGroup{Accept: strings.Fields(".mp3 .wav .ogg .m4a .aac .flac .webm .wma"), MaxBytes: maxUploadBytes, kind: "audio"}
 )
 
 // A message attaches files of any group; a project keeps the text of its
@@ -66,6 +74,26 @@ var (
 
 func (g *uploadGroup) accepts(filename string) bool {
 	return slices.Contains(g.Accept, strings.ToLower(filepath.Ext(filename)))
+}
+
+// attachmentGroup is the group a message's file belongs to, if any.
+func attachmentGroup(filename string) *uploadGroup {
+	for _, g := range attachmentGroups {
+		if g.accepts(filename) {
+			return g
+		}
+	}
+	return nil
+}
+
+// maxContent is the most an upload of the group holds: a text file's text
+// and an image's bytes are the file, and a converted file's content is what
+// the converter answers with.
+func (g *uploadGroup) maxContent() int {
+	if g == &textUploads || g == &imageUploads {
+		return g.MaxBytes
+	}
+	return maxTextBytes
 }
 
 // What a client's composer does before anything reaches the harness: a
@@ -212,26 +240,61 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+var errUnsupportedType = apiErr(415, "ATTACHMENT_UNSUPPORTED", "Unsupported file type")
+
+// fitsUpload refuses a descriptor no upload makes: one of a file uploads do
+// not take, or holding more than an upload of its file's group.
+func (d *sentAttachment) fitsUpload() error {
+	group := attachmentGroup(d.FileName)
+	if group == nil || group.kind != d.Kind {
+		return errUnsupportedType
+	}
+	content := len(d.TextContent) + base64.StdEncoding.DecodedLen(len(d.Base64))
+	for _, page := range d.Pages {
+		content += len(page.Text) + len(page.Image)
+	}
+	if content > group.maxContent() {
+		return apiErr(413, "ATTACHMENT_TOO_LARGE", "The attachment exceeds the size limit for its type")
+	}
+	return nil
+}
+
 // stored is the form of an attachment a turn sends whole that its chat
 // stores: an upload's descriptor, and an image's bytes while its client
-// holds them.
-func (d *sentAttachment) stored() Attachment {
-	return Attachment{ID: d.ID, Kind: d.Kind, FileName: d.FileName, MimeType: d.MimeType, Size: d.Size, Thumbnail: valueOr(d.Thumbnail, ""), TextContent: d.TextContent, Description: d.Description, Pages: d.Pages, Base64: d.Base64}
+// holds them, no larger than the copy an upload makes for models.
+func (d *sentAttachment) stored() (Attachment, error) {
+	a := Attachment{ID: d.ID, Kind: d.Kind, FileName: d.FileName, MimeType: d.MimeType, Size: d.Size, Thumbnail: valueOr(d.Thumbnail, ""), TextContent: d.TextContent, Description: d.Description, Pages: d.Pages, Base64: d.Base64}
+	if !a.isImage() || a.Base64 == "" {
+		return a, nil
+	}
+	data, err := base64.StdEncoding.DecodeString(a.Base64)
+	if err != nil {
+		return Attachment{}, apiErr(415, "ATTACHMENT_UNSUPPORTED", "The image could not be decoded")
+	}
+	defer clear(data)
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return Attachment{}, apiErr(415, "ATTACHMENT_UNSUPPORTED", "The image could not be decoded")
+	}
+	// An image within the bounds, as the copy an upload makes is, is kept.
+	if max(cfg.Width, cfg.Height) <= modelImageSide {
+		return a, nil
+	}
+	resized, thumb, err := resizeImage(data)
+	if err != nil {
+		return Attachment{}, err
+	}
+	a.Base64, a.Thumbnail = base64.StdEncoding.EncodeToString(resized), base64.StdEncoding.EncodeToString(thumb)
+	return a, nil
 }
 
 func (h *harness) preprocess(ctx context.Context, filename string, data []byte) (Attachment, error) {
 	ext := strings.ToLower(filepath.Ext(filename))
-	descriptor := Attachment{Kind: "document", FileName: filename, MimeType: http.DetectContentType(data), Size: new(int64(len(data)))}
-	var group *uploadGroup
-	for _, candidate := range attachmentGroups {
-		if candidate.accepts(filename) {
-			group = candidate
-			break
-		}
-	}
+	group := attachmentGroup(filename)
 	if group == nil {
-		return Attachment{}, apiErr(415, "ATTACHMENT_UNSUPPORTED", "Unsupported file type")
+		return Attachment{}, errUnsupportedType
 	}
+	descriptor := Attachment{Kind: group.kind, FileName: filename, MimeType: http.DetectContentType(data), Size: new(int64(len(data)))}
 	if len(data) > group.MaxBytes {
 		return Attachment{}, apiErr(413, "ATTACHMENT_TOO_LARGE", "The file exceeds the size limit for its type")
 	}
@@ -249,7 +312,7 @@ func (h *harness) preprocess(ctx context.Context, filename string, data []byte) 
 		if err != nil {
 			return Attachment{}, err
 		}
-		descriptor.Kind, descriptor.Base64, descriptor.Thumbnail = "image", base64.StdEncoding.EncodeToString(resized), base64.StdEncoding.EncodeToString(thumb)
+		descriptor.Base64, descriptor.Thumbnail = base64.StdEncoding.EncodeToString(resized), base64.StdEncoding.EncodeToString(thumb)
 	case &documentUploads:
 		if ext == ".pdf" && !bytes.HasPrefix(data, []byte("%PDF-")) || ext != ".pdf" && !bytes.HasPrefix(data, []byte("PK\x03\x04")) {
 			return Attachment{}, apiErr(415, "ATTACHMENT_UNSUPPORTED", "The file contents do not match the document type")
@@ -284,7 +347,7 @@ func (h *harness) preprocess(ctx context.Context, filename string, data []byte) 
 		if err != nil {
 			return Attachment{}, err
 		}
-		descriptor.Kind, descriptor.TextContent = "audio", text
+		descriptor.TextContent = text
 	}
 	return descriptor, nil
 }
@@ -315,11 +378,11 @@ func resizeImage(data []byte) ([]byte, []byte, error) {
 		err := jpeg.Encode(&b, dst, &jpeg.Options{Quality: 85})
 		return b.Bytes(), err
 	}
-	resized, err := encode(1536)
+	resized, err := encode(modelImageSide)
 	if err != nil {
 		return nil, nil, err
 	}
-	thumb, err := encode(256)
+	thumb, err := encode(thumbnailSide)
 	return resized, thumb, err
 }
 
@@ -599,7 +662,11 @@ func turnAttachments(in *turnRequest, t *Thread) ([]Attachment, error) {
 	for i := range in.Attachments {
 		sent := &in.Attachments[i]
 		if sent.whole() {
-			result = append(result, sent.stored())
+			stored, err := sent.stored()
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, stored)
 			continue
 		}
 		held := t.attachment(sent.ID)
