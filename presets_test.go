@@ -72,7 +72,7 @@ func TestANewChatTakesItsPresetsSettingsUnlessItsTurnSetsThem(t *testing.T) {
 		}
 	}
 	// A device chat takes them from the profile its turn carries.
-	in := localInput("", object{"messages": []any{}})
+	in := localInput("", nil)
 	in["options"], in["profile"] = object{}, presetProfile()
 	thread := endedThread(t, h, in, "RUN_FINISHED")
 	if thread["model"] != "gemma4-31b" || thread["webSearchEnabled"] != false || thread["presetId"] != "user:fast" || <-asked != "gemma4-31b" {

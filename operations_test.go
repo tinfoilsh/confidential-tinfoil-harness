@@ -88,3 +88,12 @@ func TestDeviceAndStoredChatsChangeTheSameWay(t *testing.T) {
 		t.Fatalf("a device chat was pinned: HTTP %d", w.Code)
 	}
 }
+
+func TestADeviceChatsFirstTurnStartsItWithoutAThread(t *testing.T) {
+	h, rows, _ := testChatHarness(t, nil)
+	in := localInput("", nil)
+	thread := endedThread(t, h, in, "RUN_FINISHED")
+	if thread["id"] != in["threadId"] || len(arr(thread["messages"])) != 2 || obj(arr(thread["messages"])[0])["id"] != in["clientRequestId"] || rows.calls != 0 {
+		t.Fatalf("the first turn left %v", thread)
+	}
+}

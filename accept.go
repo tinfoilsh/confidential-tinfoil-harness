@@ -131,13 +131,19 @@ func (h *harness) admit(ctx context.Context, p *principal, key contentKey, in *t
 	}
 	// An idle local thread starts from the client's copy, which may have been
 	// edited since the last turn. A queued turn continues the active run's row.
-	// An ask is a new thread that hides the copy it starts from.
+	// An ask is a new thread that hides the copy it starts from. A device
+	// chat's first turn sends no thread and starts the chat under its
+	// client's id.
 	var seed *threadRow
-	if in.Thread != nil && local && source == nil {
+	switch {
+	case !local || source != nil:
+	case in.Thread != nil:
 		seed = &threadRow{Thread: readDeviceThread(id, in.Thread)}
 		if seed.LastRequestID == r.nonce {
 			return errAlreadyApplied
 		}
+	case rowIDPattern.MatchString(id):
+		seed = &threadRow{Thread: newThread(id, nil, nil)}
 	}
 	if local {
 		r.profile = localProfile(in.Profile)
