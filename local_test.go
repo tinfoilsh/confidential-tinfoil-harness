@@ -207,7 +207,7 @@ func TestLocalAskHidesTheTranscriptItStartsFrom(t *testing.T) {
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"side answer\"}}]}\n\ndata: [DONE]\n\n")
 	})
 	in := localInput("0000000000004_local", priorThread())
-	in["kind"], in["quote"] = "ask", "first answer"
+	in["kind"], in["quote"], in["ephemeral"] = "ask", "first answer", true
 	delete(in, "content")
 	events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice"))
 	if rows.calls != 0 || events[0].ThreadID == "0000000000004_local" {
