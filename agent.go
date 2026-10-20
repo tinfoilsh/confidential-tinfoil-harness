@@ -21,6 +21,8 @@ const (
 	maxToolOutput  = 30000
 	maxShownOutput = 1 << 20
 	maxSSEEvent    = 1 << 22
+	// maxToolCalls bounds the calls one model turn may open.
+	maxToolCalls = 128
 
 	finalAnswerInstruction = "You have reached the maximum number of tool iterations. Do not call any more tools. Provide the best answer you can."
 	continueInstruction    = "Continue your previous response exactly where it left off. Do not repeat, summarize, or restate anything you already wrote, and do not add any preamble."
@@ -336,7 +338,7 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 			out.text(message, delta.Content)
 		}
 		for _, called := range delta.ToolCalls {
-			if called.Index < 0 || called.Index >= 128 {
+			if called.Index < 0 || called.Index >= maxToolCalls {
 				return nil, answer.String(), apiErr(502, "UPSTREAM_REFUSED", "The model exceeded the tool call limit")
 			}
 			calls = announce(out, message, calls, called, widgets)

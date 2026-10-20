@@ -169,7 +169,17 @@ func normalizeModel(name string) string {
 	return name
 }
 
+var reasoningEfforts = []string{"low", "medium", "high"}
+
 var intelligenceLevels = []object{{"id": "instant", "label": "Instant"}, {"id": "low", "label": "Low"}, {"id": "medium", "label": "Med"}, {"id": "high", "label": "High"}, {"id": "extra", "label": "Extra"}, {"id": "max", "label": "Max"}}
+
+func intelligenceIDs() []string {
+	ids := []string{}
+	for _, l := range intelligenceLevels {
+		ids = append(ids, str(l["id"]))
+	}
+	return ids
+}
 
 func intelligence(level string) (int, error) {
 	if level == "" {

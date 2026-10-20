@@ -28,7 +28,7 @@ func validateProfile(patch object) error {
 	if err := validateFields(patch, "themeMode chatFont language nickname profession additionalContext customSystemPrompt selectedModel autoIntelligence reasoningEffort", "isUsingPersonalization isUsingCustomPrompt thinkingEnabled webSearchEnabled codeExecutionEnabled piiCheckEnabled genUIEnabled pixelateSidebarChatTitlesEnabled browserTabChatTitleEnabled enterToNewlineEnabled hasSeenOnboarding hasSeenWebSearchIntro", "defaultPromptPresetId"); err != nil {
 		return err
 	}
-	for field, choices := range map[string][]string{"themeMode": {"light", "dark", "system"}, "chatFont": {"system", "serif", "mono", "dyslexic"}, "reasoningEffort": {"low", "medium", "high"}, "autoIntelligence": {"instant", "low", "medium", "high", "extra", "max"}} {
+	for field, choices := range map[string][]string{"themeMode": {"light", "dark", "system"}, "chatFont": {"system", "serif", "mono", "dyslexic"}, "reasoningEffort": reasoningEfforts, "autoIntelligence": intelligenceIDs()} {
 		if value, ok := patch[field]; ok && !slices.Contains(choices, str(value)) {
 			return apiErr(400, "BAD_REQUEST", "Invalid "+field)
 		}

@@ -168,8 +168,8 @@ func (h *harness) handleImport(w http.ResponseWriter, r *http.Request, p *princi
 				return
 			}
 		} else {
-			b, err := io.ReadAll(io.LimitReader(part, 8193))
-			if err != nil || len(b) > 8192 {
+			b, err := io.ReadAll(io.LimitReader(part, maxFormField+1))
+			if err != nil || len(b) > maxFormField {
 				respond(w, nil, apiErr(400, "IMPORT_INVALID", "Invalid multipart field"))
 				return
 			}

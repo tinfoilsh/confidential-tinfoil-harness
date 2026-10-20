@@ -34,6 +34,12 @@ const maxUploadBytes = 33 << 20
 const maxTextBytes = 50 << 20
 const maxImagePixels = 40_000_000
 
+// An upload's form holds its file and a few short fields.
+const (
+	maxFormParts = 12
+	maxFormField = 8 << 10
+)
+
 var imageExtensions = strings.Fields(".jpg .jpeg .png .gif .webp .bmp .tiff .tif")
 var documentExtensions = strings.Fields(".pdf .docx .pptx .xlsx")
 var audioExtensions = strings.Fields(".mp3 .wav .ogg .m4a .aac .flac .webm .wma")
@@ -82,7 +88,7 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 		if err == io.EOF {
 			break
 		}
-		if err != nil || count >= 12 {
+		if err != nil || count >= maxFormParts {
 			respond(w, nil, apiErr(400, "BAD_REQUEST", "Invalid multipart upload"))
 			return
 		}
@@ -98,8 +104,8 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		} else {
-			value, err := io.ReadAll(io.LimitReader(part, 8193))
-			if err != nil || len(value) > 8192 {
+			value, err := io.ReadAll(io.LimitReader(part, maxFormField+1))
+			if err != nil || len(value) > maxFormField {
 				respond(w, nil, apiErr(400, "BAD_REQUEST", "Multipart field is too large"))
 				return
 			}

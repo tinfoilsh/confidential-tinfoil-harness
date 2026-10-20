@@ -187,7 +187,7 @@ func (h *harness) buildRequest(thread, profile, project object, documents []obje
 		reason := obj(obj(def["chatConfig"])["reasoningConfig"])
 		policy = firstString(reason["reasoningHistoryPolicy"], "none")
 		effort := firstString(options["reasoningEffort"], profile["reasoningEffort"], "medium")
-		if !slices.Contains([]string{"low", "medium", "high"}, effort) {
+		if !slices.Contains(reasoningEfforts, effort) {
 			return nil, nil, apiErr(400, "BAD_REQUEST", "Unknown reasoning effort")
 		}
 		req.params = modelParams(def, boolean(options["thinking"], boolean(profile["thinkingEnabled"], boolean(reason["defaultEnabled"], true))), effort)

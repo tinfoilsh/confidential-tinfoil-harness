@@ -133,6 +133,10 @@ func respond(w http.ResponseWriter, result any, err error) {
 
 const maxRequestBody = 8 << 20
 
+// maxResponseBody bounds a downstream answer: a pull of sync's largest batch,
+// or an attachment, base64 encoded.
+const maxResponseBody = 96 << 20
+
 func decodeJSON(w http.ResponseWriter, r *http.Request) (object, error) {
 	return decodeJSONWithin(w, r, maxRequestBody)
 }
@@ -296,7 +300,7 @@ func postJSONWithHeaders(ctx context.Context, client *http.Client, url, auth str
 		_, err = io.Copy(io.Discard, io.LimitReader(resp.Body, maxRequestBody))
 		return err
 	}
-	return json.NewDecoder(io.LimitReader(resp.Body, 96<<20)).Decode(out)
+	return json.NewDecoder(io.LimitReader(resp.Body, maxResponseBody)).Decode(out)
 }
 
 // maxIDLength bounds the ids a caller names its rows with. A thread id is

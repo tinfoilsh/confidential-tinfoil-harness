@@ -94,6 +94,13 @@ func publicMessage(m object) object {
 	}
 	return out
 }
+
+// A chat is shown in windows of its latest messages.
+const (
+	messageWindow    = 50
+	maxMessageWindow = 200
+)
+
 func publicThread(row *storedRow, before string, limit int) object {
 	t := normalizeThread(row)
 	out := threadSummary(t)
@@ -109,8 +116,8 @@ func publicThread(row *storedRow, before string, limit int) object {
 			}
 		}
 	}
-	if limit <= 0 || limit > 200 {
-		limit = 50
+	if limit <= 0 || limit > maxMessageWindow {
+		limit = messageWindow
 	}
 	start := max(0, end-limit)
 	messages := []any{}
@@ -290,7 +297,7 @@ func (h *harness) changeMessages(ctx context.Context, p *principal, key contentK
 	if err != nil {
 		return nil, err
 	}
-	return publicThread(row, "", 50), nil
+	return publicThread(row, "", messageWindow), nil
 }
 func (h *harness) deleteAllThreads(ctx context.Context, p *principal, key contentKey, in object) (any, error) {
 	if err := validateFields(in, "", "", "projectId"); err != nil {

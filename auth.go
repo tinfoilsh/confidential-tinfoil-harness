@@ -107,6 +107,10 @@ type inferenceCredential struct {
 	firstParty bool
 }
 
+// maxCachedCallers bounds the callers whose credential or hourly cap is
+// remembered.
+const maxCachedCallers = 10000
+
 // hourlyCap is a subscriber's refused exchange, remembered until the cap resets.
 type hourlyCap struct {
 	refusal apiError
@@ -307,7 +311,7 @@ func (a *authenticator) inference(ctx context.Context, p *principal) (inferenceC
 				delete(a.credentials, id)
 			}
 		}
-		if len(a.credentials) >= 10000 {
+		if len(a.credentials) >= maxCachedCallers {
 			a.mu.Unlock()
 			return inferenceCredential{}, apiErr(503, "UPSTREAM_REFUSED", "The session cache is at capacity")
 		}
@@ -353,7 +357,7 @@ func (a *authenticator) refused(p *principal, status int, header http.Header, bo
 				delete(a.capped, id)
 			}
 		}
-		if len(a.capped) < 10000 {
+		if len(a.capped) < maxCachedCallers {
 			a.capped[p.scope()] = hourlyCap{refusal: *e, limit: limit, until: until}
 		}
 		return e

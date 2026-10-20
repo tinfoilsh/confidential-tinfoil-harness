@@ -189,7 +189,7 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 		r.assembler.seed(reply)
 		r.out.replyID = str(reply["id"])
 	}
-	window := publicThread(row, "", 50)
+	window := publicThread(row, "", messageWindow)
 	hasOlder := boolean(window["hasOlder"], false)
 	summary := threadSummary(normalizeThread(row))
 	h.live.mu.Lock()
