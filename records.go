@@ -99,18 +99,18 @@ func (h *harness) updateThread(ctx context.Context, p *principal, key contentKey
 			return nil, err
 		}
 	}
-	row, err := h.mutateThread(ctx, p, key, in.ID, func(t *Thread) error {
-		if in.Title != nil {
-			t.Title, t.TitleState = *in.Title, "manual"
+	var profile Profile
+	if in.PresetID.value != nil {
+		var err error
+		if profile, err = h.profile(ctx, p, key); err != nil {
+			return nil, err
 		}
-		t.Model = valueOr(in.Model, t.Model)
-		t.WebSearchEnabled = valueOr(in.WebSearchEnabled, t.WebSearchEnabled)
+	}
+	row, err := h.mutateThread(ctx, p, key, in.ID, func(t *Thread) error {
+		in.apply(t, h.catalog.get(), &profile)
 		t.Pinned = valueOr(in.Pinned, t.Pinned)
 		if in.ProjectID.set {
 			t.ProjectID = in.ProjectID.value
-		}
-		if in.PresetID.set {
-			t.PresetID = in.PresetID.value
 		}
 		return nil
 	})

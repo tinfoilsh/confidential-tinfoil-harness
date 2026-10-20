@@ -73,13 +73,16 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *principal) (*t
 		}
 	}
 	t := &row.Thread
-	created := row.etag == "" && len(t.Messages) == 0
-	// A new chat starts with the default prompt preset, as the web client
-	// stamps a blank chat. A first turn naming a preset, or null, overrides it.
-	if !r.input.PresetID.set && !s.local && created {
-		if preset := valueOr(profile.DefaultPromptPresetID, ""); preset != "" {
-			t.PresetID = &preset
+	// A new chat starts on the user's model and default prompt preset, whose
+	// settings it takes. A first turn naming a preset, or null, overrides
+	// the default, and the turn's own settings override the preset's.
+	if row.etag == "" && len(t.Messages) == 0 {
+		preset := r.input.PresetID.value
+		if id := valueOr(profile.DefaultPromptPresetID, ""); !r.input.PresetID.set && id != "" {
+			preset = &id
 		}
+		t.Model = cmp.Or(valueOr(profile.SelectedModel, ""), autoModelName)
+		h.catalog.get().applyPreset(t, &profile, preset)
 	}
 	attachments, err := turnAttachments(r.input, t)
 	if err != nil {
@@ -89,10 +92,7 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *principal) (*t
 		return nil, err
 	}
 	options := r.input.Options
-	if created {
-		t.Model = cmp.Or(valueOr(profile.SelectedModel, ""), "auto")
-	}
-	t.Model = cmp.Or(options.Model, t.Model, "auto")
+	t.Model = cmp.Or(options.Model, t.Model, autoModelName)
 	t.WebSearchEnabled = valueOr(options.WebSearch, t.WebSearchEnabled)
 	// Sync stores a chat only if every attachment it names is stored under the
 	// chat. An ask's stored source has attachments in sync; a keyless thread

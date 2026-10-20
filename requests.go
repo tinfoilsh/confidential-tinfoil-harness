@@ -199,6 +199,19 @@ func (in *updateThreadRequest) validate() error {
 	return cmp.Or(in.ProjectID.check("projectId"), in.PresetID.check("presetId"), requireID("id", in.ID))
 }
 
+// apply makes the settings change a chat's client asks for. Choosing another
+// preset takes the settings it chooses, except those the request sets.
+func (in *updateThreadRequest) apply(t *Thread, c *chatCatalog, profile *Profile) {
+	if in.Title != nil {
+		t.Title, t.TitleState = *in.Title, "manual"
+	}
+	if in.PresetID.set && valueOr(in.PresetID.value, "") != valueOr(t.PresetID, "") {
+		c.applyPreset(t, profile, in.PresetID.value)
+	}
+	t.Model = valueOr(in.Model, t.Model)
+	t.WebSearchEnabled = valueOr(in.WebSearchEnabled, t.WebSearchEnabled)
+}
+
 // messageRequest names a message of a stored chat; an edit sends its text.
 type messageRequest struct {
 	ThreadID  string  `json:"threadId"`

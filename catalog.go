@@ -181,6 +181,29 @@ func (c *chatCatalog) vision(name string) bool {
 	return name == "auto" || boolean(c.definition(name)["multimodal"], false)
 }
 
+// offers reports whether a chat may run on a model now.
+func (c *chatCatalog) offers(name string) bool {
+	return name == autoModelName || c.definition(name) != nil
+}
+
+// applyPreset files a chat under a prompt preset, or none, and takes the
+// model and web search setting a saved preset chooses. A model that is not
+// offered is not taken.
+func (c *chatCatalog) applyPreset(t *Thread, profile *Profile, id *string) {
+	t.PresetID = id
+	if id == nil {
+		return
+	}
+	saved := profile.preset(*id)
+	if saved == nil {
+		return
+	}
+	if model := valueOr(saved.Model, ""); model != "" && c.offers(model) {
+		t.Model = model
+	}
+	t.WebSearchEnabled = valueOr(saved.WebSearchEnabled, t.WebSearchEnabled)
+}
+
 // retired reports whether the control plane no longer lists a chat model.
 func (c *chatCatalog) retired(name string) bool {
 	return name != autoModelName && c.definition(name) == nil && !slices.Contains(c.Listed, name)
