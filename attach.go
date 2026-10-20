@@ -70,8 +70,8 @@ var (
 	audioUploads    = uploadGroup{Accept: strings.Fields(".mp3 .wav .ogg .m4a .aac .flac .webm .wma"), MaxBytes: maxUploadBytes, kind: "audio"}
 )
 
-// A message attaches files of any group; a project keeps the text of its
-// documents, which images do not have.
+// A message attaches files of any group; a project keeps extracted text,
+// image descriptions, and audio transcripts.
 var (
 	attachmentGroups      = []*uploadGroup{&textUploads, &imageUploads, &documentUploads, &audioUploads}
 	projectDocumentGroups = []*uploadGroup{&textUploads, &documentUploads, &imageUploads, &audioUploads}

@@ -26,7 +26,10 @@ func (h *harness) acceptTurn(ctx context.Context, p *principal, key contentKey, 
 			return nil, errShutdown
 		}
 		if h.live.requests == nil {
-			h.live.threads, h.live.runs, h.live.requests = map[string]*threadSession{}, map[string]*chatRun{}, map[string]*chatRun{}
+			h.live.runs, h.live.requests = map[string]*chatRun{}, map[string]*chatRun{}
+			if h.live.threads == nil {
+				h.live.threads = map[string]*threadSession{}
+			}
 		}
 		previous := h.live.requests[liveKey(p, nonce)]
 		if previous == nil {
@@ -133,7 +136,7 @@ func (h *harness) admit(ctx context.Context, p *principal, key contentKey, in *t
 			return err
 		}
 		copy := *p
-		copy.SyncToken = granted
+		copy.SyncToken, copy.SyncExpires = granted.Token, granted.ExpiresAt
 		p = &copy
 	}
 	var source *Thread

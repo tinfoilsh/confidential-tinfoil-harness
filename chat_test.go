@@ -38,8 +38,8 @@ type memoryRows struct {
 	calls  int
 }
 
-func (s *memoryRows) authorizeRun(_ context.Context, _ *principal, _ contentKey, id string, _ *string) (secret, error) {
-	return secret("run-for-" + id), nil
+func (s *memoryRows) authorizeRun(_ context.Context, _ *principal, _ contentKey, id string, _ *string) (storageGrant, error) {
+	return storageGrant{Token: secret("run-for-" + id), ExpiresAt: nowUTC().Add(time.Hour)}, nil
 }
 
 func (s *memoryRows) authorizeStorage(_ context.Context, p *principal, _ contentKey, _, _ string) (secret, error) {
@@ -69,6 +69,31 @@ func (s *memoryRows) load(_ context.Context, p *principal, key contentKey, scope
 		return nil, apiErr(409, "KEY_MISMATCH", "sealed to another key")
 	}
 	return row.copy(), nil
+}
+
+func (s *memoryRows) pull(ctx context.Context, p *principal, key contentKey, scope string, ids []string) ([]storedRow, map[string]error, error) {
+	rows, failed := []storedRow{}, map[string]error{}
+	for _, id := range ids {
+		row, err := s.load(ctx, p, key, scope, id)
+		if err == nil {
+			rows = append(rows, *row)
+		} else if asAPIError(err).HTTP != 404 {
+			failed[id] = err
+		}
+	}
+	return rows, failed, nil
+}
+
+func (s *memoryRows) removeRevision(_ context.Context, p *principal, _ contentKey, id, revision string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	name := rowMapKey(p, "chat", id)
+	if s.rows[name].ETag != revision {
+		return apiErr(409, "REVISION_CONFLICT", "changed")
+	}
+	delete(s.rows, name)
+	delete(s.sealed, name)
+	return nil
 }
 
 func (row storedRow) copy() *storedRow {

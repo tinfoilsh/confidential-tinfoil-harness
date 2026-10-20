@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"slices"
 	"strings"
 )
@@ -101,7 +102,7 @@ func (h *harness) listThreads(ctx context.Context, p *principal, key contentKey,
 	}
 	var pinned []threadSummary
 	if in.Cursor == "" {
-		pinned, err = h.pinnedThreads(ctx, p, key)
+		pinned, err = h.pinnedThreads(ctx, p, key, flags)
 		if err != nil {
 			return nil, err
 		}
@@ -162,21 +163,19 @@ func (h *harness) updateThread(ctx context.Context, p *principal, key contentKey
 	return summarize(&row.Thread), nil
 }
 
-func (h *harness) pinnedThreads(ctx context.Context, p *principal, key contentKey) ([]threadSummary, error) {
+func (h *harness) pinnedThreads(ctx context.Context, p *principal, key contentKey, flags chatFlags) ([]threadSummary, error) {
 	ids, err := h.pinnedIDs(ctx, p, key)
 	if err != nil {
 		return nil, err
 	}
 	threads := []threadSummary{}
-	for _, id := range ids {
-		row, err := h.loadThread(ctx, p, key, id)
-		if err != nil {
-			if status := asAPIError(err).HTTP; status == 404 || status == 409 {
-				continue
-			}
-			return nil, err
-		}
+	rows, err := h.threadBatch(ctx, p, key, ids)
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
 		row.Pinned = true
+		flags.mark(&row.Thread)
 		threads = append(threads, summarize(&row.Thread))
 	}
 	return threads, nil
@@ -213,9 +212,21 @@ func deviceReply(row *threadRow) any {
 	}{deviceThread(&row.Thread)}
 }
 
-func (h *harness) deleteThread(ctx context.Context, p *principal, key contentKey, in *idRequest) (any, error) {
-	h.stopThread(p, in.ID)
-	return struct{}{}, h.removeRow(ctx, p, key, "chat", in.ID)
+func (h *harness) deleteThread(ctx context.Context, p *principal, key contentKey, in *deleteThreadRequest) (any, error) {
+	var err error
+	if in.Revision != "" {
+		err = h.finishTransfer(ctx, p, key, in)
+	} else {
+		h.stopThread(p, in.ID)
+		err = h.removeRow(ctx, p, key, "chat", in.ID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := h.setPin(ctx, p, key, in.ID, false); err != nil {
+		slog.Warn("could not remove a deleted chat from favorites", "error", err)
+	}
+	return struct{}{}, nil
 }
 func forkTitle(title string) string {
 	title = cmp.Or(title, "Untitled")
@@ -328,7 +339,7 @@ func (h *harness) deleteAllThreads(ctx context.Context, p *principal, key conten
 		return nil, err
 	}
 	for _, id := range ids {
-		if _, err := h.deleteThread(ctx, p, key, &idRequest{ID: id}); err != nil {
+		if _, err := h.deleteThread(ctx, p, key, &deleteThreadRequest{idRequest: idRequest{ID: id}}); err != nil {
 			return nil, err
 		}
 	}

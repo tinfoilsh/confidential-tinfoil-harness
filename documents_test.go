@@ -532,6 +532,12 @@ func TestAChatTheProfileListsReadsAsPinned(t *testing.T) {
 	if len(page.Pinned) != 1 || page.Pinned[0].ID != "chat-2" {
 		t.Fatalf("favorites: %+v", page.Pinned)
 	}
+	if w := postRoute(h, "/v1/threads/delete", object{"key": key.base64(), "id": "chat-2"}, "alice"); w.Code != 200 {
+		t.Fatalf("delete favorite: %s", w.Body.String())
+	}
+	if pins := readProfile(rows.rows[rowMapKey(p, "profile", "profile")].Data).PinnedChatIDs; len(pins) != 0 {
+		t.Fatalf("deleted favorite still indexed: %v", pins)
+	}
 }
 
 // Sync moves a legacy image into its own storage under the same id and key,

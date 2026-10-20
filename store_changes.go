@@ -23,7 +23,11 @@ func (h *harness) storageChanges(ctx context.Context, p *principal) (any, error)
 				DeletedAt string `json:"deleted_at"`
 			} `json:"deletes"`
 		}
-		if err := h.syncAPI.call(ctx, p, "/v1/sync/list-status", object{"scope": scope, "direction": "desc", "limit": 1}, &status); err != nil {
+		direction := "desc"
+		if scope == "profile" {
+			direction = "asc"
+		}
+		if err := h.syncAPI.call(ctx, p, "/v1/sync/list-status", object{"scope": scope, "direction": direction, "limit": 1}, &status); err != nil {
 			return nil, err
 		}
 		tokens[scope] = hashHex(raw(status))

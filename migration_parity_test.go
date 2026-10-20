@@ -91,7 +91,19 @@ func TestMergingDeviceSettingsPreservesBothPromptLibraries(t *testing.T) {
 	if !reflect.DeepEqual(presetsByID(again), presets) {
 		t.Fatalf("a retry duplicated prompts: %v", again)
 	}
+	local["defaultPromptPresetId"] = nil
+	local["favoritePromptPresetIds"] = []string{}
+	cleared := profileOf(t, postRoute(h, "/v1/profile/merge", object{"key": key.base64(), "profile": local, "changedFields": []string{"defaultPromptPresetId", "favoritePromptPresetIds"}}, "alice"))
+	if len(arr(cleared["favoritePromptPresetIds"])) != 0 {
+		t.Fatal("the device's un-favorite was lost")
+	}
+	if str(cleared["defaultPromptPresetId"]) != "" {
+		t.Fatalf("clearing the device default was lost: %v", cleared["defaultPromptPresetId"])
+	}
 	stored, _ := rows.load(context.Background(), p, key, "profile", "profile")
+	if readProfile(stored.Data).DefaultPromptPresetID != nil {
+		t.Fatal("the cleared default was not stored")
+	}
 	if len(readProfile(stored.Data).CustomPromptPresets) != 3 {
 		t.Fatal("merge was not stored")
 	}
@@ -231,10 +243,14 @@ func TestRemoteChangesReadOnlyStorageMetadata(t *testing.T) {
 		}
 		var in object
 		json.NewDecoder(r.Body).Decode(&in)
-		if r.URL.Path != "/v1/sync/list-status" || in["limit"] != float64(1) || in["direction"] != "desc" {
+		scope := str(in["scope"])
+		direction := "desc"
+		if scope == "profile" {
+			direction = "asc"
+		}
+		if r.URL.Path != "/v1/sync/list-status" || in["limit"] != float64(1) || in["direction"] != direction {
 			t.Errorf("unexpected metadata request: %s %v", r.URL.Path, in)
 		}
-		scope := str(in["scope"])
 		json.NewEncoder(w).Encode(object{"updates": []object{{"id": scope, "etag": revisions[scope]}}})
 	}))
 	defer server.Close()
@@ -275,5 +291,45 @@ func TestRenamingAChatPreservesItsConversationActivity(t *testing.T) {
 	var summary threadSummary
 	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &summary) != nil || summary.Title != "Renamed" || summary.ActivityAt != "2026-03-01T00:00:00Z" || summary.UpdatedAt == nil || *summary.UpdatedAt == summary.ActivityAt {
 		t.Fatalf("rename activity: %d %s", w.Code, w.Body.String())
+	}
+}
+
+type countedRunGrants struct {
+	*memoryRows
+	grants atomic.Int32
+}
+
+func (s *countedRunGrants) authorizeRun(ctx context.Context, p *principal, key contentKey, id string, project *string) (storageGrant, error) {
+	s.grants.Add(1)
+	return s.memoryRows.authorizeRun(ctx, p, key, id, project)
+}
+
+func TestAQueuedTurnRefreshesStorageAccessBeforeStarting(t *testing.T) {
+	model, release := heldModel()
+	h, rows, key := testChatHarness(t, model)
+	t.Cleanup(release)
+	grants := &countedRunGrants{memoryRows: rows}
+	h.storeRows = grants
+	p := &principal{ID: "alice", JWT: "clerk-alice"}
+	in := sendInput(key)
+	first, err := h.acceptTurn(context.Background(), p, key, requestOf[turnRequest](in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitFrame(t, first.log, "TEXT_MESSAGE_CHUNK")
+	next := sendInput(key)
+	next["threadId"], next["content"] = in["threadId"], "Queued question"
+	queued, err := h.acceptTurn(context.Background(), p, key, requestOf[turnRequest](next))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.live.mu.Lock()
+	queued.principal.SyncExpires = nowUTC()
+	h.live.mu.Unlock()
+	release()
+	<-queued.finished
+	row, err := rows.load(context.Background(), p, key, "chat", str(in["threadId"]))
+	if err != nil || len(readThreadRow(row).Messages) != 4 || readThreadRow(row).Messages[2].Content != "Queued question" || readThreadRow(row).Messages[3].Content == "" || grants.grants.Load() != 3 {
+		t.Fatalf("queued reply did not renew and save: %v, grants=%d, row=%+v", err, grants.grants.Load(), row)
 	}
 }

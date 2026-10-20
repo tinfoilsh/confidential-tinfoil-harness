@@ -33,6 +33,7 @@ type principal struct {
 	ID           string
 	JWT          secret
 	SyncToken    secret
+	SyncExpires  time.Time
 	Anonymous    bool
 	AnonymousID  string
 	InferenceKey secret
@@ -437,7 +438,7 @@ func (a *authenticator) debit(p *principal, held rateLimit, spent usage) rateLim
 	defer a.mu.Unlock()
 	cred, ok := a.credentials[p.scope()]
 	if !ok {
-		return rateLimit{}
+		return held.debited(spent)
 	}
 	cred.Limit = cred.Limit.debited(spent)
 	a.credentials[p.scope()] = cred

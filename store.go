@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -96,6 +98,27 @@ func (h *harness) loadThread(ctx context.Context, p *principal, key contentKey, 
 		return nil, err
 	}
 	return readThreadRow(row), nil
+}
+
+func (h *harness) threadBatch(ctx context.Context, p *principal, key contentKey, ids []string) ([]*threadRow, error) {
+	rows, failed, err := h.storeRows.pull(ctx, p, key, "chat", ids)
+	if err != nil {
+		return nil, err
+	}
+	for _, err := range failed {
+		if asAPIError(err).HTTP != 409 {
+			return nil, err
+		}
+	}
+	threads := make([]*threadRow, len(rows))
+	for i := range rows {
+		threads[i] = readThreadRow(&rows[i])
+	}
+	return threads, nil
+}
+
+func (h *harness) removeThreadRevision(ctx context.Context, p *principal, key contentKey, id, revision string) error {
+	return h.storeRows.removeRevision(ctx, p, key, id, revision)
 }
 
 // threadPage is one page of a user's chats, newest first, or of a project's.
@@ -219,15 +242,24 @@ func (h *harness) mutateProfile(ctx context.Context, p *principal, key contentKe
 		if exists {
 			profile = readProfile(row.Data)
 		}
+		before := raw(profile)
 		if err := change(&profile); err != nil {
 			return err
+		}
+		if bytes.Equal(before, raw(profile)) {
+			return errProfileUnchanged
 		}
 		profile.UpdatedAt = timestamp()
 		row.Data = raw(profile)
 		return nil
 	})
+	if errors.Is(err, errProfileUnchanged) {
+		err = nil
+	}
 	return profile, err
 }
+
+var errProfileUnchanged = errors.New("profile unchanged")
 
 // Projects
 

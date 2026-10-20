@@ -36,13 +36,15 @@ type rowPage struct {
 	Unreadable []string
 }
 type rowStore interface {
-	authorizeRun(context.Context, *principal, contentKey, string, *string) (secret, error)
+	authorizeRun(context.Context, *principal, contentKey, string, *string) (storageGrant, error)
 	authorizeStorage(context.Context, *principal, contentKey, string, string) (secret, error)
 	load(context.Context, *principal, contentKey, string, string) (*storedRow, error)
+	pull(context.Context, *principal, contentKey, string, []string) ([]storedRow, map[string]error, error)
 	list(context.Context, *principal, contentKey, string, string, string, int) (rowPage, error)
 	push(context.Context, *principal, contentKey, string, *storedRow, string) (string, error)
 	// remove deletes a row whatever its revision; a missing row is gone.
 	remove(context.Context, *principal, contentKey, string, string) error
+	removeRevision(context.Context, *principal, contentKey, string, string) error
 	// ids lists every row of a scope, or a project's chats, unopened.
 	ids(context.Context, *principal, string, string) ([]string, error)
 }
@@ -76,7 +78,7 @@ func (s *syncClient) call(ctx context.Context, p *principal, path string, in, ou
 	return postJSONWithHeaders(ctx, s.Client, s.URL+path, string(cmp.Or(p.SyncToken, p.JWT)), map[string]string{"X-Sync-Protocol": syncProtocol}, in, out)
 }
 
-func (s *syncClient) authorizeRun(ctx context.Context, p *principal, key contentKey, threadID string, projectID *string) (secret, error) {
+func (s *syncClient) authorizeRun(ctx context.Context, p *principal, key contentKey, threadID string, projectID *string) (storageGrant, error) {
 	return s.storageCredential(ctx, p, "/v1/runs/authorize", struct {
 		ThreadID  string  `json:"thread_id"`
 		ProjectID *string `json:"project_id,omitempty"`
@@ -85,26 +87,29 @@ func (s *syncClient) authorizeRun(ctx context.Context, p *principal, key content
 }
 
 func (s *syncClient) authorizeStorage(ctx context.Context, p *principal, key contentKey, operation, projectID string) (secret, error) {
-	return s.storageCredential(ctx, p, "/v1/operations/authorize", struct {
+	grant, err := s.storageCredential(ctx, p, "/v1/operations/authorize", struct {
 		Operation string `json:"operation"`
 		Key       string `json:"key"`
 		ProjectID string `json:"project_id,omitempty"`
 	}{operation, key.base64(), projectID})
+	return grant.Token, err
 }
 
-func (s *syncClient) storageCredential(ctx context.Context, p *principal, path string, input any) (secret, error) {
-	var out struct {
-		Token     secret    `json:"token"`
-		ExpiresAt time.Time `json:"expires_at"`
-	}
+type storageGrant struct {
+	Token     secret    `json:"token"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+func (s *syncClient) storageCredential(ctx context.Context, p *principal, path string, input any) (storageGrant, error) {
+	var out storageGrant
 	err := s.call(ctx, p, path, input, &out)
 	if err != nil {
-		return "", err
+		return storageGrant{}, err
 	}
-	if out.Token == "" || !out.ExpiresAt.After(nowUTC().Add(runTimeout)) {
-		return "", apiErr(502, "UPSTREAM_REFUSED", "The storage service returned an invalid run credential")
+	if out.Token == "" || !out.ExpiresAt.After(nowUTC().Add(runTimeout+commitTimeout)) {
+		return storageGrant{}, apiErr(502, "UPSTREAM_REFUSED", "The storage service returned an invalid run credential")
 	}
-	return out.Token, nil
+	return out, nil
 }
 
 type pullItem struct {
@@ -272,4 +277,8 @@ func (s *syncClient) push(ctx context.Context, p *principal, key contentKey, sco
 // race, and treat a missing row as deleted.
 func (s *syncClient) remove(ctx context.Context, p *principal, key contentKey, scope, id string) error {
 	return s.call(ctx, p, "/v1/sync/delete", object{"scope": scope, "id": id, "key": key.base64(), "if_match": "", "idempotency_key": uuid.NewString()}, nil)
+}
+
+func (s *syncClient) removeRevision(ctx context.Context, p *principal, key contentKey, id, revision string) error {
+	return s.call(ctx, p, "/v1/sync/delete", object{"scope": "chat", "id": id, "key": key.base64(), "if_match": revision, "idempotency_key": uuid.NewString()}, nil)
 }

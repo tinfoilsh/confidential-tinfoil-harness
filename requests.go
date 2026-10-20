@@ -168,6 +168,11 @@ type idRequest struct {
 	ID string `json:"id"`
 }
 
+type deleteThreadRequest struct {
+	idRequest
+	Revision string `json:"revision,omitempty"`
+}
+
 func (in *idRequest) validate() error { return requireID("id", in.ID) }
 
 type threadRequest struct {

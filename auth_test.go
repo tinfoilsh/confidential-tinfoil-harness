@@ -259,6 +259,10 @@ func TestOnlyAMissingSubscriptionFallsBackToAFreeKey(t *testing.T) {
 	if limit := h.auth.debit(p, rateLimit{}, usage{Prompt: 100}); *limit.Remaining != 6 || limit.InputTokens.Used != 1100 || *credential.Limit.Remaining != 7 || credential.Limit.InputTokens.Used != 1000 {
 		t.Fatal("a run's spend was not counted once")
 	}
+	delete(h.auth.credentials, p.scope())
+	if limit := h.auth.debit(p, credential.Limit, usage{Prompt: 100}); limit.Remaining == nil || *limit.Remaining != 6 || limit.InputTokens.Used != 1100 {
+		t.Fatal("refreshing credentials erased the finishing run's quota")
+	}
 }
 
 func TestHourlyCapIsRememberedUntilItResets(t *testing.T) {

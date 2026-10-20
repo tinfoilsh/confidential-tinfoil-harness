@@ -17,7 +17,7 @@ import (
 func (h *harness) threadTranscript(ctx context.Context, p *principal, key contentKey, in *threadRequest) (any, error) {
 	h.live.mu.Lock()
 	live := h.live.threads[liveKey(p, in.ThreadID)]
-	running := live != nil && live.active != nil
+	running := live != nil && (live.active != nil || len(live.queue) > 0)
 	h.live.mu.Unlock()
 	if running {
 		return nil, apiErr(409, "RUN_IN_FLIGHT", "Wait for the reply to finish before moving this chat")
@@ -59,8 +59,31 @@ func (h *harness) threadTranscript(ctx context.Context, p *principal, key conten
 	}
 	row.checkWidgets()
 	return struct {
-		Thread deviceTranscript `json:"thread"`
-	}{deviceTranscript{Thread: row.Thread}}, nil
+		Thread   deviceTranscript `json:"thread"`
+		Revision string           `json:"revision"`
+	}{deviceTranscript{Thread: row.Thread}, row.etag}, nil
+}
+
+func (h *harness) finishTransfer(ctx context.Context, p *principal, key contentKey, in *deleteThreadRequest) error {
+	h.live.mu.Lock()
+	name := liveKey(p, in.ID)
+	s := h.live.threads[name]
+	if s != nil && (s.deleted || s.active != nil || len(s.queue) > 0) {
+		h.live.mu.Unlock()
+		return apiErr(409, "RUN_IN_FLIGHT", "Wait for the reply to finish before moving this chat")
+	}
+	if h.live.threads == nil {
+		h.live.threads = map[string]*threadSession{}
+	}
+	s = &threadSession{id: in.ID, owner: p.scope(), deleted: true}
+	h.live.threads[name] = s
+	h.live.mu.Unlock()
+	defer func() {
+		h.live.mu.Lock()
+		h.dropIdle(s)
+		h.live.mu.Unlock()
+	}()
+	return h.removeThreadRevision(ctx, p, key, in.ID, in.Revision)
 }
 
 // handleThreadImport stores a chat from the device as a cloud chat under the

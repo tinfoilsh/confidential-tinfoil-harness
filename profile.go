@@ -165,6 +165,9 @@ func (p *Profile) apply(patch Profile) {
 func mergeDeviceProfile(remote, local Profile, changed []string) Profile {
 	merged := local
 	merged.apply(remote)
+	if slices.Contains(changed, "defaultPromptPresetId") {
+		merged.DefaultPromptPresetID = local.DefaultPromptPresetID
+	}
 	to, from := reflect.ValueOf(&merged).Elem(), reflect.ValueOf(local)
 	for i := range from.NumField() {
 		name, _, _ := strings.Cut(from.Type().Field(i).Tag.Get("json"), ",")
@@ -193,6 +196,9 @@ func mergeDeviceProfile(remote, local Profile, changed []string) Profile {
 	}
 	merged.CustomPromptPresets = presets
 	merged.FavoritePromptPresetIDs = slices.Clone(remote.FavoritePromptPresetIDs)
+	if slices.Contains(changed, "favoritePromptPresetIds") {
+		merged.FavoritePromptPresetIDs = []string{}
+	}
 	for _, id := range local.FavoritePromptPresetIDs {
 		if replacement := remapped[id]; replacement != "" {
 			id = replacement

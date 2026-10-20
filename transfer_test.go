@@ -88,6 +88,47 @@ func TestTranscriptWaitsForALiveReply(t *testing.T) {
 	}
 }
 
+func TestTransferDeletionPreservesRepliesStartedAfterTheCopy(t *testing.T) {
+	model, release := heldModel()
+	h, rows, key := testChatHarness(t, model)
+	t.Cleanup(release)
+	in := sendInput(key)
+	id := str(in["threadId"])
+	storedThread(rows, "alice", id)
+	copy := postRoute(h, "/v1/threads/transcript", object{"key": key.base64(), "threadId": id}, "alice")
+	var copied struct {
+		Revision string `json:"revision"`
+	}
+	if copy.Code != 200 || json.Unmarshal(copy.Body.Bytes(), &copied) != nil || copied.Revision == "" {
+		t.Fatalf("copy: %s", copy.Body.String())
+	}
+	run, err := h.acceptTurn(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, key, requestOf[turnRequest](in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitFrame(t, run.log, "TEXT_MESSAGE_CHUNK")
+	deletion := object{"key": key.base64(), "id": id, "revision": copied.Revision}
+	if w := postRoute(h, "/v1/threads/delete", deletion, "alice"); w.Code != 409 || !strings.Contains(w.Body.String(), "RUN_IN_FLIGHT") {
+		t.Fatalf("active transfer: %d %s", w.Code, w.Body.String())
+	}
+	release()
+	<-run.finished
+	if w := postRoute(h, "/v1/threads/delete", deletion, "alice"); w.Code != 409 || !strings.Contains(w.Body.String(), "REVISION_CONFLICT") {
+		t.Fatalf("stale transfer: %d %s", w.Code, w.Body.String())
+	}
+	row, err := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", id)
+	if err != nil || len(readThreadRow(row).Messages) != 4 || readThreadRow(row).Messages[3].Content == "" {
+		t.Fatalf("reply lost: %v %+v", err, row)
+	}
+	deletion["revision"] = row.ETag
+	if w := postRoute(h, "/v1/threads/delete", deletion, "alice"); w.Code != 200 {
+		t.Fatalf("fresh transfer: %d %s", w.Code, w.Body.String())
+	}
+	if _, err := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", id); asAPIError(err).HTTP != 404 {
+		t.Fatal("transferred chat remains in the cloud")
+	}
+}
+
 func TestImportStoresTheDeviceChatUnderItsID(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	fake := newFakeSync(t, h)
