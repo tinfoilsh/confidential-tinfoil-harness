@@ -33,3 +33,6 @@ jobs:
 
       - name: Test
         run: go test -race -count=1 -shuffle=on ./...
+
+      - name: Build release image
+        run: docker build --platform linux/amd64 .
