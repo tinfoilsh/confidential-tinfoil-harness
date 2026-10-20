@@ -172,18 +172,26 @@ func TestAMessageIsReadAloudInOrderWithoutItsCode(t *testing.T) {
 		defer mu.Unlock()
 		return w.Body.String(), asked
 	}
-	audio, pieces := read(object{"key": key.base64(), "threadId": "chat-1", "messageId": "short"}, "alice")
-	if want := "Trip plan\nPack light, see the guide and . More at . Use rsync and compute x^2 steps."; len(pieces) != 1 || pieces[0] != want || audio != "<"+want+">" {
-		t.Fatalf("the reply was read as %q", pieces)
+	// Text a client selected reads by the same rules, without an account.
+	for _, tc := range []struct {
+		in   object
+		user string
+	}{{object{"key": key.base64(), "threadId": "chat-1", "messageId": "short"}, "alice"}, {object{"text": reply}, ""}} {
+		audio, pieces := read(tc.in, tc.user)
+		if want := "Trip plan\nPack light, see the guide and . More at . Use rsync and compute x^2 steps."; len(pieces) != 1 || pieces[0] != want || audio != "<"+want+">" {
+			t.Fatalf("%v was read as %q", tc.in, pieces)
+		}
 	}
-	audio, pieces = read(object{"key": key.base64(), "threadId": "chat-1", "messageId": "long"}, "alice")
-	slices.SortFunc(pieces, func(a, b string) int { return cmp.Compare(leadingNumber(a), leadingNumber(b)) })
-	inOrder := ""
-	for _, piece := range pieces {
-		inOrder += "<" + piece + ">"
-	}
-	if len(pieces) < 2 || strings.Join(pieces, " ") != strings.TrimSpace(long.String()) || audio != inOrder || !overlapped.Load() {
-		t.Fatalf("the long reply was asked as %q (overlapping %v) and streamed as %q", pieces, overlapped.Load(), audio)
+	for _, in := range []object{{"key": key.base64(), "threadId": "chat-1", "messageId": "long"}, {"text": long.String()}} {
+		audio, pieces := read(in, "alice")
+		slices.SortFunc(pieces, func(a, b string) int { return cmp.Compare(leadingNumber(a), leadingNumber(b)) })
+		inOrder := ""
+		for _, piece := range pieces {
+			inOrder += "<" + piece + ">"
+		}
+		if len(pieces) < 2 || strings.Join(pieces, " ") != strings.TrimSpace(long.String()) || audio != inOrder || !overlapped.Load() {
+			t.Fatalf("%v was asked as %q (overlapping %v) and streamed as %q", in["messageId"], pieces, overlapped.Load(), audio)
+		}
 	}
 	// A device chat's message reads the same, without an account.
 	if device, _ := read(object{"local": true, "threadId": "chat-1", "thread": thread, "messageId": "short"}, ""); !strings.HasPrefix(device, "<Trip plan\n") {

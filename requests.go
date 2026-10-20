@@ -378,7 +378,7 @@ type faviconRequest struct {
 
 // speechRequest names a message to read aloud: one of a stored chat, named
 // with the content key, or of a device chat its client sends. Text a client
-// selected is read as it is.
+// selected, or a shared chat's message, is sent as it is.
 type speechRequest struct {
 	threadSource
 	Key       string  `json:"key"`

@@ -6,7 +6,6 @@ import (
 	"io"
 	"mime"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -72,8 +71,8 @@ func (h *harness) handleSpeech(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// speechText is what a request reads aloud: a message's markdown as it is
-// spoken, or text a client selected as it is.
+// speechText is what a request reads aloud: a message's markdown, or text
+// a client selected, as it is spoken.
 func (h *harness) speechText(ctx context.Context, p *principal, in *speechRequest) (string, error) {
 	source := valueOr(in.Text, "")
 	if in.MessageID != "" {
@@ -103,9 +102,6 @@ func (h *harness) speechText(ctx context.Context, p *principal, in *speechReques
 	}
 	if utf8.RuneCountInString(source) > maxSpeechText {
 		return "", apiErr(413, "PAYLOAD_TOO_LARGE", "The text is too long to read aloud")
-	}
-	if in.MessageID == "" {
-		return strings.TrimSpace(source), nil
 	}
 	return speakableText(source), nil
 }
