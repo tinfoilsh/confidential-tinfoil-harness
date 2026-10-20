@@ -161,8 +161,11 @@ func chatData(f *zip.File) (string, []byte, error) {
 	return head.ID, data, nil
 }
 
-// chat reads one of the backup's chats with its images.
-func (b *nativeBackup) chat(f *zip.File) (string, Thread, error) {
+// chat reads one of the backup's chats with its images, leaving out each
+// that is not a supported image. It counts those a page or an old message
+// shows, which leave nothing behind; an attachment left without its image
+// is counted when the chat is prepared.
+func (b *nativeBackup) chat(f *zip.File, warnings *importWarnings) (string, Thread, error) {
 	chatID, data, err := chatData(f)
 	if err != nil {
 		return "", Thread{}, err
@@ -176,6 +179,8 @@ func (b *nativeBackup) chat(f *zip.File) (string, Thread, error) {
 		meta := b.images[id]
 		if kind := http.DetectContentType(bytes); slices.Contains(sniffedImages, kind) {
 			images[id] = heldImage{FileName: meta.FileName, MimeType: kind, Description: meta.Description, Size: int64(len(bytes)), Base64: base64.StdEncoding.EncodeToString(bytes)}
+		} else if meta.Page != nil || meta.LegacyIndex != nil {
+			warnings.imagesLeftOut++
 		}
 	}
 	return chatID, readBackupThread(chatID, data, images), nil
@@ -211,7 +216,7 @@ func (j *importRun) native(ctx context.Context, b *nativeBackup) error {
 		j.warnings.projectsSkipped += b.manifest.Counts.Projects
 	}
 	for _, f := range device {
-		id, t, err := b.chat(f)
+		id, t, err := b.chat(f, &j.warnings)
 		if err != nil {
 			return err
 		}
@@ -259,7 +264,7 @@ func (j *importRun) nativeCloud(b *nativeBackup) error {
 		}
 	}
 	for _, f := range b.listed("cloud_chats") {
-		id, t, err := b.chat(f)
+		id, t, err := b.chat(f, &j.warnings)
 		if err != nil {
 			return err
 		}

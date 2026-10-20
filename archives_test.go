@@ -207,6 +207,24 @@ func withEntries(t *testing.T, archive []byte, replaced map[string][]byte) []byt
 	return out.Bytes()
 }
 
+// withBackupEntries is a native backup with the contents of some of its
+// entries replaced, and its manifest listing them as they are.
+func withBackupEntries(t *testing.T, archive []byte, replaced map[string][]byte) []byte {
+	t.Helper()
+	files, _ := unzipped(t, archive)
+	var manifest backupManifest
+	if err := json.Unmarshal(files[manifestPath], &manifest); err != nil {
+		t.Fatal(err)
+	}
+	for i, file := range manifest.Files {
+		if data, ok := replaced[file.Path]; ok {
+			manifest.Files[i].SHA256, manifest.Files[i].SizeBytes = hashHex(data), int64(len(data))
+		}
+	}
+	replaced[manifestPath] = raw(manifest)
+	return withEntries(t, archive, replaced)
+}
+
 // A backup holds the cloud and the device: export it, import it elsewhere,
 // and the cloud holds the same projects and chats while the device gets its
 // chats back with the copies uploads make of their images, and the
@@ -344,16 +362,7 @@ func TestARestoreReadsDeviceChatsBeforeStoringTheCloud(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("export: HTTP %d %s", w.Code, w.Body.String())
 	}
-	files, _ := unzipped(t, w.Body.Bytes())
-	local, misfiled := backupEntityPath("local_chats", "local-chat"), raw(object{"id": "another-chat", "title": "On my device"})
-	var manifest backupManifest
-	json.Unmarshal(files[manifestPath], &manifest)
-	for i, file := range manifest.Files {
-		if file.Path == local {
-			manifest.Files[i].SHA256, manifest.Files[i].SizeBytes = hashHex(misfiled), int64(len(misfiled))
-		}
-	}
-	archive := withEntries(t, w.Body.Bytes(), map[string][]byte{local: misfiled, manifestPath: raw(manifest)})
+	archive := withBackupEntries(t, w.Body.Bytes(), map[string][]byte{backupEntityPath("local_chats", "local-chat"): raw(object{"id": "another-chat", "title": "On my device"})})
 
 	restored, restoredRows, _ := testChatHarness(t, nil)
 	newFakeSync(t, restored)
@@ -363,6 +372,31 @@ func TestARestoreReadsDeviceChatsBeforeStoringTheCloud(t *testing.T) {
 	}
 	if stored := storedChats(restoredRows, "alice"); len(stored) != 0 {
 		t.Fatalf("a failed restore stored the cloud's chats: %v", stored)
+	}
+}
+
+// A restore counts each image it leaves out as not a supported image once,
+// whether an attachment, a scanned page or an old message showed it.
+func TestRestoresCountTheImagesTheyLeaveOut(t *testing.T) {
+	h, _, _ := testChatHarness(t, nil)
+	notImage := base64.StdEncoding.EncodeToString([]byte("plain text, not an image"))
+	device := object{"id": "local-chat", "title": "Pictures", "messages": []any{object{"id": "m", "role": "user", "content": "Look", "attachments": []any{
+		object{"id": "att_photo", "kind": "image", "fileName": "photo.png", "base64": notImage},
+		object{"id": "att_scan", "kind": "document", "fileName": "scan.pdf", "textContent": "Scanned", "pages": []any{object{"page": 1, "text": "One", "image": notImage}}},
+	}}}}
+	w := archiveRoute(h, "/v1/export", "", optionsPart(object{"format": "native"}), threadPart(device))
+	if w.Code != 200 {
+		t.Fatalf("export: HTTP %d %s", w.Code, w.Body.String())
+	}
+	result := importOf(t, h, "", w.Body.Bytes(), "tinfoil-backup.zip", object{"target": "device"})
+	if want := []string{"2 images were left out: the archive does not hold them, or they are not supported images."}; !reflect.DeepEqual(result.done.Warnings, want) {
+		t.Fatalf("warnings: %v", result.done.Warnings)
+	}
+
+	old := withBackupEntries(t, fixture(t, "web-backup-v1.zip"), map[string][]byte{backupImagePath("legacy:local-1:0:0", ".bin"): []byte("plain text, not an image")})
+	result = importOf(t, h, "", old, "backup.zip", object{"target": "device"})
+	if len(result.done.Warnings) != 3 || !strings.HasPrefix(result.done.Warnings[0], "1 images were left out") {
+		t.Fatalf("warnings of an old backup: %v", result.done.Warnings)
 	}
 }
 
