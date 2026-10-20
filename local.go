@@ -82,13 +82,17 @@ func localProfile(profile object) object {
 }
 
 // deviceThread is a local thread as its client stores it after a run. Image
-// bytes are left out: the client holds them and puts them back by id.
+// bytes and document page images are left out, so a scanned document cannot
+// fill the run's log: the client holds them and puts them back by id.
 func deviceThread(row *storedRow) object {
 	thread := clone(normalizeThread(row))
 	for _, message := range arr(thread["messages"]) {
 		for _, a := range arr(obj(message)["attachments"]) {
 			delete(obj(a), "base64")
 			delete(obj(a), "inferenceMimeType")
+			for _, page := range arr(obj(a)["pages"]) {
+				obj(page)["image"] = ""
+			}
 		}
 	}
 	return thread

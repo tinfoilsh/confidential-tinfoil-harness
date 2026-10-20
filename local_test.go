@@ -252,7 +252,8 @@ func TestADeviceChatRunReturnsItsUpdatedThread(t *testing.T) {
 	in := localInput("", object{"messages": []any{}})
 	id := str(in["threadId"])
 	in["content"] = "what is this?"
-	in["attachments"] = []any{object{"id": "att_photo", "kind": "image", "fileName": "photo.png", "mimeType": "image/png", "size": 9, "thumbnail": "dGh1bWI=", "description": "a cat", "base64": base64.StdEncoding.EncodeToString([]byte("png bytes"))}}
+	in["attachments"] = []any{object{"id": "att_photo", "kind": "image", "fileName": "photo.png", "mimeType": "image/png", "size": 9, "thumbnail": "dGh1bWI=", "description": "a cat", "base64": base64.StdEncoding.EncodeToString([]byte("png bytes"))},
+		object{"id": "att_scan", "kind": "document", "fileName": "scan.pdf", "mimeType": "application/pdf", "size": 3, "pages": []any{object{"page": 1, "text": "page text", "image": "cGFnZQ==", "is_scanned": true}}}}
 	thread := endedThread(t, h, in, "RUN_FINISHED")
 	messages := arr(thread["messages"])
 	if thread["id"] != id || thread["title"] != "Device title" || thread["titleState"] != "generated" || thread["lastRequestId"] != in["clientRequestId"] || thread["activeRun"] != nil || len(messages) != 2 {
@@ -262,6 +263,10 @@ func TestADeviceChatRunReturnsItsUpdatedThread(t *testing.T) {
 	photo := obj(arr(question["attachments"])[0])
 	if question["id"] != in["clientRequestId"] || question["content"] != "what is this?" || photo["id"] != "att_photo" || photo["description"] != "a cat" || photo["thumbnailBase64"] != "dGh1bWI=" || photo["base64"] != nil {
 		t.Fatalf("the question was returned as %v", question)
+	}
+	// The client puts page images back by attachment id and page.
+	if page := obj(arr(obj(arr(question["attachments"])[1])["pages"])[0]); page["image"] != "" || page["text"] != "page text" {
+		t.Fatalf("the scanned page was returned as %v", page)
 	}
 	if reply["role"] != "assistant" || reply["content"] != "an answer" || reply["model"] != "kimi-k3" || reply["isError"] != false {
 		t.Fatalf("the reply was returned as %v", reply)
