@@ -97,9 +97,6 @@ func asAPIError(err error) *apiError {
 	if errors.As(err, &a) {
 		return a
 	}
-	if errors.Is(err, errTooLong) {
-		return apiErr(413, "RUN_LOG_FULL", "The run log is full")
-	}
 	var refusal *refusal
 	if errors.As(err, &refusal) {
 		e := downstreamError(refusal.status, []byte(refusal.detail))

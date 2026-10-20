@@ -16,8 +16,9 @@ const (
 )
 
 var (
-	errDone    = errors.New("run finished")
-	errTooLong = errors.New("run outgrew the log this harness can hold for it")
+	errDone = errors.New("run finished")
+	// errTooLong ends a run that outgrew the log this harness can hold for it.
+	errTooLong = apiErr(413, "RUN_LOG_FULL", "The run log is full")
 )
 
 // rescued logs a panic and turns it into an error worth surfacing. Without one
