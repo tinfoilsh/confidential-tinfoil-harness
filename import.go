@@ -540,7 +540,42 @@ func (j *importRun) toDevice(sourceID string, t *Thread) error {
 	created, _ := time.Parse(time.RFC3339Nano, t.CreatedAt)
 	t.ID = fmt.Sprintf("%013d_%s", max(0, maxReverseMillis-created.UnixMilli()), uuid.NewSHA1(importNamespace, []byte(j.p.scope()+"\x00"+j.source+"\x00"+sourceID)))
 	t.ProjectID, t.Pinned = nil, false
-	return j.out.thread(t)
+	return j.out.thread(withOriginals(t))
+}
+
+// importThread is a device chat as its line carries it: each image as the
+// copy and thumbnail an upload makes, with the archive's original beside it
+// for its client to keep apart from the thread.
+type importThread struct {
+	Thread
+	Messages []importMessage `json:"messages"`
+}
+
+type importMessage struct {
+	Message
+	Attachments []importAttachment `json:"attachments,omitzero"`
+}
+
+type importAttachment struct {
+	Attachment
+	OriginalBase64 string `json:"originalBase64,omitempty"`
+}
+
+func withOriginals(t *Thread) *importThread {
+	line := &importThread{Thread: *t, Messages: make([]importMessage, len(t.Messages))}
+	for i, m := range t.Messages {
+		message := importMessage{Message: m}
+		for _, a := range m.Attachments {
+			attachment := importAttachment{Attachment: a}
+			if a.isImage() {
+				attachment.OriginalBase64 = a.Base64
+				modelImageCopy(&attachment.Attachment)
+			}
+			message.Attachments = append(message.Attachments, attachment)
+		}
+		line.Messages[i] = message
+	}
+	return line
 }
 
 func (j *importRun) toCloud(sourceID, projectSourceID string, t *Thread) error {
@@ -599,9 +634,9 @@ type importStream struct {
 }
 
 type importLine struct {
-	Thread *Thread     `json:"thread,omitempty"`
-	Done   *importDone `json:"done,omitempty"`
-	Error  *apiError   `json:"error,omitempty"`
+	Thread *importThread `json:"thread,omitempty"`
+	Done   *importDone   `json:"done,omitempty"`
+	Error  *apiError     `json:"error,omitempty"`
 }
 
 type importDone struct {
@@ -620,7 +655,7 @@ func (s *importStream) start() {
 	s.enc = json.NewEncoder(s.w)
 }
 
-func (s *importStream) thread(t *Thread) error {
+func (s *importStream) thread(t *importThread) error {
 	s.start()
 	if err := s.enc.Encode(importLine{Thread: t}); err != nil {
 		return err

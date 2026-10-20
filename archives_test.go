@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/png"
 	"io"
@@ -81,7 +82,10 @@ func unzipped(t *testing.T, data []byte) (map[string][]byte, []string) {
 
 type imported struct {
 	threads []Thread
-	done    *importDone
+	// originals are the original bytes of the threads' images by attachment
+	// id, which a client keeps apart from its threads.
+	originals map[string][]byte
+	done      *importDone
 }
 
 // importOf posts an archive to /v1/import and reads its lines.
@@ -91,7 +95,7 @@ func importOf(t *testing.T, h *harness, user string, archive []byte, name string
 	if w.Code != 200 || w.Header().Get("Content-Type") != "application/x-ndjson" {
 		t.Fatalf("import: HTTP %d: %s", w.Code, w.Body.String())
 	}
-	var out imported
+	out := imported{originals: map[string][]byte{}}
 	scanner := bufio.NewScanner(w.Body)
 	scanner.Buffer(nil, 64<<20)
 	for scanner.Scan() {
@@ -99,12 +103,22 @@ func importOf(t *testing.T, h *harness, user string, archive []byte, name string
 			Thread *Thread     `json:"thread"`
 			Done   *importDone `json:"done"`
 		}
-		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil || out.done != nil {
+		var originals struct {
+			Thread *importThread `json:"thread"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil || json.Unmarshal(scanner.Bytes(), &originals) != nil || out.done != nil {
 			t.Fatalf("a line after the last, or not JSON: %s", scanner.Bytes())
 		}
 		switch {
 		case line.Thread != nil:
 			out.threads = append(out.threads, *line.Thread)
+			for _, m := range originals.Thread.Messages {
+				for _, a := range m.Attachments {
+					if a.OriginalBase64 != "" {
+						out.originals[a.ID] = base64Bytes(t, a.OriginalBase64)
+					}
+				}
+			}
 		case line.Done != nil:
 			out.done = line.Done
 		default:
@@ -161,9 +175,38 @@ func pngFixture(t *testing.T, w, h int, shade uint8) []byte {
 	return b.Bytes()
 }
 
+// decodedImage is the format and size of an image given as base64.
+func decodedImage(encoded string) string {
+	data, _ := base64.StdEncoding.DecodeString(encoded)
+	config, format, err := image.DecodeConfig(bytes.NewReader(data))
+	return fmt.Sprintf("%s %dx%d %v", format, config.Width, config.Height, err)
+}
+
+// withEntries is an archive with the contents of some of its entries
+// replaced.
+func withEntries(t *testing.T, archive []byte, replaced map[string][]byte) []byte {
+	t.Helper()
+	files, names := unzipped(t, archive)
+	for name := range replaced {
+		if _, ok := files[name]; !ok {
+			t.Fatalf("the archive holds no %s", name)
+		}
+		files[name] = replaced[name]
+	}
+	var out bytes.Buffer
+	zw := zip.NewWriter(&out)
+	for _, name := range names {
+		w, _ := zw.Create(name)
+		w.Write(files[name])
+	}
+	zw.Close()
+	return out.Bytes()
+}
+
 // A backup holds the cloud and the device: export it, import it elsewhere,
 // and the cloud holds the same projects and chats while the device gets its
-// chats back with the originals of their images.
+// chats back with the copies uploads make of their images, and the
+// originals beside them.
 func TestNativeBackupRoundTrips(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	fake := newFakeSync(t, h)
@@ -185,7 +228,7 @@ func TestNativeBackupRoundTrips(t *testing.T) {
 	}}
 	rows.rows[rowMapKey(alice, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: raw(cloudChat), project: &project, projectSet: true}
 
-	modelCopy, original, page := pngFixture(t, 4, 4, 90), pngFixture(t, 40, 30, 90), pngFixture(t, 3, 9, 200)
+	modelCopy, original, page := pngFixture(t, 4, 4, 90), pngFixture(t, 2048, 1024, 90), pngFixture(t, 3, 9, 200)
 	device := object{"id": "9999990000000_00000000-0000-4000-8000-00000000000d", "title": "On my device", "titleState": "generated", "createdAt": "2026-02-01T00:00:00Z", "updatedAt": "2026-02-01T00:00:00Z", "model": "auto", "webSearchEnabled": false, "messages": []any{
 		object{"id": "d1", "role": "user", "createdAt": "2026-02-01T00:00:00Z", "content": "Look", "attachments": []any{
 			object{"id": "att_photo", "kind": "image", "fileName": "photo.png", "mimeType": "image/jpeg", "size": 900, "thumbnail": "dGh1bWI=", "base64": base64.StdEncoding.EncodeToString(modelCopy)},
@@ -225,7 +268,7 @@ func TestNativeBackupRoundTrips(t *testing.T) {
 	if !rowIDPattern.MatchString(thread.ID) || thread.ID == device["id"] || thread.Title != "On my device" || thread.WebSearchEnabled || len(thread.Messages) != 2 || thread.Messages[1].Content != "Seen" {
 		t.Fatalf("device chat: %+v", thread)
 	}
-	if !bytes.Equal(base64Bytes(t, photo.Base64), original) || photo.MimeType != "image/png" || photo.Thumbnail != "dGh1bWI=" || !bytes.Equal(base64Bytes(t, scan.Pages[0].Image), page) || scan.TextContent != "Scanned" {
+	if decodedImage(photo.Base64) != "jpeg 1536x768 <nil>" || !bytes.Equal(result.originals[photo.ID], original) || photo.MimeType != "image/png" || !bytes.Equal(base64Bytes(t, scan.Pages[0].Image), page) || scan.TextContent != "Scanned" {
 		t.Fatalf("device chat lost its images: %+v %+v", photo, scan)
 	}
 	again := importOf(t, restored, "alice", w.Body.Bytes(), "tinfoil-backup.zip", object{"target": "device"})
@@ -279,7 +322,7 @@ func TestWebAppBackupsRestore(t *testing.T) {
 				t.Fatalf("device chats: %s, %s", legacy.Title, scanned.Title)
 			}
 			pictures := legacy.Messages[0].Attachments
-			if len(pictures) != 2 || pictures[0].TextContent != "Legacy document text" || pictures[1].Kind != "image" || !strings.HasPrefix(string(base64Bytes(t, pictures[1].Base64)), "\x89PNG") {
+			if len(pictures) != 2 || pictures[0].TextContent != "Legacy document text" || pictures[1].Kind != "image" || !strings.HasPrefix(string(result.originals[pictures[1].ID]), "\x89PNG") {
 				t.Fatalf("%s: the legacy picture was lost: %+v", green, pictures)
 			}
 			reply := legacy.Messages[1].Timeline
@@ -322,8 +365,9 @@ func TestWebAppBackupsRestore(t *testing.T) {
 }
 
 // sameForm is a thread as both destinations keep it: the cloud stores an
-// image under a blob and names it anew, a device keeps its bytes.
-func sameForm(t *testing.T, fake *fakeSync, thread Thread) string {
+// image under a blob and names it anew, a device keeps its original apart
+// from the copy and thumbnail an upload makes.
+func sameForm(t *testing.T, fake *fakeSync, originals map[string][]byte, thread Thread) string {
 	t.Helper()
 	thread = thread.clone()
 	for i := range thread.Messages {
@@ -331,9 +375,11 @@ func sameForm(t *testing.T, fake *fakeSync, thread Thread) string {
 			a := &thread.Messages[i].Attachments[j]
 			if a.EncryptionKey != "" {
 				a.Base64 = base64.StdEncoding.EncodeToString(blobOf(t, fake, *a))
+			} else if original, ok := originals[a.ID]; ok {
+				a.Base64 = base64.StdEncoding.EncodeToString(original)
 			}
 			if a.isImage() {
-				a.ID = ""
+				a.ID, a.Thumbnail = "", ""
 			}
 			a.EncryptionKey = ""
 		}
@@ -346,42 +392,49 @@ func sameForm(t *testing.T, fake *fakeSync, thread Thread) string {
 // the device.
 func TestExportsImportAlikeToCloudAndDevice(t *testing.T) {
 	documentLeftOut := []string{"1 documents were left out: the archive holds no text for them."}
+	large, broken := pngFixture(t, 2048, 1024, 120), []byte("\x89PNG\r\n\x1a\nnot an image")
 	for _, tc := range []struct {
 		fixture           string
+		images            map[string][]byte
 		chats             int
 		onDevice, inCloud []string
-		check             func(t *testing.T, threads map[string]Thread)
+		check             func(t *testing.T, threads map[string]Thread, originals map[string][]byte)
 	}{
-		{"chatgpt-export.zip", 2, documentLeftOut, documentLeftOut, func(t *testing.T, threads map[string]Thread) {
+		{"chatgpt-export.zip", map[string][]byte{"file_00000000abc-cat.png": large}, 2, documentLeftOut, documentLeftOut, func(t *testing.T, threads map[string]Thread, originals map[string][]byte) {
 			branch := threads["Branching"]
 			if len(branch.Messages) != 2 || branch.Messages[1].Content != "The second one." || branch.Messages[1].Timeline[0].Content != "Compare the two sizes" {
 				t.Fatalf("not the current branch: %s", raw(branch.Messages))
 			}
 			photo := threads["Photo question"].Messages[0]
-			if photo.Content != "What is in this picture?" || len(photo.Attachments) != 1 || photo.Attachments[0].FileName != "cat.png" || !strings.HasPrefix(string(base64Bytes(t, photo.Attachments[0].Base64)), "\x89PNG") {
+			if photo.Content != "What is in this picture?" || len(photo.Attachments) != 1 || photo.Attachments[0].FileName != "cat.png" {
 				t.Fatalf("the photo was lost: %s", raw(photo))
 			}
+			if cat := photo.Attachments[0]; decodedImage(cat.Base64) != "jpeg 1536x768 <nil>" || !bytes.Equal(originals[cat.ID], large) || cat.MimeType != "image/png" {
+				t.Fatalf("the photo came as %s, its original as %d bytes", decodedImage(cat.Base64), len(originals[cat.ID]))
+			}
 		}},
-		{"claude-export.zip", 1, []string{"1 projects were not imported: projects are kept in the cloud."}, []string{}, func(t *testing.T, threads map[string]Thread) {
+		{"claude-export.zip", nil, 1, []string{"1 projects were not imported: projects are kept in the cloud."}, []string{}, func(t *testing.T, threads map[string]Thread, _ map[string][]byte) {
 			messages := threads["Reading a spec"].Messages
 			if len(messages) != 2 || messages[0].Attachments[0].TextContent != "The contents" || messages[0].Attachments[1].FileName != "diagram.png" || messages[1].Timeline[0].Content != "Reading carefully" {
 				t.Fatalf("claude chat: %s", raw(messages))
 			}
 		}},
-		{"tinfoil-export.zip", 2, []string{}, []string{}, func(t *testing.T, threads map[string]Thread) {
+		{"tinfoil-export.zip", map[string][]byte{"attachments/tf-sketch/sketch.png": broken}, 2, []string{}, []string{}, func(t *testing.T, threads map[string]Thread, originals map[string][]byte) {
 			trip := threads["Trip plans"].Messages
 			if len(trip) != 2 || trip[0].Attachments[0].ID != "tf-photo" || trip[0].Attachments[1].TextContent != "# Packing list" || trip[1].Timeline[0].Content != "It is sunny" || trip[0].CreatedAt != "2026-04-01T08:00:00Z" {
 				t.Fatalf("tinfoil chat: %s", raw(trip))
 			}
-			if len(threads["Sketches"].Messages[0].Attachments) != 1 {
-				t.Fatal("the sketch was lost")
+			// An image that does not decode has no copy for models, and
+			// keeps its original.
+			if sketches := threads["Sketches"].Messages[0].Attachments; len(sketches) != 1 || sketches[0].Base64 != "" || !bytes.Equal(originals[sketches[0].ID], broken) {
+				t.Fatalf("the sketch was lost: %+v", sketches)
 			}
 		}},
 	} {
 		t.Run(tc.fixture, func(t *testing.T) {
 			h, rows, key := testChatHarness(t, nil)
 			fake := newFakeSync(t, h)
-			archive := fixture(t, tc.fixture)
+			archive := withEntries(t, fixture(t, tc.fixture), tc.images)
 			onDevice := importOf(t, h, "alice", archive, tc.fixture, object{"target": "device"})
 			inCloud := importOf(t, h, "alice", archive, tc.fixture, object{"target": "cloud", "key": key.base64()})
 			if len(onDevice.threads) != tc.chats || inCloud.threads != nil || onDevice.done.JobID != nil || inCloud.done.JobID == nil || !reflect.DeepEqual(onDevice.done.Warnings, tc.onDevice) || !reflect.DeepEqual(inCloud.done.Warnings, tc.inCloud) {
@@ -392,14 +445,14 @@ func TestExportsImportAlikeToCloudAndDevice(t *testing.T) {
 			for _, thread := range onDevice.threads {
 				byTitle[thread.Title] = thread
 				stored, ok := cloud[thread.Title]
-				if !ok || !rowIDPattern.MatchString(thread.ID) || sameForm(t, fake, stored) != sameForm(t, fake, thread) {
-					t.Fatalf("the cloud and the device differ:\n%s\n%s", sameForm(t, fake, stored), sameForm(t, fake, thread))
+				if !ok || !rowIDPattern.MatchString(thread.ID) || sameForm(t, fake, nil, stored) != sameForm(t, fake, onDevice.originals, thread) {
+					t.Fatalf("the cloud and the device differ:\n%s\n%s", sameForm(t, fake, nil, stored), sameForm(t, fake, onDevice.originals, thread))
 				}
 			}
 			if len(cloud) != tc.chats {
 				t.Fatalf("cloud chats: %d", len(cloud))
 			}
-			tc.check(t, byTitle)
+			tc.check(t, byTitle, onDevice.originals)
 		})
 	}
 }

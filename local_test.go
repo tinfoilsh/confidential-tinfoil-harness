@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"image"
 	"image/png"
 	"io"
@@ -402,12 +401,7 @@ func TestOldDeviceChatsUpgradeIntoThreads(t *testing.T) {
 		t.Fatalf("the large image holds only %d bytes", original.Len())
 	}
 	got := obj(arr(obj(arr(obj(upgraded(t, h, "alice", large)[0])["messages"])[0])["attachments"])[0])
-	dimensions := func(field string) string {
-		data, _ := base64.StdEncoding.DecodeString(str(got[field]))
-		config, format, err := image.DecodeConfig(bytes.NewReader(data))
-		return fmt.Sprintf("%s %dx%d %v", format, config.Width, config.Height, err)
-	}
-	if resized, thumbnail := dimensions("base64"), dimensions("thumbnail"); resized != "jpeg 1536x768 <nil>" || thumbnail != "jpeg 256x128 <nil>" {
+	if resized, thumbnail := decodedImage(str(got["base64"])), decodedImage(str(got["thumbnail"])); resized != "jpeg 1536x768 <nil>" || thumbnail != "jpeg 256x128 <nil>" {
 		t.Fatalf("the large image came back as %s with a thumbnail of %s", resized, thumbnail)
 	}
 }
