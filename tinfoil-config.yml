@@ -1,5 +1,5 @@
 # Release automation replaces the image digest before measuring this workload.
-cvm-version: 0.11.0
+cvm-version: 0.14.15
 cpus: 2
 memory: 65536
 
