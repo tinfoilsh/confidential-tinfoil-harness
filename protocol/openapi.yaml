@@ -144,6 +144,7 @@ paths:
       operationId: follow
       summary: Rejoin a live run
       tags: [runs]
+      parameters: [{$ref: "#/components/parameters/HarnessInstance"}]
       description: Streams a live run again, for a client that lost its stream, from after the last event it applied.
       requestBody:
         required: true
@@ -159,6 +160,7 @@ paths:
       operationId: cancel
       summary: Stop a run
       tags: [runs]
+      parameters: [{$ref: "#/components/parameters/HarnessInstance"}]
       requestBody:
         required: true
         content:
@@ -173,6 +175,7 @@ paths:
       operationId: queueSend
       summary: Send a queued turn now
       tags: [runs]
+      parameters: [{$ref: "#/components/parameters/HarnessInstance"}]
       description: Starts a turn queued behind the running reply now, stopping that reply.
       requestBody:
         required: true
@@ -188,6 +191,7 @@ paths:
       operationId: queueRemove
       summary: Remove a queued turn
       tags: [runs]
+      parameters: [{$ref: "#/components/parameters/HarnessInstance"}]
       requestBody:
         required: true
         content:
@@ -1226,6 +1230,13 @@ paths:
         default: {$ref: "#/components/responses/Error"}
 
 components:
+  parameters:
+    HarnessInstance:
+      name: X-Tinfoil-Harness-Instance
+      in: header
+      description: The instance a run's RUN_STARTED named. A deployment of several harnesses routes a request about the run to it by this header, which says nothing about the caller.
+      schema: {type: string}
+
   securitySchemes:
     identity:
       type: http
@@ -1694,12 +1705,13 @@ components:
     RunStartedEvent:
       description: Opens a run. A continuation names the reply it streams into.
       type: object
-      required: [type, threadId, runId]
+      required: [type, threadId, runId, instance]
       properties:
         type: {const: RUN_STARTED}
         timestamp: {$ref: "#/components/schemas/Timestamp"}
         threadId: {type: string}
         runId: {type: string}
+        instance: {type: string, description: "The instance holding the run, which requests about the run send as X-Tinfoil-Harness-Instance."}
         messageId: {type: string}
 
     MessagesSnapshotEvent:

@@ -258,6 +258,20 @@ func TestAFinishingRunsWritesBlockNothing(t *testing.T) {
 	awaitFrame(t, run.log, "RUN_FINISHED")
 }
 
+// A run names the instance holding it, the same for every run of the
+// process, so requests about any of its runs can be routed back to it.
+func TestARunNamesTheInstanceHoldingIt(t *testing.T) {
+	h, _, key := testChatHarness(t, nil)
+	var named []string
+	for range 2 {
+		events := eventsIn(t, postRoute(h, "/v1/threads/turn", sendInput(key), "alice"))
+		named = append(named, events[0].Instance)
+	}
+	if named[0] == "" || named[0] != named[1] || named[0] != instanceID {
+		t.Fatalf("runs named instances %q, not this one, %q", named, instanceID)
+	}
+}
+
 // Re-attaching to a live run resumes after the last frame the client applied,
 // or replays it from its first frame when the client names none, or names
 // one the run never sent. A run that is no longer live is not found.

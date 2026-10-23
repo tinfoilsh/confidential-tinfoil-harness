@@ -407,6 +407,7 @@ type event struct {
 	Timestamp  string          `json:"timestamp,omitempty"`
 	ThreadID   string          `json:"threadId,omitempty"`
 	RunID      string          `json:"runId,omitempty"`
+	Instance   string          `json:"instance,omitempty"`
 	MessageID  string          `json:"messageId,omitempty"`
 	BlockID    string          `json:"blockId,omitempty"`
 	ParentID   string          `json:"parentMessageId,omitempty"`
