@@ -207,15 +207,7 @@ func (h *harness) widgetResult(ctx context.Context, call toolCall) (any, error) 
 	if json.Unmarshal([]byte(call.args), &args) != nil {
 		return nil, apiErr(400, "BAD_REQUEST", "Invalid widget arguments")
 	}
-	var response object
-	if err := h.serviceCall(ctx, "metadata", "/metadata", object{"url": str(args["url"])}, &response); err != nil {
-		return nil, err
-	}
-	result := obj(response["result"])
-	if len(result) == 0 {
-		result = response
-	}
-	return object{"url": args["url"], "title": result["title"], "description": result["description"], "siteName": firstString(result["siteName"], result["site_name"]), "image": result["image"]}, nil
+	return h.linkDetails(ctx, str(args["url"]))
 }
 
 // normalizeToolResult is the caller's copy of a tool result. Its text shares

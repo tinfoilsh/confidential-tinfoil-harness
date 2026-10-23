@@ -259,3 +259,34 @@ func TestARetriedLinkPreviewReadsItsPage(t *testing.T) {
 		t.Fatalf("the retried widget was stored with arguments %s and result %s", call.Arguments, call.Result)
 	}
 }
+
+// A link preview in an old chat holds no page details; its client reads
+// them with the caller's credential, signed in or not, as the widget's call
+// reads them.
+func TestALinkPreviewReadsItsPageDetails(t *testing.T) {
+	h, _, _ := testChatHarness(t, nil)
+	asked := make(chan string, 2)
+	metadata := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var in object
+		json.NewDecoder(r.Body).Decode(&in)
+		asked <- r.Header.Get("Authorization") + " " + r.URL.Path + " " + str(in["url"])
+		json.NewEncoder(w).Encode(object{"result": object{"title": "The Post", "description": "About it", "site_name": "Example", "image": "https://example.com/i.png", "favicon": "https://example.com/f.ico"}})
+	}))
+	defer metadata.Close()
+	h.services["metadata"] = &downstreamService{URL: metadata.URL, Client: metadata.Client()}
+	w := postRoute(h, "/v1/metadata/link", object{"url": "https://example.com/post"}, "")
+	if want := `{"description":"About it","image":"https://example.com/i.png","siteName":"Example","title":"The Post","url":"https://example.com/post"}` + "\n"; w.Code != 200 || w.Body.String() != want {
+		t.Fatalf("the details: HTTP %d %s", w.Code, w.Body.String())
+	}
+	select {
+	case got := <-asked:
+		if got != "Bearer free_anonymous-key /metadata https://example.com/post" {
+			t.Fatalf("the metadata service was asked %s", got)
+		}
+	default:
+		t.Fatal("the metadata service was not asked")
+	}
+	if w := postRoute(h, "/v1/metadata/link", object{"url": " "}, ""); w.Code != 400 || !strings.Contains(w.Body.String(), "BAD_REQUEST") || len(asked) != 0 {
+		t.Fatalf("a link without a URL: HTTP %d %s", w.Code, w.Body.String())
+	}
+}

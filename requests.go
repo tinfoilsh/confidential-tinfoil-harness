@@ -450,8 +450,16 @@ type importStatusRequest struct {
 
 func (in *importStatusRequest) validate() error { return requireID("jobId", in.JobID) }
 
-type faviconRequest struct {
+// pageRequest names a page whose details the metadata service reads.
+type pageRequest struct {
 	URL string `json:"url"`
+}
+
+func (in *pageRequest) validate() error {
+	if strings.TrimSpace(in.URL) == "" {
+		return apiErr(400, "BAD_REQUEST", "A page URL is required")
+	}
+	return nil
 }
 
 // speechRequest names a message to read aloud: one of a stored chat, named
