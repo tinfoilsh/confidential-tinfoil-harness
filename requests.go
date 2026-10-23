@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -557,7 +558,12 @@ type turnOptions struct {
 	WebSearch        *bool  `json:"webSearch,omitempty"`
 	PIICheck         *bool  `json:"piiCheck,omitempty"`
 	GenUI            *bool  `json:"genUI,omitempty"`
+	// CacheSecret scopes the prompt cache to the client that holds it, as
+	// the Tinfoil SDKs scope theirs: 256 random bits, hex encoded.
+	CacheSecret string `json:"cacheSecret,omitempty"`
 }
+
+var cacheSecretPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // sentAttachment is an upload's descriptor as a turn sends it back, or the
 // id alone of an attachment the thread already holds.
@@ -592,6 +598,9 @@ func (in *turnRequest) validate() error {
 	// An ask is never stored, so it may still say so.
 	if in.Ephemeral && in.Kind != "ask" {
 		return apiErr(400, "BAD_REQUEST", "Temporary chats are kept on the device")
+	}
+	if secret := in.Options.CacheSecret; secret != "" && !cacheSecretPattern.MatchString(secret) {
+		return apiErr(400, "BAD_REQUEST", "cacheSecret must be 64 hex characters")
 	}
 	return in.PresetID.check("presetId")
 }
