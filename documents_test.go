@@ -438,12 +438,13 @@ func TestALocalChatIsSharedFromItsTranscript(t *testing.T) {
 	}))
 	defer cp.Close()
 	h.controlplane, h.cpClient = cp.URL, &http.Client{Transport: &callerAuth{inner: cp.Client().Transport}}
+	citations := []any{object{"type": "url_citation", "url_citation": object{"url": "https://photos.example/", "title": "Photos", "start_index": 2, "end_index": 7}}}
 	thread := object{"title": "Local chat", "createdAt": "2026-01-01T00:00:00Z", "messages": []any{
 		object{"id": "m1", "role": "user", "content": "what is this?", "createdAt": "2026-01-01T00:00:01Z", "quote": "earlier", "attachments": []any{
 			object{"id": "img", "type": "image", "fileName": "photo.png", "mimeType": "image/png", "base64": "ZnVsbA==", "thumbnailBase64": "dGh1bWI="},
 			object{"id": "doc", "type": "document", "fileName": "notes.pdf", "mimeType": "application/pdf", "textContent": "the notes", "pages": []any{object{"page": 1, "text": "the notes", "image": "cGFnZQ=="}}},
 		}},
-		object{"id": "m2", "role": "assistant", "content": "a photo", "createdAt": "2026-01-01T00:00:02Z", "modelDisplayName": "Kimi K3", "thoughts": "looks like one", "timeline": []any{object{"id": "b1", "type": "content", "content": "a photo"}}},
+		object{"id": "m2", "role": "assistant", "content": "a photo", "createdAt": "2026-01-01T00:00:02Z", "modelDisplayName": "Kimi K3", "thoughts": "looks like one", "timeline": []any{object{"id": "b1", "type": "content", "content": "a photo"}}, "annotations": citations},
 	}}
 	share := func(in object, user string) *httptest.ResponseRecorder {
 		return postRoute(h, "/v1/threads/share", in, user)
@@ -476,10 +477,14 @@ func TestALocalChatIsSharedFromItsTranscript(t *testing.T) {
 			object{"id": "img", "kind": "image", "fileName": "photo.png", "mimeType": "image/png", "thumbnail": "dGh1bWI="},
 			object{"id": "doc", "kind": "document", "fileName": "notes.pdf", "mimeType": "application/pdf", "textContent": "the notes"},
 		}},
-		object{"role": "assistant", "content": "a photo", "timestamp": 1767225602000, "timeline": []any{object{"id": "b1", "type": "content", "content": "a photo"}}, "modelDisplayName": "Kimi K3"},
+		object{"role": "assistant", "content": "a photo", "timestamp": 1767225602000, "timeline": []any{object{"id": "b1", "type": "content", "content": "a photo"}}, "modelDisplayName": "Kimi K3", "annotations": citations},
 	}}
 	if len(seals) != 1 || !reflect.DeepEqual(decodeValue(plaintext), decodeValue(raw(want))) {
 		t.Fatalf("sealed %d payloads, the last %s", len(seals), plaintext)
+	}
+	// The opened share lists the reply's citations as its sources.
+	if opened := sharedThreadView("0000000000005_local", plaintext).Messages[1].Annotations; !reflect.DeepEqual(decodeValue(raw(opened)), decodeValue(raw(citations))) {
+		t.Fatalf("the opened share cites %s", raw(opened))
 	}
 	if len(uploads) != 1 {
 		t.Fatalf("%d share uploads", len(uploads))

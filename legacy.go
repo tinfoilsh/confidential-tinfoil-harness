@@ -72,8 +72,14 @@ type legacyMessage struct {
 	ToolCalls               []Block            `json:"toolCalls"`
 	DocumentContent         string             `json:"documentContent"`
 	MultimodalText          string             `json:"multimodalText"`
+	Documents               []legacyFileName   `json:"documents"`
 	ImageData               []legacyImage      `json:"imageData"`
 	Attachments             []legacyAttachment `json:"attachments"`
+}
+
+// legacyFileName names one file of a message's flat fields.
+type legacyFileName struct {
+	Name string `json:"name"`
 }
 
 // legacyAttachment is an attachment under the names the web and iOS apps
@@ -148,6 +154,7 @@ type legacyBlock struct {
 
 type legacySearch struct {
 	Query   string `json:"query"`
+	Status  string `json:"status"`
 	Sources []struct {
 		URL         string `json:"url"`
 		Title       string `json:"title"`
@@ -159,11 +166,17 @@ type legacySearch struct {
 type legacyFetch struct {
 	ID        string  `json:"id"`
 	URL       string  `json:"url"`
+	Status    string  `json:"status"`
 	Title     string  `json:"title"`
 	Text      string  `json:"text"`
 	StartedAt float64 `json:"startedAt"`
 	EndedAt   float64 `json:"endedAt"`
 }
+
+// legacyFailed is whether an old client recorded a search or page read as
+// not completed: failed, blocked, or cut off while it ran. The iOS app
+// wrote a step without a status as completed.
+func legacyFailed(status string) bool { return status != "" && status != "completed" }
 
 type legacyCodeCall struct {
 	ID        string          `json:"id"`
@@ -280,8 +293,12 @@ func (m *legacyMessage) timeline(message Message) []Block {
 		}
 	}
 	blocks := []Block{}
-	// A call keeps when the step it came from ran.
-	call := func(startedAt, endedAt float64, id, name, args string, result any) {
+	// A call keeps when the step it came from ran. One that did not complete
+	// holds the result a failed call holds.
+	call := func(startedAt, endedAt float64, id, name, args string, result any, status string) {
+		if legacyFailed(status) {
+			result = json.RawMessage(toolError)
+		}
 		blocks = append(blocks, Block{Type: "tool_call", ID: id, ToolCallID: id, Name: name, Arguments: args, Result: raw(result), Complete: true, StartedAt: startedAt, EndedAt: endedAt})
 	}
 	for index, block := range source {
@@ -296,15 +313,15 @@ func (m *legacyMessage) timeline(message Message) []Block {
 			for _, source := range state.Sources {
 				results = append(results, map[string]string{"url": source.URL, "title": source.Title, "snippet": cmp.Or(source.Snippet, source.Description)})
 			}
-			call(block.StartedAt, block.EndedAt, blockID, "web_search", string(raw(map[string]string{"query": state.Query})), map[string]any{"query": state.Query, "results": results})
+			call(block.StartedAt, block.EndedAt, blockID, "web_search", string(raw(map[string]string{"query": state.Query})), map[string]any{"query": state.Query, "results": results}, state.Status)
 		case "url_fetches":
 			for i, fetch := range block.Fetches {
-				call(cmp.Or(fetch.StartedAt, block.StartedAt), cmp.Or(fetch.EndedAt, block.EndedAt), cmp.Or(fetch.ID, blockID+"-"+strconv.Itoa(i)), "web_fetch", string(raw(map[string]string{"url": fetch.URL})), map[string]string{"url": fetch.URL, "title": fetch.Title, "text": fetch.Text})
+				call(cmp.Or(fetch.StartedAt, block.StartedAt), cmp.Or(fetch.EndedAt, block.EndedAt), cmp.Or(fetch.ID, blockID+"-"+strconv.Itoa(i)), "web_fetch", string(raw(map[string]string{"url": fetch.URL})), map[string]string{"url": fetch.URL, "title": fetch.Title, "text": fetch.Text}, fetch.Status)
 			}
 		case "code_exec":
 			for i, c := range block.Calls {
 				args := c.arguments()
-				call(block.StartedAt, block.EndedAt, cmp.Or(c.ID, blockID+"-"+strconv.Itoa(i)), c.ToolName, args, normalizeToolResult(toolCall{name: c.ToolName, args: args}, c.Output))
+				call(block.StartedAt, block.EndedAt, cmp.Or(c.ID, blockID+"-"+strconv.Itoa(i)), c.ToolName, args, normalizeToolResult(toolCall{name: c.ToolName, args: args}, c.Output), "")
 			}
 		default:
 			block.ID = blockID
@@ -344,22 +361,82 @@ func (m *legacyMessage) attachments(messageID string, images backupImages) []Att
 		}
 	}
 	if len(attachments) == 0 {
-		if content := cmp.Or(m.DocumentContent, m.MultimodalText); content != "" {
-			attachments = append(attachments, Attachment{Kind: "document", FileName: "Attached document", TextContent: content})
-		}
-		for i, image := range m.ImageData {
-			if held, ok := images[image.ImageID]; ok && image.Base64 == "" {
-				image.Base64, image.MimeType = held.Base64, cmp.Or(held.MimeType, image.MimeType)
-			}
-			if image.Base64 != "" {
-				attachments = append(attachments, Attachment{Kind: "image", FileName: "image-" + strconv.Itoa(i), MimeType: cmp.Or(image.MimeType, "image/png"), Base64: image.Base64})
-			}
-		}
+		attachments = m.flatAttachments(images)
 	}
 	for i := range attachments {
 		attachments[i].ID = cmp.Or(attachments[i].ID, messageID+"-attachment-"+strconv.Itoa(i))
 	}
 	return attachments
+}
+
+// flatAttachments are the files a message kept in its flat fields, its
+// documents and then its images. documents names every file, and each
+// file's text is its section of the message's combined text: a document's
+// contents, or an image's description. The images are the files the
+// descriptions name, in the order of imageData; before the web app kept
+// descriptions apart from the documents' contents, they are the first
+// files, as the apps read them. Text no file has a section of is the only
+// document's, or else one unnamed document's.
+func (m *legacyMessage) flatAttachments(images backupImages) []Attachment {
+	claimed := false
+	contents := func(name string) string {
+		claimed = claimed || strings.Contains(m.DocumentContent, documentHeading(name))
+		return legacySection(m.DocumentContent, documentHeading(name), "\nDocument title: ")
+	}
+	described := slices.ContainsFunc(m.Documents, func(f legacyFileName) bool { return strings.Contains(m.MultimodalText, imageHeading(f.Name)) })
+	var documents, shown []Attachment
+	var imageNames []string
+	for i, file := range m.Documents {
+		if described && strings.Contains(m.MultimodalText, imageHeading(file.Name)) || !described && i < len(m.ImageData) {
+			imageNames = append(imageNames, file.Name)
+		} else {
+			documents = append(documents, Attachment{Kind: "document", FileName: file.Name, TextContent: contents(file.Name)})
+		}
+	}
+	for i, image := range m.ImageData {
+		if held, ok := images[image.ImageID]; ok && image.Base64 == "" {
+			image.Base64, image.MimeType = held.Base64, cmp.Or(held.MimeType, image.MimeType)
+		}
+		if image.Base64 == "" {
+			continue
+		}
+		a := Attachment{Kind: "image", FileName: "image-" + strconv.Itoa(i), MimeType: cmp.Or(image.MimeType, "image/png"), Base64: image.Base64}
+		if i < len(imageNames) {
+			name := imageNames[i]
+			a.FileName = cmp.Or(name, a.FileName)
+			a.Description = cmp.Or(legacySection(m.MultimodalText, imageHeading(name), "\n\nImage: "), contents(name))
+		}
+		shown = append(shown, a)
+	}
+	var unclaimed string
+	if !claimed {
+		unclaimed = m.DocumentContent
+	}
+	if !described {
+		unclaimed = cmp.Or(unclaimed, m.MultimodalText)
+	}
+	if unclaimed != "" {
+		if len(documents) == 1 && documents[0].TextContent == "" {
+			documents[0].TextContent = unclaimed
+		} else {
+			documents = append(documents, Attachment{Kind: "document", FileName: "Attached document", TextContent: unclaimed})
+		}
+	}
+	return append(documents, shown...)
+}
+
+func documentHeading(name string) string { return "Document title: " + name + "\nDocument contents:\n" }
+func imageHeading(name string) string    { return "Image: " + name + "\nDescription:\n" }
+
+// legacySection is the text after heading in combined, up to the next
+// section's start, as the apps cut it.
+func legacySection(combined, heading, next string) string {
+	_, rest, found := strings.Cut(combined, heading)
+	if !found {
+		return ""
+	}
+	section, _, _ := strings.Cut(rest, next)
+	return strings.TrimSpace(section)
 }
 
 // readProfile reads a profile row. A missing row is an empty profile.

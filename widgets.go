@@ -207,15 +207,7 @@ func (h *harness) widgetResult(ctx context.Context, call toolCall) (any, error) 
 	if json.Unmarshal([]byte(call.args), &args) != nil {
 		return nil, apiErr(400, "BAD_REQUEST", "Invalid widget arguments")
 	}
-	var response object
-	if err := h.serviceCall(ctx, "metadata", "/metadata", object{"url": str(args["url"])}, &response); err != nil {
-		return nil, err
-	}
-	result := obj(response["result"])
-	if len(result) == 0 {
-		result = response
-	}
-	return object{"url": args["url"], "title": result["title"], "description": result["description"], "siteName": firstString(result["siteName"], result["site_name"]), "image": result["image"]}, nil
+	return h.linkDetails(ctx, str(args["url"]))
 }
 
 // normalizeToolResult is the caller's copy of a tool result. Its text shares
@@ -346,8 +338,7 @@ func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *
 	}
 	usage := usageForRun(r)
 	usage.BillCustomerRequest = true
-	ctx = context.WithValue(ctx, usageContextKey{}, usage)
-	content, err := h.completion(ctx, m, payload)
+	content, err := h.completion(context.WithValue(ctx, usageContextKey{}, usage), m, payload)
 	if err != nil {
 		return err
 	}
@@ -356,17 +347,29 @@ func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *
 	if json.Unmarshal([]byte(content), &value) != nil || declaration.schema.Validate(value) != nil {
 		return apiErr(502, "UPSTREAM_REFUSED", "The replacement widget arguments do not match the schema")
 	}
-	r.replacement = content
 	id := r.input.ToolCallID
 	r.out.callStart(id, declaration.Name, r.retryTarget.parentID)
 	r.out.callArgs(id, content)
 	r.out.callEnd(id)
+	// The widget's result is the one a call with these arguments returns.
+	result, err := h.widgetResult(ctx, toolCall{id: id, name: declaration.Name, args: content})
+	if err != nil {
+		result = object{"error": asAPIError(err).Message}
+	}
+	r.replacement = replacedWidget{arguments: content, result: raw(result)}
+	r.out.emit(event{Type: "TOOL_CALL_RESULT", MessageID: "msg_" + token(), ToolCallID: id, Role: "tool", Content: r.replacement.result})
 	return nil
+}
+
+// replacedWidget is what a retry gives its widget call.
+type replacedWidget struct {
+	arguments string
+	result    json.RawMessage
 }
 
 // A retry must not revive a deleted widget or overwrite a concurrent writer.
 // expected is the widget's arguments when the retry started.
-func replaceWidget(t *Thread, messageID, callID, expected, replacement string) error {
+func replaceWidget(t *Thread, messageID, callID, expected string, replacement replacedWidget) error {
 	for i := range t.Messages {
 		m := &t.Messages[i]
 		if m.ID != messageID {
@@ -377,10 +380,10 @@ func replaceWidget(t *Thread, messageID, callID, expected, replacement string) e
 			if block.callID() != callID {
 				continue
 			}
-			if block.Arguments != expected && block.Arguments != replacement {
+			if block.Arguments != expected && block.Arguments != replacement.arguments {
 				return apiErr(409, "REVISION_CONFLICT", "The widget changed during its retry")
 			}
-			block.Arguments = replacement
+			block.Arguments, block.Result = replacement.arguments, replacement.result
 			return nil
 		}
 	}

@@ -70,7 +70,7 @@ type chatRun struct {
 	row                      *threadRow // the thread as the run started and committed it
 	assembler                *messageAssembler
 	retryTarget              *retryTarget
-	replacement              string
+	replacement              replacedWidget
 	profile                  *Profile // a local thread's settings, sent by its client
 	screening                *screening
 
@@ -82,7 +82,7 @@ type chatRun struct {
 func (r *chatRun) release() {
 	clear(r.key[:])
 	r.input, r.turn, r.retryTarget, r.assembler, r.screening, r.profile = nil, nil, nil, nil, nil, nil
-	r.replacement = ""
+	r.replacement = replacedWidget{}
 	r.principal = &principal{ID: r.principal.ID, AnonymousID: r.principal.AnonymousID, Anonymous: r.principal.Anonymous}
 	r.credential.Key = ""
 }
