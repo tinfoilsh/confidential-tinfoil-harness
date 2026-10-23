@@ -62,6 +62,12 @@ type Block struct {
 	Progress   []json.RawMessage `json:"progress,omitzero"`
 	Activity   json.RawMessage   `json:"activity,omitempty"`
 	Display    *ToolDisplay      `json:"display,omitempty"`
+	// StartedAt and EndedAt are when a reasoning or tool step ran, in epoch
+	// milliseconds, and Duration is how long a reasoning step thought, in
+	// seconds, as the apps have stored them.
+	StartedAt float64 `json:"startedAt,omitempty"`
+	EndedAt   float64 `json:"endedAt,omitempty"`
+	Duration  float64 `json:"duration,omitempty"`
 	// InvalidArguments marks a widget call whose arguments the widget's
 	// current declaration refuses, so its client offers to regenerate them.
 	// It is worked out again for whatever clients are sent, never taken

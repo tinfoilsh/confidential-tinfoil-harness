@@ -128,7 +128,8 @@ func TestCallersCopyReadsRepairedArguments(t *testing.T) {
 }
 
 // statsThread is a chat with a stat card whose arguments miss a required
-// field, and one whose arguments are valid. Its stored copy carries marks the
+// field, one whose arguments are valid, and one with fields no property
+// declares. Its stored copy carries marks the
 // harness would not set now: on the valid card and on a widget no longer
 // declared.
 func statsThread() object {
@@ -137,6 +138,7 @@ func statsThread() object {
 		object{"id": "a1", "role": "assistant", "content": "Here they are.", "createdAt": "2026-01-01T00:00:02Z", "timeline": []any{
 			object{"id": "bad", "toolCallId": "bad", "type": "tool_call", "name": "render_stat_cards", "arguments": `{"stats":[{"label":"Count"}]}`, "complete": true},
 			object{"id": "good", "toolCallId": "good", "type": "tool_call", "name": "render_stat_cards", "arguments": `{"stats":[{"label":"Count","value":1}]}`, "complete": true, "invalidArguments": true},
+			object{"id": "extra", "toolCallId": "extra", "type": "tool_call", "name": "render_stat_cards", "arguments": `{"stats":[{"label":"Count","value":1,"unit":"%"}],"title":"Counts"}`, "complete": true},
 			object{"id": "retired", "toolCallId": "retired", "type": "tool_call", "name": "render_retired", "arguments": `{}`, "complete": true, "invalidArguments": true},
 			object{"id": "text", "type": "content", "content": "Here they are."},
 		}},
@@ -198,6 +200,10 @@ func TestValidWidgetArgumentsAreAcknowledged(t *testing.T) {
 	model, shown := invokeWidget(t, set, toolCall{id: "c1", name: "render_artifact_preview", args: `{"title":"Demo","source":{"type":"html","html":"<p>hi</p>"}}`})
 	if model != "[rendered for the user]" || len(shown) != 1 || shown[0] != `"[rendered for the user]"` {
 		t.Fatalf("a valid widget read as %q and showed %q", model, shown)
+	}
+	extra := `{"title":"Demo","theme":"dark","source":{"type":"html","html":"<p>hi</p>","language":"html"}}`
+	if model, shown := invokeWidget(t, set, toolCall{id: "c3", name: "render_artifact_preview", args: extra}); model != "[rendered for the user]" || len(shown) != 1 {
+		t.Fatalf("a widget with undeclared fields read as %q and showed %q", model, shown)
 	}
 	if model, _ := invokeWidget(t, set, toolCall{id: "c2", name: "render_unknown", args: `{"anything":1}`}); model != `{"error":"unknown tool"}` {
 		t.Fatalf("an unknown widget read as %q", model)

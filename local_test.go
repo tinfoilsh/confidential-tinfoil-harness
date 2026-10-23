@@ -359,7 +359,7 @@ func TestOldDeviceChatsUpgradeIntoThreads(t *testing.T) {
 			object{"id": m(1), "role": "assistant", "content": "A cat [Cats](https://cats.example).", "createdAt": "2026-03-01T09:00:05Z", "modelDisplayName": "Kimi K3",
 				"annotations": []any{object{"type": "url_citation", "url_citation": object{"url": "https://cats.example", "title": "Cats", "start_index": 3, "end_index": 7}}},
 				"timeline": []any{
-					object{"id": m(1) + "-thinking", "type": "thinking", "content": "Looks like a cat"},
+					object{"id": m(1) + "-thinking", "type": "thinking", "content": "Looks like a cat", "duration": 2},
 					object{"id": m(1) + "-search", "toolCallId": m(1) + "-search", "type": "tool_call", "name": "web_search", "arguments": `{"query":"cat"}`, "complete": true,
 						"result":  object{"query": "cat", "results": []any{object{"url": "https://cats.example", "title": "Cats", "snippet": "about cats"}}},
 						"display": object{"query": "cat", "status": "completed", "sources": []any{object{"url": "https://cats.example", "title": "Cats", "snippet": "about cats"}}}},

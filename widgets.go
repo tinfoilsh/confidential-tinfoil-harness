@@ -179,6 +179,11 @@ func normalizeSchema(value any) {
 				}
 			}
 		}
+		// As the client's schemas did, a field no property declares is
+		// ignored rather than refused.
+		if open, ok := node["additionalProperties"].(bool); ok && !open {
+			delete(node, "additionalProperties")
+		}
 		if nullable, _ := node["nullable"].(bool); nullable {
 			if kind, ok := node["type"].(string); ok {
 				node["type"] = []any{kind, "null"}

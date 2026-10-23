@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -107,6 +109,40 @@ func TestANewChatTakesTheProfilesWebSearchSetting(t *testing.T) {
 		if chat := storedChat(t, rows, key, events[0].ThreadID); chat.WebSearchEnabled != tc.want {
 			t.Fatalf("with web search %v in the profile and options %v, the chat started with it %v", tc.profile, tc.options, chat.WebSearchEnabled)
 		}
+	}
+}
+
+// Turning web search off in the settings keeps each chat's own setting, and
+// no turn searches until it is turned back on.
+func TestTheWebSearchSettingGatesSearchWithoutChangingChats(t *testing.T) {
+	var mu sync.Mutex
+	var offered []bool
+	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		var body object
+		json.NewDecoder(r.Body).Decode(&body)
+		searches := false
+		for _, tool := range arr(body["tools"]) {
+			searches = searches || obj(obj(tool)["function"])["name"] == "web_search"
+		}
+		mu.Lock()
+		offered = append(offered, searches)
+		mu.Unlock()
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	serveWebsearch(t, nil)
+	for _, available := range []bool{false, true} {
+		rows.rows[rowMapKey(&principal{ID: "alice"}, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: raw(object{"webSearchAvailable": available})}
+		in := sendInput(key)
+		obj(in["options"])["webSearch"] = true
+		events := finishedRun(t, h, "/v1/threads/turn", in)
+		if chat := storedChat(t, rows, key, events[0].ThreadID); !chat.WebSearchEnabled {
+			t.Fatalf("with web search available %v, the chat stored its own setting as off", available)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.Equal(offered, []bool{false, true}) {
+		t.Fatalf("the model was offered web search %v", offered)
 	}
 }
 
