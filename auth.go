@@ -155,6 +155,8 @@ type authenticator struct {
 	cachesOnce   sync.Once
 	newest       *expirable.LRU[string, inferenceCredential]
 	valid        *expirable.LRU[string, struct{}]
+	flagsOnce    sync.Once
+	flags        *expirable.LRU[string, chatFlags]
 }
 
 func (a *authenticator) caches() {

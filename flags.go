@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/hashicorp/golang-lru/v2/expirable"
 )
 
 // safeguardFlagsPath lists the chats the safeguards flagged for the caller.
@@ -17,6 +19,14 @@ const maxFlagsBody = 1 << 20
 
 // flagsTimeout bounds the flag lookup that every chat read and turn makes.
 var flagsTimeout = 2 * time.Second
+
+// A caller's flags are reused for flagsTTL, so the control plane does not
+// learn of every chat read and turn, for up to maxFlagCallers callers. A chat
+// flagged in that time may take one more turn.
+const (
+	flagsTTL       = time.Minute
+	maxFlagCallers = 10000
+)
 
 var errChatFlagged = apiErr(403, "CHAT_FLAGGED", "This chat was flagged under the acceptable use policy and takes no more turns")
 
@@ -31,13 +41,24 @@ func (a *authenticator) flaggedChats(ctx context.Context, p *principal) chatFlag
 	if p.Anonymous || p.JWT == "" {
 		return nil
 	}
+	if flags, ok := a.recentFlags().Get(p.scope()); ok {
+		return flags
+	}
 	ctx, cancel := context.WithTimeout(ctx, flagsTimeout)
 	defer cancel()
 	flags, err := a.readFlags(ctx, p)
 	if err != nil {
 		slog.Warn("safeguard flags unavailable", "error", err)
+		return nil
 	}
+	a.recentFlags().Add(p.scope(), flags)
 	return flags
+}
+
+// recentFlags are the flags last read for each caller. Callers only read them.
+func (a *authenticator) recentFlags() *expirable.LRU[string, chatFlags] {
+	a.flagsOnce.Do(func() { a.flags = expirable.NewLRU[string, chatFlags](maxFlagCallers, nil, flagsTTL) })
+	return a.flags
 }
 
 func (a *authenticator) readFlags(ctx context.Context, p *principal) (chatFlags, error) {
