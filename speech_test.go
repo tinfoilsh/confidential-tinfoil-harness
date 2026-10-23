@@ -36,7 +36,7 @@ func TestSpeechStreamsTheRoutersAudio(t *testing.T) {
 		in         object
 	}{
 		{"", "Bearer free_anonymous-key", object{"text": "  Hello there.  "}},
-		{"alice", "Bearer inference-alice", object{"text": "Hello there."}},
+		{"alice", "Bearer " + chatTokenOf("alice"), object{"text": "Hello there."}},
 	} {
 		response := postRoute(h, "/v1/speech", tc.in, tc.user)
 		if response.Code != 200 || response.Header().Get("Content-Type") != "audio/pcm" || response.Header().Get("Cache-Control") != "no-store" || !bytes.Equal(response.Body.Bytes(), pcm) {
@@ -222,7 +222,7 @@ func TestSpeechThatFailsPartwayEndsIncomplete(t *testing.T) {
 		fmt.Fprintf(&long, "Sentence %d walks through the plan in enough detail to fill a piece. ", i)
 	}
 	req, _ := http.NewRequest("POST", server.URL+"/v1/speech", bytes.NewReader(raw(object{"text": long.String()})))
-	req.Header.Set("Authorization", "Bearer clerk-alice")
+	signIn(req, "alice")
 	resp, err := server.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)

@@ -7,14 +7,15 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"math"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/MicahParks/keyfunc/v3"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/hashicorp/golang-lru/v2/expirable"
 )
 
 type secret string
@@ -97,59 +98,71 @@ func budget(limit, used, remaining *int) *tokenBudget {
 	return &tokenBudget{*limit, *used, *remaining}
 }
 
-// chatTokenPath mints a subscriber's Tinfoil Chat access token.
-const chatTokenPath = "/api/chat/token"
-
 type inferenceCredential struct {
 	Key     secret
 	Expires time.Time
 	Limit   rateLimit
-	// firstParty marks a credential minted for Tinfoil Chat, the only one
-	// whose conversations are screened.
+	// firstParty marks a Tinfoil Chat access token, which only a subscriber
+	// holds and whose conversations are screened.
 	firstParty bool
 }
 
-// maxCachedCallers bounds the callers whose credential or hourly cap is
-// remembered.
-const maxCachedCallers = 10000
+// inferenceKeyHeader carries the credential a signed-in client minted for
+// inference: its chat access token, or its free key without a subscription.
+// It is read before the body, like the Clerk session beside it, which can
+// mint one.
+const inferenceKeyHeader = "X-Tinfoil-Inference-Key"
 
-// hourlyCap is a subscriber's refused exchange, remembered until the cap resets.
-type hourlyCap struct {
-	refusal apiError
-	limit   rateLimit
-	until   time.Time
+// Chat access tokens are minted by the control plane for the Tinfoil Chat
+// client and verified here as the enclave shims verify them.
+const (
+	chatTokenType     = "at+jwt"
+	chatTokenAudience = "https://inference.tinfoil.sh"
+	chatTokenScope    = "inference:api"
+	chatTokenClient   = "tinfoil-chat"
+	chatTokenProduct  = "chat"
+)
+
+type chatTokenClaims struct {
+	ClientID string `json:"client_id"`
+	Scope    string `json:"scope"`
+	Product  string `json:"product"`
+	jwt.RegisteredClaims
 }
+
+// Callers remembered by the caches below, each evicting its least recently
+// used entry when full. A free key validated within freeKeyTTL admits its
+// caller without asking the control plane again.
+const (
+	maxCachedCallers = 10000
+	freeKeyTTL       = time.Minute
+	credentialTTL    = time.Hour
+)
+
+var (
+	errCredentialRequired   = apiErr(401, "CREDENTIAL_REQUIRED", "Chat access is missing or expired")
+	errSubscriptionRequired = apiErr(403, "SUBSCRIPTION_REQUIRED", "This requires a Tinfoil Chat subscription")
+)
+
 type authenticator struct {
 	verify       func(context.Context, string) (string, error)
+	chatKeys     jwt.Keyfunc // the control plane's chat token signing keys
+	chatIssuer   string
 	client       *http.Client
 	controlplane string
-	mu           sync.Mutex
-	credentials  map[string]inferenceCredential
-	capped       map[string]hourlyCap
-	refreshing   map[string]chan struct{}
+	cachesOnce   sync.Once
+	newest       *expirable.LRU[string, inferenceCredential]
+	valid        *expirable.LRU[string, struct{}]
 }
 
-func (a *authenticator) refresh(ctx context.Context, p *principal) (inferenceCredential, error) {
-	if !p.Anonymous {
-		for {
-			a.mu.Lock()
-			pending := a.refreshing[p.scope()]
-			if pending == nil {
-				delete(a.credentials, p.scope())
-				delete(a.capped, p.scope())
-				a.mu.Unlock()
-				break
-			}
-			a.mu.Unlock()
-			select {
-			case <-pending:
-			case <-ctx.Done():
-				return inferenceCredential{}, ctx.Err()
-			}
-		}
-	}
-	return a.inference(ctx, p)
+func (a *authenticator) caches() {
+	a.cachesOnce.Do(func() {
+		a.newest = expirable.NewLRU[string, inferenceCredential](maxCachedCallers, nil, credentialTTL)
+		a.valid = expirable.NewLRU[string, struct{}](maxCachedCallers, nil, freeKeyTTL)
+	})
 }
+
+func (a *authenticator) validKeys() *expirable.LRU[string, struct{}] { a.caches(); return a.valid }
 
 func newAuthenticator(ctx context.Context, issuer, cp string) (*authenticator, error) {
 	if !strings.HasPrefix(issuer, "https://") {
@@ -160,11 +173,15 @@ func newAuthenticator(ctx context.Context, issuer, cp string) (*authenticator, e
 	if err != nil {
 		return nil, err
 	}
+	chatKeys, err := keyfunc.NewDefaultCtx(ctx, []string{cp + "/.well-known/jwks.json"})
+	if err != nil {
+		return nil, err
+	}
 	options := []jwt.ParserOption{jwt.WithValidMethods([]string{"RS256", "RS384", "RS512", "ES256", "ES384", "ES512"}), jwt.WithIssuer(issuer), jwt.WithExpirationRequired(), jwt.WithLeeway(30 * time.Second)}
 	a := &authenticator{client: &http.Client{
 		Timeout:       15 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}, controlplane: cp, credentials: map[string]inferenceCredential{}}
+	}, controlplane: cp, chatKeys: chatKeys.Keyfunc, chatIssuer: cp}
 	a.verify = func(ctx context.Context, token string) (string, error) {
 		parsed, err := jwt.NewParser(options...).Parse(token, kf.KeyfuncCtx(ctx))
 		if err != nil || !parsed.Valid {
@@ -179,6 +196,8 @@ func newAuthenticator(ctx context.Context, issuer, cp string) (*authenticator, e
 	return a, nil
 }
 
+// authenticate reads who a request is from: a signed-in caller's Clerk
+// session, or, where anonymous is allowed, a signed-out caller's free key.
 func (a *authenticator) authenticate(r *http.Request, anonymous bool) (*principal, error) {
 	if a == nil {
 		return nil, apiErr(503, "UNAUTHENTICATED", "Authentication is not configured")
@@ -193,14 +212,33 @@ func (a *authenticator) authenticate(r *http.Request, anonymous bool) (*principa
 	}
 	if anonymous && strings.HasPrefix(token, "free_") && len(token) > len("free_") && len(token) <= 256 {
 		// Possession scopes ephemeral state. The prefix is not validation:
-		// inference checks the key with controlplane before accepting work.
+		// recognize checks the key with the control plane before any work.
 		return &principal{Anonymous: true, AnonymousID: hashHex([]byte(token)), InferenceKey: secret(token)}, nil
 	}
 	id, err := a.verify(r.Context(), token)
 	if err != nil {
 		return nil, apiErr(401, "UNAUTHENTICATED", "The Clerk session is invalid or expired")
 	}
-	return &principal{ID: id, JWT: secret(token)}, nil
+	p := &principal{ID: id, JWT: secret(token), InferenceKey: secret(strings.TrimSpace(r.Header.Get(inferenceKeyHeader)))}
+	// Every request carrying a chat token keeps the newest one at hand for
+	// runs that outlive theirs.
+	if p.InferenceKey != "" && !strings.HasPrefix(string(p.InferenceKey), "free_") {
+		a.chatToken(p)
+	}
+	return p, nil
+}
+
+// recognize refuses a caller before its body is read: a signed-out caller
+// is served only with a free key the control plane accepted, recently or now.
+func (a *authenticator) recognize(ctx context.Context, p *principal) error {
+	if !p.Anonymous {
+		return nil
+	}
+	if _, ok := a.validKeys().Get(hashHex([]byte(p.InferenceKey))); ok {
+		return nil
+	}
+	_, err := a.freeKey(ctx, p)
+	return err
 }
 
 // keyValidation asks the control plane whether a free key is valid, and
@@ -216,10 +254,18 @@ type validatedKey struct {
 	RateLimit *quota `json:"rate_limit"`
 }
 
-func (a *authenticator) anonymousInference(ctx context.Context, p *principal) (inferenceCredential, error) {
-	if p.InferenceKey == "" {
-		return inferenceCredential{}, apiErr(401, "UNAUTHENTICATED", "An anonymous chat key is required")
+// freeKey validates a free key, a signed-out caller's or a signed-in
+// caller's without a subscription, and reads its quota. A key validated
+// recently admits its caller without asking again.
+func (a *authenticator) freeKey(ctx context.Context, p *principal) (inferenceCredential, error) {
+	credential, err := a.validateFreeKey(ctx, p)
+	if err == nil {
+		a.validKeys().Add(hashHex([]byte(p.InferenceKey)), struct{}{})
 	}
+	return credential, err
+}
+
+func (a *authenticator) validateFreeKey(ctx context.Context, p *principal) (inferenceCredential, error) {
 	// Reuse the validation endpoint already used by shims on Tinfoil hosts,
 	// asking it for the key's quota. No key issuance, client IP, or expiry
 	// metadata comes from this call.
@@ -275,174 +321,68 @@ func (a *authenticator) anonymousInference(ctx context.Context, p *principal) (i
 	return inferenceCredential{}, withRetryAfter(downstreamError(resp.StatusCode, body), resp.Header)
 }
 
+// inference is the credential a caller's model calls carry: a signed-out
+// caller's free key, or the chat token or free key a signed-in client minted.
 func (a *authenticator) inference(ctx context.Context, p *principal) (inferenceCredential, error) {
-	if p.Anonymous {
-		return a.anonymousInference(ctx, p)
-	}
-	a.mu.Lock()
-	if cached, ok := a.credentials[p.scope()]; ok && nowUTC().Add(time.Minute).Before(cached.Expires) {
-		a.mu.Unlock()
-		return cached, nil
-	}
-	if capped, ok := a.capped[p.scope()]; ok && nowUTC().Before(capped.until) {
-		a.mu.Unlock()
-		refusal := capped.refusal
-		refusal.RetryAfter = max(1, int(math.Ceil(time.Until(capped.until).Seconds())))
-		return inferenceCredential{}, &refusal
-	}
-	if a.refreshing == nil {
-		a.refreshing = map[string]chan struct{}{}
-	}
-	if pending := a.refreshing[p.scope()]; pending != nil {
-		a.mu.Unlock()
-		select {
-		case <-pending:
-			return a.inference(ctx, p)
-		case <-ctx.Done():
-			return inferenceCredential{}, ctx.Err()
-		}
-	}
-	a.refreshing[p.scope()] = make(chan struct{})
-	a.mu.Unlock()
-	defer func() { a.mu.Lock(); close(a.refreshing[p.scope()]); delete(a.refreshing, p.scope()); a.mu.Unlock() }()
-	paths := []string{chatTokenPath, "/api/keys/chat"}
-	for i, path := range paths {
-		req, _ := http.NewRequestWithContext(ctx, "GET", a.controlplane+path, nil)
-		if p.JWT != "" {
-			req.Header.Set("Authorization", "Bearer "+string(p.JWT))
-		}
-		resp, err := a.client.Do(req)
-		if err != nil {
-			return inferenceCredential{}, err
-		}
-		b, err := io.ReadAll(io.LimitReader(resp.Body, 32<<10))
-		resp.Body.Close()
-		if err != nil {
-			return inferenceCredential{}, err
-		}
-		if resp.StatusCode/100 != 2 {
-			// Only a missing subscription falls back to a free key: a suspended
-			// account or a failed exchange must never downgrade a subscriber.
-			if i == 0 && resp.StatusCode == http.StatusPaymentRequired {
-				continue
-			}
-			return inferenceCredential{}, a.refused(p, resp.StatusCode, resp.Header, b)
-		}
-		var in struct {
-			Key     secret `json:"key"`
-			Expires string `json:"expires_at"`
-			Free    bool   `json:"is_free_tier"`
-			Rate    *quota `json:"rate_limit"`
-		}
-		if json.Unmarshal(b, &in) != nil || in.Key == "" {
-			return inferenceCredential{}, errors.New("invalid inference credential response")
-		}
-		exp, err := time.Parse(time.RFC3339, in.Expires)
-		if err != nil || !exp.After(nowUTC()) {
-			return inferenceCredential{}, errors.New("invalid inference credential expiry")
-		}
-		cred := inferenceCredential{Key: in.Key, Expires: exp, firstParty: path == chatTokenPath}
-		switch {
-		case in.Rate != nil && i == 0:
-			cred.Limit = in.Rate.limit("hourly")
-		case in.Rate != nil && in.Free:
-			cred.Limit = in.Rate.limit("free_daily")
-		}
-		a.mu.Lock()
-		if a.credentials == nil {
-			a.credentials = map[string]inferenceCredential{}
-		}
-		for id, entry := range a.credentials {
-			if !entry.Expires.After(nowUTC()) {
-				delete(a.credentials, id)
-			}
-		}
-		if len(a.credentials) >= maxCachedCallers {
-			a.mu.Unlock()
-			return inferenceCredential{}, apiErr(503, "UPSTREAM_REFUSED", "The session cache is at capacity")
-		}
-		a.credentials[p.scope()] = cred
-		delete(a.capped, p.scope())
-		a.mu.Unlock()
-		return cred, nil
-	}
-	return inferenceCredential{}, errors.New("no inference credential")
-}
-
-// refused maps a declined credential exchange. Every harness user shares one
-// egress address, which the controlplane rate-limits, so an hourly cap is
-// remembered until it resets instead of being asked about again.
-func (a *authenticator) refused(p *principal, status int, header http.Header, body []byte) error {
-	var detail object
-	json.Unmarshal(body, &detail)
 	switch {
-	case status == http.StatusTooManyRequests && str(detail["code"]) == "HOURLY_LIMIT_REACHED":
-		var budgets quota
-		json.Unmarshal(raw(detail["rate_limit"]), &budgets)
-		limit := budgets.limit("hourly")
-		limit.MaxRequests, limit.Remaining = new(0), new(0)
-		limit.ResetsAt = firstString(detail["resets_at"], limit.ResetsAt)
-		e := apiErr(429, "QUOTA_EXHAUSTED", firstString(detail["error"], "The hourly usage limit is reached"))
-		e.Kind, e.ResetsAt, e.RetryAfter, e.RateLimit = "hourly", limit.ResetsAt, retryAfter(header), &limit
-		until := nowUTC().Add(time.Minute)
-		if at, err := time.Parse(time.RFC3339, limit.ResetsAt); err == nil && at.After(nowUTC()) {
-			until = at
-		} else if e.RetryAfter > 0 {
-			until = nowUTC().Add(time.Duration(e.RetryAfter) * time.Second)
-		}
-		if latest := nowUTC().Add(time.Hour); until.After(latest) {
-			until = latest
-		}
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		if a.capped == nil {
-			a.capped = map[string]hourlyCap{}
-		}
-		for id, entry := range a.capped {
-			if !entry.until.After(nowUTC()) {
-				delete(a.capped, id)
-			}
-		}
-		if len(a.capped) < maxCachedCallers {
-			a.capped[p.scope()] = hourlyCap{refusal: *e, limit: limit, until: until}
-		}
-		return e
-	case status == http.StatusTooManyRequests:
-		e := apiErr(429, "RATE_LIMITED", "Chat access is busy; retry shortly")
-		e.RetryAfter = retryAfter(header)
-		return e
-	case status == http.StatusForbidden:
-		return apiErr(403, "UPSTREAM_REFUSED", "This account is suspended")
-	case status == http.StatusServiceUnavailable:
-		e := apiErr(503, "UPSTREAM_REFUSED", "Chat access is temporarily unavailable")
-		if str(detail["code"]) == "ACCOUNT_PROVISIONING" {
-			e.Message = "The account is still being set up"
-		}
-		e.RetryAfter = retryAfter(header)
-		return e
+	case p.InferenceKey == "" && p.Anonymous:
+		return inferenceCredential{}, apiErr(401, "UNAUTHENTICATED", "An anonymous chat key is required")
+	case p.InferenceKey == "":
+		return inferenceCredential{}, errCredentialRequired
+	case strings.HasPrefix(string(p.InferenceKey), "free_"):
+		return a.freeKey(ctx, p)
 	}
-	return withRetryAfter(downstreamError(status, body), header)
+	return a.chatToken(p)
 }
 
-// A subscriber's quota is remembered with its credential. A signed-out
-// caller's is held by the request or run that validated its key, and is
-// passed in as held.
+// chatToken verifies a signed-in caller's chat access token: the control
+// plane signed it for the Tinfoil Chat client, for this caller, and it has
+// not expired.
+func (a *authenticator) chatToken(p *principal) (inferenceCredential, error) {
+	var claims chatTokenClaims
+	parsed, err := jwt.NewParser(jwt.WithValidMethods([]string{"EdDSA"}), jwt.WithIssuer(a.chatIssuer), jwt.WithAudience(chatTokenAudience), jwt.WithExpirationRequired(), jwt.WithIssuedAt(), jwt.WithLeeway(30*time.Second)).
+		ParseWithClaims(string(p.InferenceKey), &claims, a.chatKeys)
+	if err != nil || !parsed.Valid {
+		return inferenceCredential{}, errCredentialRequired
+	}
+	kind, _ := parsed.Header["typ"].(string)
+	if !strings.EqualFold(kind, chatTokenType) || p.Anonymous || claims.Subject != p.ID || claims.ID == "" || claims.ClientID != chatTokenClient || claims.Product != chatTokenProduct || !slices.Contains(strings.Fields(claims.Scope), chatTokenScope) {
+		return inferenceCredential{}, errCredentialRequired
+	}
+	credential := inferenceCredential{Key: p.InferenceKey, Expires: claims.ExpiresAt.Time, firstParty: true}
+	a.caches()
+	if held, ok := a.newest.Get(p.scope()); !ok || credential.Expires.After(held.Expires) {
+		a.newest.Add(p.scope(), credential)
+	}
+	return credential, nil
+}
 
-// debit counts a run's request and the tokens it spent against the caller's
-// quota, and returns the quota left.
-func (a *authenticator) debit(p *principal, held rateLimit, spent usage) rateLimit {
-	if p.Anonymous {
-		return held.debited(spent)
+// renewed is the newest chat token the caller presented, for a run whose
+// own was refused, unless it is the refused one or has expired.
+func (a *authenticator) renewed(p *principal, refused secret) (inferenceCredential, error) {
+	a.caches()
+	credential, ok := a.newest.Get(p.scope())
+	if !ok || credential.Key == refused || !credential.Expires.After(nowUTC()) {
+		return inferenceCredential{}, errCredentialRequired
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	cred, ok := a.credentials[p.scope()]
-	if !ok {
-		return held.debited(spent)
+	return credential, nil
+}
+
+// subscriber is a signed-in caller holding a chat token, which only a Tinfoil
+// Chat subscription grants.
+func (a *authenticator) subscriber(r *http.Request) (*principal, error) {
+	p, err := a.authenticate(r, false)
+	if err != nil {
+		return nil, err
 	}
-	cred.Limit = cred.Limit.debited(spent)
-	a.credentials[p.scope()] = cred
-	return cred.Limit
+	credential, err := a.inference(r.Context(), p)
+	if err != nil {
+		return nil, err
+	}
+	if !credential.firstParty {
+		return nil, errSubscriptionRequired
+	}
+	return p, nil
 }
 
 // debited is the quota after a run's request and the tokens it spent.
@@ -472,51 +412,11 @@ func (b *tokenBudget) spend(tokens int64) *tokenBudget {
 	return &tokenBudget{Max: b.Max, Used: b.Used + int(tokens), Remaining: max(0, b.Remaining-int(tokens))}
 }
 
-// exhausted is the caller's quota as a refusal for a spent one leaves it: a
-// free key has no request left, and a subscriber is capped until the reset
-// its budgets name.
-func (a *authenticator) exhausted(p *principal, held rateLimit) rateLimit {
-	if p.Anonymous {
+// exhausted is the quota a refusal for a spent one leaves: no request left,
+// and a free key's quota is its daily one.
+func exhausted(p *principal, held rateLimit) rateLimit {
+	if strings.HasPrefix(string(p.InferenceKey), "free_") {
 		held.Kind = "free_daily"
-		return held.none()
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if capped, ok := a.capped[p.scope()]; ok && nowUTC().Before(capped.until) {
-		return capped.limit
-	}
-	return a.credentials[p.scope()].Limit.none()
-}
-
-// spent records that a model refused the caller's free key as spent, so
-// its next turn is refused before it reaches one.
-func (a *authenticator) spent(p *principal, held rateLimit) rateLimit {
-	a.mu.Lock()
-	if cred, ok := a.credentials[p.scope()]; ok && cred.Limit.Remaining != nil {
-		cred.Limit.Remaining = new(0)
-		a.credentials[p.scope()] = cred
-	}
-	a.mu.Unlock()
-	return a.exhausted(p, held)
-}
-
-func (a *authenticator) currentLimit(p *principal, held rateLimit) rateLimit {
-	if p.Anonymous {
-		return held
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if capped, ok := a.capped[p.scope()]; ok && nowUTC().Before(capped.until) {
-		return capped.limit
-	}
-	return a.credentials[p.scope()].Limit
-}
-
-func (a *authenticator) reject(p *principal, rejected secret) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	// Another run may already have replaced the rejected credential.
-	if current := a.credentials[p.scope()]; current.Key == rejected {
-		delete(a.credentials, p.scope())
-	}
+	return held.none()
 }

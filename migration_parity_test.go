@@ -29,7 +29,7 @@ func TestResponseLanguageUsesTheDeviceUnlessTheProfileChoosesOne(t *testing.T) {
 		in := localInput("", nil)
 		in["profile"] = object{"language": tc.selected}
 		r := httptest.NewRequest(http.MethodPost, "/v1/threads/turn", bytes.NewReader(raw(in)))
-		r.Header.Set("Authorization", "Bearer clerk-alice")
+		signIn(r, "alice")
 		r.Header.Set("Accept-Language", tc.locale)
 		w := httptest.NewRecorder()
 		h.routes().ServeHTTP(w, r)
@@ -39,35 +39,6 @@ func TestResponseLanguageUsesTheDeviceUnlessTheProfileChoosesOne(t *testing.T) {
 		}
 		if system := <-systems; !strings.Contains(system, tc.want) {
 			t.Fatalf("%s/%s: %q", tc.selected, tc.locale, system)
-		}
-	}
-}
-
-func TestExplicitSessionRefreshRechecksTheSubscription(t *testing.T) {
-	var subscribed atomic.Bool
-	h, _ := subscriberHarness(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == chatTokenPath && !subscribed.Load() {
-			w.WriteHeader(http.StatusPaymentRequired)
-			return
-		}
-		if r.URL.Path == chatTokenPath {
-			json.NewEncoder(w).Encode(object{"key": "paid-token", "expires_at": time.Now().Add(time.Hour).Format(time.RFC3339), "rate_limit": object{"max_input_tokens": 10000, "input_tokens_used": 0, "input_tokens_remaining": 10000}})
-			return
-		}
-		if r.URL.Path != "/api/keys/chat" {
-			t.Errorf("unexpected request %s", r.URL.Path)
-		}
-		json.NewEncoder(w).Encode(object{"key": "free_previous-plan", "expires_at": time.Now().Add(12 * time.Hour).Format(time.RFC3339), "is_free_tier": true, "rate_limit": object{"max_requests": 5, "remaining": 0}})
-	})
-	for _, paid := range []bool{false, true, false} {
-		subscribed.Store(paid)
-		result := profileOf(t, postRoute(h, "/v1/session", object{"refreshCredentials": true}, "alice"))
-		want := "free_daily"
-		if paid {
-			want = "hourly"
-		}
-		if obj(result["rateLimit"])["kind"] != want {
-			t.Fatalf("paid=%v: %v", paid, result["rateLimit"])
 		}
 	}
 }
@@ -312,14 +283,14 @@ func TestAQueuedTurnRefreshesStorageAccessBeforeStarting(t *testing.T) {
 	h.storeRows = grants
 	p := &principal{ID: "alice", JWT: "clerk-alice"}
 	in := sendInput(key)
-	first, err := h.acceptTurn(context.Background(), p, key, requestOf[turnRequest](in))
+	first, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](in))
 	if err != nil {
 		t.Fatal(err)
 	}
 	awaitFrame(t, first.log, "TEXT_MESSAGE_CHUNK")
 	next := sendInput(key)
 	next["threadId"], next["content"] = in["threadId"], "Queued question"
-	queued, err := h.acceptTurn(context.Background(), p, key, requestOf[turnRequest](next))
+	queued, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](next))
 	if err != nil {
 		t.Fatal(err)
 	}

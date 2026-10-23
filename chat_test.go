@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -20,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
@@ -224,10 +226,7 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 			return "", errors.New("bad session")
 		}
 		return strings.TrimPrefix(s, "clerk-"), nil
-	}, client: cp.Client(), controlplane: cp.URL, credentials: map[string]inferenceCredential{}}
-	for _, subject := range []string{"alice", "bob"} {
-		h.auth.credentials["user:"+subject] = inferenceCredential{Key: "inference-" + secret(subject), Expires: nowUTC().Add(time.Hour)}
-	}
+	}, chatKeys: func(*jwt.Token) (any, error) { return testChatKeys().Public(), nil }, chatIssuer: testChatIssuer, client: cp.Client(), controlplane: cp.URL}
 	m := &model{name: "kimi-k3", context: 8192, client: &http.Client{Transport: &callerAuth{inner: server.Client().Transport, usageSecret: "test-usage-secret"}}}
 	h.offer.models = []*model{m}
 	h.autoModel = m
@@ -248,6 +247,59 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 	}
 	rows.key = key
 	return h, rows, key
+}
+
+// testChatKeys sign the chat tokens test clients mint, as the control plane
+// signs theirs.
+var testChatKeys = sync.OnceValue(func() ed25519.PrivateKey {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+	return private
+})
+
+const testChatIssuer = "https://api.tinfoil.test"
+
+var testChatTokens sync.Map
+
+// chatTokenOf is the chat token a subscriber's client minted.
+func chatTokenOf(user string) string {
+	token, _ := testChatTokens.LoadOrStore(user, mintChatToken(user, nil))
+	return token.(string)
+}
+
+// mintChatToken signs a chat token for user, with edit changing its header
+// or claims.
+func mintChatToken(user string, edit func(header map[string]any, claims jwt.MapClaims)) string {
+	claims := jwt.MapClaims{"iss": testChatIssuer, "sub": user, "aud": chatTokenAudience, "client_id": chatTokenClient, "scope": chatTokenScope, "product": chatTokenProduct,
+		"iat": time.Now().Unix(), "exp": time.Now().Add(time.Hour).Unix(), "jti": uuid.NewString()}
+	token := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims)
+	token.Header["typ"] = chatTokenType
+	if edit != nil {
+		edit(token.Header, claims)
+	}
+	signed, err := token.SignedString(testChatKeys())
+	if err != nil {
+		panic(err)
+	}
+	return signed
+}
+
+// chatCredential is the credential a turn from user's client carries.
+func chatCredential(user string) inferenceCredential {
+	return inferenceCredential{Key: secret(chatTokenOf(user)), Expires: nowUTC().Add(time.Hour), firstParty: true}
+}
+
+// signIn sends a request as user, with the chat token its client minted, or
+// with no user as a signed-out visitor.
+func signIn(r *http.Request, user string) {
+	if user == "" {
+		r.Header.Set("Authorization", "Bearer free_anonymous-key")
+		return
+	}
+	r.Header.Set("Authorization", "Bearer clerk-"+user)
+	r.Header.Set(inferenceKeyHeader, chatTokenOf(user))
 }
 
 // unflagged is a control plane that lists no safeguard flags and answers
@@ -326,11 +378,7 @@ func liveCount(h *harness) (threads, runs, requests int) {
 func postRoute(h *harness, path string, in object, user string) *httptest.ResponseRecorder {
 	r := httptest.NewRequest("POST", path, bytes.NewReader(raw(in)))
 	r.RemoteAddr = "192.0.2.1:1234"
-	if user != "" {
-		r.Header.Set("Authorization", "Bearer clerk-"+user)
-	} else {
-		r.Header.Set("Authorization", "Bearer free_anonymous-key")
-	}
+	signIn(r, user)
 	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	h.routes().ServeHTTP(w, r)
@@ -368,7 +416,7 @@ func eventsIn(t *testing.T, w *httptest.ResponseRecorder) []event {
 
 func TestManagedTurnStoresV2AndKeepsKeyOutOfEvents(t *testing.T) {
 	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer inference-alice" {
+		if r.Header.Get("Authorization") != "Bearer "+chatTokenOf("alice") {
 			t.Error("did not forward inference credential")
 		}
 		var payload object
@@ -943,7 +991,7 @@ func TestCancelCommitsPartialAndLeavesQueue(t *testing.T) {
 	})
 	p := &principal{ID: "alice", JWT: "clerk-alice"}
 	in := sendInput(key)
-	run, err := h.acceptTurn(context.Background(), p, key, requestOf[turnRequest](in))
+	run, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](in))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -951,7 +999,7 @@ func TestCancelCommitsPartialAndLeavesQueue(t *testing.T) {
 	awaitFrame(t, run.log, "TEXT_MESSAGE_CHUNK")
 	queued := sendInput(key)
 	queued["threadId"] = run.thread.id
-	next, err := h.acceptTurn(context.Background(), p, key, requestOf[turnRequest](queued))
+	next, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](queued))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1023,7 +1071,7 @@ func prioritySend(t *testing.T, when string) {
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n")
 	})
 	p := &principal{ID: "alice", JWT: "clerk-alice"}
-	run, err := h.acceptTurn(context.Background(), p, key, requestOf[turnRequest](sendInput(key)))
+	run, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1033,7 +1081,7 @@ func prioritySend(t *testing.T, when string) {
 	queue := func(content string) *chatRun {
 		in := sendInput(key)
 		in["threadId"], in["content"] = run.thread.id, content
-		next, err := h.acceptTurn(context.Background(), p, key, requestOf[turnRequest](in))
+		next, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](in))
 		if err != nil || !next.queued {
 			t.Fatalf("turn not queued: %v", err)
 		}
@@ -1592,7 +1640,7 @@ func TestWebSearchIsNeverBilled(t *testing.T) {
 		if usage.BillCustomerRequest {
 			t.Fatalf("search was marked billable: %+v", usage)
 		}
-		if usage.ContextID != events[0].RunID || usage.RootRequestID != events[0].RunID || usage.ParentService != "harness" || usage.Depth != 1 || !usagereporting.VerifyAPIKeyHash("inference-alice", usage.APIKeyHash) {
+		if usage.ContextID != events[0].RunID || usage.RootRequestID != events[0].RunID || usage.ParentService != "harness" || usage.Depth != 1 || !usagereporting.VerifyAPIKeyHash(chatTokenOf("alice"), usage.APIKeyHash) {
 			t.Fatalf("search lost the run's identity: %+v", usage)
 		}
 	}
@@ -1743,9 +1791,6 @@ func heldScreening(t *testing.T, h *harness, hold chan struct{}) func() []submis
 	}))
 	t.Cleanup(sidecar.Close)
 	h.safeguards = newSubmitter(sidecar.URL)
-	credential := chatToken
-	credential.Expires = nowUTC().Add(time.Hour)
-	h.auth.credentials["user:alice"] = credential
 	// As deployed, auto is the router, not one of the gateway's models.
 	h.autoModel = &model{name: "auto", client: h.offer.get()[0].client}
 	return func() []submission {
@@ -1790,7 +1835,7 @@ func TestACompletedFirstPartyChatIsScreenedOnce(t *testing.T) {
 					t.Fatalf("an ask stored %d rows", len(rows.rows))
 				}
 			}
-			if len(got) != 1 || got[0].Credential != string(chatToken.Key) || got[0].ConversationID != conversation {
+			if len(got) != 1 || got[0].Credential != chatTokenOf("alice") || got[0].ConversationID != conversation {
 				t.Fatalf("the sidecar received %+v", got)
 			}
 			messages := got[0].Messages
