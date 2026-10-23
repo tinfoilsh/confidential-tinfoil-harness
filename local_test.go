@@ -445,10 +445,12 @@ func TestAutoReadsImagesAndTextModelsReadTheirDescriptions(t *testing.T) {
 	}
 }
 
-// Signed-out visitors behind one address hold the same free key, so each of
-// their chats gets its own prompt cache, and a one-off request such as an
-// image description gets one of its own. An account's chats share one.
-func TestSignedOutChatsDoNotShareAPromptCache(t *testing.T) {
+// A client's chats share a prompt cache through the secret it sends, which
+// nothing outside the enclaves can tell from its credential. Sent without
+// one, a chat has a cache of its own, whether its caller is signed in or one
+// of the visitors behind one address who hold the same free key. A one-off
+// request such as an image description gets one of its own.
+func TestChatsShareAPromptCacheOnlyThroughTheClientsSecret(t *testing.T) {
 	var source bytes.Buffer
 	png.Encode(&source, image.NewRGBA(image.Rect(0, 0, 8, 8)))
 	var mu sync.Mutex
@@ -495,7 +497,21 @@ func TestSignedOutChatsDoNotShareAPromptCache(t *testing.T) {
 	if first[0] != again[0] || slices.Contains(other, first[0]) || other[0] == other[1] {
 		t.Fatalf("signed-out cache scopes: %q, %q, %q", first, again, other)
 	}
-	if alice := append(scopesOf(sendInput(key), "alice"), scopesOf(sendInput(key), "alice")...); alice[0] != alice[1] {
-		t.Fatalf("an account's chats do not share a prompt cache: %q", alice)
+	scoped := func(in object, secret string) object {
+		obj(in["options"])["cacheSecret"] = secret
+		return in
+	}
+	secret, another := strings.Repeat("ab", 32), strings.Repeat("cd", 32)
+	visitor := append(scopesOf(scoped(localInput("", nil), secret), ""), scopesOf(scoped(localInput("", nil), secret), "")...)
+	alice := append(scopesOf(scoped(sendInput(key), secret), "alice"), scopesOf(scoped(sendInput(key), secret), "alice")...)
+	if visitor[0] != visitor[1] || alice[0] != alice[1] {
+		t.Fatalf("chats sent with one client secret do not share a prompt cache: %q, %q", visitor, alice)
+	}
+	unscoped := append(scopesOf(sendInput(key), "alice"), scopesOf(sendInput(key), "alice")...)
+	if unscoped[0] == unscoped[1] || slices.Contains(unscoped, alice[0]) || visitor[0] == alice[0] || scopesOf(scoped(sendInput(key), another), "alice")[0] == alice[0] {
+		t.Fatalf("prompt caches shared beyond the client secret: %q, %q, %q", unscoped, alice, visitor)
+	}
+	if w := postRoute(h, "/v1/threads/turn", scoped(sendInput(key), "not hex"), "alice"); w.Code != 400 {
+		t.Fatalf("a malformed cache secret was accepted: %d", w.Code)
 	}
 }

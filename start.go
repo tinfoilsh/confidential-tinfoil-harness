@@ -220,7 +220,7 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	}
 	row, request, model, titleText := plan.row, plan.request, plan.model, plan.titleText
 	r.screening, r.retryTarget, r.turn = h.screening(request), plan.retryTarget, plan.turn
-	request.cacheScope = cacheScope(p, s.id)
+	request.cacheScope = cacheScope(p, s.id, r.input.Options.CacheSecret)
 	request.refreshAuth = func(ctx context.Context) (inferenceCredential, error) {
 		h.live.mu.Lock()
 		p, rejected := *r.principal, r.credential.Key

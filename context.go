@@ -35,14 +35,17 @@ type request struct {
 	webSearch, piiCheck        bool
 }
 
-// cacheScope is the prompt cache a chat's turns share: its account's, or for
-// a signed-out caller its own. Signed-out callers behind one address hold the
-// same free key, so a namespace per key would let them time each other's
-// prompts.
-func cacheScope(p *principal, threadID string) string {
-	scope := p.scope()
-	if p.Anonymous {
-		scope += "\x00" + threadID
+// cacheScope is the prompt cache a chat's turns share: the chats of one
+// client, told apart by the secret it sends, or one chat alone when it sends
+// none. The gateway routes model requests by a hash of the prompt keyed with
+// this scope, so it must hold something the gateway cannot work out from the
+// credential it sees: the client's secret, or the chat id, which never
+// leaves the enclaves. Signed-out callers behind one address hold the same
+// free key, so neither is the key alone.
+func cacheScope(p *principal, threadID, clientSecret string) string {
+	scope := p.scope() + "\x00client:" + clientSecret
+	if clientSecret == "" {
+		scope = p.scope() + "\x00thread:" + threadID
 	}
 	sum := sha256.Sum256([]byte("confidential-tinfoil-harness cache scope\x00" + scope))
 	return hex.EncodeToString(sum[:])
