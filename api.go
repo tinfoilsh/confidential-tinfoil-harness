@@ -162,12 +162,12 @@ func (h *harness) routes() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { respond(w, object{"ok": true}, nil) })
 	for _, spec := range h.apiRoutes() {
 		mux.HandleFunc("POST "+spec.path, func(w http.ResponseWriter, r *http.Request) {
-			body, err := readBody(w, r, maxRequestBody)
+			p, err := h.caller(r, spec.public)
 			if err != nil {
 				respond(w, nil, err)
 				return
 			}
-			p, err := h.auth.authenticate(r, spec.public)
+			body, err := readBody(w, r, maxRequestBody)
 			if err != nil {
 				respond(w, nil, err)
 				return
@@ -209,12 +209,21 @@ func (h *harness) routes() http.Handler {
 	return mux
 }
 
+// caller is who a request is from, recognized before its body is read.
+func (h *harness) caller(r *http.Request, anonymous bool) (*principal, error) {
+	p, err := h.auth.authenticate(r, anonymous)
+	if err != nil {
+		return nil, err
+	}
+	return p, h.auth.recognize(r.Context(), p)
+}
+
 // threadOperation serves a route that changes a stored chat, named by id
 // with the content key, or a device chat, which its client sends as a turn
 // sends it, and which needs no account.
 func (h *harness) threadOperation(handler jsonEndpoint) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		p, err := h.auth.authenticate(r, true)
+		p, err := h.caller(r, true)
 		if err != nil {
 			respond(w, nil, err)
 			return

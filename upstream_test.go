@@ -139,11 +139,7 @@ func uploadRoute(h *harness, path, filename string, data []byte, fields map[stri
 	form.Close()
 	r := httptest.NewRequest("POST", path, &body)
 	r.Header.Set("Content-Type", form.FormDataContentType())
-	if user != "" {
-		r.Header.Set("Authorization", "Bearer clerk-"+user)
-	} else {
-		r.Header.Set("Authorization", "Bearer free_anonymous-key")
-	}
+	signIn(r, user)
 	w := httptest.NewRecorder()
 	h.routes().ServeHTTP(w, r)
 	return w

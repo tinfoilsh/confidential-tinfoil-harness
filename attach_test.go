@@ -137,7 +137,7 @@ func TestRecordingsTranscribeThroughTheRouter(t *testing.T) {
 	h := routerHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		file, header, err := r.FormFile("file")
 		data, _ := io.ReadAll(file)
-		if err != nil || r.URL.Path != "/v1/audio/transcriptions" || r.FormValue("model") != "voxtral-small-24b" || r.FormValue("response_format") != "text" || header.Filename != "memo.mp3" || string(data) != "ID3 audio" || r.Header.Get("Authorization") != "Bearer inference-alice" {
+		if err != nil || r.URL.Path != "/v1/audio/transcriptions" || r.FormValue("model") != "voxtral-small-24b" || r.FormValue("response_format") != "text" || header.Filename != "memo.mp3" || string(data) != "ID3 audio" || r.Header.Get("Authorization") != "Bearer "+chatTokenOf("alice") {
 			t.Errorf("router got %s %s model %q auth %q", r.Method, r.URL.Path, r.FormValue("model"), r.Header.Get("Authorization"))
 		}
 		io.WriteString(w, "the transcript\n")

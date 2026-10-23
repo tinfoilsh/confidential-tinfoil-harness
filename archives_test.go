@@ -37,11 +37,7 @@ func archiveRoute(h *harness, path, user string, parts ...formPart) *httptest.Re
 	body, contentType := archiveForm(parts...)
 	r := httptest.NewRequest("POST", path, bytes.NewReader(body))
 	r.Header.Set("Content-Type", contentType)
-	if user != "" {
-		r.Header.Set("Authorization", "Bearer clerk-"+user)
-	} else {
-		r.Header.Set("Authorization", "Bearer free_anonymous-key")
-	}
+	signIn(r, user)
 	w := httptest.NewRecorder()
 	h.routes().ServeHTTP(w, r)
 	return w
@@ -334,11 +330,11 @@ func TestBackupsHoldWhatRestoresTake(t *testing.T) {
 	h, _, _ := testChatHarness(t, nil)
 	largest := append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, imageUploads.MaxBytes-8)...)
 	device := object{"id": "local-chat", "title": "Large photo", "messages": []any{object{"id": "m", "role": "user", "content": "Look", "attachments": []any{object{"id": "att_large", "kind": "image", "fileName": "large.png"}}}}}
-	w := archiveRoute(h, "/v1/export", "", optionsPart(object{"format": "native"}), threadPart(device), formPart{name: "file", filename: "att_large", data: largest})
+	w := archiveRoute(h, "/v1/export", "alice", optionsPart(object{"format": "native"}), threadPart(device), formPart{name: "file", filename: "att_large", data: largest})
 	if w.Code != 200 {
 		t.Fatalf("export: HTTP %d %.300s", w.Code, w.Body.String())
 	}
-	result := importOf(t, h, "", w.Body.Bytes(), "tinfoil-backup.zip", object{"target": "device"})
+	result := importOf(t, h, "alice", w.Body.Bytes(), "tinfoil-backup.zip", object{"target": "device"})
 	if len(result.threads) != 1 || len(result.threads[0].Messages[0].Attachments) != 1 || !bytes.Equal(result.originals[result.threads[0].Messages[0].Attachments[0].ID], largest) {
 		t.Fatalf("the largest image was not restored: %+v", result.done)
 	}
@@ -391,17 +387,17 @@ func TestRestoresCountTheImagesTheyLeaveOut(t *testing.T) {
 		object{"id": "att_photo", "kind": "image", "fileName": "photo.png", "base64": notImage},
 		object{"id": "att_scan", "kind": "document", "fileName": "scan.pdf", "textContent": "Scanned", "pages": []any{object{"page": 1, "text": "One", "image": notImage}}},
 	}}}}
-	w := archiveRoute(h, "/v1/export", "", optionsPart(object{"format": "native"}), threadPart(device))
+	w := archiveRoute(h, "/v1/export", "alice", optionsPart(object{"format": "native"}), threadPart(device))
 	if w.Code != 200 {
 		t.Fatalf("export: HTTP %d %s", w.Code, w.Body.String())
 	}
-	result := importOf(t, h, "", w.Body.Bytes(), "tinfoil-backup.zip", object{"target": "device"})
+	result := importOf(t, h, "alice", w.Body.Bytes(), "tinfoil-backup.zip", object{"target": "device"})
 	if want := []string{"2 images were left out: the archive does not hold them, or they are not supported images."}; !reflect.DeepEqual(result.done.Warnings, want) {
 		t.Fatalf("warnings: %v", result.done.Warnings)
 	}
 
 	old := withBackupEntries(t, fixture(t, "web-backup-v1.zip"), map[string][]byte{backupImagePath("legacy:local-1:0:0", ".bin"): []byte("plain text, not an image")})
-	result = importOf(t, h, "", old, "backup.zip", object{"target": "device"})
+	result = importOf(t, h, "alice", old, "backup.zip", object{"target": "device"})
 	if len(result.done.Warnings) != 3 || !strings.HasPrefix(result.done.Warnings[0], "1 images were left out") {
 		t.Fatalf("warnings of an old backup: %v", result.done.Warnings)
 	}
@@ -416,7 +412,7 @@ func TestOldBackupImagesKeepTheirType(t *testing.T) {
 		t.Fatal(err)
 	}
 	backup := withBackupEntries(t, fixture(t, "web-backup-v1.zip"), map[string][]byte{backupImagePath("legacy:local-1:0:0", ".bin"): photo.Bytes()})
-	result := importOf(t, h, "", backup, "backup.zip", object{"target": "device"})
+	result := importOf(t, h, "alice", backup, "backup.zip", object{"target": "device"})
 	for _, thread := range result.threads {
 		if thread.Title != "Old device chat" {
 			continue
@@ -487,7 +483,7 @@ func TestWebAppBackupsRestore(t *testing.T) {
 		})
 	}
 	h, _, _ := testChatHarness(t, nil)
-	result := importOf(t, h, "", fixture(t, "web-backup-v1.zip"), "backup.zip", object{"target": "device"})
+	result := importOf(t, h, "alice", fixture(t, "web-backup-v1.zip"), "backup.zip", object{"target": "device"})
 	if len(result.threads) != 3 || result.threads[0].Title != "Evidence" || result.threads[0].ProjectID != nil || result.done.JobID != nil ||
 		!reflect.DeepEqual(result.done.Warnings, []string{"1 projects were not imported: projects are kept in the cloud.", "1 chats were imported without their project."}) {
 		t.Fatalf("a restore to the device: %d chats, %+v", len(result.threads), result.done)
@@ -605,7 +601,7 @@ func TestChatGPTRepliesKeepTheirTurnsReasoning(t *testing.T) {
 		"u2":     node("a1", "user", "text", text("Second question")),
 		"a2":     node("u2", "assistant", "text", text("Second answer")),
 	}}
-	result := importOf(t, h, "", raw([]object{conversation}), "conversations.json", object{"target": "device"})
+	result := importOf(t, h, "alice", raw([]object{conversation}), "conversations.json", object{"target": "device"})
 	if len(result.threads) != 1 || len(result.threads[0].Messages) != 4 {
 		t.Fatalf("threads: %s", raw(result.threads))
 	}
@@ -627,7 +623,7 @@ func TestClaudeImagesAreFoundByTheirID(t *testing.T) {
 		w.Write(data)
 	}
 	zw.Close()
-	result := importOf(t, h, "", archive.Bytes(), "claude.zip", object{"target": "device"})
+	result := importOf(t, h, "alice", archive.Bytes(), "claude.zip", object{"target": "device"})
 	if len(result.threads) != 1 || len(result.threads[0].Messages[0].Attachments) != 1 {
 		t.Fatalf("threads: %s", raw(result.threads))
 	}
@@ -640,7 +636,7 @@ func TestClaudeImagesAreFoundByTheirID(t *testing.T) {
 func TestNullFormatKeysAreNotExports(t *testing.T) {
 	h, _, _ := testChatHarness(t, nil)
 	for _, record := range []string{`{"mapping":null}`, `[{"chat_messages":null}]`, `{"prompt_template":null,"docs":null}`} {
-		w := archiveRoute(h, "/v1/import", "", optionsPart(object{"target": "device"}), formPart{name: "file", filename: "conversations.json", data: []byte(record)})
+		w := archiveRoute(h, "/v1/import", "alice", optionsPart(object{"target": "device"}), formPart{name: "file", filename: "conversations.json", data: []byte(record)})
 		if w.Code != 400 || !strings.Contains(w.Body.String(), "IMPORT_INVALID") {
 			t.Errorf("%s imported: HTTP %d %s", record, w.Code, w.Body.String())
 		}
@@ -743,15 +739,12 @@ func decodedOr(encoded string, fallback []byte) []byte {
 	return b
 }
 
-// A signed-out visitor exports the chats it sends, and nothing is read
-// from sync for it.
-func TestSignedOutExportHoldsOnlyItsChats(t *testing.T) {
-	h, rows, key := testChatHarness(t, nil)
+// An export without the content key holds the chats its client sends, and
+// nothing is read from sync for it.
+func TestAnExportWithoutTheKeyHoldsOnlyItsDeviceChats(t *testing.T) {
+	h, rows, _ := testChatHarness(t, nil)
 	thread := object{"id": "local-chat", "title": "Tab chat", "messages": []any{object{"id": "m", "role": "user", "content": "hi"}}}
-	if w := archiveRoute(h, "/v1/export", "", optionsPart(object{"format": "native", "key": key.base64()}), threadPart(thread)); w.Code != 401 {
-		t.Fatalf("a signed-out export read the cloud: HTTP %d", w.Code)
-	}
-	w := archiveRoute(h, "/v1/export", "", optionsPart(object{"format": "native"}), threadPart(thread))
+	w := archiveRoute(h, "/v1/export", "alice", optionsPart(object{"format": "native"}), threadPart(thread))
 	if w.Code != 200 {
 		t.Fatalf("export: HTTP %d %s", w.Code, w.Body.String())
 	}
@@ -775,13 +768,13 @@ func TestArchivesWaitForScratchSpace(t *testing.T) {
 	}
 	// The export fits the space, but not with the conversations it writes.
 	large := threadPart(object{"id": "local-chat", "title": "Tab chat", "messages": []any{object{"id": "m", "role": "user", "content": strings.Repeat("x", 40<<10)}}})
-	if w := archiveRoute(h, "/v1/export", "", optionsPart(object{"format": "conversations"}), large); w.Code != 413 || !strings.Contains(w.Body.String(), "ARCHIVE_TOO_LARGE") {
+	if w := archiveRoute(h, "/v1/export", "alice", optionsPart(object{"format": "conversations"}), large); w.Code != 413 || !strings.Contains(w.Body.String(), "ARCHIVE_TOO_LARGE") {
 		t.Fatalf("an export that cannot fit: HTTP %d %s", w.Code, w.Body.String())
 	}
 	held := heldScratch(t, h, 60<<10)
 	done := make(chan *httptest.ResponseRecorder)
 	go func() {
-		done <- archiveRoute(h, "/v1/export", "", optionsPart(object{"format": "conversations"}), thread)
+		done <- archiveRoute(h, "/v1/export", "alice", optionsPart(object{"format": "conversations"}), thread)
 	}()
 	for h.scratch.waiting.Load() == 0 {
 		select {
@@ -797,7 +790,7 @@ func TestArchivesWaitForScratchSpace(t *testing.T) {
 	held = heldScratch(t, h, 60<<10)
 	defer held.release()
 	h.scratch.wait = 10 * time.Millisecond
-	if w := archiveRoute(h, "/v1/export", "", optionsPart(object{"format": "conversations"}), thread); w.Code != 503 || w.Header().Get("Retry-After") == "" || !strings.Contains(w.Body.String(), "TEMP_SPACE_BUSY") {
+	if w := archiveRoute(h, "/v1/export", "alice", optionsPart(object{"format": "conversations"}), thread); w.Code != 503 || w.Header().Get("Retry-After") == "" || !strings.Contains(w.Body.String(), "TEMP_SPACE_BUSY") {
 		t.Fatalf("an export that waited too long: HTTP %d %s", w.Code, w.Body.String())
 	}
 }
@@ -849,7 +842,7 @@ func TestStalledArchivesFreeTheirSpace(t *testing.T) {
 	}()
 
 	thread := threadPart(object{"id": "local-chat", "title": "Tab chat", "messages": []any{object{"id": "m", "role": "user", "content": strings.Repeat("x", 16<<10)}}})
-	if w := archiveRoute(h, "/v1/export", "", optionsPart(object{"format": "conversations"}), thread); w.Code != 200 {
+	if w := archiveRoute(h, "/v1/export", "alice", optionsPart(object{"format": "conversations"}), thread); w.Code != 200 {
 		t.Fatalf("an export waited for a stalled import's space: HTTP %d %s", w.Code, w.Body.String())
 	}
 	if r, body := rawResponse(t, stalled); r.StatusCode != http.StatusRequestTimeout || !strings.Contains(body, "REQUEST_TIMEOUT") {
@@ -918,7 +911,7 @@ func postRaw(t *testing.T, server *httptest.Server, path, contentType string, le
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { conn.Close() })
-	fmt.Fprintf(conn, "POST %s HTTP/1.1\r\nHost: harness\r\nAuthorization: Bearer clerk-alice\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n", path, contentType, length)
+	fmt.Fprintf(conn, "POST %s HTTP/1.1\r\nHost: harness\r\nAuthorization: Bearer clerk-alice\r\n%s: %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n", path, inferenceKeyHeader, chatTokenOf("alice"), contentType, length)
 	return conn
 }
 

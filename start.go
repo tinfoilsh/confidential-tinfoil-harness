@@ -225,8 +225,7 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 		h.live.mu.Lock()
 		p, rejected := *r.principal, r.credential.Key
 		h.live.mu.Unlock()
-		h.auth.reject(&p, rejected)
-		credential, err := h.auth.inference(ctx, &p)
+		credential, err := h.auth.renewed(&p, rejected)
 		if err == nil {
 			h.live.mu.Lock()
 			r.credential = credential
@@ -350,7 +349,7 @@ func (h *harness) endUnstarted(r *chatRun, err error) *chatRun {
 	next := h.advance(r, true)
 	h.live.mu.Unlock()
 	e := asAPIError(h.withQuota(r.principal, r.credential.Limit, err))
-	limit := valueOr(e.RateLimit, h.auth.currentLimit(r.principal, r.credential.Limit))
+	limit := valueOr(e.RateLimit, r.credential.Limit)
 	r.out.emit(event{Type: "RUN_ERROR", ThreadID: r.thread.id, RunID: r.log.id, Message: e.Message, Code: e.Code, Kind: e.Kind, ResetsAt: e.ResetsAt, RetryAfter: e.RetryAfter, Metadata: raw(runMetadata{RateLimit: &limit})})
 	r.log.log.close(errDone)
 	r.release()
