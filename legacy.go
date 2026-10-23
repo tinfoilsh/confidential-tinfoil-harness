@@ -148,6 +148,7 @@ type legacyBlock struct {
 
 type legacySearch struct {
 	Query   string `json:"query"`
+	Status  string `json:"status"`
 	Sources []struct {
 		URL         string `json:"url"`
 		Title       string `json:"title"`
@@ -159,11 +160,17 @@ type legacySearch struct {
 type legacyFetch struct {
 	ID        string  `json:"id"`
 	URL       string  `json:"url"`
+	Status    string  `json:"status"`
 	Title     string  `json:"title"`
 	Text      string  `json:"text"`
 	StartedAt float64 `json:"startedAt"`
 	EndedAt   float64 `json:"endedAt"`
 }
+
+// legacyFailed is whether an old client recorded a search or page read as
+// not completed: failed, blocked, or cut off while it ran. The iOS app
+// wrote a step without a status as completed.
+func legacyFailed(status string) bool { return status != "" && status != "completed" }
 
 type legacyCodeCall struct {
 	ID        string          `json:"id"`
@@ -280,8 +287,12 @@ func (m *legacyMessage) timeline(message Message) []Block {
 		}
 	}
 	blocks := []Block{}
-	// A call keeps when the step it came from ran.
-	call := func(startedAt, endedAt float64, id, name, args string, result any) {
+	// A call keeps when the step it came from ran. One that did not complete
+	// holds the result a failed call holds.
+	call := func(startedAt, endedAt float64, id, name, args string, result any, status string) {
+		if legacyFailed(status) {
+			result = json.RawMessage(toolError)
+		}
 		blocks = append(blocks, Block{Type: "tool_call", ID: id, ToolCallID: id, Name: name, Arguments: args, Result: raw(result), Complete: true, StartedAt: startedAt, EndedAt: endedAt})
 	}
 	for index, block := range source {
@@ -296,15 +307,15 @@ func (m *legacyMessage) timeline(message Message) []Block {
 			for _, source := range state.Sources {
 				results = append(results, map[string]string{"url": source.URL, "title": source.Title, "snippet": cmp.Or(source.Snippet, source.Description)})
 			}
-			call(block.StartedAt, block.EndedAt, blockID, "web_search", string(raw(map[string]string{"query": state.Query})), map[string]any{"query": state.Query, "results": results})
+			call(block.StartedAt, block.EndedAt, blockID, "web_search", string(raw(map[string]string{"query": state.Query})), map[string]any{"query": state.Query, "results": results}, state.Status)
 		case "url_fetches":
 			for i, fetch := range block.Fetches {
-				call(cmp.Or(fetch.StartedAt, block.StartedAt), cmp.Or(fetch.EndedAt, block.EndedAt), cmp.Or(fetch.ID, blockID+"-"+strconv.Itoa(i)), "web_fetch", string(raw(map[string]string{"url": fetch.URL})), map[string]string{"url": fetch.URL, "title": fetch.Title, "text": fetch.Text})
+				call(cmp.Or(fetch.StartedAt, block.StartedAt), cmp.Or(fetch.EndedAt, block.EndedAt), cmp.Or(fetch.ID, blockID+"-"+strconv.Itoa(i)), "web_fetch", string(raw(map[string]string{"url": fetch.URL})), map[string]string{"url": fetch.URL, "title": fetch.Title, "text": fetch.Text}, fetch.Status)
 			}
 		case "code_exec":
 			for i, c := range block.Calls {
 				args := c.arguments()
-				call(block.StartedAt, block.EndedAt, cmp.Or(c.ID, blockID+"-"+strconv.Itoa(i)), c.ToolName, args, normalizeToolResult(toolCall{name: c.ToolName, args: args}, c.Output))
+				call(block.StartedAt, block.EndedAt, cmp.Or(c.ID, blockID+"-"+strconv.Itoa(i)), c.ToolName, args, normalizeToolResult(toolCall{name: c.ToolName, args: args}, c.Output), "")
 			}
 		default:
 			block.ID = blockID
