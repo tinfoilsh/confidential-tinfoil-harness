@@ -213,8 +213,15 @@ func (h *harness) routes() http.Handler {
 	for _, path := range []string{"/v1/attachments/get", "/v1/attachments/get-public"} {
 		mux.HandleFunc("POST "+path, h.handleAttachmentGet)
 	}
+	if contractCheck != nil {
+		return contractCheck(mux)
+	}
 	return mux
 }
+
+// contractCheck, set only by the tests, checks every request and response
+// against the published protocol.
+var contractCheck func(http.Handler) http.Handler
 
 // caller is who a request is from, recognized before its body is read.
 func (h *harness) caller(r *http.Request, anonymous bool) (*principal, error) {

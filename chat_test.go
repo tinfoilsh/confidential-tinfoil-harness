@@ -200,6 +200,7 @@ func (s *memoryRows) ids(_ context.Context, p *principal, scope, project string)
 
 func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memoryRows, contentKey) {
 	t.Helper()
+	watchContract(t)
 	if upstream == nil {
 		upstream = func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/event-stream")
