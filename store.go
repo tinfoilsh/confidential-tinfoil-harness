@@ -138,6 +138,7 @@ func (h *harness) threadPage(ctx context.Context, p *principal, key contentKey, 
 // saveThread pushes a chat at the revision it was read at. A chat naming
 // attachments sync does not hold under it is repaired once and pushed again.
 func (h *harness) saveThread(ctx context.Context, p *principal, key contentKey, row *threadRow) error {
+	row.RecordVersion = recordVersion
 	row.UpdatedAt = timestamp()
 	for repaired := false; ; repaired = true {
 		stored := storedRow{ID: row.ID, ETag: row.etag, Data: raw(row.Thread), project: row.ProjectID, projectSet: true, restore: row.restore}
@@ -267,6 +268,7 @@ func (h *harness) mutateProfile(ctx context.Context, p *principal, key contentKe
 			return errProfileUnchanged
 		}
 		profile.UpdatedAt = timestamp()
+		profile.RecordVersion = recordVersion
 		row.Data = raw(profile)
 		return nil
 	})
@@ -310,7 +312,7 @@ func (h *harness) mutateProject(ctx context.Context, p *principal, key contentKe
 		}
 		change(&project)
 		project.UpdatedAt = timestamp()
-		row.Data = raw(project)
+		row.Data = raw(storedProject{project, recordVersion})
 		return nil
 	})
 	return project, err
@@ -364,7 +366,7 @@ func (h *harness) createProjectDocument(ctx context.Context, p *principal, key c
 			doc.CreatedAt = readProjectDocument(row, doc.ProjectID).CreatedAt
 		}
 		doc.UpdatedAt = timestamp()
-		row.Data, row.project, row.projectSet = raw(doc), &doc.ProjectID, true
+		row.Data, row.project, row.projectSet = raw(storedDocument{doc, recordVersion}), &doc.ProjectID, true
 		return nil
 	})
 	return doc, err

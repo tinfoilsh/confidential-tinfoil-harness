@@ -569,6 +569,7 @@ func (h *harness) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 		thread := readDeviceThread(named.ID, item)
 		modelCopies(&thread)
 		thread.checkWidgets()
+		thread.RecordVersion = recordVersion
 		threads = append(threads, thread)
 	}
 	respond(w, struct {
