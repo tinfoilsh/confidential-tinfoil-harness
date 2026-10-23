@@ -115,3 +115,33 @@ func TestAFlaggedChatTakesNoTurns(t *testing.T) {
 	}
 	finishedRun(t, h, "/v1/threads/turn", continueInput(key, "fine"))
 }
+
+// A caller's flags are read once a minute, so the control plane does not
+// hear of each chat read, and they never mark another caller's chats.
+func TestFlagsAreReusedOnlyForTheirCaller(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	var reads atomic.Int32
+	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reads.Add(1)
+		if r.Header.Get("Authorization") == "Bearer clerk-alice" {
+			io.WriteString(w, `{"flags":[{"conversation_id":"chat-1"}]}`)
+			return
+		}
+		io.WriteString(w, `{"flags":[]}`)
+	}))
+	t.Cleanup(cp.Close)
+	h.auth.client, h.auth.controlplane = cp.Client(), cp.URL
+	storedThread(rows, "alice", "chat-1")
+	storedThread(rows, "bob", "chat-1")
+	flagged := func(user string) bool {
+		var got threadSummary
+		json.Unmarshal(postRoute(h, "/v1/threads/get", object{"key": key.base64(), "id": "chat-1"}, user).Body.Bytes(), &got)
+		return got.Flagged
+	}
+	if seen := []bool{flagged("alice"), flagged("alice"), flagged("bob"), flagged("bob")}; !reflect.DeepEqual(seen, []bool{true, true, false, false}) {
+		t.Fatalf("flagged as read by alice, alice, bob, bob: %v", seen)
+	}
+	if reads.Load() != 2 {
+		t.Fatalf("the control plane was asked for flags %d times", reads.Load())
+	}
+}

@@ -147,9 +147,10 @@ func identifier(s string) bool {
 	return true
 }
 
-// requireID refuses an id that cannot name a row.
+// requireID refuses an id that cannot name a row. Ids become path segments
+// of other services' URLs, so the dot segments are refused, as sync does.
 func requireID(field, id string) error {
-	if id == "" || !identifier(id) || strings.ContainsAny(id, "/\\?#") {
+	if id == "" || id == "." || id == ".." || !identifier(id) || strings.ContainsAny(id, "/\\?#") {
 		return apiErr(400, "BAD_REQUEST", field+" must be a valid identifier")
 	}
 	return nil

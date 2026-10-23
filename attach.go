@@ -651,6 +651,9 @@ func (h *harness) legacyAttachmentBytes(ctx context.Context, id, encodedKey stri
 	return plain, nil
 }
 
+// opaqueContentType is the type every downloaded attachment is sent as.
+const opaqueContentType = "application/octet-stream"
+
 func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 	body, err := readBody(w, r, maxRequestBody)
 	if err != nil {
@@ -696,7 +699,6 @@ func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer clear(data)
-	contentType, fileName := cmp.Or(descriptor.MimeType, http.DetectContentType(data)), cmp.Or(descriptor.FileName, "attachment")
 	if documentRequest(descriptor, data) {
 		// A stored document keeps its extracted content, not the uploaded file.
 		content := descriptor.content()
@@ -708,12 +710,12 @@ func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 		}
 		clear(data)
 		data = []byte(documentText(content))
-		contentType, fileName = "text/markdown; charset=utf-8", strings.TrimSuffix(fileName, filepath.Ext(fileName))+".md"
 	}
-	w.Header().Set("Content-Type", contentType)
+	// EHBP seals the body but not the headers, so the response names neither
+	// the file nor its type; the client reads both from the chat it holds.
+	w.Header().Set("Content-Type", opaqueContentType)
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": fileName}))
 	w.Write(data)
 }
 
