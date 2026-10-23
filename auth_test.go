@@ -105,8 +105,7 @@ func TestLargeBodiesAreReadOnlyAfterAuthentication(t *testing.T) {
 		{"/v1/threads/turn", "forged-session", "", 401},
 		{"/v1/threads/turn", "free_refused-key", "", 401},
 		{"/v1/threads/import", "forged-session", "", 401},
-		// Upgrading old device chats requires a signed-in caller.
-		{"/v1/threads/upgrade", "free_anonymous-key", "", 401},
+		{"/v1/threads/upgrade", "free_refused-key", "", 401},
 		{"/v1/threads/update", "", "", 401},
 		{"/v1/threads/update", "free_refused-key", "", 401},
 		{"/v1/threads/get", "free_refused-key", "", 401},
