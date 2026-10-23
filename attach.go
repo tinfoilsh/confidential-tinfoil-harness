@@ -662,6 +662,11 @@ func (h *harness) legacyAttachmentBytes(ctx context.Context, id, encodedKey stri
 const opaqueContentType = "application/octet-stream"
 
 func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
+	p, err := h.caller(r, true)
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
 	body, err := readBody(w, r, maxRequestBody)
 	defer clear(body)
 	if err != nil {
@@ -669,11 +674,6 @@ func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	public := r.URL.Path == "/v1/attachments/get-public"
-	p, err := h.auth.authenticate(r, true)
-	if err != nil {
-		respond(w, nil, err)
-		return
-	}
 	var in attachmentRequest
 	defer in.clearKey()
 	if err := decodeBody(body, &in); err != nil {

@@ -208,7 +208,7 @@ type spooledPart struct {
 }
 
 func (h *harness) handleExport(w http.ResponseWriter, r *http.Request) {
-	p, err := h.auth.authenticate(r, true)
+	p, err := h.auth.subscriber(r)
 	if err != nil {
 		respond(w, nil, err)
 		return
@@ -235,10 +235,6 @@ func (h *harness) handleExport(w http.ResponseWriter, r *http.Request) {
 	lift()
 	var key *contentKey
 	if len(form.options.Key) != 0 {
-		if p.Anonymous {
-			respond(w, nil, errAnonymousCloud)
-			return
-		}
 		decoded, err := decodeContentKey(form.options.Key)
 		form.options.clearKey()
 		if err != nil {

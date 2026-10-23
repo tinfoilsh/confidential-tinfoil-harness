@@ -192,7 +192,7 @@ func TestEveryViewMarksWidgetArgumentsTheDeclarationRefuses(t *testing.T) {
 	marks("the device operation", deviceOperation(t, h, "/v1/threads/update", statsThread(), object{"id": "chat-2", "title": "Renamed"}, "")["messages"])
 	device := statsThread()
 	device["id"] = "chat-3"
-	marks("the upgrade", obj(upgraded(t, h, "", device)[0])["messages"])
+	marks("the upgrade", obj(upgraded(t, h, "alice", device)[0])["messages"])
 }
 
 func TestValidWidgetArgumentsAreAcknowledged(t *testing.T) {

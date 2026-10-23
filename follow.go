@@ -4,13 +4,13 @@ import "net/http"
 
 // handleFollow re-attaches a client to a run that is live on this instance.
 func (h *harness) handleFollow(w http.ResponseWriter, r *http.Request) {
-	body, err := readBody(w, r, maxRequestBody)
-	defer clear(body)
+	p, err := h.caller(r, true)
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
-	p, err := h.auth.authenticate(r, true)
+	body, err := readBody(w, r, maxRequestBody)
+	defer clear(body)
 	if err != nil {
 		respond(w, nil, err)
 		return

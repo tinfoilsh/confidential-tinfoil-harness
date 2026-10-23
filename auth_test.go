@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -11,12 +13,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 func TestAnonymousInferenceValidatesTheClientKey(t *testing.T) {
@@ -52,8 +55,8 @@ func TestAnonymousInferenceValidatesTheClientKey(t *testing.T) {
 			t.Fatalf("incorrect credential or invented quota/expiry metadata: err=%v", err)
 		}
 	}
-	if calls.Load() != 2 || len(a.credentials) != 0 {
-		t.Fatal("client keys were cached as server-issued credentials")
+	if calls.Load() != 2 {
+		t.Fatal("a free key's quota was not read for each request")
 	}
 	if _, err := a.authenticate(r, false); err == nil {
 		t.Fatal("free key authorized a signed-in route")
@@ -67,22 +70,64 @@ func TestAnonymousInferenceValidatesTheClientKey(t *testing.T) {
 	}
 }
 
+func TestSessionReadsFreeQuotaOncePerRequest(t *testing.T) {
+	h, _, _ := testChatHarness(t, nil)
+	var calls atomic.Int32
+	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(object{"ok": true, "rate_limit": object{"max_requests": 10, "remaining": 10 - calls.Add(1)}})
+	}))
+	defer cp.Close()
+	h.auth.client, h.auth.controlplane = cp.Client(), cp.URL
+	for _, remaining := range []int{9, 8} {
+		w := postRoute(h, "/v1/session", object{}, "")
+		var session struct {
+			RateLimit rateLimit `json:"rateLimit"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &session); err != nil || w.Code != 200 || session.RateLimit.Remaining == nil || *session.RateLimit.Remaining != remaining {
+			t.Fatalf("session quota: HTTP %d %s", w.Code, w.Body.String())
+		}
+	}
+}
+
 type watchedBody struct{ read atomic.Bool }
 
 func (b *watchedBody) Read([]byte) (int, error) { b.read.Store(true); return 0, io.EOF }
 
-// A turn or an import may be tens of mebibytes; only a caller who signed in
-// gets them read.
+// A turn or an archive may be tens of mebibytes; only a caller who signed in,
+// or holds a free key the control plane accepts, gets one read, and only a
+// subscriber gets an archive read.
 func TestLargeBodiesAreReadOnlyAfterAuthentication(t *testing.T) {
 	h, _, _ := testChatHarness(t, nil)
-	for _, path := range []string{"/v1/threads/turn", "/v1/threads/import", "/v1/threads/upgrade"} {
+	for _, tc := range []struct {
+		path, session, credential string
+		code                      int
+	}{
+		{"/v1/threads/turn", "forged-session", "", 401},
+		{"/v1/threads/turn", "free_refused-key", "", 401},
+		{"/v1/threads/import", "forged-session", "", 401},
+		// Upgrading old device chats requires a signed-in caller.
+		{"/v1/threads/upgrade", "free_anonymous-key", "", 401},
+		{"/v1/threads/update", "", "", 401},
+		{"/v1/threads/update", "free_refused-key", "", 401},
+		{"/v1/threads/get", "free_refused-key", "", 401},
+		{"/v1/threads/follow", "free_refused-key", "", 401},
+		{"/v1/attachments/get-public", "free_refused-key", "", 401},
+		{"/v1/speech", "free_refused-key", "", 401},
+		{"/v1/import", "clerk-alice", "free_anonymous-key", 403},
+		{"/v1/export", "clerk-alice", "", 401},
+	} {
 		body := &watchedBody{}
-		r := httptest.NewRequest(http.MethodPost, path, body)
-		r.Header.Set("Authorization", "Bearer forged-session")
+		r := httptest.NewRequest(http.MethodPost, tc.path, body)
+		if tc.session != "" {
+			r.Header.Set("Authorization", "Bearer "+tc.session)
+		}
+		if tc.credential != "" {
+			r.Header.Set(inferenceKeyHeader, tc.credential)
+		}
 		w := httptest.NewRecorder()
 		h.routes().ServeHTTP(w, r)
-		if w.Code != 401 || body.read.Load() {
-			t.Fatalf("%s: HTTP %d, body read: %v", path, w.Code, body.read.Load())
+		if w.Code != tc.code || body.read.Load() {
+			t.Fatalf("%s as %q: HTTP %d, body read: %v", tc.path, tc.session, w.Code, body.read.Load())
 		}
 	}
 }
@@ -137,18 +182,21 @@ func TestAnonymousReconnectUsesKeyPossessionInsteadOfIP(t *testing.T) {
 	model, release := heldModel()
 	h, _, _ := testChatHarness(t, model)
 	t.Cleanup(release)
-	run, err := h.acceptTurn(context.Background(), &principal{Anonymous: true, AnonymousID: hashHex([]byte("free_anonymous-key")), InferenceKey: "free_anonymous-key"}, contentKey{}, requestOf[turnRequest](localInput("", object{})))
+	run, err := h.acceptTurn(context.Background(), &principal{Anonymous: true, AnonymousID: hashHex([]byte("free_anonymous-key")), InferenceKey: "free_anonymous-key"}, inferenceCredential{Key: "free_anonymous-key"}, contentKey{}, requestOf[turnRequest](localInput("", object{})))
 	if err != nil {
 		t.Fatal(err)
 	}
 	awaitFrame(t, run.log, "TEXT_MESSAGE_CHUNK")
+	if err := h.auth.recognize(context.Background(), run.principal); err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		key, ip string
 		want    int
 	}{
 		{"free_anonymous-key", "198.51.100.9:1234", 200},
-		{"free_other-client", "192.0.2.1:1234", 404},
-		{"", "192.0.2.1:1234", 404},
+		{"free_other-client", "192.0.2.1:1234", 401},
+		{"", "192.0.2.1:1234", 401},
 	} {
 		body := raw(object{"threadId": run.thread.id, "runId": run.log.id})
 		req := httptest.NewRequest(http.MethodPost, "/v1/threads/follow", bytes.NewReader(body))
@@ -156,153 +204,20 @@ func TestAnonymousReconnectUsesKeyPossessionInsteadOfIP(t *testing.T) {
 		if tc.key != "" {
 			req.Header.Set("Authorization", "Bearer "+tc.key)
 		}
-		response := replayOf(h, req)
+		// A refused caller is answered at once; a follower stops listening
+		// once it has what the run framed.
+		response := httptest.NewRecorder()
+		if tc.want == 200 {
+			response = replayOf(h, req)
+		} else {
+			h.routes().ServeHTTP(response, req)
+		}
 		if response.Code != tc.want {
 			t.Fatalf("incorrect reconnect authorization: want %d, got %d", tc.want, response.Code)
 		}
 		if strings.Contains(response.Body.String(), "free_anonymous-key") {
 			t.Fatal("credential leaked into run events")
 		}
-	}
-}
-
-func subscriberHarness(t *testing.T, controlplane http.HandlerFunc) (*harness, contentKey) {
-	t.Helper()
-	h, _, key := testChatHarness(t, nil)
-	cp := httptest.NewServer(unflagged(controlplane))
-	t.Cleanup(cp.Close)
-	h.auth.client, h.auth.controlplane = cp.Client(), cp.URL
-	delete(h.auth.credentials, "user:alice")
-	h.syncAPI = &syncClient{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(*http.Request) (*http.Response, error) {
-		return syncTestResponse(404, object{"ok": false, "code": "NOT_FOUND"})
-	})}}
-	return h, key
-}
-
-func TestSubscribersHaveTokenBudgetsButNoRequestQuota(t *testing.T) {
-	resets := nowUTC().Add(30 * time.Minute).Format(time.RFC3339)
-	h, key := subscriberHarness(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/chat/token" || r.Header.Get("Authorization") != "Bearer clerk-alice" {
-			t.Errorf("unexpected exchange %s", r.URL.Path)
-		}
-		json.NewEncoder(w).Encode(object{"key": "subscriber-jwt", "expires_at": nowUTC().Add(15 * time.Minute).Format(time.RFC3339), "is_free_tier": false,
-			"rate_limit": object{"max_input_tokens": 1000000, "input_tokens_used": 250000, "input_tokens_remaining": 750000, "max_output_tokens": 100000, "output_tokens_used": 100000, "output_tokens_remaining": 0, "resets_at": resets}})
-	})
-	var session struct {
-		RateLimit json.RawMessage `json:"rateLimit"`
-	}
-	response := postRoute(h, "/v1/session", object{}, "alice")
-	json.Unmarshal(response.Body.Bytes(), &session)
-	want := `{"kind":"hourly","inputTokens":{"max":1000000,"used":250000,"remaining":750000},"outputTokens":{"max":100000,"used":100000,"remaining":0},"resetsAt":"` + resets + `"}`
-	if response.Code != 200 || string(session.RateLimit) != want {
-		t.Fatalf("HTTP %d rateLimit %s, want %s", response.Code, session.RateLimit, want)
-	}
-	events := eventsIn(t, postRoute(h, "/v1/threads/turn", sendInput(key), "alice"))
-	if last := events[len(events)-1]; last.Type != "RUN_FINISHED" {
-		t.Fatalf("a subscriber without a request quota was refused: %+v", last)
-	}
-	if limit := h.auth.currentLimit(&principal{ID: "alice"}, rateLimit{}); limit.MaxRequests != nil || limit.Remaining != nil {
-		t.Fatal("a finished run invented a request quota")
-	}
-}
-
-func TestOnlyAMissingSubscriptionFallsBackToAFreeKey(t *testing.T) {
-	for _, tc := range []struct {
-		name, body, retryAfter string
-		status, http, wait     int
-		code                   string
-	}{
-		{"suspended", `{"error":"account is suspended","code":"FORBIDDEN"}`, "", 403, 403, 0, "UPSTREAM_REFUSED"},
-		{"provisioning", `{"error":"account provisioning is in progress","code":"ACCOUNT_PROVISIONING"}`, "5", 503, 503, 5, "UPSTREAM_REFUSED"},
-		{"exchange rate limit", `{"error":"rate_limited","error_description":"too many requests, please slow down"}`, "30", 429, 429, 30, "RATE_LIMITED"},
-		{"server error", `{"error":"failed to verify subscription","code":"INTERNAL_ERROR"}`, "", 500, 502, 0, "UPSTREAM_REFUSED"},
-		{"malformed credential", `{"expires_at":"2099-01-01T00:00:00Z"}`, "", 200, 502, 0, "UPSTREAM_REFUSED"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var freeKeys atomic.Int32
-			h, _ := subscriberHarness(t, func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path == "/api/keys/chat" {
-					freeKeys.Add(1)
-				}
-				if tc.retryAfter != "" {
-					w.Header().Set("Retry-After", tc.retryAfter)
-				}
-				w.WriteHeader(tc.status)
-				io.WriteString(w, tc.body)
-			})
-			_, err := h.auth.inference(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"})
-			e := asAPIError(err)
-			if err == nil || e.HTTP != tc.http || e.Code != tc.code || e.RetryAfter != tc.wait || freeKeys.Load() != 0 {
-				t.Fatalf("got %v (HTTP %d %s retry %d), free key exchanges %d", err, e.HTTP, e.Code, e.RetryAfter, freeKeys.Load())
-			}
-		})
-	}
-	resets := nowUTC().Add(5 * time.Hour).Format(time.RFC3339)
-	h, _ := subscriberHarness(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer clerk-alice" {
-			t.Error("exchanged without the Clerk session")
-		}
-		if r.URL.Path == "/api/chat/token" {
-			w.WriteHeader(http.StatusPaymentRequired)
-			io.WriteString(w, `{"error":"an active Tinfoil Chat subscription is required","code":"PAYMENT_REQUIRED"}`)
-			return
-		}
-		json.NewEncoder(w).Encode(object{"key": "free_key", "expires_at": resets, "is_free_tier": true,
-			"rate_limit": object{"max_requests": 10, "remaining": 7, "max_input_tokens": 500000, "input_tokens_used": 1000, "input_tokens_remaining": 499000, "max_output_tokens": 0, "output_tokens_used": 0, "output_tokens_remaining": 0, "resets_at": resets}})
-	})
-	p := &principal{ID: "alice", JWT: "clerk-alice"}
-	credential, err := h.auth.inference(context.Background(), p)
-	want := rateLimit{Kind: "free_daily", MaxRequests: new(10), Remaining: new(7), InputTokens: &tokenBudget{500000, 1000, 499000}, ResetsAt: resets}
-	if err != nil || credential.Key != "free_key" || !reflect.DeepEqual(credential.Limit, want) {
-		t.Fatalf("free key %q limit %+v, err %v", credential.Key, credential.Limit, err)
-	}
-	if limit := h.auth.debit(p, rateLimit{}, usage{Prompt: 100}); *limit.Remaining != 6 || limit.InputTokens.Used != 1100 || *credential.Limit.Remaining != 7 || credential.Limit.InputTokens.Used != 1000 {
-		t.Fatal("a run's spend was not counted once")
-	}
-	delete(h.auth.credentials, p.scope())
-	if limit := h.auth.debit(p, credential.Limit, usage{Prompt: 100}); limit.Remaining == nil || *limit.Remaining != 6 || limit.InputTokens.Used != 1100 {
-		t.Fatal("refreshing credentials erased the finishing run's quota")
-	}
-}
-
-func TestHourlyCapIsRememberedUntilItResets(t *testing.T) {
-	resets := nowUTC().Add(30 * time.Minute).Truncate(time.Second).Format(time.RFC3339)
-	var exchanges atomic.Int32
-	h, key := subscriberHarness(t, func(w http.ResponseWriter, r *http.Request) {
-		exchanges.Add(1)
-		if r.URL.Path != "/api/chat/token" {
-			t.Errorf("a capped subscriber was downgraded to %s", r.URL.Path)
-		}
-		w.Header().Set("Retry-After", "1800")
-		w.WriteHeader(http.StatusTooManyRequests)
-		json.NewEncoder(w).Encode(object{"error": "You've reached your hourly usage limit. Please try again later.", "code": "HOURLY_LIMIT_REACHED", "limit": "output", "resets_at": resets,
-			"rate_limit": object{"max_input_tokens": 1000000, "input_tokens_used": 1000, "input_tokens_remaining": 999000, "max_output_tokens": 100000, "output_tokens_used": 100000, "output_tokens_remaining": 0, "resets_at": resets}})
-	})
-	p := &principal{ID: "alice", JWT: "clerk-alice"}
-	for range 2 {
-		_, err := h.auth.inference(context.Background(), p)
-		if e := asAPIError(err); e.HTTP != 429 || e.Code != "QUOTA_EXHAUSTED" || e.Kind != "hourly" || e.ResetsAt != resets || e.RetryAfter < 1790 || e.RetryAfter > 1800 || e.Message != "You've reached your hourly usage limit. Please try again later." {
-			t.Fatalf("hourly cap: %+v", e)
-		}
-	}
-	turn := postRoute(h, "/v1/threads/turn", sendInput(key), "alice")
-	var session struct {
-		RateLimit json.RawMessage `json:"rateLimit"`
-	}
-	response := postRoute(h, "/v1/session", object{}, "alice")
-	json.Unmarshal(response.Body.Bytes(), &session)
-	want := `{"kind":"hourly","maxRequests":0,"remaining":0,"inputTokens":{"max":1000000,"used":1000,"remaining":999000},"outputTokens":{"max":100000,"used":100000,"remaining":0},"resetsAt":"` + resets + `"}`
-	if turn.Code != 429 || turn.Header().Get("Retry-After") == "" || response.Code != 200 || string(session.RateLimit) != want || exchanges.Load() != 1 {
-		t.Fatalf("turn HTTP %d, session HTTP %d %s, exchanges %d", turn.Code, response.Code, session.RateLimit, exchanges.Load())
-	}
-	h.auth.mu.Lock()
-	capped := h.auth.capped[p.scope()]
-	capped.until = nowUTC().Add(-time.Second)
-	h.auth.capped[p.scope()] = capped
-	h.auth.mu.Unlock()
-	h.auth.inference(context.Background(), p)
-	if exchanges.Load() != 2 {
-		t.Fatal("the cap was remembered past its reset")
 	}
 }
 
@@ -342,7 +257,7 @@ func (b *endlessJSON) Read(p []byte) (int, error) {
 func TestOversizedBodiesAreRefusedAsTooLarge(t *testing.T) {
 	h, _, _ := testChatHarness(t, nil)
 	r := httptest.NewRequest(http.MethodPost, "/v1/threads/get", &endlessJSON{})
-	r.Header.Set("Authorization", "Bearer clerk-alice")
+	signIn(r, "alice")
 	w := httptest.NewRecorder()
 	h.routes().ServeHTTP(w, r)
 	var refused struct {
@@ -359,78 +274,87 @@ func TestOversizedBodiesAreRefusedAsTooLarge(t *testing.T) {
 func TestOnlyChatTokenChatsAreScreened(t *testing.T) {
 	for _, subscribed := range []bool{true, false} {
 		t.Run(strconv.FormatBool(subscribed), func(t *testing.T) {
-			h, key := subscriberHarness(t, func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path == chatTokenPath && !subscribed {
-					w.WriteHeader(http.StatusPaymentRequired)
-					return
-				}
-				json.NewEncoder(w).Encode(object{"key": "opaque-" + r.URL.Path, "expires_at": nowUTC().Add(time.Hour).Format(time.RFC3339)})
-			})
-			delete(h.auth.credentials, "user:alice")
+			h, _, key := testChatHarness(t, nil)
 			drained := screenedBy(t, h)
-			delete(h.auth.credentials, "user:alice")
-			finishedRun(t, h, "/v1/threads/turn", sendInput(key))
+			r := httptest.NewRequest(http.MethodPost, "/v1/threads/turn", bytes.NewReader(raw(sendInput(key))))
+			signIn(r, "alice")
+			if !subscribed {
+				r.Header.Set(inferenceKeyHeader, "free_anonymous-key")
+			}
+			w := httptest.NewRecorder()
+			h.routes().ServeHTTP(w, r)
+			if events := eventsIn(t, w); events[len(events)-1].Type != "RUN_FINISHED" {
+				t.Fatalf("the run ended with %+v", events[len(events)-1])
+			}
 			got := drained()
-			if subscribed && (len(got) != 1 || got[0].Credential != "opaque-"+chatTokenPath) || !subscribed && len(got) != 0 {
+			if subscribed && (len(got) != 1 || got[0].Credential != chatTokenOf("alice")) || !subscribed && len(got) != 0 {
 				t.Fatalf("subscribed %v: the sidecar received %+v", subscribed, got)
 			}
 		})
 	}
 }
 
-// A run's request and tokens come off the caller's quota, which every run's
-// end and every refusal for a spent quota report.
-func TestARunsSpendComesOffTheQuotaItReports(t *testing.T) {
-	var refuse atomic.Bool
-	quotaRefusal := `{"error":{"message":"Daily request limit reached.","type":"insufficient_quota","code":"insufficient_quota"}}`
+// A signed-in client mints its chat token, and only one the control plane
+// signed for the Tinfoil Chat client and for that caller reaches a model.
+func TestChatTokensAreVerified(t *testing.T) {
+	var modelCalls atomic.Int32
 	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
-		if refuse.Load() {
-			w.WriteHeader(http.StatusPaymentRequired)
-			io.WriteString(w, quotaRefusal)
-			return
-		}
-		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\ndata: {\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3}}\n\ndata: [DONE]\n\n")
+		modelCalls.Add(1)
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n")
 	})
-	resets := nowUTC().Add(5 * time.Hour).Format(time.RFC3339)
-	credential := h.auth.credentials["user:alice"]
-	credential.Limit = rateLimit{Kind: "free_daily", MaxRequests: new(10), Remaining: new(7), InputTokens: &tokenBudget{1000, 100, 900}, OutputTokens: &tokenBudget{500, 0, 500}, ResetsAt: resets}
-	h.auth.credentials["user:alice"] = credential
-	reported := func(e event) rateLimit {
-		var metadata runMetadata
-		json.Unmarshal(e.Metadata, &metadata)
-		return valueOr(metadata.RateLimit, rateLimit{})
+	claim := func(name string, value any) func(map[string]any, jwt.MapClaims) {
+		return func(_ map[string]any, claims jwt.MapClaims) { claims[name] = value }
 	}
-	events := finishedRun(t, h, "/v1/threads/turn", sendInput(key))
-	want := `{"kind":"free_daily","maxRequests":10,"remaining":6,"inputTokens":{"max":1000,"used":112,"remaining":888},"outputTokens":{"max":500,"used":3,"remaining":497},"resetsAt":"` + resets + `"}`
+	_, forger, _ := ed25519.GenerateKey(rand.Reader)
+	forged, _ := jwt.NewWithClaims(jwt.SigningMethodEdDSA, jwt.MapClaims{"iss": testChatIssuer, "sub": "alice", "aud": chatTokenAudience, "client_id": chatTokenClient, "scope": chatTokenScope,
+		"product": chatTokenProduct, "iat": time.Now().Unix(), "exp": time.Now().Add(time.Hour).Unix(), "jti": "forged"}).SignedString(forger)
+	turn := func(credential string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, "/v1/threads/turn", bytes.NewReader(raw(sendInput(key))))
+		r.Header.Set("Authorization", "Bearer clerk-alice")
+		r.Header.Set(inferenceKeyHeader, credential)
+		w := httptest.NewRecorder()
+		h.routes().ServeHTTP(w, r)
+		return w
+	}
+	for name, credential := range map[string]string{
+		"none":                        "",
+		"another signer":              forged,
+		"another caller's":            mintChatToken("bob", nil),
+		"another client's":            mintChatToken("alice", claim("client_id", "third-party-app")),
+		"another product's":           mintChatToken("alice", claim("product", "api")),
+		"another audience's":          mintChatToken("alice", claim("aud", "https://example.com")),
+		"another issuer's":            mintChatToken("alice", claim("iss", "https://evil.example")),
+		"expired":                     mintChatToken("alice", claim("exp", time.Now().Add(-time.Hour).Unix())),
+		"without the inference scope": mintChatToken("alice", claim("scope", "openid")),
+		"not an access token":         mintChatToken("alice", func(header map[string]any, _ jwt.MapClaims) { header["typ"] = "JWT" }),
+		"a free key nobody issued":    "free_refused-key",
+	} {
+		if w := turn(credential); w.Code != 401 || modelCalls.Load() != 0 {
+			t.Fatalf("%s: HTTP %d after %d model calls", name, w.Code, modelCalls.Load())
+		}
+	}
+	for _, credential := range []string{chatTokenOf("alice"), "free_anonymous-key"} {
+		if events := eventsIn(t, turn(credential)); events[len(events)-1].Type != "RUN_FINISHED" {
+			t.Fatalf("a valid credential was refused: %+v", events[len(events)-1])
+		}
+	}
+}
+
+// A signed-in client opens the app before or without chat access, as at its
+// hourly cap, which the control plane told it of when it asked for access.
+func TestASignedInSessionOpensWithoutChatAccess(t *testing.T) {
+	h, _, _ := testChatHarness(t, nil)
+	r := httptest.NewRequest(http.MethodPost, "/v1/session", strings.NewReader(`{}`))
+	r.Header.Set("Authorization", "Bearer clerk-alice")
+	w := httptest.NewRecorder()
+	h.routes().ServeHTTP(w, r)
 	var session struct {
-		RateLimit json.RawMessage `json:"rateLimit"`
+		User      sessionUser `json:"user"`
+		RateLimit object      `json:"rateLimit"`
 	}
-	json.Unmarshal(postRoute(h, "/v1/session", object{}, "alice").Body.Bytes(), &session)
-	if got := string(raw(reported(events[len(events)-1]))); got != want || string(session.RateLimit) != want {
-		t.Fatalf("the run reported %s and the session %s, want %s", got, session.RateLimit, want)
-	}
-	refuse.Store(true)
-	events = eventsIn(t, postRoute(h, "/v1/threads/turn", sendInput(key), "alice"))
-	if last := events[len(events)-1]; last.Code != "QUOTA_EXHAUSTED" || valueOr(reported(last).Remaining, -1) != 0 || valueOr(reported(last).MaxRequests, -1) != 10 {
-		t.Fatalf("the refused run ended %+v", last)
-	}
-	refusalOf := func(w *httptest.ResponseRecorder) apiError {
-		var refused struct {
-			Error apiError `json:"error"`
-		}
-		json.Unmarshal(w.Body.Bytes(), &refused)
-		return refused.Error
-	}
-	if w := postRoute(h, "/v1/threads/turn", sendInput(key), "alice"); w.Code != 429 || refusalOf(w).RateLimit == nil || valueOr(refusalOf(w).RateLimit.Remaining, -1) != 0 {
-		t.Fatalf("a turn on a spent quota: HTTP %d %s", w.Code, w.Body.String())
-	}
-	// A service's refusal reports the quota too.
-	router := routerHarness(t, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusPaymentRequired)
-		io.WriteString(w, quotaRefusal)
-	})
-	if w := uploadRoute(router, "/v1/transcriptions", "memo.mp3", []byte("ID3 audio"), nil, "alice"); w.Code != 429 || refusalOf(w).RateLimit == nil {
-		t.Fatalf("a refused transcription: HTTP %d %s", w.Code, w.Body.String())
+	json.Unmarshal(w.Body.Bytes(), &session)
+	if w.Code != 200 || session.User.ID != "alice" || session.RateLimit["kind"] != nil {
+		t.Fatalf("HTTP %d %s", w.Code, w.Body.String())
 	}
 }
 

@@ -455,7 +455,8 @@ func readProjectDocument(row *storedRow, projectID string) ProjectDocument {
 // holding a chat it cannot read is refused whole, so its client can tell
 // which chat that is.
 func (h *harness) handleUpgrade(w http.ResponseWriter, r *http.Request) {
-	if _, err := h.auth.authenticate(r, true); err != nil {
+	// Upgrading old device chats requires a signed-in caller.
+	if _, err := h.auth.authenticate(r, false); err != nil {
 		respond(w, nil, err)
 		return
 	}

@@ -48,25 +48,13 @@ func (h *harness) threadOperations() map[string]jsonEndpoint {
 		"/v1/threads/messages/delete": decoded(h.deleteMessage), "/v1/threads/messages/update": decoded(h.updateMessage)}
 }
 
-func (h *harness) session(ctx context.Context, p *principal, _ contentKey, body json.RawMessage) (any, error) {
+func (h *harness) session(ctx context.Context, p *principal, _ contentKey, _ json.RawMessage) (any, error) {
 	c := h.catalog.get()
-	var in struct {
-		RefreshCredentials bool `json:"refreshCredentials"`
-	}
-	if err := json.Unmarshal(body, &in); err != nil {
-		return nil, apiErr(400, "BAD_REQUEST", "Invalid session request")
-	}
-	exchange := h.auth.inference
-	if in.RefreshCredentials {
-		exchange = h.auth.refresh
-	}
-	credential, err := exchange(ctx, p)
-	if err != nil {
-		// A subscriber at the hourly cap still opens the app and sees when it resets.
-		if e := asAPIError(err); e.Code != "QUOTA_EXHAUSTED" || e.Kind != "hourly" {
-			return nil, err
-		}
-		credential.Limit = h.auth.currentLimit(p, credential.Limit)
+	credential, err := h.auth.inference(ctx, p)
+	// A signed-in client opens the app before or without chat access, as at
+	// its hourly cap, which it learned of when it asked for that access.
+	if err != nil && p.Anonymous {
+		return nil, err
 	}
 	presets := c.Presets
 	if presets == nil {

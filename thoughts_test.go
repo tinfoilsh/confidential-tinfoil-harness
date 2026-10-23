@@ -63,7 +63,7 @@ func TestAThinkingReplysReasoningIsSummarized(t *testing.T) {
 		}))
 		t.Cleanup(summarizer.Close)
 		h.services["summarizer"] = &downstreamService{URL: summarizer.URL, Client: summarizer.Client()}
-		run, err := h.acceptTurn(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, key, requestOf[turnRequest](sendInput(key)))
+		run, err := h.acceptTurn(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
 		if err != nil {
 			t.Fatal(err)
 		}

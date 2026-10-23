@@ -31,6 +31,11 @@ func (h *harness) handleSpeech(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, err)
 		return
 	}
+	credential, err := h.auth.inference(r.Context(), p)
+	if err != nil {
+		respond(w, nil, h.withQuota(p, credential.Limit, err))
+		return
+	}
 	body, err := readBody(w, r, maxTurnBody)
 	defer clear(body)
 	if err != nil {
@@ -61,11 +66,6 @@ func (h *harness) handleSpeech(w http.ResponseWriter, r *http.Request) {
 	router := h.services["router"]
 	if router == nil {
 		respond(w, nil, apiErr(503, "TOOL_UNAVAILABLE", "Speech is unavailable"))
-		return
-	}
-	credential, err := h.auth.inference(r.Context(), p)
-	if err != nil {
-		respond(w, nil, h.withQuota(p, credential.Limit, err))
 		return
 	}
 	ctx := context.WithValue(r.Context(), apiKeyKey{}, string(credential.Key))

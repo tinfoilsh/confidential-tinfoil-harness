@@ -87,12 +87,12 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 		}
 	}
 	clear(r.key[:])
-	limit := h.auth.currentLimit(p, held)
+	limit := held
 	if r.out.modelAccepted {
-		limit = h.auth.debit(p, held, spend)
+		limit = held.debited(spend)
 	}
 	if runErr != nil && asAPIError(runErr).Code == "QUOTA_EXHAUSTED" {
-		limit = h.auth.spent(p, held)
+		limit = exhausted(p, held)
 	}
 	summary := summarize(&r.row.Thread)
 	metadata := runMetadata{Messages: committed}

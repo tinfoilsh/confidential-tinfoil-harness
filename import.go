@@ -64,7 +64,7 @@ type importOptions struct {
 }
 
 func (h *harness) handleImport(w http.ResponseWriter, r *http.Request) {
-	p, err := h.auth.authenticate(r, true)
+	p, err := h.auth.subscriber(r)
 	if err != nil {
 		respond(w, nil, err)
 		return
@@ -86,9 +86,6 @@ func (h *harness) handleImport(w http.ResponseWriter, r *http.Request) {
 		if options.Target != "cloud" {
 			return nil
 		}
-		if p.Anonymous {
-			return errAnonymousCloud
-		}
 		if len(options.Key) == 0 {
 			return apiErr(401, "KEY_REQUIRED", "A content key is required")
 		}
@@ -105,10 +102,6 @@ func (h *harness) handleImport(w http.ResponseWriter, r *http.Request) {
 	case "device":
 		options.clearKey()
 	case "cloud":
-		if p.Anonymous {
-			respond(w, nil, errAnonymousCloud)
-			return
-		}
 		key, err := decodeContentKey(options.Key)
 		options.clearKey()
 		if err != nil {

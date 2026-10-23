@@ -20,6 +20,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 func TestImagePreprocessingBoundsAndTransparency(t *testing.T) {
@@ -66,18 +68,23 @@ func TestImagePreprocessingBoundsAndTransparency(t *testing.T) {
 	}
 }
 
-func TestManagedModelRefreshesRejectedInferenceCredentialOnce(t *testing.T) {
+// A model that refuses a run's chat token is asked once more, with the newest
+// token the same caller has presented since, never another caller's.
+func TestManagedModelRetriesARejectedChatTokenOnce(t *testing.T) {
 	for _, rejectAgain := range []bool{false, true} {
 		t.Run(strconv.FormatBool(rejectAgain), func(t *testing.T) {
-			var modelCalls, exchanges atomic.Int32
+			soon := mintChatToken("alice", func(_ map[string]any, claims jwt.MapClaims) { claims["exp"] = time.Now().Add(10 * time.Minute).Unix() })
+			renewed := mintChatToken("alice", nil)
+			others := mintChatToken("bob", func(_ map[string]any, claims jwt.MapClaims) { claims["exp"] = time.Now().Add(2 * time.Hour).Unix() })
+			var modelCalls atomic.Int32
 			var original []byte
 			h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
 				body, _ := io.ReadAll(r.Body)
 				call := modelCalls.Add(1)
 				if call == 1 {
 					original = body
-				} else if !bytes.Equal(original, body) || r.Header.Get("Authorization") != "Bearer fresh-inference" {
-					t.Error("retry changed the request body or retained the stale credential")
+				} else if !bytes.Equal(original, body) || r.Header.Get("Authorization") != "Bearer "+renewed {
+					t.Error("retry changed the request body or did not take the caller's newest token")
 				}
 				if call == 1 || rejectAgain {
 					w.WriteHeader(http.StatusUnauthorized)
@@ -85,18 +92,24 @@ func TestManagedModelRefreshesRejectedInferenceCredentialOnce(t *testing.T) {
 				}
 				io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\ndata: [DONE]\n\n")
 			})
-			cp := httptest.NewServer(unflagged(func(w http.ResponseWriter, r *http.Request) {
-				exchanges.Add(1)
-				if r.URL.Path != "/api/chat/token" || r.Header.Get("Authorization") != "Bearer clerk-alice" {
-					t.Error("exchange did not use the Clerk session")
+			present := func(user, token string) {
+				r := httptest.NewRequest(http.MethodPost, "/v1/changes", nil)
+				signIn(r, user)
+				r.Header.Set(inferenceKeyHeader, token)
+				if _, err := h.auth.authenticate(r, true); err != nil {
+					t.Fatal(err)
 				}
-				json.NewEncoder(w).Encode(object{"key": "fresh-inference", "expires_at": nowUTC().Add(time.Hour).Format(time.RFC3339)})
-			}))
-			defer cp.Close()
-			h.auth.client, h.auth.controlplane = cp.Client(), cp.URL
-			events := eventsIn(t, postRoute(h, "/v1/threads/turn", sendInput(key), "alice"))
-			if exchanges.Load() != 1 || modelCalls.Load() != 2 {
-				t.Fatal("credential refresh was not bounded to one retry")
+			}
+			present("alice", renewed)
+			present("bob", others)
+			r := httptest.NewRequest(http.MethodPost, "/v1/threads/turn", bytes.NewReader(raw(sendInput(key))))
+			signIn(r, "alice")
+			r.Header.Set(inferenceKeyHeader, soon)
+			w := httptest.NewRecorder()
+			h.routes().ServeHTTP(w, r)
+			events := eventsIn(t, w)
+			if modelCalls.Load() != 2 {
+				t.Fatalf("the model was asked %d times", modelCalls.Load())
 			}
 			last := events[len(events)-1]
 			if rejectAgain && last.Code != "UNAUTHENTICATED" || !rejectAgain && last.Type != "RUN_FINISHED" {
@@ -198,7 +211,7 @@ func TestTitleRunsBeforeAnswerFinishes(t *testing.T) {
 	}))
 	defer server.Close()
 	h.services["summarizer"] = &downstreamService{URL: server.URL, Client: server.Client()}
-	run, err := h.acceptTurn(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, key, requestOf[turnRequest](sendInput(key)))
+	run, err := h.acceptTurn(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,7 +311,7 @@ func TestShutdownCommitsPartialOutput(t *testing.T) {
 		close(started)
 		<-r.Context().Done()
 	})
-	run, err := h.acceptTurn(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, key, requestOf[turnRequest](sendInput(key)))
+	run, err := h.acceptTurn(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,7 +329,7 @@ func TestShutdownCommitsPartialOutput(t *testing.T) {
 	if readThreadRow(row).ActiveRun != nil {
 		t.Fatal("shutdown left an active marker")
 	}
-	if _, err := h.acceptTurn(context.Background(), &principal{ID: "alice"}, key, requestOf[turnRequest](sendInput(key))); err == nil {
+	if _, err := h.acceptTurn(context.Background(), &principal{ID: "alice"}, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key))); err == nil {
 		t.Fatal("accepted a turn during shutdown")
 	}
 }

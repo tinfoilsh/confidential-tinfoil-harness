@@ -8,6 +8,11 @@ func (h *harness) handleTurn(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, err)
 		return
 	}
+	credential, err := h.auth.inference(r.Context(), p)
+	if err != nil {
+		respond(w, nil, h.withQuota(p, credential.Limit, err))
+		return
+	}
 	body, err := readBody(w, r, maxTurnBody)
 	defer clear(body)
 	if err != nil {
@@ -45,7 +50,7 @@ func (h *harness) handleTurn(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, err)
 		return
 	}
-	accepted, err := h.acceptTurn(r.Context(), p, key, in)
+	accepted, err := h.acceptTurn(r.Context(), p, credential, key, in)
 	clear(key[:])
 	if err != nil {
 		respond(w, nil, h.withQuota(p, rateLimit{}, err))
