@@ -163,55 +163,8 @@ type routeSpec struct {
 
 func (h *harness) routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { respond(w, object{"ok": true}, nil) })
-	for _, spec := range h.apiRoutes() {
-		mux.HandleFunc("POST "+spec.path, func(w http.ResponseWriter, r *http.Request) {
-			p, err := h.caller(r, spec.public)
-			if err != nil {
-				respond(w, nil, err)
-				return
-			}
-			body, err := readBody(w, r, maxRequestBody)
-			defer clear(body)
-			if err != nil {
-				respond(w, nil, err)
-				return
-			}
-			var key contentKey
-			if spec.key {
-				var keyed keyRequest
-				defer keyed.clearKey()
-				if err := decodeRequest(body, &keyed); err != nil {
-					respond(w, nil, err)
-					return
-				}
-				key, err = decodeContentKey(keyed.Key)
-				keyed.clearKey()
-				if err != nil {
-					respond(w, nil, err)
-					return
-				}
-				defer clear(key[:])
-			}
-			result, err := spec.handler(r.Context(), p, key, body)
-			respond(w, result, h.withQuota(p, rateLimit{}, err))
-		})
-	}
-	for path, handler := range h.threadOperations() {
-		mux.HandleFunc("POST "+path, h.threadOperation(handler))
-	}
-	mux.HandleFunc("POST /v1/threads/turn", h.handleTurn)
-	mux.HandleFunc("POST /v1/threads/import", h.handleThreadImport)
-	mux.HandleFunc("POST /v1/threads/follow", h.handleFollow)
-	mux.HandleFunc("POST /v1/threads/upgrade", h.handleUpgrade)
-	mux.HandleFunc("POST /v1/speech", h.handleSpeech)
-	for _, path := range []string{"/v1/attachments/upload", "/v1/projects/documents/upload", "/v1/transcriptions"} {
-		mux.HandleFunc("POST "+path, boundedHandler(uploadSlots, h.handleUpload))
-	}
-	mux.HandleFunc("POST /v1/import", h.handleImport)
-	mux.HandleFunc("POST /v1/export", h.handleExport)
-	for _, path := range []string{"/v1/attachments/get", "/v1/attachments/get-public"} {
-		mux.HandleFunc("POST "+path, h.handleAttachmentGet)
+	for pattern, handler := range h.handlers() {
+		mux.HandleFunc(pattern, handler)
 	}
 	if contractCheck != nil {
 		return contractCheck(mux)
@@ -222,6 +175,68 @@ func (h *harness) routes() http.Handler {
 // contractCheck, set only by the tests, checks every request and response
 // against the published protocol.
 var contractCheck func(http.Handler) http.Handler
+
+// handlers are every route the harness serves, by method and path.
+func (h *harness) handlers() map[string]http.HandlerFunc {
+	handlers := map[string]http.HandlerFunc{
+		"GET /healthz":                       func(w http.ResponseWriter, r *http.Request) { respond(w, object{"ok": true}, nil) },
+		"POST /v1/threads/turn":              h.handleTurn,
+		"POST /v1/threads/import":            h.handleThreadImport,
+		"POST /v1/threads/follow":            h.handleFollow,
+		"POST /v1/threads/upgrade":           h.handleUpgrade,
+		"POST /v1/speech":                    h.handleSpeech,
+		"POST /v1/attachments/upload":        boundedHandler(uploadSlots, h.handleUpload),
+		"POST /v1/projects/documents/upload": boundedHandler(uploadSlots, h.handleUpload),
+		"POST /v1/transcriptions":            boundedHandler(uploadSlots, h.handleUpload),
+		"POST /v1/import":                    h.handleImport,
+		"POST /v1/export":                    h.handleExport,
+		"POST /v1/attachments/get":           h.handleAttachmentGet,
+		"POST /v1/attachments/get-public":    h.handleAttachmentGet,
+	}
+	for _, spec := range h.apiRoutes() {
+		handlers["POST "+spec.path] = h.jsonRoute(spec)
+	}
+	for path, handler := range h.threadOperations() {
+		handlers["POST "+path] = h.threadOperation(handler)
+	}
+	return handlers
+}
+
+// jsonRoute serves a route whose request is one JSON object, after it knows
+// the caller.
+func (h *harness) jsonRoute(spec routeSpec) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		p, err := h.caller(r, spec.public)
+		if err != nil {
+			respond(w, nil, err)
+			return
+		}
+		body, err := readBody(w, r, maxRequestBody)
+		defer clear(body)
+		if err != nil {
+			respond(w, nil, err)
+			return
+		}
+		var key contentKey
+		if spec.key {
+			var keyed keyRequest
+			defer keyed.clearKey()
+			if err := decodeRequest(body, &keyed); err != nil {
+				respond(w, nil, err)
+				return
+			}
+			key, err = decodeContentKey(keyed.Key)
+			keyed.clearKey()
+			if err != nil {
+				respond(w, nil, err)
+				return
+			}
+			defer clear(key[:])
+		}
+		result, err := spec.handler(r.Context(), p, key, body)
+		respond(w, result, h.withQuota(p, rateLimit{}, err))
+	}
+}
 
 // caller is who a request is from, recognized before its body is read.
 func (h *harness) caller(r *http.Request, anonymous bool) (*principal, error) {

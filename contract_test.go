@@ -8,7 +8,6 @@ import (
 	"maps"
 	"mime"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"slices"
 	"strconv"
@@ -388,6 +387,9 @@ func (c *contract) problems(r *http.Request, sent []byte, answer *teeResponse) [
 
 	// A request is held to its schema only when the harness accepted it;
 	// the tests also send requests the harness must refuse.
+	if status < 400 && len(sent) == 0 && c.at(append(operation, "requestBody", "required")...) == true {
+		note("the harness accepted a request without the body the protocol requires")
+	}
 	if requestType := mediaType(r.Header.Get("Content-Type"), sent); status < 400 && len(sent) > 0 {
 		body := append(operation, "requestBody", "content", requestType)
 		switch {
@@ -605,23 +607,18 @@ func TestTheProtocolNamesEveryRoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	paths := c.at("paths").(map[string]any)
-	served := slices.Collect(maps.Keys(h.threadOperations()))
-	for _, spec := range h.apiRoutes() {
-		served = append(served, spec.path)
-	}
-	for _, path := range served {
-		if paths[path] == nil {
-			t.Errorf("%s is served but not in the protocol", path)
+	served := map[string]bool{}
+	for pattern := range h.handlers() {
+		served[pattern] = true
+		method, path, _ := strings.Cut(pattern, " ")
+		if c.at("paths", path, strings.ToLower(method)) == nil {
+			t.Errorf("%s is served but not in the protocol", pattern)
 		}
 	}
-	for path, item := range paths {
+	for path, item := range c.at("paths").(map[string]any) {
 		for method := range item.(map[string]any) {
-			r := httptest.NewRequest(strings.ToUpper(method), path, strings.NewReader("{}"))
-			w := httptest.NewRecorder()
-			h.routes().ServeHTTP(w, r)
-			if w.Code == http.StatusNotFound && strings.HasPrefix(w.Header().Get("Content-Type"), "text/plain") || w.Code == http.StatusMethodNotAllowed {
-				t.Errorf("%s %s is in the protocol but not served", strings.ToUpper(method), path)
+			if pattern := strings.ToUpper(method) + " " + path; !served[pattern] {
+				t.Errorf("%s is in the protocol but not served", pattern)
 			}
 		}
 	}
