@@ -208,7 +208,9 @@ type spooledPart struct {
 }
 
 func (h *harness) handleExport(w http.ResponseWriter, r *http.Request) {
-	p, err := h.auth.subscriber(r)
+	// An archive calls no model, so any signed-in caller may make one,
+	// with or without chat access.
+	p, err := h.auth.authenticate(r, false)
 	if err != nil {
 		respond(w, nil, err)
 		return
