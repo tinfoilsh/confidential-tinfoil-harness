@@ -351,6 +351,9 @@ func TestDocumentDownloadReturnsExtractedText(t *testing.T) {
 	if w.Code != 200 || w.Body.String() != "page one" {
 		t.Fatalf("download was not the extracted text: %d %q", w.Code, w.Body.String())
 	}
+	if w.Header().Get("Content-Type") != opaqueContentType || w.Header().Get("Content-Disposition") != "" {
+		t.Fatalf("download headers disclose attachment metadata: %v", w.Header())
+	}
 	// Headers travel outside the sealed body.
 	for name, values := range w.Header() {
 		if joined := strings.Join(values, " "); strings.Contains(joined, "scan") || strings.Contains(joined, "markdown") || strings.Contains(joined, "pdf") {
