@@ -77,6 +77,31 @@ var (
 	projectDocumentGroups = []*uploadGroup{&textUploads, &documentUploads, &imageUploads, &audioUploads}
 )
 
+// A file of no type uploads take is read as text, as the web client read
+// it, when its first textSniffBytes hold no NUL byte and at most
+// maxInvalidTextPercent of their characters are not UTF-8.
+const (
+	textSniffBytes        = 8192
+	maxInvalidTextPercent = 5
+)
+
+func sniffsAsText(data []byte) bool {
+	sample := data[:min(len(data), textSniffBytes)]
+	if len(sample) == 0 || bytes.IndexByte(sample, 0) >= 0 {
+		return false
+	}
+	chars, invalid := 0, 0
+	for len(sample) > 0 {
+		r, size := utf8.DecodeRune(sample)
+		if r == utf8.RuneError && size == 1 {
+			invalid++
+		}
+		chars++
+		sample = sample[size:]
+	}
+	return invalid*100 <= chars*maxInvalidTextPercent
+}
+
 func (g *uploadGroup) accepts(filename string) bool {
 	return slices.Contains(g.Accept, strings.ToLower(filepath.Ext(filename)))
 }
@@ -268,6 +293,10 @@ var errUnsupportedType = apiErr(415, "ATTACHMENT_UNSUPPORTED", "Unsupported file
 // its file's group. A turn names an image its chat holds by id alone.
 func (d *sentAttachment) fitsUpload() error {
 	group := attachmentGroup(d.FileName)
+	// A file of no type uploads take was read as text.
+	if group == nil && d.Kind == textUploads.kind && d.Base64 == "" && len(d.Pages) == 0 {
+		group = &textUploads
+	}
 	if group == nil || group.kind != d.Kind {
 		return errUnsupportedType
 	}
@@ -329,6 +358,9 @@ func (d *sentAttachment) resizePixels() int64 {
 func (h *harness) preprocess(ctx context.Context, filename string, data []byte) (Attachment, error) {
 	ext := strings.ToLower(filepath.Ext(filename))
 	group := attachmentGroup(filename)
+	if group == nil && sniffsAsText(data) {
+		group = &textUploads
+	}
 	if group == nil {
 		return Attachment{}, errUnsupportedType
 	}
@@ -338,10 +370,15 @@ func (h *harness) preprocess(ctx context.Context, filename string, data []byte) 
 	}
 	switch group {
 	case &textUploads:
-		if !utf8.Valid(data) || bytes.ContainsRune(data, 0) {
+		if bytes.ContainsRune(data, 0) {
 			return Attachment{}, apiErr(415, "ATTACHMENT_UNSUPPORTED", "Text uploads must contain UTF-8 text")
 		}
-		descriptor.TextContent = string(data)
+		// As the web client read text, what is not UTF-8 reads as U+FFFD,
+		// which can make the text longer than the file.
+		descriptor.TextContent = strings.ToValidUTF8(string(data), string(utf8.RuneError))
+		if len(descriptor.TextContent) > group.maxContent() {
+			return Attachment{}, apiErr(413, "ATTACHMENT_TOO_LARGE", "The file exceeds the size limit for its type")
+		}
 		if m := mime.TypeByExtension(ext); m != "" {
 			descriptor.MimeType = m
 		}

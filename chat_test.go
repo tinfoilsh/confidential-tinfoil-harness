@@ -736,7 +736,7 @@ func TestEditingAReplyCollapsesItsText(t *testing.T) {
 	}
 	// A reply stored with flat fields keeps its thinking, search, code and widgets.
 	windowIDs(t, update("a2", "Rain."))
-	want = decodeValue(raw([]any{object{"type": "thinking", "id": "a2-thinking", "content": "look it up"},
+	want = decodeValue(raw([]any{object{"type": "thinking", "id": "a2-thinking", "content": "look it up", "duration": 3},
 		object{"type": "tool_call", "id": "a2-search", "toolCallId": "a2-search", "name": "web_search", "arguments": `{"query":"weather"}`, "result": object{"query": "weather", "results": []any{}}, "complete": true,
 			"display": object{"query": "weather", "status": "completed", "sources": []any{}}},
 		object{"type": "tool_call", "id": "x1", "toolCallId": "x1", "name": "bash", "arguments": `{"command":"date"}`, "result": object{"output": "Mon"}, "complete": true},
@@ -900,7 +900,7 @@ func TestAContinuationExtendsOnlyATrailingContentBlock(t *testing.T) {
 		"trailing content": {object{"id": "r", "role": "assistant", "timeline": []any{thinking, content}}, event{Type: "TEXT_MESSAGE_CHUNK", MessageID: "r", Delta: " answer"},
 			[]any{thinking, object{"id": "c", "type": "content", "content": "Partial answer"}}},
 		"trailing thinking": {object{"id": "r", "role": "assistant", "timeline": []any{content, thinking}}, event{Type: "REASONING_MESSAGE_CHUNK", MessageID: "r-reasoning", Delta: "again"},
-			[]any{content, thinking, object{"id": "r_thinking_2", "type": "thinking", "content": "again"}}},
+			[]any{content, thinking, object{"id": "r_thinking_2", "type": "thinking", "content": "again", "startedAt": 1790812800000, "endedAt": 1790812800000}}},
 		"empty": {object{"id": "r", "role": "assistant", "timeline": []any{}}, event{Type: "TEXT_MESSAGE_CHUNK", MessageID: "r", Delta: " answer"},
 			[]any{object{"id": "r_content_0", "type": "content", "content": " answer"}}},
 	} {
