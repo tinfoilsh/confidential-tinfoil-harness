@@ -7,6 +7,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -44,7 +45,7 @@ func TestCatalogRefreshAcceptsControlplaneArray(t *testing.T) {
 				response = []object{}
 			}
 		case "/api/config/system-prompt":
-			response = object{"systemPrompt": "Test prompt", "rules": "Test rules", "genUI": object{"enabledWidgets": []string{"render_chart"}}}
+			response = object{"systemPrompt": "Hostile prompt", "rules": "Hostile rules", "genUI": object{"enabledWidgets": []string{"render_chart"}}}
 		default:
 			http.NotFound(w, r)
 			return
@@ -71,8 +72,9 @@ func TestCatalogRefreshAcceptsControlplaneArray(t *testing.T) {
 	if catalog.Fallback != 65536 || len(catalog.Deprecated) != 1 {
 		t.Fatal("lost the configured fallback window or deprecated model metadata")
 	}
-	if catalog.Prompt != "Test prompt" || len(catalog.EnabledWidgets) != 1 {
-		t.Fatal("lost prompt configuration")
+	// The prompt is the measured one, whatever the control plane serves.
+	if want := builtInPrompt(); catalog.Prompt != want.SystemPrompt || catalog.Rules != want.Rules || catalog.WidgetHeader != want.GenUI.Header || !slices.Equal(catalog.EnabledWidgets, want.GenUI.EnabledWidgets) {
+		t.Fatal("the catalog took its prompt from the control plane")
 	}
 	for i, name := range []string{"wrong response shape", "untrusted repository", "no active models"} {
 		t.Run(name, func(t *testing.T) {
@@ -101,8 +103,6 @@ func TestHarnessStartsBeforeTheGatewayOffersAModel(t *testing.T) {
 			io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n")
 		case "/api/config/models":
 			json.NewEncoder(w).Encode([]object{{"modelName": "kimi-k3", "name": "Kimi K3", "repo": "tinfoilsh/confidential-kimi-k3", "type": "chat", "chat": true, "chatConfig": object{"contextWindowTokens": 8192}}})
-		case "/api/config/system-prompt":
-			json.NewEncoder(w).Encode(object{"systemPrompt": "Test prompt"})
 		default:
 			http.NotFound(w, r)
 		}
@@ -162,5 +162,23 @@ func TestSessionModelsAreReadyToDisplay(t *testing.T) {
 	}
 	if want := `{"default":"high","levels":[` + strings.Join(levels, ",") + `]}`; string(session.Auto) != want {
 		t.Fatalf("Auto is offered as %s, want %s", session.Auto, want)
+	}
+}
+
+// Every widget the measured prompt enables is one the harness declares, so a
+// misspelled name cannot leave a widget silently unoffered.
+func TestEveryEnabledWidgetIsDeclared(t *testing.T) {
+	declared := map[string]bool{}
+	for _, w := range widgetCatalog() {
+		declared[w.Name] = true
+	}
+	enabled := builtInPrompt().GenUI.EnabledWidgets
+	if len(enabled) == 0 {
+		t.Fatal("the measured prompt enables no widget")
+	}
+	for _, name := range enabled {
+		if !declared[name] {
+			t.Errorf("%s is enabled but not declared", name)
+		}
 	}
 }

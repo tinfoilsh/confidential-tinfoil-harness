@@ -25,6 +25,29 @@ var widgetJSON []byte
 //go:embed presets.json
 var presetJSON []byte
 
+//go:embed prompt.json
+var promptJSON []byte
+
+// chatPrompt is the system prompt every chat is built from. It is part of the
+// measured image, so no service outside the enclave can instruct the model.
+type chatPrompt struct {
+	SystemPrompt string `json:"systemPrompt"`
+	Rules        string `json:"rules"`
+	GenUI        struct {
+		Header         string   `json:"header"`
+		EnabledWidgets []string `json:"enabledWidgets"`
+	} `json:"genUI"`
+}
+
+// builtInPrompt is the compiled system prompt, read once.
+var builtInPrompt = sync.OnceValue(func() chatPrompt {
+	var prompt chatPrompt
+	if json.Unmarshal(promptJSON, &prompt) != nil || prompt.SystemPrompt == "" {
+		panic("invalid compiled system prompt")
+	}
+	return prompt
+})
+
 // preset is a built-in prompt the clients offer.
 type preset struct {
 	ID           string `json:"id"`
@@ -103,14 +126,10 @@ func (h *harness) refreshCatalog(ctx context.Context) error {
 	h.refreshOffer(ctx)
 	client := &http.Client{Timeout: 15 * time.Second}
 	var models []object
-	var prompt object
 	if err := fetchConfig(ctx, client, h.controlplane, "/api/config/models", &models); err != nil {
 		return err
 	}
-	if err := fetchConfig(ctx, client, h.controlplane, "/api/config/system-prompt", &prompt); err != nil {
-		return err
-	}
-	c := buildCatalog(models, prompt, h.offer.get())
+	c := buildCatalog(models, h.offer.get())
 	// The first catalog may offer only Auto; a later one without models keeps the last.
 	if len(c.Models) == 0 && h.catalog.get() != nil {
 		return errors.New("no configured chat model is offered by the gateway")
@@ -118,11 +137,9 @@ func (h *harness) refreshCatalog(ctx context.Context) error {
 	h.catalog.set(c)
 	return nil
 }
-func buildCatalog(config []object, prompt object, models []*model) *chatCatalog {
-	c := &chatCatalog{Prompt: str(prompt["systemPrompt"]), Rules: str(prompt["rules"]), WidgetHeader: str(obj(prompt["genUI"])["header"]), Models: []object{}, Presets: builtInPresets()}
-	for _, name := range arr(obj(prompt["genUI"])["enabledWidgets"]) {
-		c.EnabledWidgets = append(c.EnabledWidgets, str(name))
-	}
+func buildCatalog(config []object, models []*model) *chatCatalog {
+	prompt := builtInPrompt()
+	c := &chatCatalog{Prompt: prompt.SystemPrompt, Rules: prompt.Rules, WidgetHeader: prompt.GenUI.Header, EnabledWidgets: slices.Clone(prompt.GenUI.EnabledWidgets), Models: []object{}, Presets: builtInPresets()}
 	var unpinned []string
 	for _, definition := range config {
 		if !boolean(definition["chat"], false) || str(definition["type"]) != "chat" {
