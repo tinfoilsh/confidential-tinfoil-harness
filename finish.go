@@ -49,8 +49,11 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 			}
 		}
 		// What the run commits to each reply beyond its streamed content, so a
-		// client that stores the thread itself stores the same messages.
-		committed = append(committed, committedReply{ID: m.ID, Model: m.Model, ModelDisplayName: m.ModelDisplayName, Usage: m.Usage, IsError: m.IsError, IsInterrupted: m.IsInterrupted, Annotations: m.Annotations})
+		// client that stores the thread itself stores the same messages. A
+		// widget retry commits only its call, so its reply keeps its own.
+		if r.retryTarget == nil {
+			committed = append(committed, committedReply{ID: m.ID, Model: m.Model, ModelDisplayName: m.ModelDisplayName, Usage: m.Usage, IsError: m.IsError, IsInterrupted: m.IsInterrupted, Annotations: m.Annotations})
+		}
 	}
 	commit := func(t *Thread) error {
 		if r.retryTarget != nil && r.replacement.arguments != "" {

@@ -262,13 +262,22 @@ func TestWidgetRetryReplacesOnlyTheArguments(t *testing.T) {
 	in["widgets"] = []any{"render_stat_cards"}
 	delete(in, "content")
 	events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice"))
-	if last := events[len(events)-1]; last.Type != "RUN_FINISHED" {
+	last := events[len(events)-1]
+	if last.Type != "RUN_FINISHED" {
 		t.Fatalf("retry failed: %+v", last)
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", "chat")
 	messages := readThreadRow(row).Messages
 	if len(messages) != 2 || len(messages[1].Timeline) != 2 || messages[1].Timeline[1].Arguments != replacement {
 		t.Fatal("retry changed message structure")
+	}
+	// The reply keeps the model and state it was committed with, which a
+	// client merges from the run's report of its replies.
+	var finished struct {
+		Messages []committedReply `json:"messages"`
+	}
+	if err := json.Unmarshal(last.Metadata, &finished); err != nil || len(finished.Messages) != 0 {
+		t.Fatalf("the retry reported its replies as %s", last.Metadata)
 	}
 }
 
