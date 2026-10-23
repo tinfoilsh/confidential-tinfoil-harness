@@ -38,6 +38,8 @@ type principal struct {
 	Anonymous    bool
 	AnonymousID  string
 	InferenceKey secret
+	// The validation already performed while recognizing this request.
+	validatedFree *inferenceCredential
 }
 
 func (p *principal) scope() string {
@@ -233,7 +235,10 @@ func (a *authenticator) recognize(ctx context.Context, p *principal) error {
 	if _, ok := a.validKeys().Get(hashHex([]byte(p.InferenceKey))); ok {
 		return nil
 	}
-	_, err := a.freeKey(ctx, p)
+	credential, err := a.freeKey(ctx, p)
+	if err == nil {
+		p.validatedFree = &credential
+	}
 	return err
 }
 
@@ -254,6 +259,11 @@ type validatedKey struct {
 // caller's without a subscription, and reads its quota. A key validated
 // recently admits its caller without asking again.
 func (a *authenticator) freeKey(ctx context.Context, p *principal) (inferenceCredential, error) {
+	if p.validatedFree != nil {
+		credential := *p.validatedFree
+		p.validatedFree = nil
+		return credential, nil
+	}
 	credential, err := a.validateFreeKey(ctx, p)
 	if err == nil {
 		a.validKeys().Add(hashHex([]byte(p.InferenceKey)), struct{}{})

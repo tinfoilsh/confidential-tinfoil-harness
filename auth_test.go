@@ -70,6 +70,25 @@ func TestAnonymousInferenceValidatesTheClientKey(t *testing.T) {
 	}
 }
 
+func TestSessionReadsFreeQuotaOncePerRequest(t *testing.T) {
+	h, _, _ := testChatHarness(t, nil)
+	var calls atomic.Int32
+	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(object{"ok": true, "rate_limit": object{"max_requests": 10, "remaining": 10 - calls.Add(1)}})
+	}))
+	defer cp.Close()
+	h.auth.client, h.auth.controlplane = cp.Client(), cp.URL
+	for _, remaining := range []int{9, 8} {
+		w := postRoute(h, "/v1/session", object{}, "")
+		var session struct {
+			RateLimit rateLimit `json:"rateLimit"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &session); err != nil || w.Code != 200 || session.RateLimit.Remaining == nil || *session.RateLimit.Remaining != remaining {
+			t.Fatalf("session quota: HTTP %d %s", w.Code, w.Body.String())
+		}
+	}
+}
+
 type watchedBody struct{ read atomic.Bool }
 
 func (b *watchedBody) Read([]byte) (int, error) { b.read.Store(true); return 0, io.EOF }
@@ -86,7 +105,7 @@ func TestLargeBodiesAreReadOnlyAfterAuthentication(t *testing.T) {
 		{"/v1/threads/turn", "forged-session", "", 401},
 		{"/v1/threads/turn", "free_refused-key", "", 401},
 		{"/v1/threads/import", "forged-session", "", 401},
-		// Only a signed-in caller's device holds chats the old client stored.
+		// Upgrading old device chats requires a signed-in caller.
 		{"/v1/threads/upgrade", "free_anonymous-key", "", 401},
 		{"/v1/threads/update", "", "", 401},
 		{"/v1/threads/update", "free_refused-key", "", 401},
