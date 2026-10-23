@@ -15,6 +15,7 @@ import (
 
 	"github.com/MicahParks/keyfunc/v3"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/hashicorp/golang-lru/v2/expirable"
 )
 
 type secret string
@@ -127,6 +128,8 @@ type authenticator struct {
 	credentials  map[string]inferenceCredential
 	capped       map[string]hourlyCap
 	refreshing   map[string]chan struct{}
+	flagsOnce    sync.Once
+	flags        *expirable.LRU[string, chatFlags]
 }
 
 func (a *authenticator) refresh(ctx context.Context, p *principal) (inferenceCredential, error) {
