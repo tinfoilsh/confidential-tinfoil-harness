@@ -72,8 +72,14 @@ type legacyMessage struct {
 	ToolCalls               []Block            `json:"toolCalls"`
 	DocumentContent         string             `json:"documentContent"`
 	MultimodalText          string             `json:"multimodalText"`
+	Documents               []legacyFileName   `json:"documents"`
 	ImageData               []legacyImage      `json:"imageData"`
 	Attachments             []legacyAttachment `json:"attachments"`
+}
+
+// legacyFileName names one file of a message's flat fields.
+type legacyFileName struct {
+	Name string `json:"name"`
 }
 
 // legacyAttachment is an attachment under the names the web and iOS apps
@@ -355,22 +361,82 @@ func (m *legacyMessage) attachments(messageID string, images backupImages) []Att
 		}
 	}
 	if len(attachments) == 0 {
-		if content := cmp.Or(m.DocumentContent, m.MultimodalText); content != "" {
-			attachments = append(attachments, Attachment{Kind: "document", FileName: "Attached document", TextContent: content})
-		}
-		for i, image := range m.ImageData {
-			if held, ok := images[image.ImageID]; ok && image.Base64 == "" {
-				image.Base64, image.MimeType = held.Base64, cmp.Or(held.MimeType, image.MimeType)
-			}
-			if image.Base64 != "" {
-				attachments = append(attachments, Attachment{Kind: "image", FileName: "image-" + strconv.Itoa(i), MimeType: cmp.Or(image.MimeType, "image/png"), Base64: image.Base64})
-			}
-		}
+		attachments = m.flatAttachments(images)
 	}
 	for i := range attachments {
 		attachments[i].ID = cmp.Or(attachments[i].ID, messageID+"-attachment-"+strconv.Itoa(i))
 	}
 	return attachments
+}
+
+// flatAttachments are the files a message kept in its flat fields, its
+// documents and then its images. documents names every file, and each
+// file's text is its section of the message's combined text: a document's
+// contents, or an image's description. The images are the files the
+// descriptions name, in the order of imageData; before the web app kept
+// descriptions apart from the documents' contents, they are the first
+// files, as the apps read them. Text no file has a section of is the only
+// document's, or else one unnamed document's.
+func (m *legacyMessage) flatAttachments(images backupImages) []Attachment {
+	claimed := false
+	contents := func(name string) string {
+		claimed = claimed || strings.Contains(m.DocumentContent, documentHeading(name))
+		return legacySection(m.DocumentContent, documentHeading(name), "\nDocument title: ")
+	}
+	described := slices.ContainsFunc(m.Documents, func(f legacyFileName) bool { return strings.Contains(m.MultimodalText, imageHeading(f.Name)) })
+	var documents, shown []Attachment
+	var imageNames []string
+	for i, file := range m.Documents {
+		if described && strings.Contains(m.MultimodalText, imageHeading(file.Name)) || !described && i < len(m.ImageData) {
+			imageNames = append(imageNames, file.Name)
+		} else {
+			documents = append(documents, Attachment{Kind: "document", FileName: file.Name, TextContent: contents(file.Name)})
+		}
+	}
+	for i, image := range m.ImageData {
+		if held, ok := images[image.ImageID]; ok && image.Base64 == "" {
+			image.Base64, image.MimeType = held.Base64, cmp.Or(held.MimeType, image.MimeType)
+		}
+		if image.Base64 == "" {
+			continue
+		}
+		a := Attachment{Kind: "image", FileName: "image-" + strconv.Itoa(i), MimeType: cmp.Or(image.MimeType, "image/png"), Base64: image.Base64}
+		if i < len(imageNames) {
+			name := imageNames[i]
+			a.FileName = cmp.Or(name, a.FileName)
+			a.Description = cmp.Or(legacySection(m.MultimodalText, imageHeading(name), "\n\nImage: "), contents(name))
+		}
+		shown = append(shown, a)
+	}
+	var unclaimed string
+	if !claimed {
+		unclaimed = m.DocumentContent
+	}
+	if !described {
+		unclaimed = cmp.Or(unclaimed, m.MultimodalText)
+	}
+	if unclaimed != "" {
+		if len(documents) == 1 && documents[0].TextContent == "" {
+			documents[0].TextContent = unclaimed
+		} else {
+			documents = append(documents, Attachment{Kind: "document", FileName: "Attached document", TextContent: unclaimed})
+		}
+	}
+	return append(documents, shown...)
+}
+
+func documentHeading(name string) string { return "Document title: " + name + "\nDocument contents:\n" }
+func imageHeading(name string) string    { return "Image: " + name + "\nDescription:\n" }
+
+// legacySection is the text after heading in combined, up to the next
+// section's start, as the apps cut it.
+func legacySection(combined, heading, next string) string {
+	_, rest, found := strings.Cut(combined, heading)
+	if !found {
+		return ""
+	}
+	section, _, _ := strings.Cut(rest, next)
+	return strings.TrimSpace(section)
 }
 
 // readProfile reads a profile row. A missing row is an empty profile.
