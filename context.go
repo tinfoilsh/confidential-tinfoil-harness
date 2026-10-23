@@ -244,7 +244,8 @@ func (h *harness) buildRequest(thread *Thread, profile *Profile, project *Projec
 	}
 	req.window, req.policy = window, policy
 	req.piiCheck = valueOr(options.PIICheck, valueOr(profile.PIICheckEnabled, true))
-	req.webSearch = valueOr(options.WebSearch, thread.WebSearchEnabled)
+	// Turning web search off in the settings leaves each chat's own setting.
+	req.webSearch = valueOr(profile.WebSearchAvailable, true) && valueOr(options.WebSearch, thread.WebSearchEnabled)
 	if req.webSearch && webSearch.client == nil {
 		return nil, nil, apiErr(503, "TOOL_UNAVAILABLE", "webSearch is unavailable")
 	}

@@ -14,6 +14,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -179,7 +180,12 @@ func TestTheComposerOffersWhatUploadsAccept(t *testing.T) {
 		t.Fatalf("the composer offers %+v", offered)
 	}
 	refusal := func(name string, size int) apiError {
-		w := uploadRoute(h, "/v1/attachments/upload", name, bytes.Repeat([]byte("x"), size), nil, "alice")
+		data := bytes.Repeat([]byte("x"), size)
+		// A file of no type uploads take is refused unless it reads as text.
+		if filepath.Ext(name) == ".exe" {
+			data[0] = 0
+		}
+		w := uploadRoute(h, "/v1/attachments/upload", name, data, nil, "alice")
 		var body struct {
 			Error apiError `json:"error"`
 		}
@@ -201,6 +207,55 @@ func TestTheComposerOffersWhatUploadsAccept(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// A file of a type uploads do not take is read as text when it sniffs as
+// text, and text that is not all UTF-8 is read with replacement characters,
+// as the web client read both. A turn takes such a file back.
+func TestFilesThatReadAsTextAreTakenAsText(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	newFakeSync(t, h)
+	mostlyText := append(bytes.Repeat([]byte("a"), 99), 0xff)
+	for _, tc := range []struct {
+		name string
+		data []byte
+		text string
+		code string
+	}{
+		{"Dockerfile", []byte("FROM scratch\n"), "FROM scratch\n", ""},
+		{"notes.custom", mostlyText, strings.Repeat("a", 99) + "\ufffd", ""},
+		{"sales.csv", []byte("caf\xe9,3"), "caf\ufffd,3", ""},
+		{"program.bin", []byte("MZ\x00\x01"), "", "ATTACHMENT_UNSUPPORTED"},
+		{"noise.dat", bytes.Repeat([]byte{'a', 0xff}, 50), "", "ATTACHMENT_UNSUPPORTED"},
+	} {
+		w := uploadRoute(h, "/v1/attachments/upload", tc.name, tc.data, nil, "alice")
+		var got struct {
+			Attachment Attachment `json:"attachment"`
+			Error      apiError   `json:"error"`
+		}
+		json.Unmarshal(w.Body.Bytes(), &got)
+		if got.Error.Code != tc.code || got.Attachment.TextContent != tc.text || tc.code == "" && (got.Attachment.Kind != "document" || got.Attachment.FileName != tc.name) {
+			t.Errorf("%s: HTTP %d %s", tc.name, w.Code, w.Body.String())
+		}
+	}
+	// Text that replacement characters make longer than the limit is refused
+	// at upload rather than by the turn that sends it.
+	saved := textUploads.MaxBytes
+	textUploads.MaxBytes = 8
+	w := uploadRoute(h, "/v1/attachments/upload", "notes.txt", []byte("\xffa\xffa\xffa"), nil, "alice")
+	textUploads.MaxBytes = saved
+	if w.Code != http.StatusRequestEntityTooLarge || !strings.Contains(w.Body.String(), "ATTACHMENT_TOO_LARGE") {
+		t.Errorf("text longer than its limit once read: HTTP %d %s", w.Code, w.Body.String())
+	}
+	in := sendInput(key)
+	in["attachments"] = []any{object{"id": "att_docker", "kind": "document", "fileName": "Dockerfile", "mimeType": "text/plain; charset=utf-8", "textContent": "FROM scratch\n"}}
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice"))
+	if last := events[len(events)-1]; last.Type != "RUN_FINISHED" {
+		t.Fatalf("a turn attaching a text file of no known type ended with %+v", last)
+	}
+	if held := storedChat(t, rows, key, events[0].ThreadID).Messages[0].Attachments; len(held) != 1 || held[0].FileName != "Dockerfile" {
+		t.Fatalf("the chat holds %+v", held)
 	}
 }
 
@@ -253,7 +308,7 @@ func TestATurnsUploadIsHeldToWhatUploadsMake(t *testing.T) {
 		attachment object
 		code       string
 	}{
-		{"unknown type", object{"kind": "document", "fileName": "run.exe", "textContent": "text"}, "ATTACHMENT_UNSUPPORTED"},
+		{"unknown type", object{"kind": "document", "fileName": "run.exe", "base64": base64.StdEncoding.EncodeToString([]byte{0, 1, 2})}, "ATTACHMENT_UNSUPPORTED"},
 		{"wrong kind", object{"kind": "image", "fileName": "notes.txt", "textContent": "text"}, "ATTACHMENT_UNSUPPORTED"},
 		{"long text", object{"kind": "document", "fileName": "notes.txt", "textContent": strings.Repeat("x", 65)}, "ATTACHMENT_TOO_LARGE"},
 		{"large image", object{"kind": "image", "fileName": "small.png", "base64": base64.StdEncoding.EncodeToString(small)}, "ATTACHMENT_TOO_LARGE"},

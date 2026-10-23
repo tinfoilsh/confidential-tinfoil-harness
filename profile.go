@@ -30,6 +30,7 @@ type Profile struct {
 	ReasoningEffort                  *string         `json:"reasoningEffort,omitempty"`
 	ThinkingEnabled                  *bool           `json:"thinkingEnabled,omitempty"`
 	WebSearchEnabled                 *bool           `json:"webSearchEnabled,omitempty"`
+	WebSearchAvailable               *bool           `json:"webSearchAvailable,omitempty"`
 	PIICheckEnabled                  *bool           `json:"piiCheckEnabled,omitempty"`
 	GenUIEnabled                     *bool           `json:"genUIEnabled,omitempty"`
 	PixelateSidebarChatTitlesEnabled *bool           `json:"pixelateSidebarChatTitlesEnabled,omitempty"`
@@ -91,7 +92,7 @@ func defaultProfile() Profile {
 	return Profile{ThemeMode: new(defaultTheme), ChatFont: new(defaultFont), Language: new(defaultLanguage), Nickname: new(""), Profession: new(""), Traits: []string{}, AdditionalContext: new(""),
 		IsUsingPersonalization: new(true), IsUsingCustomPrompt: new(false), CustomSystemPrompt: new(""), CustomPromptPresets: []CustomPreset{}, FavoritePromptPresetIDs: []string{}, DefaultPromptPresetID: new(""),
 		SelectedModel: new(autoModelName), AutoIntelligence: new(defaultIntelligence), ReasoningEffort: new(defaultEffort), WebSearchEnabled: new(true),
-		PIICheckEnabled: new(true), GenUIEnabled: new(true), PixelateSidebarChatTitlesEnabled: new(false), BrowserTabChatTitleEnabled: new(true), EnterToNewlineEnabled: new(false),
+		WebSearchAvailable: new(true), PIICheckEnabled: new(true), GenUIEnabled: new(true), PixelateSidebarChatTitlesEnabled: new(false), BrowserTabChatTitleEnabled: new(true), EnterToNewlineEnabled: new(false),
 		HasSeenOnboarding: new(false), HasSeenWebSearchIntro: new(false), Dismissed: map[string]bool{}}
 }
 

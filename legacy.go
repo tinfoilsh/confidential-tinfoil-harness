@@ -64,6 +64,7 @@ type legacyMessage struct {
 	Timestamp               looseTime          `json:"timestamp"`
 	Timeline                []legacyBlock      `json:"timeline"`
 	Thoughts                string             `json:"thoughts"`
+	ThinkingDuration        float64            `json:"thinkingDuration"`
 	WebSearch               *legacySearch      `json:"webSearch"`
 	WebSearchBeforeThinking bool               `json:"webSearchBeforeThinking"`
 	URLFetches              []legacyFetch      `json:"urlFetches"`
@@ -156,10 +157,12 @@ type legacySearch struct {
 }
 
 type legacyFetch struct {
-	ID    string `json:"id"`
-	URL   string `json:"url"`
-	Title string `json:"title"`
-	Text  string `json:"text"`
+	ID        string  `json:"id"`
+	URL       string  `json:"url"`
+	Title     string  `json:"title"`
+	Text      string  `json:"text"`
+	StartedAt float64 `json:"startedAt"`
+	EndedAt   float64 `json:"endedAt"`
 }
 
 type legacyCodeCall struct {
@@ -257,7 +260,7 @@ func (m *legacyMessage) timeline(message Message) []Block {
 			addSearch()
 		}
 		if m.Thoughts != "" {
-			source = append(source, legacyBlock{Block: Block{Type: "thinking", ID: id + "-thinking", Content: m.Thoughts}})
+			source = append(source, legacyBlock{Block: Block{Type: "thinking", ID: id + "-thinking", Content: m.Thoughts, Duration: m.ThinkingDuration}})
 		}
 		if !m.WebSearchBeforeThinking {
 			addSearch()
@@ -277,8 +280,9 @@ func (m *legacyMessage) timeline(message Message) []Block {
 		}
 	}
 	blocks := []Block{}
-	call := func(id, name, args string, result any) {
-		blocks = append(blocks, Block{Type: "tool_call", ID: id, ToolCallID: id, Name: name, Arguments: args, Result: raw(result), Complete: true})
+	// A call keeps when the step it came from ran.
+	call := func(startedAt, endedAt float64, id, name, args string, result any) {
+		blocks = append(blocks, Block{Type: "tool_call", ID: id, ToolCallID: id, Name: name, Arguments: args, Result: raw(result), Complete: true, StartedAt: startedAt, EndedAt: endedAt})
 	}
 	for index, block := range source {
 		blockID := cmp.Or(block.ID, id+"-block-"+strconv.Itoa(index))
@@ -292,15 +296,15 @@ func (m *legacyMessage) timeline(message Message) []Block {
 			for _, source := range state.Sources {
 				results = append(results, map[string]string{"url": source.URL, "title": source.Title, "snippet": cmp.Or(source.Snippet, source.Description)})
 			}
-			call(blockID, "web_search", string(raw(map[string]string{"query": state.Query})), map[string]any{"query": state.Query, "results": results})
+			call(block.StartedAt, block.EndedAt, blockID, "web_search", string(raw(map[string]string{"query": state.Query})), map[string]any{"query": state.Query, "results": results})
 		case "url_fetches":
 			for i, fetch := range block.Fetches {
-				call(cmp.Or(fetch.ID, blockID+"-"+strconv.Itoa(i)), "web_fetch", string(raw(map[string]string{"url": fetch.URL})), map[string]string{"url": fetch.URL, "title": fetch.Title, "text": fetch.Text})
+				call(cmp.Or(fetch.StartedAt, block.StartedAt), cmp.Or(fetch.EndedAt, block.EndedAt), cmp.Or(fetch.ID, blockID+"-"+strconv.Itoa(i)), "web_fetch", string(raw(map[string]string{"url": fetch.URL})), map[string]string{"url": fetch.URL, "title": fetch.Title, "text": fetch.Text})
 			}
 		case "code_exec":
 			for i, c := range block.Calls {
 				args := c.arguments()
-				call(cmp.Or(c.ID, blockID+"-"+strconv.Itoa(i)), c.ToolName, args, normalizeToolResult(toolCall{name: c.ToolName, args: args}, c.Output))
+				call(block.StartedAt, block.EndedAt, cmp.Or(c.ID, blockID+"-"+strconv.Itoa(i)), c.ToolName, args, normalizeToolResult(toolCall{name: c.ToolName, args: args}, c.Output))
 			}
 		default:
 			block.ID = blockID
