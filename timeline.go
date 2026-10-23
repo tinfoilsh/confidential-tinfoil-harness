@@ -73,6 +73,14 @@ func (a *messageAssembler) apply(e event) {
 		a.stamp(id, m, e.Timestamp)
 		at := float64(millis(e.Timestamp))
 		blocks := m.Timeline
+		if kind == "thinking" {
+			// Reasoning that arrives after the reply's text began is the tail
+			// of the reasoning before that text, as on the web client.
+			if n := len(blocks); n-2 >= a.sealed[id] && blocks[n-1].Type == "content" && blocks[n-2].Type == "thinking" {
+				blocks[n-2].Content += delta
+				break
+			}
+		}
 		if len(blocks) <= a.sealed[id] || blocks[len(blocks)-1].Type != kind {
 			block := Block{ID: fmt.Sprintf("%s_%s_%d", id, kind, len(blocks)), Type: kind}
 			if kind == "thinking" {

@@ -56,8 +56,9 @@ func (s *thoughtSummaries) follow(e event) {
 	switch e.Type {
 	case "REASONING_MESSAGE_CHUNK":
 		message := strings.TrimSuffix(e.MessageID, "-reasoning")
+		// A late tail of reasoning the reply's text closed is not followed.
 		block := s.assembler.lastBlock(message)
-		if block == nil {
+		if block == nil || block.Type != "thinking" {
 			return
 		}
 		if block.ID != s.block {

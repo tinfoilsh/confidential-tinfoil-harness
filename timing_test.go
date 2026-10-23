@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -14,6 +16,7 @@ func TestAReplyRecordsWhenItsStepsRan(t *testing.T) {
 		{Type: "REASONING_MESSAGE_CHUNK", MessageID: "r-reasoning", Delta: "Plan", Timestamp: at("00")},
 		{Type: "REASONING_MESSAGE_CHUNK", MessageID: "r-reasoning", Delta: "ning", Timestamp: at("02.5")},
 		{Type: "TEXT_MESSAGE_CHUNK", MessageID: "r", Delta: "Answer", Timestamp: at("03")},
+		{Type: "REASONING_MESSAGE_CHUNK", MessageID: "r-reasoning", Delta: " late", Timestamp: at("03.2")},
 		{Type: "TEXT_MESSAGE_CHUNK", MessageID: "r", Delta: " done", Timestamp: at("03.4")},
 		{Type: "TOOL_CALL_START", ToolCallID: "s", ToolName: "web_search", ParentID: "r", Timestamp: at("04")},
 		{Type: "TOOL_CALL_RESULT", ToolCallID: "s", Content: raw(object{"results": []any{}}), Timestamp: at("06")},
@@ -23,7 +26,7 @@ func TestAReplyRecordsWhenItsStepsRan(t *testing.T) {
 		assembler.apply(e)
 	}
 	want := []Block{
-		{ID: "r_thinking_0", Type: "thinking", Content: "Planning", StartedAt: start, EndedAt: start + 2500, Duration: 2.5},
+		{ID: "r_thinking_0", Type: "thinking", Content: "Planning late", StartedAt: start, EndedAt: start + 2500, Duration: 2.5},
 		{ID: "r_content_1", Type: "content", Content: "Answer done"},
 		{ID: "s", Type: "tool_call", ToolCallID: "s", Name: "web_search", Progress: []json.RawMessage{}, Result: raw(object{"results": []any{}}), StartedAt: start + 4000, EndedAt: start + 6000},
 		{ID: "r_thinking_3", Type: "thinking", Content: "Next step", StartedAt: start + 7000, EndedAt: start + 8250, Duration: 1.25},
@@ -61,5 +64,21 @@ func TestOldRepliesKeepWhenTheirStepsRan(t *testing.T) {
 	want := []step{{"t", 1000, 3500, 2.5}, {"w", 4000, 9000, 0}, {"f1", 9000.5, 12000.25, 0}, {"f2", 9000, 15000, 0}, {"c", 0, 0, 0}, {"b-thinking", 0, 0, 1.25}, {"b-content", 0, 0, 0}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("steps %+v, want %+v", got, want)
+	}
+}
+
+func TestALateReasoningTailIsNotSummarized(t *testing.T) {
+	assembler := newMessageAssembler()
+	summaries := &thoughtSummaries{out: &stream{}, assembler: assembler, summarize: func(ctx context.Context, _ string) (string, error) { return "", ctx.Err() }}
+	for _, e := range []event{
+		{Type: "REASONING_MESSAGE_CHUNK", MessageID: "r-reasoning", Delta: "plan"},
+		{Type: "TEXT_MESSAGE_CHUNK", MessageID: "r", Delta: strings.Repeat("answer ", minSummaryWords)},
+		{Type: "REASONING_MESSAGE_CHUNK", MessageID: "r-reasoning", Delta: " tail"},
+	} {
+		assembler.apply(e)
+		summaries.follow(e)
+	}
+	if summaries.block != "" || summaries.trace != "" || summaries.inFlight {
+		t.Fatalf("followed block %q with trace %q", summaries.block, summaries.trace)
 	}
 }
