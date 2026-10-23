@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -155,7 +156,7 @@ func buildCatalog(config []object, models []*model) *chatCatalog {
 		if configured > 0 && (c.Fallback == 0 || configured < c.Fallback) {
 			c.Fallback = configured
 		}
-		if !slices.ContainsFunc(pinned, func(p struct{ name, repo string }) bool { return p.name == name && p.repo == repo }) {
+		if !slices.ContainsFunc(pinned, func(p pin) bool { return p.name == name && p.repo == repo }) {
 			unpinned = append(unpinned, name)
 			continue
 		}
@@ -387,8 +388,15 @@ func (c *chatCatalog) selectedWidgets(requested []string, enabled bool) []widget
 	return result
 }
 
+// reasoningSetting is a word a model's reasoning effort is written in. The
+// model catalog comes from outside the enclave, and a chat template writes
+// these settings into the prompt, so nothing that could be an instruction is
+// sent.
+var reasoningSetting = regexp.MustCompile(`^[a-z]{1,16}$`)
+
+// modelParams are the reasoning settings a model's configuration asks for:
+// whether it thinks and how hard, and nothing else.
 func modelParams(def object, thinking bool, effort string) object {
-	reserved := []string{"model", "messages", "stream", "stream_options", "signal", "reasoning_effort", "web_search_options", "code_execution_options", "pii_check_options", "tools", "tool_choice", "response_format", "user_cache_secret", "auto_model_options"}
 	params := object{}
 	reason := obj(obj(def["chatConfig"])["reasoningConfig"])
 	mode := "enable"
@@ -399,16 +407,25 @@ func modelParams(def object, thinking bool, effort string) object {
 		effort = "medium"
 	}
 	effort = firstString(obj(reason["effortMap"])[effort], effort)
-	block := obj(obj(reason["params"])["/v1/chat/completions"])[mode]
-	for k, v := range obj(substituteEffort(block, effort)) {
-		if k == "reasoning_effort" || !slices.Contains(reserved, k) {
-			params[k] = v
+	block := obj(substituteEffort(obj(obj(reason["params"])["/v1/chat/completions"])[mode], effort))
+	if value, ok := block["reasoning_effort"].(string); ok && reasoningSetting.MatchString(value) {
+		params["reasoning_effort"] = value
+	}
+	switches := object{}
+	for k, v := range obj(block["chat_template_kwargs"]) {
+		switch value := v.(type) {
+		case bool:
+			if k == "enable_thinking" || k == "thinking" {
+				switches[k] = value
+			}
+		case string:
+			if k == "reasoning_effort" && reasoningSetting.MatchString(value) {
+				switches[k] = value
+			}
 		}
 	}
-	for k, v := range obj(def["requestParams"]) {
-		if !slices.Contains(reserved, k) {
-			params[k] = v
-		}
+	if len(switches) > 0 {
+		params["chat_template_kwargs"] = switches
 	}
 	return params
 }
