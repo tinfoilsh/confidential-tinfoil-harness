@@ -136,3 +136,25 @@ func TestADeviceTurnDropsInvalidProfileFields(t *testing.T) {
 		t.Fatalf("the device's settings read as %q", system)
 	}
 }
+
+// Turning web search off in an old client's settings stays off, apart from
+// whether a chat searches.
+func TestTheWebSearchSettingOfAnOldProfileIsKept(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	p := &principal{ID: "alice"}
+	rows.rows[rowMapKey(p, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: raw(object{"webSearchAvailable": false, "webSearchEnabled": true})}
+	get := func(user string) object {
+		return profileOf(t, postRoute(h, "/v1/profile/get", object{"key": key.base64()}, user))
+	}
+	if got := get("alice"); got["webSearchAvailable"] != false || got["webSearchEnabled"] != true {
+		t.Fatalf("the old profile read as %v", got)
+	}
+	if got := get("bob"); got["webSearchAvailable"] != true {
+		t.Fatalf("an unset web search setting read as %v", got["webSearchAvailable"])
+	}
+	w := postRoute(h, "/v1/profile/update", object{"key": key.base64(), "patch": object{"webSearchAvailable": true}}, "alice")
+	row, _ := rows.load(context.Background(), p, key, "profile", "profile")
+	if got := profileOf(t, w); got["webSearchAvailable"] != true || rowJSON(row)["webSearchAvailable"] != true {
+		t.Fatalf("the update answered %v and stored %v", got, rowJSON(row))
+	}
+}
