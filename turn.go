@@ -56,5 +56,5 @@ func (h *harness) handleTurn(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, h.withQuota(p, rateLimit{}, err))
 		return
 	}
-	follow(w, r, accepted.log)
+	follow(w, r, accepted.log, -1)
 }

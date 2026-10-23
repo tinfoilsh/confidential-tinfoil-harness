@@ -258,9 +258,10 @@ func TestAFinishingRunsWritesBlockNothing(t *testing.T) {
 	awaitFrame(t, run.log, "RUN_FINISHED")
 }
 
-// Re-attaching replays a live run from its first frame, whatever the client
-// last saw, and a run that is no longer live is not found.
-func TestFollowReplaysALiveRunFromItsFirstFrame(t *testing.T) {
+// Re-attaching to a live run resumes after the last frame the client applied,
+// or replays it from its first frame when the client names none, or names
+// one the run never sent. A run that is no longer live is not found.
+func TestFollowResumesALiveRunAfterTheClientsCursor(t *testing.T) {
 	model, release := heldModel()
 	h, _, key := testChatHarness(t, model)
 	t.Cleanup(release)
@@ -269,22 +270,37 @@ func TestFollowReplaysALiveRunFromItsFirstFrame(t *testing.T) {
 		t.Fatal(err)
 	}
 	awaitFrame(t, run.log, "TEXT_MESSAGE_CHUNK")
-	request := func() *http.Request {
-		req := httptest.NewRequest(http.MethodPost, "/v1/threads/follow", bytes.NewReader(raw(object{"key": key.base64(), "threadId": run.thread.id, "runId": run.log.id})))
+	request := func(after ...int) *http.Request {
+		in := object{"key": key.base64(), "threadId": run.thread.id, "runId": run.log.id}
+		if len(after) > 0 {
+			in["after"] = after[0]
+		}
+		req := httptest.NewRequest(http.MethodPost, "/v1/threads/follow", bytes.NewReader(raw(in)))
 		signIn(req, "alice")
+		// The cursor is the body's, which the gateway cannot read.
 		req.Header.Set("Last-Event-ID", "2")
 		return req
 	}
-	w := replayOf(h, request())
 	frames, _, _ := run.log.log.read(0)
-	ids := regexp.MustCompile(`(?m)^id: (\d+)$`).FindAllStringSubmatch(w.Body.String(), -1)
-	events := eventsIn(t, w)
-	if len(ids) != len(frames) || len(events) != len(frames) || events[0].Type != "RUN_STARTED" || eventOfType(events, "TEXT_MESSAGE_CHUNK") == nil {
-		t.Fatalf("replayed %d of %d frames: %s", len(events), len(frames), w.Body.String())
-	}
-	for i, id := range ids {
-		if id[1] != strconv.Itoa(i) {
-			t.Fatalf("frame %d replayed as id %s", i, id[1])
+	for _, tc := range []struct {
+		name  string
+		req   *http.Request
+		first int
+	}{
+		{"without a cursor", request(), 0},
+		{"after frame 1", request(1), 2},
+		{"after a frame the run never sent", request(len(frames)), 0},
+	} {
+		w := replayOf(h, tc.req)
+		ids := regexp.MustCompile(`(?m)^id: (\d+)$`).FindAllStringSubmatch(w.Body.String(), -1)
+		events := eventsIn(t, w)
+		if len(ids) != len(frames)-tc.first || len(events) != len(ids) || eventOfType(events, "TEXT_MESSAGE_CHUNK") == nil {
+			t.Fatalf("%s: replayed %d of %d frames: %s", tc.name, len(events), len(frames), w.Body.String())
+		}
+		for i, id := range ids {
+			if id[1] != strconv.Itoa(tc.first+i) {
+				t.Fatalf("%s: frame %d replayed as id %s", tc.name, tc.first+i, id[1])
+			}
 		}
 	}
 	release()

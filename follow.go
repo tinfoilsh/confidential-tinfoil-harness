@@ -15,7 +15,10 @@ func (h *harness) handleFollow(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, err)
 		return
 	}
-	var in runRequest
+	var in struct {
+		runRequest
+		After *int `json:"after"`
+	}
 	defer in.clearKey()
 	if err := decodeBody(body, &in); err != nil {
 		respond(w, nil, err)
@@ -43,5 +46,5 @@ func (h *harness) handleFollow(w http.ResponseWriter, r *http.Request) {
 		}
 		h.live.mu.Unlock()
 	}
-	follow(w, r, live.log)
+	follow(w, r, live.log, valueOr(in.After, -1))
 }

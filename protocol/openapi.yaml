@@ -144,7 +144,7 @@ paths:
       operationId: follow
       summary: Rejoin a live run
       tags: [runs]
-      description: Streams a live run from its first event, for a client that lost its stream.
+      description: Streams a live run again, for a client that lost its stream, from after the last event it applied.
       requestBody:
         required: true
         content:
@@ -1642,6 +1642,7 @@ components:
         key: {type: string, description: "The account's content key, base64. Absent for device chats and signed-out callers."}
         threadId: {$ref: "#/components/schemas/Identifier"}
         runId: {type: string}
+        after: {type: integer, minimum: 0, description: "The cursor of the last event the client applied. The stream resumes after it. Without one, or with one the run never sent, it starts from the run's first event."}
 
     RunRequest:
       description: A run, or a turn queued behind one, of a chat.

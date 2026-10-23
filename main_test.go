@@ -28,7 +28,7 @@ func TestOutgrowingTheLogStopsTheRun(t *testing.T) {
 	}
 	// A client following the run is told the same error a request is.
 	w := httptest.NewRecorder()
-	follow(w, httptest.NewRequest("POST", "/v1/threads/follow", nil), rn)
+	follow(w, httptest.NewRequest("POST", "/v1/threads/follow", nil), rn, -1)
 	events := eventsIn(t, w)
 	want := asAPIError(errTooLong)
 	if last := events[len(events)-1]; last.Type != "RUN_ERROR" || last.Code != "RUN_LOG_FULL" || last.Code != want.Code || last.Message != want.Message {
