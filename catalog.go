@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -24,6 +25,29 @@ var widgetJSON []byte
 
 //go:embed presets.json
 var presetJSON []byte
+
+//go:embed prompt.json
+var promptJSON []byte
+
+// chatPrompt is the system prompt every chat is built from. It is part of the
+// measured image, so no service outside the enclave can instruct the model.
+type chatPrompt struct {
+	SystemPrompt string `json:"systemPrompt"`
+	Rules        string `json:"rules"`
+	GenUI        struct {
+		Header         string   `json:"header"`
+		EnabledWidgets []string `json:"enabledWidgets"`
+	} `json:"genUI"`
+}
+
+// builtInPrompt is the compiled system prompt, read once.
+var builtInPrompt = sync.OnceValue(func() chatPrompt {
+	var prompt chatPrompt
+	if json.Unmarshal(promptJSON, &prompt) != nil || prompt.SystemPrompt == "" {
+		panic("invalid compiled system prompt")
+	}
+	return prompt
+})
 
 // preset is a built-in prompt the clients offer.
 type preset struct {
@@ -103,14 +127,10 @@ func (h *harness) refreshCatalog(ctx context.Context) error {
 	h.refreshOffer(ctx)
 	client := &http.Client{Timeout: 15 * time.Second}
 	var models []object
-	var prompt object
 	if err := fetchConfig(ctx, client, h.controlplane, "/api/config/models", &models); err != nil {
 		return err
 	}
-	if err := fetchConfig(ctx, client, h.controlplane, "/api/config/system-prompt", &prompt); err != nil {
-		return err
-	}
-	c := buildCatalog(models, prompt, h.offer.get())
+	c := buildCatalog(models, h.offer.get())
 	// The first catalog may offer only Auto; a later one without models keeps the last.
 	if len(c.Models) == 0 && h.catalog.get() != nil {
 		return errors.New("no configured chat model is offered by the gateway")
@@ -118,11 +138,9 @@ func (h *harness) refreshCatalog(ctx context.Context) error {
 	h.catalog.set(c)
 	return nil
 }
-func buildCatalog(config []object, prompt object, models []*model) *chatCatalog {
-	c := &chatCatalog{Prompt: str(prompt["systemPrompt"]), Rules: str(prompt["rules"]), WidgetHeader: str(obj(prompt["genUI"])["header"]), Models: []object{}, Presets: builtInPresets()}
-	for _, name := range arr(obj(prompt["genUI"])["enabledWidgets"]) {
-		c.EnabledWidgets = append(c.EnabledWidgets, str(name))
-	}
+func buildCatalog(config []object, models []*model) *chatCatalog {
+	prompt := builtInPrompt()
+	c := &chatCatalog{Prompt: prompt.SystemPrompt, Rules: prompt.Rules, WidgetHeader: prompt.GenUI.Header, EnabledWidgets: slices.Clone(prompt.GenUI.EnabledWidgets), Models: []object{}, Presets: builtInPresets()}
 	var unpinned []string
 	for _, definition := range config {
 		if !boolean(definition["chat"], false) || str(definition["type"]) != "chat" {
@@ -138,7 +156,7 @@ func buildCatalog(config []object, prompt object, models []*model) *chatCatalog 
 		if configured > 0 && (c.Fallback == 0 || configured < c.Fallback) {
 			c.Fallback = configured
 		}
-		if !slices.ContainsFunc(pinned, func(p struct{ name, repo string }) bool { return p.name == name && p.repo == repo }) {
+		if !slices.ContainsFunc(pinned, func(p pin) bool { return p.name == name && p.repo == repo }) {
 			unpinned = append(unpinned, name)
 			continue
 		}
@@ -370,8 +388,15 @@ func (c *chatCatalog) selectedWidgets(requested []string, enabled bool) []widget
 	return result
 }
 
+// reasoningSetting is a word a model's reasoning effort is written in. The
+// model catalog comes from outside the enclave, and a chat template writes
+// these settings into the prompt, so nothing that could be an instruction is
+// sent.
+var reasoningSetting = regexp.MustCompile(`^[a-z]{1,16}$`)
+
+// modelParams are the reasoning settings a model's configuration asks for:
+// whether it thinks and how hard, and nothing else.
 func modelParams(def object, thinking bool, effort string) object {
-	reserved := []string{"model", "messages", "stream", "stream_options", "signal", "reasoning_effort", "web_search_options", "code_execution_options", "pii_check_options", "tools", "tool_choice", "response_format", "user_cache_secret", "auto_model_options"}
 	params := object{}
 	reason := obj(obj(def["chatConfig"])["reasoningConfig"])
 	mode := "enable"
@@ -382,16 +407,25 @@ func modelParams(def object, thinking bool, effort string) object {
 		effort = "medium"
 	}
 	effort = firstString(obj(reason["effortMap"])[effort], effort)
-	block := obj(obj(reason["params"])["/v1/chat/completions"])[mode]
-	for k, v := range obj(substituteEffort(block, effort)) {
-		if k == "reasoning_effort" || !slices.Contains(reserved, k) {
-			params[k] = v
+	block := obj(substituteEffort(obj(obj(reason["params"])["/v1/chat/completions"])[mode], effort))
+	if value, ok := block["reasoning_effort"].(string); ok && reasoningSetting.MatchString(value) {
+		params["reasoning_effort"] = value
+	}
+	switches := object{}
+	for k, v := range obj(block["chat_template_kwargs"]) {
+		switch value := v.(type) {
+		case bool:
+			if k == "enable_thinking" || k == "thinking" {
+				switches[k] = value
+			}
+		case string:
+			if k == "reasoning_effort" && reasoningSetting.MatchString(value) {
+				switches[k] = value
+			}
 		}
 	}
-	for k, v := range obj(def["requestParams"]) {
-		if !slices.Contains(reserved, k) {
-			params[k] = v
-		}
+	if len(switches) > 0 {
+		params["chat_template_kwargs"] = switches
 	}
 	return params
 }
