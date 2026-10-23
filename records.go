@@ -60,13 +60,17 @@ func (h *harness) session(ctx context.Context, p *principal, _ contentKey, _ jso
 	if presets == nil {
 		presets = []preset{}
 	}
+	widgets := c.EnabledWidgets
+	if widgets == nil {
+		widgets = []string{}
+	}
 	return sessionView{
 		User:            sessionUser{ID: p.ID, Anonymous: p.Anonymous},
 		RateLimit:       credential.Limit,
 		Models:          c.displayModels(),
 		Auto:            autoView{Default: defaultIntelligence, Levels: autoLevels()},
 		DefaultModel:    autoModelName,
-		Widgets:         c.EnabledWidgets,
+		Widgets:         widgets,
 		ProfileDefaults: defaultProfile(),
 		Composer:        composer(),
 		Presets:         presets,
