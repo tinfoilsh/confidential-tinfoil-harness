@@ -54,7 +54,7 @@ type reasoningSummary struct {
 
 type toolCallStart struct {
 	ToolCallID      string `json:"toolCallId"`
-	ToolCallName    string `json:"toolCallName,omitempty"`
+	ToolCallName    string `json:"toolCallName"`
 	ParentMessageID string `json:"parentMessageId,omitempty"`
 }
 
