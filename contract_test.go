@@ -599,6 +599,32 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+// Every error code the protocol names tells clients what to do about it, and
+// the harness gives no code the protocol leaves out.
+func TestEveryErrorCodeHasAnAction(t *testing.T) {
+	c, err := loadContract()
+	if err != nil {
+		t.Fatal(err)
+	}
+	codes, actions := map[string]bool{}, map[string]bool{}
+	for _, code := range c.at("components", "schemas", "ErrorCode", "enum").([]any) {
+		codes[code.(string)] = true
+	}
+	for _, action := range c.at("components", "schemas", "ErrorAction", "enum").([]any) {
+		actions[action.(string)] = true
+	}
+	for code := range codes {
+		if errorActions[code] == "" {
+			t.Errorf("%s has no action", code)
+		}
+	}
+	for code, action := range errorActions {
+		if !codes[code] || !actions[action] {
+			t.Errorf("%s: %s is not in the protocol", code, action)
+		}
+	}
+}
+
 // The protocol names every route the harness serves, and the harness serves
 // every route the protocol names.
 func TestTheProtocolNamesEveryRoute(t *testing.T) {

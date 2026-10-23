@@ -20,7 +20,7 @@ func (h *harness) threadTranscript(ctx context.Context, p *principal, key conten
 	running := live != nil && (live.active != nil || len(live.queue) > 0)
 	h.live.mu.Unlock()
 	if running {
-		return nil, apiErr(409, "RUN_IN_FLIGHT", "Wait for the reply to finish before moving this chat")
+		return nil, apiErr(409, "RUN_IN_FLIGHT", "Wait for the reply to finish before moving this chat").withAction(actionRetry)
 	}
 	row, err := h.loadThread(ctx, p, key, in.ThreadID)
 	if err != nil {
@@ -73,7 +73,7 @@ func (h *harness) finishTransfer(ctx context.Context, p *principal, key contentK
 	s := h.live.threads[name]
 	if s != nil && (s.deleted || s.active != nil || len(s.queue) > 0) {
 		h.live.mu.Unlock()
-		return apiErr(409, "RUN_IN_FLIGHT", "Wait for the reply to finish before moving this chat")
+		return apiErr(409, "RUN_IN_FLIGHT", "Wait for the reply to finish before moving this chat").withAction(actionRetry)
 	}
 	if h.live.threads == nil {
 		h.live.threads = map[string]*threadSession{}

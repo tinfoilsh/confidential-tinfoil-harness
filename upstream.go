@@ -63,18 +63,23 @@ func openAIRefusal(status int, body []byte) *apiError {
 	case status == http.StatusTooManyRequests:
 		e = apiErr(429, "RATE_LIMITED", firstString(message, "Too many requests; retry shortly"))
 	case status == http.StatusServiceUnavailable && code == "model_unavailable":
-		e = apiErr(503, "MODEL_UNAVAILABLE", firstString(message, "The model is temporarily unavailable"))
+		e = apiErr(503, "MODEL_UNAVAILABLE", firstString(message, "The model is temporarily unavailable")).withAction(actionRetry)
 	case status == http.StatusServiceUnavailable && code == "server_is_overloaded":
 		e = apiErr(503, "UPSTREAM_REFUSED", firstString(message, "The model is overloaded"))
 	case status/100 == 4 && (code == "context_length_exceeded" || strings.Contains(strings.ToLower(message), "context length")):
 		e = apiErr(413, "CONTEXT_TOO_LARGE", firstString(message, "The conversation exceeds the model's context window"))
 	case (status/100 == 4 || strings.HasPrefix(code, "document_")) && message != "":
 		// Document failures carry fixed messages that describe nothing in the file.
-		e = apiErr(502, "UPSTREAM_REFUSED", message)
+		e = apiErr(502, "UPSTREAM_REFUSED", message).withAction(actionStop)
 	}
 	e.Status = status
 	if strings.HasPrefix(code, "document_") {
 		e.Upstream = code
+		// A document that failed to convert is the file's doing, as its
+		// message says, so the user sends another.
+		if e.Code == "UPSTREAM_REFUSED" {
+			e.Action = actionRevise
+		}
 	}
 	return e
 }
