@@ -239,6 +239,15 @@ func TestFilesThatReadAsTextAreTakenAsText(t *testing.T) {
 			t.Errorf("%s: HTTP %d %s", tc.name, w.Code, w.Body.String())
 		}
 	}
+	// Text that replacement characters make longer than the limit is refused
+	// at upload rather than by the turn that sends it.
+	saved := textUploads.MaxBytes
+	textUploads.MaxBytes = 8
+	w := uploadRoute(h, "/v1/attachments/upload", "notes.txt", []byte("\xffa\xffa\xffa"), nil, "alice")
+	textUploads.MaxBytes = saved
+	if w.Code != http.StatusRequestEntityTooLarge || !strings.Contains(w.Body.String(), "ATTACHMENT_TOO_LARGE") {
+		t.Errorf("text longer than its limit once read: HTTP %d %s", w.Code, w.Body.String())
+	}
 	in := sendInput(key)
 	in["attachments"] = []any{object{"id": "att_docker", "kind": "document", "fileName": "Dockerfile", "mimeType": "text/plain; charset=utf-8", "textContent": "FROM scratch\n"}}
 	events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice"))

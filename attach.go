@@ -373,8 +373,12 @@ func (h *harness) preprocess(ctx context.Context, filename string, data []byte) 
 		if bytes.ContainsRune(data, 0) {
 			return Attachment{}, apiErr(415, "ATTACHMENT_UNSUPPORTED", "Text uploads must contain UTF-8 text")
 		}
-		// As the web client read text, what is not UTF-8 reads as U+FFFD.
+		// As the web client read text, what is not UTF-8 reads as U+FFFD,
+		// which can make the text longer than the file.
 		descriptor.TextContent = strings.ToValidUTF8(string(data), string(utf8.RuneError))
+		if len(descriptor.TextContent) > group.maxContent() {
+			return Attachment{}, apiErr(413, "ATTACHMENT_TOO_LARGE", "The file exceeds the size limit for its type")
+		}
 		if m := mime.TypeByExtension(ext); m != "" {
 			descriptor.MimeType = m
 		}
