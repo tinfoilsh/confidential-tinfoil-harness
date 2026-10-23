@@ -34,10 +34,15 @@ func optionsPart(options object) formPart { return formPart{name: "options", dat
 func threadPart(thread any) formPart      { return formPart{name: "thread", data: raw(thread)} }
 
 func archiveRoute(h *harness, path, user string, parts ...formPart) *httptest.ResponseRecorder {
+	return archiveRequest(h, path, func(r *http.Request) { signIn(r, user) }, parts...)
+}
+
+// archiveRequest posts an archive form with the credentials sign sets.
+func archiveRequest(h *harness, path string, sign func(*http.Request), parts ...formPart) *httptest.ResponseRecorder {
 	body, contentType := archiveForm(parts...)
 	r := httptest.NewRequest("POST", path, bytes.NewReader(body))
 	r.Header.Set("Content-Type", contentType)
-	signIn(r, user)
+	sign(r)
 	w := httptest.NewRecorder()
 	h.routes().ServeHTTP(w, r)
 	return w
@@ -98,7 +103,12 @@ type imported struct {
 // importOf posts an archive to /v1/import and reads its lines.
 func importOf(t *testing.T, h *harness, user string, archive []byte, name string, options object) imported {
 	t.Helper()
-	w := archiveRoute(h, "/v1/import", user, optionsPart(options), formPart{name: "file", filename: name, data: archive})
+	return importLines(t, archiveRoute(h, "/v1/import", user, optionsPart(options), formPart{name: "file", filename: name, data: archive}))
+}
+
+// importLines reads the lines an import answered with.
+func importLines(t *testing.T, w *httptest.ResponseRecorder) imported {
+	t.Helper()
 	if w.Code != 200 || w.Header().Get("Content-Type") != "application/x-ndjson" {
 		t.Fatalf("import: HTTP %d: %s", w.Code, w.Body.String())
 	}
@@ -753,6 +763,33 @@ func TestAnExportWithoutTheKeyHoldsOnlyItsDeviceChats(t *testing.T) {
 	json.Unmarshal(files[manifestPath], &manifest)
 	if manifest.Counts != (backupCounts{LocalChats: 1, Files: 2}) || files[backupEntityPath("local_chats", "local-chat")] == nil || rows.calls != 0 {
 		t.Fatalf("manifest %+v after %d store calls", manifest.Counts, rows.calls)
+	}
+}
+
+// An archive calls no model: a signed-in caller without chat access, a free
+// user or a subscriber at its hourly cap, backs up its chats and restores
+// them.
+func TestArchivesNeedNoChatAccess(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: raw(object{"title": "Stored", "messages": []any{object{"id": "m", "role": "user", "content": "hi"}}})}
+	for name, credential := range map[string]string{"a free user": "free_anonymous-key", "a subscriber at its cap": ""} {
+		signedIn := func(r *http.Request) {
+			r.Header.Set("Authorization", "Bearer clerk-alice")
+			if credential != "" {
+				r.Header.Set(inferenceKeyHeader, credential)
+			}
+		}
+		export := archiveRequest(h, "/v1/export", signedIn, optionsPart(object{"format": "native", "key": key.base64()}))
+		if export.Code != 200 {
+			t.Fatalf("%s exported: HTTP %d %s", name, export.Code, export.Body.String())
+		}
+		restored, restoredRows, _ := testChatHarness(t, nil)
+		newFakeSync(t, restored)
+		result := importLines(t, archiveRequest(restored, "/v1/import", signedIn, optionsPart(object{"target": "cloud", "key": key.base64()}), formPart{name: "file", filename: "tinfoil-backup.zip", data: export.Body.Bytes()}))
+		chats := storedChats(restoredRows, "alice")
+		if chat := chats["Stored"]; result.done.JobID == nil || len(chats) != 1 || len(chat.Messages) != 1 || chat.Messages[0].Role != "user" || chat.Messages[0].Content != "hi" {
+			t.Fatalf("%s restored %+v: %+v", name, result.done, chats)
+		}
 	}
 }
 

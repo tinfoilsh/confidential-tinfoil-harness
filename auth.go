@@ -141,10 +141,7 @@ const (
 	credentialTTL    = time.Hour
 )
 
-var (
-	errCredentialRequired   = apiErr(401, "CREDENTIAL_REQUIRED", "Chat access is missing or expired")
-	errSubscriptionRequired = apiErr(403, "SUBSCRIPTION_REQUIRED", "This requires a Tinfoil Chat subscription")
-)
+var errCredentialRequired = apiErr(401, "CREDENTIAL_REQUIRED", "Chat access is missing or expired")
 
 type authenticator struct {
 	verify       func(context.Context, string) (string, error)
@@ -374,23 +371,6 @@ func (a *authenticator) renewed(p *principal, refused secret) (inferenceCredenti
 		return inferenceCredential{}, errCredentialRequired
 	}
 	return credential, nil
-}
-
-// subscriber is a signed-in caller holding a chat token, which only a Tinfoil
-// Chat subscription grants.
-func (a *authenticator) subscriber(r *http.Request) (*principal, error) {
-	p, err := a.authenticate(r, false)
-	if err != nil {
-		return nil, err
-	}
-	credential, err := a.inference(r.Context(), p)
-	if err != nil {
-		return nil, err
-	}
-	if !credential.firstParty {
-		return nil, errSubscriptionRequired
-	}
-	return p, nil
 }
 
 // debited is the quota after a run's request and the tokens it spent.

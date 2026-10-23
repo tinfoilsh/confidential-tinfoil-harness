@@ -95,7 +95,7 @@ func (b *watchedBody) Read([]byte) (int, error) { b.read.Store(true); return 0, 
 
 // A turn or an archive may be tens of mebibytes; only a caller who signed in,
 // or holds a free key the control plane accepts, gets one read, and only a
-// subscriber gets an archive read.
+// caller who signed in gets an archive read.
 func TestLargeBodiesAreReadOnlyAfterAuthentication(t *testing.T) {
 	h, _, _ := testChatHarness(t, nil)
 	for _, tc := range []struct {
@@ -113,8 +113,8 @@ func TestLargeBodiesAreReadOnlyAfterAuthentication(t *testing.T) {
 		{"/v1/threads/follow", "free_refused-key", "", 401},
 		{"/v1/attachments/get-public", "free_refused-key", "", 401},
 		{"/v1/speech", "free_refused-key", "", 401},
-		{"/v1/import", "clerk-alice", "free_anonymous-key", 403},
-		{"/v1/export", "clerk-alice", "", 401},
+		{"/v1/import", "free_anonymous-key", "", 401},
+		{"/v1/export", "free_anonymous-key", "", 401},
 	} {
 		body := &watchedBody{}
 		r := httptest.NewRequest(http.MethodPost, tc.path, body)
