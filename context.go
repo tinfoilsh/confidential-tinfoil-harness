@@ -216,7 +216,7 @@ func (h *harness) buildRequest(thread *Thread, profile *Profile, project *Projec
 		if def == nil {
 			return nil, nil, apiErr(404, "MODEL_UNAVAILABLE", "The selected model is unavailable")
 		}
-		display, window = str(def["name"]), integer(def["budgetWindow"])
+		display, window = pinnedName(name), integer(def["budgetWindow"])
 		reason := obj(obj(def["chatConfig"])["reasoningConfig"])
 		policy = firstString(reason["reasoningHistoryPolicy"], "none")
 		effort := cmp.Or(options.ReasoningEffort, valueOr(profile.ReasoningEffort, ""), "medium")
