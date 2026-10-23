@@ -19,6 +19,11 @@ func (h *harness) completion(ctx context.Context, m *model, payload object) (str
 		endpoint = h.gateway + "/v1/chat/completions"
 	}
 	payload["stream"] = false
+	// Without a scope of its own, a request would share the process-wide
+	// cache secret with everyone holding the same credential.
+	if _, scoped := payload["user_cache_secret"]; !scoped {
+		payload["user_cache_secret"] = token()
+	}
 	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(raw(payload)))
 	if err != nil {
 		return "", err

@@ -348,8 +348,17 @@ func TestDocumentDownloadReturnsExtractedText(t *testing.T) {
 	id, blobKey := fake.seed("chat-1", []byte(`{"pages":[{"page":1,"text":"page one","image":"","is_scanned":false}]}`))
 	storedThread(rows, "alice", "chat-1", object{"id": id, "type": "document", "fileName": "scan.pdf", "encryptionKey": blobKey})
 	w := postRoute(h, "/v1/attachments/get", object{"key": key.base64(), "id": id, "threadId": "chat-1"}, "alice")
-	if w.Code != 200 || w.Body.String() != "page one" || !strings.HasPrefix(w.Header().Get("Content-Type"), "text/markdown") || !strings.Contains(w.Header().Get("Content-Disposition"), "scan.md") {
-		t.Fatalf("download was not the extracted text: %d %q %v", w.Code, w.Body.String(), w.Header())
+	if w.Code != 200 || w.Body.String() != "page one" {
+		t.Fatalf("download was not the extracted text: %d %q", w.Code, w.Body.String())
+	}
+	if w.Header().Get("Content-Type") != opaqueContentType || w.Header().Get("Content-Disposition") != "" {
+		t.Fatalf("download headers disclose attachment metadata: %v", w.Header())
+	}
+	// Headers travel outside the sealed body.
+	for name, values := range w.Header() {
+		if joined := strings.Join(values, " "); strings.Contains(joined, "scan") || strings.Contains(joined, "markdown") || strings.Contains(joined, "pdf") {
+			t.Fatalf("header %s describes the file: %q", name, joined)
+		}
 	}
 }
 
@@ -572,5 +581,26 @@ func TestARetiredDocumentIsDescribedOnlyToTheModel(t *testing.T) {
 	stored := readThreadRow(row).Messages[0].Attachments[0]
 	if stored.EncryptionKey != "" || stored.TextContent != "" || stored.FileName != "old.pdf" {
 		t.Fatalf("the retired document was stored as %+v", stored)
+	}
+}
+
+// A share id names one share, however it is spelled, since the control
+// plane answers this host on routes it answers no one else.
+func TestOpeningAShareNamesOnlyThatShare(t *testing.T) {
+	h, _, _ := testChatHarness(t, nil)
+	paths := make(chan string, 2)
+	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths <- r.URL.EscapedPath()
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer cp.Close()
+	h.controlplane, h.cpClient = cp.URL, cp.Client()
+	fragment := "v2:" + strings.Repeat("ab", 32)
+	if w := postRoute(h, "/v1/shares/open", object{"shareId": "..", "fragment": fragment}, ""); w.Code != 400 {
+		t.Fatalf("a dot segment share id: HTTP %d", w.Code)
+	}
+	postRoute(h, "/v1/shares/open", object{"shareId": "..%2Fshim%2Frouter-config", "fragment": fragment}, "")
+	if got := <-paths; got != "/api/shares/..%252Fshim%252Frouter-config" {
+		t.Fatalf("the control plane was asked for %s", got)
 	}
 }
