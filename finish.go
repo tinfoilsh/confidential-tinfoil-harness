@@ -53,7 +53,7 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 		committed = append(committed, committedReply{ID: m.ID, Model: m.Model, ModelDisplayName: m.ModelDisplayName, Usage: m.Usage, IsError: m.IsError, IsInterrupted: m.IsInterrupted, Annotations: m.Annotations})
 	}
 	commit := func(t *Thread) error {
-		if r.retryTarget != nil && r.replacement != "" {
+		if r.retryTarget != nil && r.replacement.arguments != "" {
 			if err := replaceWidget(t, r.retryTarget.parentID, r.input.ToolCallID, r.retryTarget.block.Arguments, r.replacement); err != nil {
 				return err
 			}

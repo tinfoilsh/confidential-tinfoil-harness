@@ -209,3 +209,53 @@ func TestValidWidgetArgumentsAreAcknowledged(t *testing.T) {
 		t.Fatalf("an unknown widget read as %q", model)
 	}
 }
+
+// A retried link preview reads the page its new arguments name, as a first
+// call does, and keeps what it read in place of the refusal.
+func TestARetriedLinkPreviewReadsItsPage(t *testing.T) {
+	original, fixed := `{"url":"https://example.com/post"}`, `{"url":"https://example.com/post","title":"A post"}`
+	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(object{"choices": []object{{"message": object{"content": fixed}}}})
+	})
+	asked := make(chan string, 1)
+	metadata := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var in object
+		json.NewDecoder(r.Body).Decode(&in)
+		asked <- r.URL.Path + " " + str(in["url"])
+		json.NewEncoder(w).Encode(object{"result": object{"title": "The Post", "description": "About it", "site_name": "Example", "image": "https://example.com/i.png"}})
+	}))
+	defer metadata.Close()
+	h.services["metadata"] = &downstreamService{URL: metadata.URL, Client: metadata.Client()}
+	h.catalog.get().EnabledWidgets = []string{"render_link_preview"}
+	refused := widgetFailure(catalogWidgets("render_link_preview")["render_link_preview"], original)
+	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat")] = storedRow{ID: "chat", ETag: "1", Data: raw(object{"createdAt": timestamp(), "title": "Links", "titleState": "manual", "model": "kimi-k3", "messages": []any{
+		object{"id": "user", "role": "user", "content": "link the post", "createdAt": timestamp()},
+		object{"id": "assistant", "role": "assistant", "content": "Here it is.", "createdAt": timestamp(), "timeline": []any{
+			object{"type": "content", "id": "text", "content": "Here it is."},
+			object{"type": "tool_call", "id": "call", "toolCallId": "call", "name": "render_link_preview", "arguments": original, "complete": true, "result": refused},
+		}},
+	}})}
+	in := sendInput(key)
+	in["threadId"], in["kind"], in["toolCallId"], in["widgets"] = "chat", "retryToolCall", "call", []any{"render_link_preview"}
+	delete(in, "content")
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice"))
+	if last := events[len(events)-1]; last.Type != "RUN_FINISHED" {
+		t.Fatalf("the retry failed: %+v", last)
+	}
+	select {
+	case got := <-asked:
+		if got != "/metadata https://example.com/post" {
+			t.Fatalf("the retry read %s", got)
+		}
+	default:
+		t.Fatal("the retry read no page")
+	}
+	want := decodeValue(raw(object{"url": "https://example.com/post", "title": "The Post", "description": "About it", "siteName": "Example", "image": "https://example.com/i.png"}))
+	if shown := eventOfType(events, "TOOL_CALL_RESULT"); shown == nil || shown.ToolCallID != "call" || !reflect.DeepEqual(decodeValue(shown.Content), want) {
+		t.Fatalf("the retry showed %+v", shown)
+	}
+	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", "chat")
+	if call := readThreadRow(row).Messages[1].Timeline[1]; call.Arguments != fixed || !reflect.DeepEqual(decodeValue(call.Result), want) {
+		t.Fatalf("the retried widget was stored with arguments %s and result %s", call.Arguments, call.Result)
+	}
+}
