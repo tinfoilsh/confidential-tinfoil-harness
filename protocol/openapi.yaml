@@ -1457,8 +1457,15 @@ components:
 
     Session:
       type: object
-      required: [user, rateLimit, models, auto, defaultModel, widgets, profileDefaults, composer, presets, features]
+      required: [protocol, user, rateLimit, models, auto, defaultModel, widgets, profileDefaults, composer, presets, features]
       properties:
+        protocol:
+          description: The versions of this document the harness speaks. A client knows its own as the info.version of the document it was built from.
+          type: object
+          required: [version, minimum]
+          properties:
+            version: {type: integer, description: "The version this harness speaks."}
+            minimum: {type: integer, description: "The oldest version whose clients this harness still serves. A client built from an older one asks the user to update it."}
         user:
           type: object
           required: [id, anonymous]

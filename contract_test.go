@@ -599,6 +599,28 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+// A session names the version of the protocol this document is, which
+// clients compare theirs with.
+func TestTheSessionSpeaksThePublishedVersion(t *testing.T) {
+	h, _, _ := testChatHarness(t, nil)
+	c, err := loadContract()
+	if err != nil {
+		t.Fatal(err)
+	}
+	published, err := strconv.Atoi(c.at("info", "version").(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := postRoute(h, "/v1/session", object{}, "alice")
+	var session struct {
+		Protocol protocolView `json:"protocol"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &session)
+	if w.Code != http.StatusOK || session.Protocol.Version != published || session.Protocol.Minimum < 1 || session.Protocol.Minimum > published {
+		t.Fatalf("HTTP %d: the session speaks %+v, the document is version %d", w.Code, session.Protocol, published)
+	}
+}
+
 // Every error code the protocol names tells clients what to do about it, and
 // the harness gives no code the protocol leaves out.
 func TestEveryErrorCodeHasAnAction(t *testing.T) {

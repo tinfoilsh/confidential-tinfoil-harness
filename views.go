@@ -244,8 +244,21 @@ type stateSnapshot struct {
 	RateLimit rateLimit     `json:"rateLimit"`
 }
 
+// The version of protocol/openapi.yaml this harness speaks, and the oldest
+// whose clients it still serves.
+const (
+	protocolVersion        = 1
+	minimumProtocolVersion = 1
+)
+
+type protocolView struct {
+	Version int `json:"version"`
+	Minimum int `json:"minimum"`
+}
+
 // sessionView is what a client opens the app with.
 type sessionView struct {
+	Protocol        protocolView    `json:"protocol"`
 	User            sessionUser     `json:"user"`
 	RateLimit       rateLimit       `json:"rateLimit"`
 	Models          []sessionModel  `json:"models"`
