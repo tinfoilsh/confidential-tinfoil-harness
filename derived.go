@@ -118,14 +118,14 @@ func (h *harness) generateTitle(ctx context.Context, r *chatRun, p *principal, t
 		h.live.mu.Lock()
 		defer h.live.mu.Unlock()
 		name(&r.row.Thread)
-		r.out.emit(event{Type: "STATE_DELTA", Delta: titleDelta(&r.row.Thread)})
+		r.out.emit(stateDelta{Delta: titleDelta(&r.row.Thread)})
 		return
 	}
 	updated, err := h.mutateThread(ctx, p, r.key, r.thread.id, name)
 	if err != nil {
 		return
 	}
-	r.out.emit(event{Type: "STATE_DELTA", Delta: titleDelta(&updated.Thread)})
+	r.out.emit(stateDelta{Delta: titleDelta(&updated.Thread)})
 }
 
 func titleDelta(t *Thread) []statePatch {

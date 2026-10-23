@@ -119,7 +119,7 @@ func (h *harness) makeActive(s *threadSession, r *chatRun) {
 // reply that has not started is told by its first state snapshot.
 func queueChanged(s *threadSession) {
 	if s.active != nil && s.active.running {
-		s.active.out.emit(event{Type: "STATE_DELTA", Delta: []statePatch{{"replace", "/queue", queueItems(s)}}})
+		s.active.out.emit(stateDelta{Delta: []statePatch{{"replace", "/queue", queueItems(s)}}})
 	}
 }
 
@@ -176,18 +176,19 @@ func (h *harness) dropIdle(s *threadSession) {
 	}
 }
 
-// endQueued ends a turn that never started with the frame that says why;
-// live.mu is held.
-func (h *harness) endQueued(r *chatRun, end event) {
+// endQueued ends a turn that never started: removed when why is nil, and
+// failed with why otherwise. live.mu is held.
+func (h *harness) endQueued(r *chatRun, why error) {
 	h.live.forget(r)
-	end.ThreadID, end.RunID = r.thread.id, r.log.id
-	r.out.emit(end)
+	if why == nil {
+		r.out.emit(runFinished{ThreadID: r.thread.id, RunID: r.log.id, Metadata: runMetadata{Cancelled: new(true)}})
+	} else {
+		r.out.emit(failedRun(r.thread.id, r.log.id, asAPIError(why), nil))
+	}
 	r.log.log.close(errDone)
 	r.release()
 	close(r.finished)
 }
-
-var removedTurn = event{Type: "RUN_FINISHED", Metadata: raw(runMetadata{Cancelled: new(true)})}
 
 // endWaitingQueue ends the queue of a stopped run that nobody came back to.
 func (h *harness) endWaitingQueue(s *threadSession) {
@@ -197,7 +198,7 @@ func (h *harness) endWaitingQueue(s *threadSession) {
 		return
 	}
 	for _, r := range s.queue {
-		h.endQueued(r, removedTurn)
+		h.endQueued(r, nil)
 	}
 	s.queue = nil
 	h.dropIdle(s)

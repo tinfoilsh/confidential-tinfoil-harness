@@ -82,7 +82,7 @@ func (h *harness) removeQueued(ctx context.Context, p *principal, _ contentKey, 
 	}
 	s.queue = slices.Delete(s.queue, index, index+1)
 	r.cancelled = true
-	h.endQueued(r, removedTurn)
+	h.endQueued(r, nil)
 	queueChanged(s)
 	h.dropIdle(s)
 	return struct{}{}, nil
@@ -103,7 +103,7 @@ func (h *harness) stopThread(p *principal, id string) {
 		s.active.log.stop()
 	}
 	for _, r := range s.queue {
-		h.endQueued(r, removedTurn)
+		h.endQueued(r, nil)
 	}
 	s.queue = nil
 	h.dropIdle(s)

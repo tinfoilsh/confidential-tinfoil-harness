@@ -52,10 +52,10 @@ func (h *harness) thoughtSummaries(ctx context.Context, out *stream, assembler *
 }
 
 // follow reads a frame the run's reply was built from.
-func (s *thoughtSummaries) follow(e event) {
-	switch e.Type {
-	case "REASONING_MESSAGE_CHUNK":
-		message := strings.TrimSuffix(e.MessageID, "-reasoning")
+func (s *thoughtSummaries) follow(e runEvent) {
+	switch e := e.(type) {
+	case reasoningChunk:
+		message := strings.TrimSuffix(e.MessageID, reasoningSuffix)
 		// A late tail of reasoning the reply's text closed is not followed.
 		block := s.assembler.lastBlock(message)
 		if block == nil || block.Type != "thinking" {
@@ -67,7 +67,7 @@ func (s *thoughtSummaries) follow(e event) {
 		}
 		s.trace = block.Content
 		s.consider()
-	case "TEXT_MESSAGE_CHUNK", "TOOL_CALL_START":
+	case textChunk, toolCallStart:
 		s.close()
 	}
 }
@@ -121,7 +121,7 @@ func (s *thoughtSummaries) fire() {
 		}
 		s.inFlight = false
 		if summary = strings.TrimSpace(summary); err == nil && summary != "" {
-			s.out.frame(event{Type: "REASONING_SUMMARY", Timestamp: timestamp(), MessageID: message, BlockID: block, Content: raw(summary)})
+			s.out.frame(reasoningSummary{MessageID: message, BlockID: block, Content: summary}, timestamp())
 		}
 	}()
 }

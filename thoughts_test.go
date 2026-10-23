@@ -12,8 +12,8 @@ import (
 	"time"
 )
 
-// reasoningChunk is one streamed chunk of a reply's reasoning.
-func reasoningChunk(text string) string {
+// modelReasoning is one chunk of reasoning a model streams.
+func modelReasoning(text string) string {
 	return "data: " + string(raw(object{"choices": []object{{"delta": object{"reasoning_content": text}}}})) + "\n\n"
 }
 
@@ -25,7 +25,7 @@ func TestAThinkingReplysReasoningIsSummarized(t *testing.T) {
 		trace := strings.Repeat("considering the options carefully ", 7)
 		release := make(chan struct{})
 		h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
-			io.WriteString(w, reasoningChunk(trace))
+			io.WriteString(w, modelReasoning(trace))
 			w.(http.Flusher).Flush()
 			select {
 			case <-release:
@@ -33,7 +33,7 @@ func TestAThinkingReplysReasoningIsSummarized(t *testing.T) {
 				return
 			}
 			// Within the interval, so it asks for no second summary.
-			io.WriteString(w, reasoningChunk(" and some more thoughts"))
+			io.WriteString(w, modelReasoning(" and some more thoughts"))
 			io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\ndata: [DONE]\n\n")
 		})
 		var mu sync.Mutex

@@ -12,18 +12,21 @@ func TestAReplyRecordsWhenItsStepsRan(t *testing.T) {
 	at := func(offset string) string { return "2026-10-01T00:00:" + offset + "Z" }
 	const start = 1790812800000.0
 	assembler := newMessageAssembler()
-	for _, e := range []event{
-		{Type: "REASONING_MESSAGE_CHUNK", MessageID: "r-reasoning", Delta: "Plan", Timestamp: at("00")},
-		{Type: "REASONING_MESSAGE_CHUNK", MessageID: "r-reasoning", Delta: "ning", Timestamp: at("02.5")},
-		{Type: "TEXT_MESSAGE_CHUNK", MessageID: "r", Delta: "Answer", Timestamp: at("03")},
-		{Type: "REASONING_MESSAGE_CHUNK", MessageID: "r-reasoning", Delta: " late", Timestamp: at("03.2")},
-		{Type: "TEXT_MESSAGE_CHUNK", MessageID: "r", Delta: " done", Timestamp: at("03.4")},
-		{Type: "TOOL_CALL_START", ToolCallID: "s", ToolName: "web_search", ParentID: "r", Timestamp: at("04")},
-		{Type: "TOOL_CALL_RESULT", ToolCallID: "s", Content: raw(object{"results": []any{}}), Timestamp: at("06")},
-		{Type: "REASONING_MESSAGE_CHUNK", MessageID: "r-reasoning", Delta: "Next", Timestamp: at("07")},
-		{Type: "REASONING_MESSAGE_CHUNK", MessageID: "r-reasoning", Delta: " step", Timestamp: at("08.25")},
+	for _, e := range []struct {
+		event runEvent
+		at    string
+	}{
+		{reasoningChunk{MessageID: "r-reasoning", Delta: "Plan"}, at("00")},
+		{reasoningChunk{MessageID: "r-reasoning", Delta: "ning"}, at("02.5")},
+		{textChunk{MessageID: "r", Delta: "Answer"}, at("03")},
+		{reasoningChunk{MessageID: "r-reasoning", Delta: " late"}, at("03.2")},
+		{textChunk{MessageID: "r", Delta: " done"}, at("03.4")},
+		{toolCallStart{ToolCallID: "s", ToolCallName: "web_search", ParentMessageID: "r"}, at("04")},
+		{toolCallResult{ToolCallID: "s", Content: raw(object{"results": []any{}})}, at("06")},
+		{reasoningChunk{MessageID: "r-reasoning", Delta: "Next"}, at("07")},
+		{reasoningChunk{MessageID: "r-reasoning", Delta: " step"}, at("08.25")},
 	} {
-		assembler.apply(e)
+		assembler.apply(e.event, e.at)
 	}
 	want := []Block{
 		{ID: "r_thinking_0", Type: "thinking", Content: "Planning late", StartedAt: start, EndedAt: start + 2500, Duration: 2.5},
@@ -70,12 +73,12 @@ func TestOldRepliesKeepWhenTheirStepsRan(t *testing.T) {
 func TestALateReasoningTailIsNotSummarized(t *testing.T) {
 	assembler := newMessageAssembler()
 	summaries := &thoughtSummaries{out: &stream{}, assembler: assembler, summarize: func(ctx context.Context, _ string) (string, error) { return "", ctx.Err() }}
-	for _, e := range []event{
-		{Type: "REASONING_MESSAGE_CHUNK", MessageID: "r-reasoning", Delta: "plan"},
-		{Type: "TEXT_MESSAGE_CHUNK", MessageID: "r", Delta: strings.Repeat("answer ", minSummaryWords)},
-		{Type: "REASONING_MESSAGE_CHUNK", MessageID: "r-reasoning", Delta: " tail"},
+	for _, e := range []runEvent{
+		reasoningChunk{MessageID: "r-reasoning", Delta: "plan"},
+		textChunk{MessageID: "r", Delta: strings.Repeat("answer ", minSummaryWords)},
+		reasoningChunk{MessageID: "r-reasoning", Delta: " tail"},
 	} {
-		assembler.apply(e)
+		assembler.apply(e, "")
 		summaries.follow(e)
 	}
 	if summaries.block != "" || summaries.trace != "" || summaries.inFlight {

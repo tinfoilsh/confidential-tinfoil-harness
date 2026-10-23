@@ -185,7 +185,7 @@ func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) (mess
 		}
 		// The caller never reports back, so only the model can be told the widget was not drawn.
 		if failure := widgetFailure(w, call.args); failure != nil {
-			out.emit(event{Type: "TOOL_CALL_RESULT", MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: failure})
+			out.emit(toolCallResult{MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: failure})
 			if !set.retry(call.name) {
 				return answered(call.id, `{"status":"executed"}`)
 			}
@@ -195,7 +195,7 @@ func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) (mess
 		if err != nil {
 			content = object{"error": asAPIError(err).Message}
 		}
-		out.emit(event{Type: "TOOL_CALL_RESULT", MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: raw(content)})
+		out.emit(toolCallResult{MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: raw(content)})
 		return answered(call.id, "[rendered for the user]")
 	}
 	out.activity(call)
@@ -212,7 +212,7 @@ func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) (mess
 	} else {
 		shown = normalizeToolResult(call, content)
 	}
-	out.emit(event{Type: "TOOL_CALL_RESULT", MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: raw(shown), Metadata: meta, Display: searchDisplay(call.name, call.args, raw(shown))})
+	out.emit(toolCallResult{MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: raw(shown), Metadata: meta, Display: searchDisplay(call.name, call.args, raw(shown))})
 	return answered(call.id, clip(read, maxToolOutput))
 }
 

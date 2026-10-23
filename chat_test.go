@@ -398,6 +398,36 @@ func requestOf[T any](in object) *T {
 func sendInput(key contentKey) object {
 	return object{"key": key.base64(), "threadId": rowID(), "clientRequestId": uuid.NewString(), "content": "test message", "kind": "send", "options": object{"model": "kimi-k3", "webSearch": false}}
 }
+
+// event is a frame as a test reads it: the members of every event type in
+// one value.
+type event struct {
+	Type       string          `json:"type"`
+	Timestamp  string          `json:"timestamp,omitempty"`
+	ThreadID   string          `json:"threadId,omitempty"`
+	RunID      string          `json:"runId,omitempty"`
+	MessageID  string          `json:"messageId,omitempty"`
+	BlockID    string          `json:"blockId,omitempty"`
+	ParentID   string          `json:"parentMessageId,omitempty"`
+	ToolCallID string          `json:"toolCallId,omitempty"`
+	ToolName   string          `json:"toolCallName,omitempty"`
+	Role       string          `json:"role,omitempty"`
+	Delta      any             `json:"delta,omitempty"`
+	Snapshot   any             `json:"snapshot,omitempty"`
+	Messages   any             `json:"messages,omitempty"`
+	HasOlder   *bool           `json:"hasOlder,omitempty"`
+	Code       string          `json:"code,omitempty"`
+	Kind       string          `json:"kind,omitempty"`
+	ResetsAt   string          `json:"resetsAt,omitempty"`
+	RetryAfter int             `json:"retryAfter,omitempty"`
+	Content    json.RawMessage `json:"content,omitempty"`
+	Activity   string          `json:"activityType,omitempty"`
+	Patch      json.RawMessage `json:"patch,omitempty"`
+	Message    string          `json:"message,omitempty"`
+	Metadata   json.RawMessage `json:"metadata,omitempty"`
+	Display    *ToolDisplay    `json:"display,omitempty"`
+}
+
 func eventsIn(t *testing.T, w *httptest.ResponseRecorder) []event {
 	t.Helper()
 	if w.Code != 200 {
@@ -896,22 +926,22 @@ func TestAContinuationExtendsOnlyATrailingContentBlock(t *testing.T) {
 	thinking, content := object{"id": "t", "type": "thinking", "content": "plan"}, object{"id": "c", "type": "content", "content": "Partial"}
 	for name, tc := range map[string]struct {
 		reply object
-		event event
+		event runEvent
 		want  []any
 	}{
-		"trailing content": {object{"id": "r", "role": "assistant", "timeline": []any{thinking, content}}, event{Type: "TEXT_MESSAGE_CHUNK", MessageID: "r", Delta: " answer"},
+		"trailing content": {object{"id": "r", "role": "assistant", "timeline": []any{thinking, content}}, textChunk{MessageID: "r", Delta: " answer"},
 			[]any{thinking, object{"id": "c", "type": "content", "content": "Partial answer"}}},
-		"trailing thinking": {object{"id": "r", "role": "assistant", "timeline": []any{content, thinking}}, event{Type: "REASONING_MESSAGE_CHUNK", MessageID: "r-reasoning", Delta: "again"},
+		"trailing thinking": {object{"id": "r", "role": "assistant", "timeline": []any{content, thinking}}, reasoningChunk{MessageID: "r-reasoning", Delta: "again"},
 			[]any{content, thinking, object{"id": "r_thinking_2", "type": "thinking", "content": "again", "startedAt": 1790812800000, "endedAt": 1790812800000}}},
-		"empty": {object{"id": "r", "role": "assistant", "timeline": []any{}}, event{Type: "TEXT_MESSAGE_CHUNK", MessageID: "r", Delta: " answer"},
+		"empty": {object{"id": "r", "role": "assistant", "timeline": []any{}}, textChunk{MessageID: "r", Delta: " answer"},
 			[]any{object{"id": "r_content_0", "type": "content", "content": " answer"}}},
 	} {
-		tc.reply["createdAt"], tc.event.Timestamp = "2026-01-01T00:00:00Z", "2026-10-01T00:00:00Z"
+		tc.reply["createdAt"] = "2026-01-01T00:00:00Z"
 		var reply Message
 		json.Unmarshal(raw(tc.reply), &reply)
 		assembler := newMessageAssembler()
 		assembler.seed(reply)
-		assembler.apply(tc.event)
+		assembler.apply(tc.event, "2026-10-01T00:00:00Z")
 		if got := assembler.messages(); len(got) != 1 || !reflect.DeepEqual(decodeValue(raw(got[0].Timeline)), decodeValue(raw(tc.want))) || got[0].CreatedAt != "2026-01-01T00:00:00Z" {
 			t.Errorf("%s: continued into %+v", name, got)
 		}

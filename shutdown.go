@@ -10,14 +10,13 @@ func (h *harness) stopRuns() {
 	h.live.mu.Lock()
 	defer h.live.mu.Unlock()
 	h.live.closing = true
-	e := asAPIError(errShutdown)
 	for _, s := range h.live.threads {
 		if s.active != nil {
 			s.active.cancelled = true
 			s.active.log.stop()
 		}
 		for _, r := range s.queue {
-			h.endQueued(r, event{Type: "RUN_ERROR", Message: e.Message, Code: e.Code})
+			h.endQueued(r, errShutdown)
 		}
 		s.queue = nil
 	}
