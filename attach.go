@@ -647,7 +647,9 @@ func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 	var descriptor *Attachment
 	var data []byte
 	if public {
-		key, keyErr := decodeBase64Key([]byte(in.AttKey))
+		encodedKey := []byte(in.AttKey)
+		key, keyErr := decodeBase64Key(encodedKey)
+		clear(encodedKey)
 		clear(key[:])
 		if keyErr != nil {
 			respond(w, nil, keyErr)
