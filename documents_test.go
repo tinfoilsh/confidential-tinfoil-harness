@@ -348,8 +348,14 @@ func TestDocumentDownloadReturnsExtractedText(t *testing.T) {
 	id, blobKey := fake.seed("chat-1", []byte(`{"pages":[{"page":1,"text":"page one","image":"","is_scanned":false}]}`))
 	storedThread(rows, "alice", "chat-1", object{"id": id, "type": "document", "fileName": "scan.pdf", "encryptionKey": blobKey})
 	w := postRoute(h, "/v1/attachments/get", object{"key": key.base64(), "id": id, "threadId": "chat-1"}, "alice")
-	if w.Code != 200 || w.Body.String() != "page one" || !strings.HasPrefix(w.Header().Get("Content-Type"), "text/markdown") || !strings.Contains(w.Header().Get("Content-Disposition"), "scan.md") {
-		t.Fatalf("download was not the extracted text: %d %q %v", w.Code, w.Body.String(), w.Header())
+	if w.Code != 200 || w.Body.String() != "page one" {
+		t.Fatalf("download was not the extracted text: %d %q", w.Code, w.Body.String())
+	}
+	// Headers travel outside the sealed body.
+	for name, values := range w.Header() {
+		if joined := strings.Join(values, " "); strings.Contains(joined, "scan") || strings.Contains(joined, "markdown") || strings.Contains(joined, "pdf") {
+			t.Fatalf("header %s describes the file: %q", name, joined)
+		}
 	}
 }
 
