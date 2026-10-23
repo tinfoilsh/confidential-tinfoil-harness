@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -441,5 +442,60 @@ func TestAutoReadsImagesAndTextModelsReadTheirDescriptions(t *testing.T) {
 		if name == "auto" && (!read || len(requests) != 1) || name != "auto" && (read || !described || len(requests) != 2) {
 			t.Fatalf("%s: the model was asked %v after %d requests", name, question, len(requests))
 		}
+	}
+}
+
+// Signed-out visitors behind one address hold the same free key, so each of
+// their chats gets its own prompt cache, and a one-off request such as an
+// image description gets one of its own. An account's chats share one.
+func TestSignedOutChatsDoNotShareAPromptCache(t *testing.T) {
+	var source bytes.Buffer
+	png.Encode(&source, image.NewRGBA(image.Rect(0, 0, 8, 8)))
+	var mu sync.Mutex
+	var scopes []string
+	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		var body object
+		json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		scopes = append(scopes, str(body["user_cache_secret"]))
+		mu.Unlock()
+		if body["stream"] == false {
+			json.NewEncoder(w).Encode(object{"choices": []object{{"message": object{"content": "a small square"}}}})
+			return
+		}
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	h.offer.models = append(h.offer.models, &model{name: "gemma4-31b", vision: true, context: 8192, client: h.offer.models[0].client})
+	scopesOf := func(in object, user string) []string {
+		t.Helper()
+		mu.Lock()
+		scopes = nil
+		mu.Unlock()
+		if events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, user)); events[len(events)-1].Type != "RUN_FINISHED" {
+			t.Fatalf("the run ended with %+v", events[len(events)-1])
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		for _, scope := range scopes {
+			if scope == "" {
+				t.Fatalf("a model request named no cache scope: %q", scopes)
+			}
+		}
+		return slices.Clone(scopes)
+	}
+	chat := rowID()
+	first := scopesOf(localInput(chat, nil), "")
+	again := scopesOf(localInput(chat, priorThread()), "")
+	pictured := localInput("", nil)
+	pictured["attachments"] = []any{object{"id": "att_photo", "kind": "image", "fileName": "photo.png", "mimeType": "image/png", "base64": base64.StdEncoding.EncodeToString(source.Bytes())}}
+	other := scopesOf(pictured, "")
+	if len(first) != 1 || len(again) != 1 || len(other) != 2 {
+		t.Fatalf("model requests per turn: %d, %d, %d", len(first), len(again), len(other))
+	}
+	if first[0] != again[0] || slices.Contains(other, first[0]) || other[0] == other[1] {
+		t.Fatalf("signed-out cache scopes: %q, %q, %q", first, again, other)
+	}
+	if alice := append(scopesOf(sendInput(key), "alice"), scopesOf(sendInput(key), "alice")...); alice[0] != alice[1] {
+		t.Fatalf("an account's chats do not share a prompt cache: %q", alice)
 	}
 }

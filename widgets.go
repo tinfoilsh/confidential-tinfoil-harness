@@ -335,7 +335,7 @@ func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *
 		return err
 	}
 	conversation = append(conversation, raw(object{"role": "user", "content": "Regenerate the arguments for the " + declaration.Name + " widget. Preserve the user's intent and return only JSON matching its schema."}))
-	payload := object{"model": req.model, "messages": conversation, "response_format": object{"type": "json_schema", "json_schema": object{"name": "widget_arguments", "strict": true, "schema": declaration.Schema}}}
+	payload := object{"model": req.model, "messages": conversation, "user_cache_secret": req.cacheScope, "response_format": object{"type": "json_schema", "json_schema": object{"name": "widget_arguments", "strict": true, "schema": declaration.Schema}}}
 	for k, v := range req.params {
 		payload[k] = v
 	}

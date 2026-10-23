@@ -35,8 +35,16 @@ type request struct {
 	webSearch, piiCheck        bool
 }
 
-func cacheScope(apiKey string) string {
-	sum := sha256.Sum256([]byte("confidential-tinfoil-harness cache scope\x00" + apiKey))
+// cacheScope is the prompt cache a chat's turns share: its account's, or for
+// a signed-out caller its own. Signed-out callers behind one address hold the
+// same free key, so a namespace per key would let them time each other's
+// prompts.
+func cacheScope(p *principal, threadID string) string {
+	scope := p.scope()
+	if p.Anonymous {
+		scope += "\x00" + threadID
+	}
+	sum := sha256.Sum256([]byte("confidential-tinfoil-harness cache scope\x00" + scope))
 	return hex.EncodeToString(sum[:])
 }
 
