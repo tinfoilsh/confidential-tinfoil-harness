@@ -17,6 +17,8 @@ const maxQueuedTurns = 32
 var errQueueFull = apiErr(429, "QUEUE_FULL", "The turn queue is full")
 
 func (h *harness) acceptTurn(ctx context.Context, p *principal, credential inferenceCredential, key contentKey, in *turnRequest) (*chatRun, error) {
+	defer clear(key[:])
+	in.clearKey()
 	nonce, digest := in.ClientRequestID, in.digest()
 	var r *chatRun
 	for r == nil {
@@ -62,6 +64,7 @@ func (h *harness) acceptTurn(ctx context.Context, p *principal, credential infer
 		}
 	}
 	if err := h.admit(ctx, p, credential, key, in, r); err != nil {
+		clear(r.key[:])
 		h.live.mu.Lock()
 		if h.live.requests[liveKey(p, nonce)] == r {
 			delete(h.live.requests, liveKey(p, nonce))
@@ -121,6 +124,7 @@ func askThread(id string, source *Thread) *threadRow {
 // admit gives a turn its chat: it starts now if the chat has no running
 // reply, or waits in the chat's queue.
 func (h *harness) admit(ctx context.Context, p *principal, credential inferenceCredential, key contentKey, in *turnRequest, r *chatRun) error {
+	defer clear(key[:])
 	if credential.Limit.exhausted() {
 		return quotaExhausted(credential.Limit)
 	}
@@ -179,12 +183,15 @@ func (h *harness) admit(ctx context.Context, p *principal, credential inferenceC
 	clean := *in
 	// The transcript seeds the row; holding it again per run would double a
 	// local thread's memory while it waits in the queue.
-	clean.Key, clean.Thread, clean.Profile = "", nil, nil
+	clean.Key, clean.Thread, clean.Profile = nil, nil, nil
 	stopped, stop := context.WithCancel(context.Background())
 	r.log = newRun(token())
 	r.log.stop = stop
 	// The user message a turn adds is named by the client's request.
 	r.stopped, r.input, r.received, r.principal, r.key, r.messageID, r.credential, r.assembler = stopped, &clean, timestamp(), p, key, r.nonce, credential, newMessageAssembler()
+	if keyless {
+		clear(r.key[:])
+	}
 	r.out = &stream{run: r.log}
 
 	h.live.mu.Lock()

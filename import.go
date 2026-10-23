@@ -59,8 +59,8 @@ var importNamespace = uuid.NewSHA1(uuid.NameSpaceURL, []byte("https://chat.tinfo
 var sniffedImages = []string{"image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp"}
 
 type importOptions struct {
+	keyRequest
 	Target string `json:"target"`
-	Key    string `json:"key"`
 }
 
 func (h *harness) handleImport(w http.ResponseWriter, r *http.Request) {
@@ -86,11 +86,12 @@ func (h *harness) handleImport(w http.ResponseWriter, r *http.Request) {
 		if options.Target != "cloud" {
 			return nil
 		}
-		if options.Key == "" {
+		if len(options.Key) == 0 {
 			return apiErr(401, "KEY_REQUIRED", "A content key is required")
 		}
 		return h.authorizeArchive(r.Context(), p, options.Key, "import")
 	})
+	defer options.clearKey()
 	if err != nil {
 		respond(w, nil, err)
 		return
@@ -99,8 +100,10 @@ func (h *harness) handleImport(w http.ResponseWriter, r *http.Request) {
 	run := &importRun{h: h, p: p, lease: lease, out: &importStream{w: w}, seen: map[string]bool{}}
 	switch options.Target {
 	case "device":
+		options.clearKey()
 	case "cloud":
 		key, err := decodeContentKey(options.Key)
+		options.clearKey()
 		if err != nil {
 			respond(w, nil, err)
 			return
@@ -193,7 +196,8 @@ func formError(err error) error {
 }
 
 func decodeFormField(part *multipart.Part, v any) error {
-	b, err := io.ReadAll(io.LimitReader(part, maxFormField+1))
+	b, err := readWipeable(io.LimitReader(part, maxFormField+1))
+	defer clear(b)
 	if err != nil || len(b) > maxFormField {
 		return apiErr(400, "BAD_REQUEST", "Multipart field is too large")
 	}
@@ -845,12 +849,8 @@ type importChunkUpload struct {
 	Data        string `json:"data"`
 }
 
-type importStart struct {
-	JobID string `json:"job_id"`
-	Key   string `json:"key"`
-}
-
 func (h *harness) stageImport(ctx context.Context, p *principal, key contentKey, archive *scratchFile) (string, error) {
+	defer clear(key[:])
 	size := archive.Size()
 	if size > maxCloudImport {
 		return "", apiErr(413, "IMPORT_TOO_LARGE", "The chats for the cloud exceed what one import takes")
@@ -878,7 +878,7 @@ func (h *harness) stageImport(ctx context.Context, p *principal, key contentKey,
 			return "", err
 		}
 	}
-	return created.JobID, h.syncImport(ctx, p, "start", importStart{JobID: created.JobID, Key: key.base64()}, nil)
+	return created.JobID, h.syncAPI.callKey(ctx, p, "/v1/import/start", key, object{"job_id": created.JobID}, nil)
 }
 
 // importKindCounts is what sync's job did with one kind of item.

@@ -1,13 +1,13 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -138,8 +138,12 @@ type validated interface{ validate() error }
 // decoded is a route whose handler takes its request decoded and checked.
 func decoded[T any](handle func(context.Context, *principal, contentKey, *T) (any, error)) jsonEndpoint {
 	return func(ctx context.Context, p *principal, key contentKey, body json.RawMessage) (any, error) {
+		defer clear(key[:])
 		in := new(T)
-		if err := decodeRequest(body, in); err != nil {
+		if keyed, ok := any(in).(interface{ clearKey() }); ok {
+			defer keyed.clearKey()
+		}
+		if err := decodeBody(body, in); err != nil {
 			return nil, err
 		}
 		if check, ok := any(in).(validated); ok {
@@ -168,18 +172,21 @@ func (h *harness) routes() http.Handler {
 				return
 			}
 			body, err := readBody(w, r, maxRequestBody)
+			defer clear(body)
 			if err != nil {
 				respond(w, nil, err)
 				return
 			}
 			var key contentKey
 			if spec.key {
-				var keyed struct {
-					Key any `json:"key"`
+				var keyed keyRequest
+				defer keyed.clearKey()
+				if err := decodeRequest(body, &keyed); err != nil {
+					respond(w, nil, err)
+					return
 				}
-				json.Unmarshal(body, &keyed)
-				text, _ := keyed.Key.(string)
-				key, err = decodeContentKey(text)
+				key, err = decodeContentKey(keyed.Key)
+				keyed.clearKey()
 				if err != nil {
 					respond(w, nil, err)
 					return
@@ -229,15 +236,20 @@ func (h *harness) threadOperation(handler jsonEndpoint) http.HandlerFunc {
 			return
 		}
 		body, err := readBody(w, r, maxTurnBody)
+		defer clear(body)
 		if err != nil {
 			respond(w, nil, err)
 			return
 		}
 		var target struct {
-			Key   string `json:"key"`
-			Local bool   `json:"local"`
+			keyRequest
+			Local bool `json:"local"`
 		}
-		json.Unmarshal(body, &target)
+		defer target.clearKey()
+		if err := decodeRequest(body, &target); err != nil {
+			respond(w, nil, err)
+			return
+		}
 		var key contentKey
 		if !target.Local {
 			if p.Anonymous {
@@ -250,6 +262,7 @@ func (h *harness) threadOperation(handler jsonEndpoint) http.HandlerFunc {
 			}
 			defer clear(key[:])
 		}
+		target.clearKey()
 		result, err := handler(r.Context(), p, key, body)
 		respond(w, result, h.withQuota(p, rateLimit{}, err))
 	}
@@ -316,11 +329,55 @@ func postJSON(ctx context.Context, client *http.Client, url, auth string, in, ou
 	return postJSONWithHeaders(ctx, client, url, auth, nil, in, out)
 }
 
+// requestBuffer lets a transport finish reading or replaying a request while
+// cleanup erases its bytes. RoundTrip may return before its body reader stops.
+type requestBuffer struct {
+	mu   sync.Mutex
+	data []byte
+}
+
+func (b *requestBuffer) clear() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	clear(b.data)
+	b.data = nil
+}
+
+func (b *requestBuffer) open() (io.ReadCloser, error) {
+	return &requestReader{buffer: b}, nil
+}
+
+type requestReader struct {
+	buffer *requestBuffer
+	offset int
+}
+
+func (r *requestReader) Read(dst []byte) (int, error) {
+	r.buffer.mu.Lock()
+	defer r.buffer.mu.Unlock()
+	if r.offset >= len(r.buffer.data) {
+		return 0, io.EOF
+	}
+	n := copy(dst, r.buffer.data[r.offset:])
+	r.offset += n
+	return n, nil
+}
+
+func (r *requestReader) Close() error { return nil }
+
 func postJSONWithHeaders(ctx context.Context, client *http.Client, url, auth string, headers map[string]string, in, out any) error {
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(raw(in)))
+	body, encoded := in.(json.RawMessage)
+	if !encoded {
+		body = raw(in)
+	}
+	buffer := &requestBuffer{data: body}
+	defer buffer.clear()
+	reader, _ := buffer.open()
+	req, err := http.NewRequestWithContext(ctx, "POST", url, reader)
 	if err != nil {
 		return err
 	}
+	req.ContentLength, req.GetBody = int64(len(body)), buffer.open
 	req.Header.Set("Content-Type", "application/json")
 	for name, value := range headers {
 		req.Header.Set(name, value)

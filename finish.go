@@ -86,6 +86,7 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 			}
 		}
 	}
+	clear(r.key[:])
 	limit := held
 	if r.out.modelAccepted {
 		limit = held.debited(spend)

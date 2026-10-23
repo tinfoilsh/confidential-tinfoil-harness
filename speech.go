@@ -37,12 +37,14 @@ func (h *harness) handleSpeech(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body, err := readBody(w, r, maxTurnBody)
+	defer clear(body)
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
 	in := &speechRequest{}
-	if err := decodeRequest(body, in); err != nil {
+	defer in.clearKey()
+	if err := decodeBody(body, in); err != nil {
 		respond(w, nil, err)
 		return
 	}
@@ -51,6 +53,7 @@ func (h *harness) handleSpeech(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	text, err := h.speechText(r.Context(), p, in)
+	in.clearKey()
 	if err != nil {
 		respond(w, nil, err)
 		return
@@ -89,6 +92,7 @@ func (h *harness) speechText(ctx context.Context, p *principal, in *speechReques
 			}
 			defer clear(key[:])
 			row, err := h.loadThread(ctx, p, key, in.ThreadID)
+			clear(key[:])
 			if err != nil {
 				return "", err
 			}

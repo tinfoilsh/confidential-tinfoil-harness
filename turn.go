@@ -14,12 +14,14 @@ func (h *harness) handleTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body, err := readBody(w, r, maxTurnBody)
+	defer clear(body)
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
 	in := &turnRequest{}
-	if err := decodeRequest(body, in); err != nil {
+	defer in.clearKey()
+	if err := decodeBody(body, in); err != nil {
 		respond(w, nil, err)
 		return
 	}
@@ -35,7 +37,7 @@ func (h *harness) handleTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var key contentKey
-	if !p.Anonymous && !in.Local || in.Key != "" {
+	if !p.Anonymous && !in.Local || len(in.Key) != 0 {
 		key, err = decodeContentKey(in.Key)
 		if err != nil {
 			respond(w, nil, err)
@@ -43,11 +45,13 @@ func (h *harness) handleTurn(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	defer clear(key[:])
+	in.clearKey()
 	if err := in.validateContent(); err != nil {
 		respond(w, nil, err)
 		return
 	}
 	accepted, err := h.acceptTurn(r.Context(), p, credential, key, in)
+	clear(key[:])
 	if err != nil {
 		respond(w, nil, h.withQuota(p, rateLimit{}, err))
 		return

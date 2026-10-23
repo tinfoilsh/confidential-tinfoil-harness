@@ -50,6 +50,8 @@ func (s *memoryRows) authorizeStorage(_ context.Context, p *principal, _ content
 
 func randomKey() contentKey { var k contentKey; rand.Read(k[:]); return k }
 
+func (k contentKey) base64() string { return base64.StdEncoding.EncodeToString(k[:]) }
+
 func rowMapKey(p *principal, scope, id string) string { return p.scope() + "/" + scope + "/" + id }
 func (s *memoryRows) opens(name string, key contentKey) bool {
 	sealed, ok := s.sealed[name]

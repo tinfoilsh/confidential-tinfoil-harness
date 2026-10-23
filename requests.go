@@ -24,18 +24,41 @@ import (
 // object.
 func readBody(w http.ResponseWriter, r *http.Request, limit int64) (json.RawMessage, error) {
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
-	decoder := json.NewDecoder(r.Body)
-	var body json.RawMessage
-	if err := decoder.Decode(&body); err != nil {
+	body, err := readWipeable(r.Body)
+	if err != nil {
+		clear(body)
 		return nil, bodyError(err, "Expected a JSON object")
 	}
-	if !isObject(body) {
+	if !isObject(body) || !json.Valid(body) {
+		clear(body)
 		return nil, apiErr(400, "BAD_REQUEST", "Expected a JSON object")
 	}
-	if err := decoder.Decode(new(json.RawMessage)); err != io.EOF {
-		return nil, bodyError(err, "Expected one JSON object")
-	}
 	return body, nil
+}
+
+const bodyReadChunk = 4 << 10
+
+// readWipeable clears both the read scratch space and replaced growth buffers.
+// The caller owns and clears the returned bytes.
+func readWipeable(r io.Reader) ([]byte, error) {
+	chunk := make([]byte, bodyReadChunk)
+	defer clear(chunk)
+	var buffer wipingBuffer
+	_, err := io.CopyBuffer(&buffer, r, chunk)
+	return buffer.data, err
+}
+
+type wipingBuffer struct{ data []byte }
+
+func (b *wipingBuffer) Write(p []byte) (int, error) {
+	if size := len(b.data) + len(p); size > cap(b.data) {
+		next := make([]byte, len(b.data), max(size, 2*cap(b.data)))
+		copy(next, b.data)
+		clear(b.data)
+		b.data = next
+	}
+	b.data = append(b.data, p...)
+	return len(p), nil
 }
 
 // bodyError tells a body over the size limit, or one that stopped
@@ -62,7 +85,43 @@ func decodeRequest(body []byte, in any) error {
 	return requestError(json.Unmarshal(body, in))
 }
 
+// decodeBody consumes the owned HTTP buffer after copying its fields.
+func decodeBody(body []byte, in any) error {
+	defer clear(body)
+	return decodeRequest(body, in)
+}
+
+type keyRequest struct {
+	Key keyBytes `json:"key,omitempty"`
+}
+
+type keyBytes []byte
+
+func (key *keyBytes) UnmarshalJSON(data []byte) error {
+	clear(*key)
+	*key = nil
+	if bytes.Equal(data, []byte("null")) {
+		return nil
+	}
+	if len(data) == 0 || data[0] != '"' {
+		return apiErr(400, "BAD_REQUEST", "key must be a base64 string")
+	}
+	if err := json.Unmarshal(data, (*[]byte)(key)); err != nil {
+		return apiErr(400, "BAD_REQUEST", "key must be a base64 string")
+	}
+	return nil
+}
+
+func (in *keyRequest) clearKey() {
+	clear(in.Key)
+	in.Key = nil
+}
+
 func requestError(err error) error {
+	var refused *apiError
+	if errors.As(err, &refused) {
+		return refused
+	}
 	var mistyped *json.UnmarshalTypeError
 	if err == nil || !errors.As(err, &mistyped) || mistyped.Field == "" {
 		if err != nil {
@@ -158,8 +217,8 @@ func requireID(field, id string) error {
 
 // A missing key is checked against the run: keyless threads accept it, and
 // every other thread compares the key's fingerprint.
-func requestKey(key string) (contentKey, error) {
-	if key == "" {
+func requestKey(key []byte) (contentKey, error) {
+	if len(key) == 0 {
 		return contentKey{}, nil
 	}
 	return decodeContentKey(key)
@@ -281,7 +340,7 @@ type deleteAllRequest struct {
 
 // runRequest names a run, or a turn queued behind one, of a chat.
 type runRequest struct {
-	Key      string `json:"key"`
+	keyRequest
 	ThreadID string `json:"threadId"`
 	RunID    string `json:"runId"`
 	QueueID  string `json:"queueId"`
@@ -358,7 +417,7 @@ func (in *projectDocumentRequest) validate() error {
 // shareRequest shares a stored chat by its key, or a device chat by the
 // thread its client sends.
 type shareRequest struct {
-	Key      string          `json:"key"`
+	keyRequest
 	ThreadID string          `json:"threadId"`
 	Local    bool            `json:"local"`
 	Thread   json.RawMessage `json:"thread"`
@@ -399,7 +458,7 @@ type faviconRequest struct {
 // selected, or a shared chat's message, is sent as it is.
 type speechRequest struct {
 	threadSource
-	Key       string  `json:"key"`
+	keyRequest
 	ThreadID  string  `json:"threadId"`
 	MessageID string  `json:"messageId"`
 	Text      *string `json:"text"`
@@ -423,7 +482,7 @@ func (in *speechRequest) validate() error {
 
 // threadImportRequest stores a device chat in the cloud under its id.
 type threadImportRequest struct {
-	Key      string          `json:"key"`
+	keyRequest
 	ThreadID string          `json:"threadId"`
 	Thread   json.RawMessage `json:"thread"`
 }
@@ -445,7 +504,7 @@ type upgradeRequest struct {
 // attachmentRequest downloads an attachment of a stored chat, or one a share
 // names by the key its link carries.
 type attachmentRequest struct {
-	Key         string         `json:"key"`
+	keyRequest
 	ID          string         `json:"id"`
 	ThreadID    string         `json:"threadId"`
 	AttKey      string         `json:"attKey"`
@@ -469,7 +528,7 @@ func (in *attachmentRequest) validate() error {
 
 // turnRequest is one user action on a chat, which its run carries out.
 type turnRequest struct {
-	Key             string           `json:"key,omitempty"`
+	keyRequest
 	ClientRequestID string           `json:"clientRequestId"`
 	ThreadID        string           `json:"threadId"`
 	Kind            string           `json:"kind"`
@@ -604,7 +663,7 @@ func (a *sentAttachment) whole() bool { return a.Kind != "" }
 // another request under the same id.
 func (in *turnRequest) digest() string {
 	copy := *in
-	copy.Key = ""
+	copy.Key = nil
 	return hashHex(raw(copy))
 }
 

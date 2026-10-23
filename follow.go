@@ -10,22 +10,26 @@ func (h *harness) handleFollow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body, err := readBody(w, r, maxRequestBody)
+	defer clear(body)
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
 	var in runRequest
-	if err := decodeRequest(body, &in); err != nil {
+	defer in.clearKey()
+	if err := decodeBody(body, &in); err != nil {
 		respond(w, nil, err)
 		return
 	}
 	key, err := requestKey(in.Key)
+	in.clearKey()
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
 	defer clear(key[:])
 	live, err := h.authorizedRun(p, key, in.ThreadID, in.RunID)
+	clear(key[:])
 	if err != nil {
 		respond(w, nil, err)
 		return
