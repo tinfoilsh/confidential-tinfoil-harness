@@ -195,7 +195,7 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		} else {
-			value, err := io.ReadAll(io.LimitReader(part, maxFormField+1))
+			value, err := readWipeable(io.LimitReader(part, maxFormField+1))
 			if err != nil || len(value) > maxFormField {
 				clear(value)
 				respond(w, nil, apiErr(400, "BAD_REQUEST", "Multipart field is too large"))
@@ -647,10 +647,10 @@ func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 	var descriptor *Attachment
 	var data []byte
 	if public {
-		key, err := decodeBase64Key([]byte(in.AttKey))
+		key, keyErr := decodeBase64Key([]byte(in.AttKey))
 		clear(key[:])
-		if err != nil {
-			respond(w, nil, err)
+		if keyErr != nil {
+			respond(w, nil, keyErr)
 			return
 		}
 		// A share's client names the attachment and the key its link carries.

@@ -24,7 +24,7 @@ import (
 // object.
 func readBody(w http.ResponseWriter, r *http.Request, limit int64) (json.RawMessage, error) {
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
-	body, err := io.ReadAll(r.Body)
+	body, err := readWipeable(r.Body)
 	if err != nil {
 		clear(body)
 		return nil, bodyError(err, "Expected a JSON object")
@@ -34,6 +34,31 @@ func readBody(w http.ResponseWriter, r *http.Request, limit int64) (json.RawMess
 		return nil, apiErr(400, "BAD_REQUEST", "Expected a JSON object")
 	}
 	return body, nil
+}
+
+const bodyReadChunk = 4 << 10
+
+// readWipeable clears both the read scratch space and replaced growth buffers.
+// The caller owns and clears the returned bytes.
+func readWipeable(r io.Reader) ([]byte, error) {
+	chunk := make([]byte, bodyReadChunk)
+	defer clear(chunk)
+	var buffer wipingBuffer
+	_, err := io.CopyBuffer(&buffer, r, chunk)
+	return buffer.data, err
+}
+
+type wipingBuffer struct{ data []byte }
+
+func (b *wipingBuffer) Write(p []byte) (int, error) {
+	if size := len(b.data) + len(p); size > cap(b.data) {
+		next := make([]byte, len(b.data), max(size, 2*cap(b.data)))
+		copy(next, b.data)
+		clear(b.data)
+		b.data = next
+	}
+	b.data = append(b.data, p...)
+	return len(p), nil
 }
 
 // bodyError tells a body over the size limit, or one that stopped
@@ -81,7 +106,10 @@ func (key *keyBytes) UnmarshalJSON(data []byte) error {
 	if len(data) == 0 || data[0] != '"' {
 		return apiErr(400, "BAD_REQUEST", "key must be a base64 string")
 	}
-	return json.Unmarshal(data, (*[]byte)(key))
+	if err := json.Unmarshal(data, (*[]byte)(key)); err != nil {
+		return apiErr(400, "BAD_REQUEST", "key must be a base64 string")
+	}
+	return nil
 }
 
 func (in *keyRequest) clearKey() {
@@ -90,6 +118,10 @@ func (in *keyRequest) clearKey() {
 }
 
 func requestError(err error) error {
+	var refused *apiError
+	if errors.As(err, &refused) {
+		return refused
+	}
 	var mistyped *json.UnmarshalTypeError
 	if err == nil || !errors.As(err, &mistyped) || mistyped.Field == "" {
 		if err != nil {

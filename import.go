@@ -103,6 +103,7 @@ func (h *harness) handleImport(w http.ResponseWriter, r *http.Request) {
 	run := &importRun{h: h, p: p, lease: lease, out: &importStream{w: w}, seen: map[string]bool{}}
 	switch options.Target {
 	case "device":
+		options.clearKey()
 	case "cloud":
 		if p.Anonymous {
 			respond(w, nil, errAnonymousCloud)
@@ -202,7 +203,7 @@ func formError(err error) error {
 }
 
 func decodeFormField(part *multipart.Part, v any) error {
-	b, err := io.ReadAll(io.LimitReader(part, maxFormField+1))
+	b, err := readWipeable(io.LimitReader(part, maxFormField+1))
 	defer clear(b)
 	if err != nil || len(b) > maxFormField {
 		return apiErr(400, "BAD_REQUEST", "Multipart field is too large")
@@ -856,6 +857,7 @@ type importChunkUpload struct {
 }
 
 func (h *harness) stageImport(ctx context.Context, p *principal, key contentKey, archive *scratchFile) (string, error) {
+	defer clear(key[:])
 	size := archive.Size()
 	if size > maxCloudImport {
 		return "", apiErr(413, "IMPORT_TOO_LARGE", "The chats for the cloud exceed what one import takes")

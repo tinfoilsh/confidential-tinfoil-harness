@@ -109,6 +109,19 @@ func newFakeSync(t *testing.T, h *harness) *fakeSync {
 	return f
 }
 
+func TestPublicAttachmentPropagatesMissingBlob(t *testing.T) {
+	h, _, key := testChatHarness(t, nil)
+	fake := newFakeSync(t, h)
+	w := postRoute(h, "/v1/attachments/get-public", object{"id": "missing", "attKey": key.base64()}, "")
+	var response struct {
+		Error apiError `json:"error"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &response)
+	if w.Code != http.StatusNotFound || response.Error.Code != "THREAD_NOT_FOUND" || len(fake.requests("/v1/attachment/get-public")) != 1 {
+		t.Fatalf("missing public blob: HTTP %d %s", w.Code, w.Body.String())
+	}
+}
+
 func (f *fakeSync) seed(chat string, data []byte) (string, string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

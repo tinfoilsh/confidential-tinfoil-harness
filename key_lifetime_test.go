@@ -6,8 +6,34 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 )
+
+func TestInvalidKeyEncodingNamesTheKey(t *testing.T) {
+	h, _, _ := testChatHarness(t, nil)
+	for _, key := range []any{true, "not-base64"} {
+		w := postRoute(h, "/v1/threads/get", object{"key": key, "id": "chat-1"}, "alice")
+		var response struct {
+			Error apiError `json:"error"`
+		}
+		json.Unmarshal(w.Body.Bytes(), &response)
+		if w.Code != http.StatusBadRequest || response.Error.Code != "BAD_REQUEST" || !strings.Contains(response.Error.Message, "key") {
+			t.Fatalf("invalid key: HTTP %d %s", w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestKeyBufferGrowthErasesPreviousAllocation(t *testing.T) {
+	key := randomKey()
+	var buffer wipingBuffer
+	buffer.Write(key[:])
+	previous := buffer.data
+	buffer.Write(bytes.Repeat([]byte("x"), cap(previous)+1))
+	if !bytes.Equal(previous, make([]byte, len(previous))) || !bytes.Equal(buffer.data[:len(key)], key[:]) {
+		t.Fatal("growing the key buffer retained the old allocation or lost the key")
+	}
+}
 
 // The streaming handler must not retain the encoded key after decoding it.
 func TestRequestKeysAreClearedAfterDecoding(t *testing.T) {
