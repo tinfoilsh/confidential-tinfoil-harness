@@ -488,6 +488,11 @@ func (h *harness) searchThreads(ctx context.Context, p *principal, key contentKe
 		if indexing, err = h.reindexChats(ctx, p, key); err != nil {
 			return nil, err
 		}
+		if !indexing {
+			if ids, indexing, err = h.searchChats(ctx, p, key, in.Query, in.Limit); err != nil {
+				return nil, err
+			}
+		}
 	}
 	flags := h.auth.flaggedChats(ctx, p)
 	results := []threadSummary{}
