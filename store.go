@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"time"
 
 	"github.com/google/uuid"
@@ -211,13 +212,29 @@ func (h *harness) searchChats(ctx context.Context, p *principal, key contentKey,
 	return ids, found.NeedsReindex, nil
 }
 
-// reindexChats has sync index a user's chats, reporting whether it is still running.
+const (
+	reindexRunning   = "running"
+	reindexCompleted = "completed"
+)
+
+// reindexChats has sync index a user's chats, reporting whether more indexing is needed.
 func (h *harness) reindexChats(ctx context.Context, p *principal, key contentKey) (bool, error) {
 	var job struct {
-		Status string `json:"status"`
+		Status  string `json:"status"`
+		Partial bool   `json:"partial"`
 	}
-	err := h.syncAPI.call(ctx, p, "/v1/search/reindex", object{"keys": []object{{"key": key.base64()}}}, &job)
-	return job.Status == "running", err
+	if err := h.syncAPI.call(ctx, p, "/v1/search/reindex", object{"keys": []object{{"key": key.base64()}}}, &job); err != nil {
+		return false, err
+	}
+	switch job.Status {
+	case reindexRunning:
+		return true, nil
+	case reindexCompleted:
+		// A clean partial checkpoint resumes on the next request.
+		return job.Partial, nil
+	default:
+		return false, apiErr(http.StatusBadGateway, "UPSTREAM_REFUSED", "The search index could not be rebuilt")
+	}
 }
 
 // Profile
