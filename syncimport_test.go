@@ -48,7 +48,7 @@ func (f *fakeSync) importStep(t *testing.T, h *harness, r *http.Request, in obje
 		return 200, object{"ok": true}
 	case "/v1/import/start":
 		job := f.imports[str(in["job_id"])]
-		key, err := decodeContentKey(str(in["key"]))
+		key, err := decodeBase64Key([]byte(str(in["key"])))
 		if job == nil || err != nil {
 			return 400, object{"code": "BAD_REQUEST"}
 		}

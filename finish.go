@@ -86,6 +86,7 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 			}
 		}
 	}
+	clear(r.key[:])
 	limit := h.auth.currentLimit(p, held)
 	if r.out.modelAccepted {
 		limit = h.auth.debit(p, held, spend)

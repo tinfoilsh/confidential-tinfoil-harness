@@ -154,6 +154,10 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fields := map[string]string{}
+	var key contentKey
+	defer clear(key[:])
+	var keyField []byte
+	defer func() { clear(keyField) }()
 	var file []byte
 	filename := ""
 	for count := 0; ; count++ {
@@ -171,13 +175,14 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if r.URL.Path == "/v1/projects/documents/upload" {
-				key, err := decodeContentKey(fields["key"])
+				key, err = decodeBase64Key(keyField)
+				clear(keyField)
+				keyField = nil
 				if err != nil {
 					respond(w, nil, err)
 					return
 				}
 				p.SyncToken, err = h.storeRows.authorizeStorage(r.Context(), p, key, "project-upload", fields["projectId"])
-				clear(key[:])
 				if err != nil {
 					respond(w, nil, err)
 					return
@@ -192,14 +197,22 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 		} else {
 			value, err := io.ReadAll(io.LimitReader(part, maxFormField+1))
 			if err != nil || len(value) > maxFormField {
+				clear(value)
 				respond(w, nil, apiErr(400, "BAD_REQUEST", "Multipart field is too large"))
 				return
 			}
 			if _, exists := fields[part.FormName()]; exists {
+				clear(value)
 				respond(w, nil, apiErr(400, "BAD_REQUEST", "Duplicate multipart field"))
 				return
 			}
-			fields[part.FormName()] = string(value)
+			if part.FormName() == "key" {
+				keyField = value
+				fields["key"] = ""
+			} else {
+				fields[part.FormName()] = string(value)
+				clear(value)
+			}
 		}
 		part.Close()
 	}
@@ -228,12 +241,6 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 		}{descriptor}, nil)
 		return
 	}
-	key, err := decodeContentKey(fields["key"])
-	if err != nil {
-		respond(w, nil, err)
-		return
-	}
-	defer clear(key[:])
 	if r.URL.Path == "/v1/projects/documents/upload" {
 		projectID := fields["projectId"]
 		if err := requireID("projectId", projectID); err != nil {
@@ -616,6 +623,7 @@ func (h *harness) legacyAttachmentBytes(ctx context.Context, id, encodedKey stri
 
 func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 	body, err := readBody(w, r, maxRequestBody)
+	defer clear(body)
 	if err != nil {
 		respond(w, nil, err)
 		return
@@ -627,7 +635,8 @@ func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in attachmentRequest
-	if err := decodeRequest(body, &in); err != nil {
+	defer in.clearKey()
+	if err := decodeBody(body, &in); err != nil {
 		respond(w, nil, err)
 		return
 	}
@@ -638,7 +647,9 @@ func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 	var descriptor *Attachment
 	var data []byte
 	if public {
-		if _, err := decodeContentKey(in.AttKey); err != nil {
+		key, err := decodeBase64Key([]byte(in.AttKey))
+		clear(key[:])
+		if err != nil {
 			respond(w, nil, err)
 			return
 		}
@@ -647,12 +658,14 @@ func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 		data, err = h.attachmentBytes(r.Context(), &principal{Anonymous: true}, descriptor, true)
 	} else {
 		key, keyErr := requestKey(in.Key)
+		in.clearKey()
 		if keyErr != nil {
 			respond(w, nil, keyErr)
 			return
 		}
 		defer clear(key[:])
 		descriptor, data, err = h.attachment(r.Context(), p, key, in.ID, in.ThreadID)
+		clear(key[:])
 	}
 	if err != nil {
 		respond(w, nil, err)

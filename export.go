@@ -33,17 +33,20 @@ const chatURL = "https://chat.tinfoil.sh"
 // image thumbnails and document text, so the transcript may omit image bytes.
 // No attachment is uploaded for it: sync holds no chat to keep one under.
 func (h *harness) shareThread(ctx context.Context, p *principal, _ contentKey, in *shareRequest) (any, error) {
+	defer in.clearKey()
 	id := in.ThreadID
 	var t Thread
 	if in.Local {
 		t = readDeviceThread(id, in.Thread)
 	} else {
 		key, err := decodeContentKey(in.Key)
+		in.clearKey()
 		if err != nil {
 			return nil, err
 		}
 		defer clear(key[:])
 		row, err := h.loadThread(ctx, p, key, id)
+		clear(key[:])
 		if err != nil {
 			return nil, err
 		}
@@ -187,8 +190,8 @@ const (
 )
 
 type exportOptions struct {
+	keyRequest
 	Format string `json:"format"`
-	Key    string `json:"key"`
 }
 
 // exportForm is an export request: its options, and its device chats and
@@ -228,14 +231,16 @@ func (h *harness) handleExport(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, err)
 		return
 	}
+	defer form.options.clearKey()
 	lift()
 	var key *contentKey
-	if form.options.Key != "" {
+	if len(form.options.Key) != 0 {
 		if p.Anonymous {
 			respond(w, nil, errAnonymousCloud)
 			return
 		}
 		decoded, err := decodeContentKey(form.options.Key)
+		form.options.clearKey()
 		if err != nil {
 			respond(w, nil, err)
 			return
@@ -264,7 +269,7 @@ func (h *harness) handleExport(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func readExportForm(r *http.Request, lease *scratchLease, authorize func(exportOptions) error) (*exportForm, error) {
+func readExportForm(r *http.Request, lease *scratchLease, authorize func(exportOptions) error) (_ *exportForm, err error) {
 	reader, err := r.MultipartReader()
 	if err != nil {
 		return nil, apiErr(400, "BAD_REQUEST", "Expected multipart form data")
@@ -274,6 +279,11 @@ func readExportForm(r *http.Request, lease *scratchLease, authorize func(exportO
 		return nil, err
 	}
 	form := &exportForm{spool: spool, originals: map[string]spooledPart{}}
+	defer func() {
+		if err != nil {
+			form.options.clearKey()
+		}
+	}()
 	hasOptions, ids := false, map[string]bool{}
 	for count := 0; ; count++ {
 		part, err := reader.NextPart()

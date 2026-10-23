@@ -456,12 +456,13 @@ func (h *harness) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body, err := readBody(w, r, maxTurnBody)
+	defer clear(body)
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
 	var in upgradeRequest
-	if err := decodeRequest(body, &in); err != nil || in.Threads == nil {
+	if err := decodeBody(body, &in); err != nil || in.Threads == nil {
 		respond(w, nil, apiErr(400, "BAD_REQUEST", "threads must be an array"))
 		return
 	}

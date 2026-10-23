@@ -68,6 +68,9 @@ const (
 )
 
 func (s *syncClient) call(ctx context.Context, p *principal, path string, in, out any) error {
+	if body, ok := in.(json.RawMessage); ok {
+		defer clear(body)
+	}
 	if s == nil || s.Client == nil {
 		return apiErr(503, "UPSTREAM_REFUSED", "The sync enclave is unavailable")
 	}
@@ -78,20 +81,47 @@ func (s *syncClient) call(ctx context.Context, p *principal, path string, in, ou
 	return postJSONWithHeaders(ctx, s.Client, s.URL+path, string(cmp.Or(p.SyncToken, p.JWT)), map[string]string{"X-Sync-Protocol": syncProtocol}, in, out)
 }
 
+// keyedBody appends the key directly to an owned buffer, keeping its base64
+// form out of strings and encoding/json's pooled encoder buffers.
+func keyedBody(key contentKey, in object, multiple bool) json.RawMessage {
+	defer clear(key[:])
+	body := raw(in)
+	defer clear(body)
+	prefix, suffix := `"key":"`, `"}`
+	if multiple {
+		prefix, suffix = `"keys":[{"key":"`, `"}]}`
+	}
+	if len(in) != 0 {
+		prefix = "," + prefix
+	}
+	out := make([]byte, 0, len(body)-1+len(prefix)+base64.StdEncoding.EncodedLen(len(key))+len(suffix))
+	out = append(out, body[:len(body)-1]...)
+	out = append(out, prefix...)
+	out = base64.StdEncoding.AppendEncode(out, key[:])
+	return append(out, suffix...)
+}
+
+func (s *syncClient) callKey(ctx context.Context, p *principal, path string, key contentKey, in object, out any) error {
+	defer clear(key[:])
+	return s.call(ctx, p, path, keyedBody(key, in, false), out)
+}
+
 func (s *syncClient) authorizeRun(ctx context.Context, p *principal, key contentKey, threadID string, projectID *string) (storageGrant, error) {
-	return s.storageCredential(ctx, p, "/v1/runs/authorize", struct {
-		ThreadID  string  `json:"thread_id"`
-		ProjectID *string `json:"project_id,omitempty"`
-		Key       string  `json:"key"`
-	}{threadID, projectID, key.base64()})
+	defer clear(key[:])
+	in := object{"thread_id": threadID}
+	if projectID != nil {
+		in["project_id"] = projectID
+	}
+	return s.storageCredential(ctx, p, "/v1/runs/authorize", key, in)
 }
 
 func (s *syncClient) authorizeStorage(ctx context.Context, p *principal, key contentKey, operation, projectID string) (secret, error) {
-	grant, err := s.storageCredential(ctx, p, "/v1/operations/authorize", struct {
-		Operation string `json:"operation"`
-		Key       string `json:"key"`
-		ProjectID string `json:"project_id,omitempty"`
-	}{operation, key.base64(), projectID})
+	defer clear(key[:])
+	in := object{"operation": operation}
+	if projectID != "" {
+		in["project_id"] = projectID
+	}
+	grant, err := s.storageCredential(ctx, p, "/v1/operations/authorize", key, in)
 	return grant.Token, err
 }
 
@@ -100,9 +130,10 @@ type storageGrant struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
-func (s *syncClient) storageCredential(ctx context.Context, p *principal, path string, input any) (storageGrant, error) {
+func (s *syncClient) storageCredential(ctx context.Context, p *principal, path string, key contentKey, input object) (storageGrant, error) {
+	defer clear(key[:])
 	var out storageGrant
-	err := s.call(ctx, p, path, input, &out)
+	err := s.callKey(ctx, p, path, key, input, &out)
 	if err != nil {
 		return storageGrant{}, err
 	}
@@ -138,7 +169,7 @@ func (s *syncClient) pullBatch(ctx context.Context, p *principal, key contentKey
 	var result struct {
 		Items []pullItem `json:"items"`
 	}
-	err := s.call(ctx, p, "/v1/sync/pull", object{"scope": scope, "ids": ids, "keys": []object{{"key": key.base64()}}}, &result)
+	err := s.call(ctx, p, "/v1/sync/pull", keyedBody(key, object{"scope": scope, "ids": ids}, true), &result)
 	if err != nil {
 		return err
 	}
@@ -269,16 +300,16 @@ func (s *syncClient) push(ctx context.Context, p *principal, key contentKey, sco
 	var result struct {
 		ETag string `json:"etag"`
 	}
-	err := s.call(ctx, p, "/v1/sync/push", object{"scope": scope, "id": row.ID, "key": key.base64(), "plaintext": base64.StdEncoding.EncodeToString(row.Data), "if_match": match, "idempotency_key": nonce, "metadata": metadata}, &result)
+	err := s.callKey(ctx, p, "/v1/sync/push", key, object{"scope": scope, "id": row.ID, "plaintext": base64.StdEncoding.EncodeToString(row.Data), "if_match": match, "idempotency_key": nonce, "metadata": metadata}, &result)
 	return result.ETag, err
 }
 
 // An empty if_match has sync read the row's revision, delete at it, retry a
 // race, and treat a missing row as deleted.
 func (s *syncClient) remove(ctx context.Context, p *principal, key contentKey, scope, id string) error {
-	return s.call(ctx, p, "/v1/sync/delete", object{"scope": scope, "id": id, "key": key.base64(), "if_match": "", "idempotency_key": uuid.NewString()}, nil)
+	return s.callKey(ctx, p, "/v1/sync/delete", key, object{"scope": scope, "id": id, "if_match": "", "idempotency_key": uuid.NewString()}, nil)
 }
 
 func (s *syncClient) removeRevision(ctx context.Context, p *principal, key contentKey, id, revision string) error {
-	return s.call(ctx, p, "/v1/sync/delete", object{"scope": "chat", "id": id, "key": key.base64(), "if_match": revision, "idempotency_key": uuid.NewString()}, nil)
+	return s.callKey(ctx, p, "/v1/sync/delete", key, object{"scope": "chat", "id": id, "if_match": revision, "idempotency_key": uuid.NewString()}, nil)
 }

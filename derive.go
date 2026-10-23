@@ -16,21 +16,28 @@ type contentKey [32]byte
 
 func (contentKey) LogValue() slog.Value { return slog.StringValue("REDACTED") }
 
-func decodeContentKey(value string) (contentKey, error) {
+func decodeContentKey(value []byte) (contentKey, error) {
 	var key contentKey
-	if value == "" {
+	if len(value) == 0 {
 		return key, apiErr(401, "KEY_REQUIRED", "A content key is required")
 	}
-	b, err := base64.StdEncoding.Strict().DecodeString(value)
-	if err != nil || len(b) != len(key) {
+	if len(value) != len(key) {
 		return key, apiErr(400, "BAD_REQUEST", "key must be base64 encoding of 32 bytes")
 	}
-	copy(key[:], b)
-	clear(b)
+	copy(key[:], value)
 	return key, nil
 }
 
-func (k contentKey) base64() string      { return base64.StdEncoding.EncodeToString(k[:]) }
+func decodeBase64Key(value []byte) (contentKey, error) {
+	b := make([]byte, base64.StdEncoding.DecodedLen(len(value)))
+	defer clear(b)
+	n, err := base64.StdEncoding.Strict().Decode(b, value)
+	if err != nil {
+		return contentKey{}, apiErr(400, "BAD_REQUEST", "key must be base64 encoding of 32 bytes")
+	}
+	return decodeContentKey(b[:n])
+}
+
 func (k contentKey) fingerprint() string { b := sha256.Sum256(k[:]); return hex.EncodeToString(b[:]) }
 
 // maxReverseMillis is the instant a reverse-time chat id counts down from.

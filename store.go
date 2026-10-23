@@ -190,7 +190,7 @@ func (h *harness) chatIDs(ctx context.Context, p *principal, project string) ([]
 // forkStored has sync copy a chat's first count messages, with their
 // attachments, into a new chat.
 func (h *harness) forkStored(ctx context.Context, p *principal, key contentKey, source, target, title string, count int) error {
-	return h.syncAPI.call(ctx, p, "/v1/sync/fork", object{"source_id": source, "target_id": target, "key": key.base64(), "message_count": count, "title": title, "created_at": timestamp(), "idempotency_key": uuid.NewString()}, nil)
+	return h.syncAPI.callKey(ctx, p, "/v1/sync/fork", key, object{"source_id": source, "target_id": target, "message_count": count, "title": title, "created_at": timestamp(), "idempotency_key": uuid.NewString()}, nil)
 }
 
 // searchChats finds the ids of a user's chats that match a query, and
@@ -202,7 +202,7 @@ func (h *harness) searchChats(ctx context.Context, p *principal, key contentKey,
 			ID string `json:"id"`
 		} `json:"results"`
 	}
-	if err := h.syncAPI.call(ctx, p, "/v1/search/query", object{"key": key.base64(), "query": query, "limit": limit}, &found); err != nil {
+	if err := h.syncAPI.callKey(ctx, p, "/v1/search/query", key, object{"query": query, "limit": limit}, &found); err != nil {
 		return nil, false, err
 	}
 	ids := make([]string, len(found.Results))
@@ -223,7 +223,7 @@ func (h *harness) reindexChats(ctx context.Context, p *principal, key contentKey
 		Status  string `json:"status"`
 		Partial bool   `json:"partial"`
 	}
-	if err := h.syncAPI.call(ctx, p, "/v1/search/reindex", object{"keys": []object{{"key": key.base64()}}}, &job); err != nil {
+	if err := h.syncAPI.call(ctx, p, "/v1/search/reindex", keyedBody(key, object{}, true), &job); err != nil {
 		return false, err
 	}
 	switch job.Status {
@@ -321,7 +321,7 @@ func (h *harness) removeAllProjects(ctx context.Context, p *principal, key conte
 	var result struct {
 		Deleted int `json:"deleted"`
 	}
-	err := h.syncAPI.call(ctx, p, "/v1/sync/delete-all-projects", object{"key": key.base64(), "idempotency_key": uuid.NewString()}, &result)
+	err := h.syncAPI.callKey(ctx, p, "/v1/sync/delete-all-projects", key, object{"idempotency_key": uuid.NewString()}, &result)
 	return result.Deleted, err
 }
 
@@ -448,14 +448,14 @@ func (h *harness) openSealedShare(ctx context.Context, shareKey string, cipherte
 
 // Keys and imports
 
-func (h *harness) authorizeArchive(ctx context.Context, p *principal, encodedKey, operation string) error {
-	if encodedKey == "" {
+func (h *harness) authorizeArchive(ctx context.Context, p *principal, keyBytes []byte, operation string) error {
+	if len(keyBytes) == 0 {
 		return nil
 	}
 	if p.Anonymous {
 		return errAnonymousCloud
 	}
-	key, err := decodeContentKey(encodedKey)
+	key, err := decodeContentKey(keyBytes)
 	if err != nil {
 		return err
 	}
