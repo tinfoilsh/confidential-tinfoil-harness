@@ -78,13 +78,14 @@ func rewriteRefs(v any, from, to string) any {
 // closed is schema with every object a value is checked against on its own
 // admitting no member its schema does not name. The parts of an allOf, and
 // definitions, are not checked on their own: the schema that names them
-// closes over all their members together.
-func closed(schema any, whole bool) any {
+// closes over all their members together. A schema that names no members,
+// or declares the rest open, stays open.
+func (c *contract) closed(schema any, whole bool) any {
 	switch s := schema.(type) {
 	case []any:
 		out := make([]any, len(s))
 		for i, child := range s {
-			out[i] = closed(child, whole)
+			out[i] = c.closed(child, whole)
 		}
 		return out
 	case map[string]any:
@@ -93,7 +94,7 @@ func closed(schema any, whole bool) any {
 			if children, ok := s[k].(map[string]any); ok {
 				shut := make(map[string]any, len(children))
 				for name, child := range children {
-					shut[name] = closed(child, true)
+					shut[name] = c.closed(child, true)
 				}
 				out[k] = shut
 			}
@@ -101,31 +102,44 @@ func closed(schema any, whole bool) any {
 		if children, ok := s["$defs"].(map[string]any); ok {
 			shut := make(map[string]any, len(children))
 			for name, child := range children {
-				shut[name] = closed(child, false)
+				shut[name] = c.closed(child, false)
 			}
 			out["$defs"] = shut
 		}
 		for _, k := range []string{"items", "additionalProperties", "unevaluatedProperties", "unevaluatedItems", "contains", "not", "if", "then", "else", "contentSchema", "prefixItems", "oneOf", "anyOf"} {
 			if child, ok := s[k]; ok {
-				out[k] = closed(child, true)
+				out[k] = c.closed(child, true)
 			}
 		}
 		if child, ok := s["allOf"]; ok {
-			out["allOf"] = closed(child, false)
+			out["allOf"] = c.closed(child, false)
 		}
-		_, open := s["additionalProperties"]
-		if _, set := s["unevaluatedProperties"]; set {
-			open = true
-		}
-		_, named := s["properties"]
-		_, ref := s["$ref"]
-		_, parts := s["allOf"]
-		if whole && !open && (named || ref || parts) {
+		if whole && c.namesMembers(s) {
 			out["unevaluatedProperties"] = false
 		}
 		return out
 	}
 	return schema
+}
+
+// namesMembers reports whether a schema, or the definition it refers to,
+// names an object's members without leaving the rest open.
+func (c *contract) namesMembers(schema any) bool {
+	s, _ := schema.(map[string]any)
+	for _, k := range []string{"additionalProperties", "unevaluatedProperties"} {
+		if _, open := s[k]; open {
+			return false
+		}
+	}
+	for _, k := range []string{"properties", "allOf", "oneOf", "anyOf"} {
+		if _, named := s[k]; named {
+			return true
+		}
+	}
+	if ref, ok := s["$ref"].(string); ok {
+		return c.namesMembers(c.defs[strings.TrimPrefix(ref, "#/$defs/")])
+	}
+	return false
 }
 
 // at is the node of the protocol a path of member names leads to, following
@@ -159,9 +173,9 @@ func (c *contract) validator(path ...string) (*jsonschema.Resolved, error) {
 	if !ok {
 		return nil, fmt.Errorf("the protocol has no schema at %s", strings.Join(path, "/"))
 	}
-	root := closed(maps.Clone(target), true).(map[string]any)
+	root := c.closed(maps.Clone(target), true).(map[string]any)
 	root["$schema"] = "https://json-schema.org/draft/2020-12/schema"
-	root["$defs"] = closed(map[string]any{"$defs": c.defs}, false).(map[string]any)["$defs"]
+	root["$defs"] = c.closed(map[string]any{"$defs": c.defs}, false).(map[string]any)["$defs"]
 	encoded, err := json.Marshal(root)
 	if err != nil {
 		return nil, err
@@ -282,10 +296,8 @@ func (c *contract) undeclared(value, schema any, at string) []string {
 		return extra
 	case map[string]any:
 		properties := c.properties(s)
-		rest, open := s["additionalProperties"]
-		if rest == false {
-			open = false
-		}
+		rest := s["additionalProperties"]
+		open := rest != false && (rest != nil || !c.namesMembers(s))
 		var extra []string
 		for _, name := range slices.Sorted(maps.Keys(v)) {
 			switch property, named := properties[name]; {

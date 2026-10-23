@@ -1321,17 +1321,11 @@ components:
 
     Json:
       description: Any JSON value.
-      oneOf:
-        - {type: "null"}
-        - {type: boolean}
-        - {type: number}
-        - {type: string}
-        - {type: array, items: {$ref: "#/components/schemas/Json"}}
-        - {$ref: "#/components/schemas/JsonObject"}
 
     JsonObject:
+      description: A JSON object with any members.
       type: object
-      additionalProperties: {$ref: "#/components/schemas/Json"}
+      additionalProperties: true
 
     Identifier:
       description: An id a client names a row with. Printable ASCII without / \ ? or #, and neither "." nor "..".
@@ -1485,14 +1479,12 @@ components:
               label: {type: string}
               tooltip: {type: string}
         reasoning:
-          oneOf:
-            - {type: "null"}
-            - type: object
-              required: [toggle, effort, defaultEnabled]
-              properties:
-                toggle: {type: boolean}
-                effort: {type: boolean}
-                defaultEnabled: {type: boolean}
+          type: [object, "null"]
+          required: [toggle, effort, defaultEnabled]
+          properties:
+            toggle: {type: boolean}
+            effort: {type: boolean}
+            defaultEnabled: {type: boolean}
         deprecated: {type: boolean}
         auto: {type: boolean, description: "The entry that has the router choose a model for each turn."}
 
@@ -1933,14 +1925,6 @@ components:
 
     TitleState: {enum: [placeholder, generated, manual]}
 
-    ActiveRun:
-      description: A hint that a reply may be streaming, until the run's deadline. It never locks the chat.
-      type: object
-      required: [runId, expiresAt]
-      properties:
-        runId: {type: string}
-        expiresAt: {$ref: "#/components/schemas/Timestamp"}
-
     ContextUsage:
       description: How much of the model's window the chat's last prompt filled.
       type: object
@@ -1966,9 +1950,20 @@ components:
         webSearchEnabled: {type: boolean}
         pinned: {type: boolean}
         contextUsage:
-          oneOf: [{type: "null"}, {$ref: "#/components/schemas/ContextUsage"}]
+          description: "How much of the model's window the chat's last prompt filled."
+          type: [object, "null"]
+          required: [usedTokens, limitTokens, percentage]
+          properties:
+            usedTokens: {type: integer}
+            limitTokens: {type: integer}
+            percentage: {type: number}
         activeRun:
-          oneOf: [{type: "null"}, {$ref: "#/components/schemas/ActiveRun"}]
+          description: "A hint that a reply may be streaming, until the run's deadline. It never locks the chat."
+          type: [object, "null"]
+          required: [runId, expiresAt]
+          properties:
+            runId: {type: string}
+            expiresAt: {$ref: "#/components/schemas/Timestamp"}
         messageCount: {type: integer}
         flagged: {type: boolean, description: "The safeguards flagged the chat, which takes no more turns."}
 
@@ -1988,9 +1983,20 @@ components:
         webSearchEnabled: {type: boolean}
         pinned: {type: boolean}
         contextUsage:
-          oneOf: [{type: "null"}, {$ref: "#/components/schemas/ContextUsage"}]
+          description: "How much of the model's window the chat's last prompt filled."
+          type: [object, "null"]
+          required: [usedTokens, limitTokens, percentage]
+          properties:
+            usedTokens: {type: integer}
+            limitTokens: {type: integer}
+            percentage: {type: number}
         activeRun:
-          oneOf: [{type: "null"}, {$ref: "#/components/schemas/ActiveRun"}]
+          description: "A hint that a reply may be streaming, until the run's deadline. It never locks the chat."
+          type: [object, "null"]
+          required: [runId, expiresAt]
+          properties:
+            runId: {type: string}
+            expiresAt: {$ref: "#/components/schemas/Timestamp"}
         messageCount: {type: integer}
         flagged: {type: boolean, description: "The safeguards flagged the chat, which takes no more turns."}
         revision: {type: string}
@@ -2146,7 +2152,12 @@ components:
         lastRequestId: {type: string}
         lastRequestKind: {type: string, description: "What the last request's turn did, which a retry repeats."}
         activeRun:
-          oneOf: [{type: "null"}, {$ref: "#/components/schemas/ActiveRun"}]
+          description: "A hint that a reply may be streaming, until the run's deadline. It never locks the chat."
+          type: [object, "null"]
+          required: [runId, expiresAt]
+          properties:
+            runId: {type: string}
+            expiresAt: {$ref: "#/components/schemas/Timestamp"}
         contextUsage: {$ref: "#/components/schemas/ContextUsage"}
         flagged: {type: boolean}
         harnessHiddenCount: {type: integer, description: "How many leading messages an ask's chat holds as context without showing them."}
@@ -2409,19 +2420,18 @@ components:
         key_id: {type: [string, "null"], description: "Hex. Null while the account has no key."}
         etag: {type: string}
         bundles:
-          oneOf:
-            - {type: "null"}
-            - type: object
-              additionalProperties:
-                type: object
-                required: [credential_id, kek_iv, encrypted_keys]
-                properties:
-                  credential_id: {type: string}
-                  kek_iv: {type: string}
-                  encrypted_keys: {type: string}
-                  bundle_version: {type: integer}
-                  created_at: {type: string}
-                  updated_at: {type: string}
+          description: "The passkey bundles by credential id. Null before the key has any."
+          type: [object, "null"]
+          additionalProperties:
+            type: object
+            required: [credential_id, kek_iv, encrypted_keys]
+            properties:
+              credential_id: {type: string}
+              kek_iv: {type: string}
+              encrypted_keys: {type: string}
+              bundle_version: {type: integer}
+              created_at: {type: string}
+              updated_at: {type: string}
         created_via: {$ref: "#/components/schemas/KeyOrigin"}
         created_at: {type: string}
         has_data: {type: boolean, description: "The account has rows not sealed under this key."}
