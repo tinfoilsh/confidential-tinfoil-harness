@@ -71,13 +71,29 @@ func (a *messageAssembler) apply(e event) {
 		}
 		m := a.message(id)
 		a.stamp(id, m, e.Timestamp)
+		at := float64(millis(e.Timestamp))
 		blocks := m.Timeline
-		if len(blocks) <= a.sealed[id] || blocks[len(blocks)-1].Type != kind {
-			m.Timeline = append(blocks, Block{ID: fmt.Sprintf("%s_%s_%d", id, kind, len(blocks)), Type: kind})
+		if kind == "thinking" {
+			// Reasoning that arrives after the reply's text began is the tail
+			// of the reasoning before that text, as on the web client.
+			if n := len(blocks); n-2 >= a.sealed[id] && blocks[n-1].Type == "content" && blocks[n-2].Type == "thinking" {
+				blocks[n-2].Content += delta
+				break
+			}
 		}
-		m.Timeline[len(m.Timeline)-1].Content += delta
+		if len(blocks) <= a.sealed[id] || blocks[len(blocks)-1].Type != kind {
+			block := Block{ID: fmt.Sprintf("%s_%s_%d", id, kind, len(blocks)), Type: kind}
+			if kind == "thinking" {
+				block.StartedAt = at
+			}
+			m.Timeline = append(blocks, block)
+		}
+		last := &m.Timeline[len(m.Timeline)-1]
+		last.Content += delta
 		if kind == "content" {
 			m.Content += delta
+		} else if last.StartedAt > 0 && at >= last.StartedAt {
+			last.EndedAt, last.Duration = at, (at-last.StartedAt)/1000
 		}
 	case "TOOL_CALL_START":
 		parent := e.ParentID
@@ -90,7 +106,7 @@ func (a *messageAssembler) apply(e event) {
 		m := a.message(parent)
 		a.stamp(parent, m, e.Timestamp)
 		a.calls[e.ToolCallID] = blockRef{m, len(m.Timeline)}
-		m.Timeline = append(m.Timeline, Block{ID: e.ToolCallID, Type: "tool_call", ToolCallID: e.ToolCallID, Name: e.ToolName, Progress: []json.RawMessage{}})
+		m.Timeline = append(m.Timeline, Block{ID: e.ToolCallID, Type: "tool_call", ToolCallID: e.ToolCallID, Name: e.ToolName, Progress: []json.RawMessage{}, StartedAt: float64(millis(e.Timestamp))})
 	case "TOOL_CALL_ARGS":
 		if call, ok := a.calls[e.ToolCallID]; ok {
 			call.block().Arguments += delta
@@ -103,6 +119,9 @@ func (a *messageAssembler) apply(e event) {
 		if call, ok := a.calls[e.ToolCallID]; ok {
 			b := call.block()
 			b.Result = e.Content
+			if at := float64(millis(e.Timestamp)); at >= b.StartedAt {
+				b.EndedAt = at
+			}
 			if len(e.Metadata) > 0 {
 				b.Metadata = e.Metadata
 			}
