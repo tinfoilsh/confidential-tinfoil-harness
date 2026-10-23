@@ -343,7 +343,7 @@ func upgraded(t *testing.T, h *harness, user string, rows ...any) []any {
 func TestOldDeviceChatsUpgradeIntoThreads(t *testing.T) {
 	h, rows, _ := testChatHarness(t, nil)
 	id := "8207544722379_4fe58a7b-eece-4f57-b098-d0c3cec90006"
-	threads := upgraded(t, h, "", oldDeviceChat(id), object{"id": "second", "messages": []any{}})
+	threads := upgraded(t, h, "alice", oldDeviceChat(id), object{"id": "second", "messages": []any{}})
 	if len(threads) != 2 || obj(threads[1])["id"] != "second" {
 		t.Fatalf("the threads came back as %v", threads)
 	}

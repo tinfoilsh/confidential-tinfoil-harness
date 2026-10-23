@@ -202,11 +202,7 @@ func (a *authenticator) authenticate(r *http.Request, anonymous bool) (*principa
 	if a == nil {
 		return nil, apiErr(503, "UNAUTHENTICATED", "Authentication is not configured")
 	}
-	header := r.Header.Get("Authorization")
-	if header == "" && anonymous {
-		return &principal{Anonymous: true}, nil
-	}
-	token := bearer(header)
+	token := bearer(r.Header.Get("Authorization"))
 	if token == "" {
 		return nil, apiErr(401, "UNAUTHENTICATED", "A Clerk session is required")
 	}

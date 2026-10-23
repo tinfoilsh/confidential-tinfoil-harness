@@ -74,18 +74,41 @@ type watchedBody struct{ read atomic.Bool }
 
 func (b *watchedBody) Read([]byte) (int, error) { b.read.Store(true); return 0, io.EOF }
 
-// A turn or an import may be tens of mebibytes; only a caller who signed in
-// gets them read.
+// A turn or an archive may be tens of mebibytes; only a caller who signed in,
+// or holds a free key the control plane accepts, gets one read, and only a
+// subscriber gets an archive read.
 func TestLargeBodiesAreReadOnlyAfterAuthentication(t *testing.T) {
 	h, _, _ := testChatHarness(t, nil)
-	for _, path := range []string{"/v1/threads/turn", "/v1/threads/import", "/v1/threads/upgrade"} {
+	for _, tc := range []struct {
+		path, session, credential string
+		code                      int
+	}{
+		{"/v1/threads/turn", "forged-session", "", 401},
+		{"/v1/threads/turn", "free_refused-key", "", 401},
+		{"/v1/threads/import", "forged-session", "", 401},
+		// Only a signed-in caller's device holds chats the old client stored.
+		{"/v1/threads/upgrade", "free_anonymous-key", "", 401},
+		{"/v1/threads/update", "", "", 401},
+		{"/v1/threads/update", "free_refused-key", "", 401},
+		{"/v1/threads/get", "free_refused-key", "", 401},
+		{"/v1/threads/follow", "free_refused-key", "", 401},
+		{"/v1/attachments/get-public", "free_refused-key", "", 401},
+		{"/v1/speech", "free_refused-key", "", 401},
+		{"/v1/import", "clerk-alice", "free_anonymous-key", 403},
+		{"/v1/export", "clerk-alice", "", 401},
+	} {
 		body := &watchedBody{}
-		r := httptest.NewRequest(http.MethodPost, path, body)
-		r.Header.Set("Authorization", "Bearer forged-session")
+		r := httptest.NewRequest(http.MethodPost, tc.path, body)
+		if tc.session != "" {
+			r.Header.Set("Authorization", "Bearer "+tc.session)
+		}
+		if tc.credential != "" {
+			r.Header.Set(inferenceKeyHeader, tc.credential)
+		}
 		w := httptest.NewRecorder()
 		h.routes().ServeHTTP(w, r)
-		if w.Code != 401 || body.read.Load() {
-			t.Fatalf("%s: HTTP %d, body read: %v", path, w.Code, body.read.Load())
+		if w.Code != tc.code || body.read.Load() {
+			t.Fatalf("%s as %q: HTTP %d, body read: %v", tc.path, tc.session, w.Code, body.read.Load())
 		}
 	}
 }
@@ -145,13 +168,16 @@ func TestAnonymousReconnectUsesKeyPossessionInsteadOfIP(t *testing.T) {
 		t.Fatal(err)
 	}
 	awaitFrame(t, run.log, "TEXT_MESSAGE_CHUNK")
+	if err := h.auth.recognize(context.Background(), run.principal); err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		key, ip string
 		want    int
 	}{
 		{"free_anonymous-key", "198.51.100.9:1234", 200},
-		{"free_other-client", "192.0.2.1:1234", 404},
-		{"", "192.0.2.1:1234", 404},
+		{"free_other-client", "192.0.2.1:1234", 401},
+		{"", "192.0.2.1:1234", 401},
 	} {
 		body := raw(object{"threadId": run.thread.id, "runId": run.log.id})
 		req := httptest.NewRequest(http.MethodPost, "/v1/threads/follow", bytes.NewReader(body))
@@ -159,7 +185,14 @@ func TestAnonymousReconnectUsesKeyPossessionInsteadOfIP(t *testing.T) {
 		if tc.key != "" {
 			req.Header.Set("Authorization", "Bearer "+tc.key)
 		}
-		response := replayOf(h, req)
+		// A refused caller is answered at once; a follower stops listening
+		// once it has what the run framed.
+		response := httptest.NewRecorder()
+		if tc.want == 200 {
+			response = replayOf(h, req)
+		} else {
+			h.routes().ServeHTTP(response, req)
+		}
 		if response.Code != tc.want {
 			t.Fatalf("incorrect reconnect authorization: want %d, got %d", tc.want, response.Code)
 		}

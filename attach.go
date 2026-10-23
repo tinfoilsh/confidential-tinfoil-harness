@@ -615,17 +615,17 @@ func (h *harness) legacyAttachmentBytes(ctx context.Context, id, encodedKey stri
 }
 
 func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
+	p, err := h.caller(r, true)
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
 	body, err := readBody(w, r, maxRequestBody)
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
 	public := r.URL.Path == "/v1/attachments/get-public"
-	p, err := h.auth.authenticate(r, true)
-	if err != nil {
-		respond(w, nil, err)
-		return
-	}
 	var in attachmentRequest
 	if err := decodeRequest(body, &in); err != nil {
 		respond(w, nil, err)

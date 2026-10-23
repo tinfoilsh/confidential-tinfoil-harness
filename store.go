@@ -452,9 +452,6 @@ func (h *harness) authorizeArchive(ctx context.Context, p *principal, encodedKey
 	if encodedKey == "" {
 		return nil
 	}
-	if p.Anonymous {
-		return errAnonymousCloud
-	}
 	key, err := decodeContentKey(encodedKey)
 	if err != nil {
 		return err
