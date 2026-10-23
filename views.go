@@ -168,6 +168,7 @@ type shareMessage struct {
 	ModelDisplayName string       `json:"modelDisplayName,omitempty"`
 	IsError          *bool        `json:"isError,omitempty"`
 	Quote            string       `json:"quote,omitempty"`
+	Annotations      []Annotation `json:"annotations,omitempty"`
 	Attachments      []Attachment `json:"attachments,omitempty"`
 }
 
