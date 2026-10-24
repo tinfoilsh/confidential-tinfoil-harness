@@ -270,7 +270,7 @@ paths:
                 limit: {type: integer}
       responses:
         "200":
-          description: The stored chats that match, how many more match that the harness could not open, and whether the search index is still being built. A chat sync could not fetch in time fails the search with UPSTREAM_REFUSED, and one the search index could not be rebuilt for with SEARCH_INDEX_FAILED.
+          description: The stored chats that match, how many more match that the harness could not open, and whether the search index is still being built. A chat sync could not fetch in time fails the search with UPSTREAM_REFUSED, and a failed rebuild of the search index with SEARCH_INDEX_FAILED.
           content:
             application/json:
               schema:
