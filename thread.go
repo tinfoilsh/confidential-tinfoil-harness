@@ -194,6 +194,8 @@ type URLCitation struct {
 type ActiveRun struct {
 	RunID     string `json:"runId"`
 	ExpiresAt string `json:"expiresAt"`
+	// Instance holds the run; a hint stored before runs named theirs has none.
+	Instance string `json:"instance,omitempty"`
 }
 
 // ContextUsage is how much of the model's window the chat's last prompt filled.
