@@ -153,7 +153,7 @@ func TestSearchCountsTheChatsItCannotOpen(t *testing.T) {
 		wantCode  int
 		wantFound []string
 	}{
-		{name: "every chat fetched", wantCode: http.StatusOK, wantFound: []string{"first", "second"}},
+		{name: "every chat fetched", wantCode: http.StatusOK, wantFound: []string{"second", "first"}},
 		{name: "a chat not fetched in time", slow: "second", wantCode: http.StatusBadGateway},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -209,7 +209,7 @@ func TestSearchCountsTheChatsItCannotOpen(t *testing.T) {
 				}
 				return
 			}
-			if w.Code != tc.wantCode || !slices.Equal(found, []string{"second", "first"}) || got.Unreadable != 3 || pulls != 1 {
+			if w.Code != tc.wantCode || !slices.Equal(found, tc.wantFound) || got.Unreadable != 3 || pulls != 1 {
 				t.Fatalf("search answered HTTP %d %s after %d pulls", w.Code, w.Body, pulls)
 			}
 		})
