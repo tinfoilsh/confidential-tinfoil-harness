@@ -60,43 +60,44 @@ func (a *messageAssembler) stamp(id string, m *Message, at string) {
 		m.CreatedAt = at
 	}
 }
-func (a *messageAssembler) apply(e event) {
-	delta, _ := e.Delta.(string)
-	switch e.Type {
-	case "TEXT_MESSAGE_CHUNK", "REASONING_MESSAGE_CHUNK":
-		id, kind := e.MessageID, "content"
-		if e.Type == "REASONING_MESSAGE_CHUNK" {
-			id = strings.TrimSuffix(id, "-reasoning")
-			kind = "thinking"
+
+// streamed adds text or reasoning a reply streamed to its timeline.
+func (a *messageAssembler) streamed(id, kind, delta, emitted string) {
+	m := a.message(id)
+	a.stamp(id, m, emitted)
+	at := float64(millis(emitted))
+	blocks := m.Timeline
+	if kind == "thinking" {
+		// Reasoning that arrives after the reply's text began is the tail
+		// of the reasoning before that text, as on the web client.
+		if n := len(blocks); n-2 >= a.sealed[id] && blocks[n-1].Type == "content" && blocks[n-2].Type == "thinking" {
+			blocks[n-2].Content += delta
+			return
 		}
-		m := a.message(id)
-		a.stamp(id, m, e.Timestamp)
-		at := float64(millis(e.Timestamp))
-		blocks := m.Timeline
+	}
+	if len(blocks) <= a.sealed[id] || blocks[len(blocks)-1].Type != kind {
+		block := Block{ID: fmt.Sprintf("%s_%s_%d", id, kind, len(blocks)), Type: kind}
 		if kind == "thinking" {
-			// Reasoning that arrives after the reply's text began is the tail
-			// of the reasoning before that text, as on the web client.
-			if n := len(blocks); n-2 >= a.sealed[id] && blocks[n-1].Type == "content" && blocks[n-2].Type == "thinking" {
-				blocks[n-2].Content += delta
-				break
-			}
+			block.StartedAt = at
 		}
-		if len(blocks) <= a.sealed[id] || blocks[len(blocks)-1].Type != kind {
-			block := Block{ID: fmt.Sprintf("%s_%s_%d", id, kind, len(blocks)), Type: kind}
-			if kind == "thinking" {
-				block.StartedAt = at
-			}
-			m.Timeline = append(blocks, block)
-		}
-		last := &m.Timeline[len(m.Timeline)-1]
-		last.Content += delta
-		if kind == "content" {
-			m.Content += delta
-		} else if last.StartedAt > 0 && at >= last.StartedAt {
-			last.EndedAt, last.Duration = at, (at-last.StartedAt)/1000
-		}
-	case "TOOL_CALL_START":
-		parent := e.ParentID
+		m.Timeline = append(blocks, block)
+	}
+	last := &m.Timeline[len(m.Timeline)-1]
+	last.Content += delta
+	if kind == "content" {
+		m.Content += delta
+	} else if last.StartedAt > 0 && at >= last.StartedAt {
+		last.EndedAt, last.Duration = at, (at-last.StartedAt)/1000
+	}
+}
+func (a *messageAssembler) apply(e runEvent, at string) {
+	switch e := e.(type) {
+	case textChunk:
+		a.streamed(e.MessageID, "content", e.Delta, at)
+	case reasoningChunk:
+		a.streamed(strings.TrimSuffix(e.MessageID, reasoningSuffix), "thinking", e.Delta, at)
+	case toolCallStart:
+		parent := e.ParentMessageID
 		if parent == "" && len(a.ordered) > 0 {
 			parent = a.ordered[len(a.ordered)-1].ID
 		}
@@ -104,22 +105,22 @@ func (a *messageAssembler) apply(e event) {
 			parent = "msg_" + e.ToolCallID
 		}
 		m := a.message(parent)
-		a.stamp(parent, m, e.Timestamp)
+		a.stamp(parent, m, at)
 		a.calls[e.ToolCallID] = blockRef{m, len(m.Timeline)}
-		m.Timeline = append(m.Timeline, Block{ID: e.ToolCallID, Type: "tool_call", ToolCallID: e.ToolCallID, Name: e.ToolName, Progress: []json.RawMessage{}, StartedAt: float64(millis(e.Timestamp))})
-	case "TOOL_CALL_ARGS":
+		m.Timeline = append(m.Timeline, Block{ID: e.ToolCallID, Type: "tool_call", ToolCallID: e.ToolCallID, Name: e.ToolCallName, Progress: []json.RawMessage{}, StartedAt: float64(millis(at))})
+	case toolCallArgs:
 		if call, ok := a.calls[e.ToolCallID]; ok {
-			call.block().Arguments += delta
+			call.block().Arguments += e.Delta
 		}
-	case "TOOL_CALL_END":
+	case toolCallEnd:
 		if call, ok := a.calls[e.ToolCallID]; ok {
 			call.block().Complete = true
 		}
-	case "TOOL_CALL_RESULT":
+	case toolCallResult:
 		if call, ok := a.calls[e.ToolCallID]; ok {
 			b := call.block()
 			b.Result = e.Content
-			if at := float64(millis(e.Timestamp)); at >= b.StartedAt {
+			if at := float64(millis(at)); at >= b.StartedAt {
 				b.EndedAt = at
 			}
 			if len(e.Metadata) > 0 {
@@ -129,21 +130,16 @@ func (a *messageAssembler) apply(e event) {
 				b.Display = e.Display
 			}
 		}
-	case "ACTIVITY_SNAPSHOT":
-		if call, ok := a.calls[strings.TrimPrefix(e.MessageID, "act_")]; ok && e.Display != nil {
+	case activitySnapshot:
+		if call, ok := a.calls[strings.TrimPrefix(e.MessageID, activityPrefix)]; ok && e.Display != nil {
 			call.block().Display = e.Display
 		}
-	case "ACTIVITY_DELTA":
-		if call, ok := a.calls[strings.TrimPrefix(e.MessageID, "act_")]; ok {
-			var ops []struct {
-				Path  string          `json:"path"`
-				Value json.RawMessage `json:"value"`
-			}
-			json.Unmarshal(e.Patch, &ops)
-			for _, op := range ops {
+	case activityDelta:
+		if call, ok := a.calls[strings.TrimPrefix(e.MessageID, activityPrefix)]; ok {
+			for _, op := range e.Patch {
 				if op.Path == "/output/-" {
 					b := call.block()
-					b.Progress = append(b.Progress, op.Value)
+					b.Progress = append(b.Progress, raw(op.Value))
 				}
 			}
 		}

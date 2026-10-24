@@ -111,14 +111,13 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 	next := h.advance(r, !cancelled || r.yielded)
 	deleted = s.deleted
 	h.live.mu.Unlock()
-	r.out.emit(event{Type: "STATE_SNAPSHOT", Snapshot: stateSnapshot{summary, queue, limit}})
+	r.out.emit(stateSnapshotEvent{stateSnapshot{summary, queue, limit}})
 	metadata.RateLimit = &limit
 	if runErr != nil && !cancelled {
-		e := asAPIError(runErr)
-		r.out.emit(event{Type: "RUN_ERROR", ThreadID: s.id, RunID: r.log.id, Message: e.Message, Code: e.Code, Kind: e.Kind, ResetsAt: e.ResetsAt, RetryAfter: e.RetryAfter, Metadata: raw(metadata)})
+		r.out.emit(failedRun(s.id, r.log.id, asAPIError(runErr), &metadata))
 	} else {
 		metadata.Usage, metadata.Cancelled = &spend, &cancelled
-		r.out.emit(event{Type: "RUN_FINISHED", ThreadID: s.id, RunID: r.log.id, Metadata: raw(metadata)})
+		r.out.emit(runFinished{ThreadID: s.id, RunID: r.log.id, Metadata: metadata})
 	}
 	r.log.log.close(errDone)
 	if next != nil {

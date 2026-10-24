@@ -251,9 +251,9 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	}
 	r.row, r.running = row, true
 	// Framed under the lock, so no queue change reaches the run before them.
-	r.out.emit(event{Type: "RUN_STARTED", ThreadID: s.id, RunID: r.log.id, MessageID: r.out.replyID})
-	r.out.emit(event{Type: "MESSAGES_SNAPSHOT", Messages: shown.Messages, HasOlder: &shown.HasOlder})
-	r.out.emit(event{Type: "STATE_SNAPSHOT", Snapshot: stateSnapshot{shown.threadSummary, queueItems(s), r.credential.Limit}})
+	r.out.emit(runStarted{ThreadID: s.id, RunID: r.log.id, MessageID: r.out.replyID})
+	r.out.emit(messagesSnapshot{Messages: shown.Messages, HasOlder: shown.HasOlder})
+	r.out.emit(stateSnapshotEvent{stateSnapshot{shown.threadSummary, queueItems(s), r.credential.Limit}})
 	r.out.mu.Lock()
 	r.out.observe = r.assembler.apply
 	r.out.mu.Unlock()
@@ -350,7 +350,7 @@ func (h *harness) endUnstarted(r *chatRun, err error) *chatRun {
 	h.live.mu.Unlock()
 	e := asAPIError(h.withQuota(r.principal, r.credential.Limit, err))
 	limit := valueOr(e.RateLimit, r.credential.Limit)
-	r.out.emit(event{Type: "RUN_ERROR", ThreadID: r.thread.id, RunID: r.log.id, Message: e.Message, Code: e.Code, Kind: e.Kind, ResetsAt: e.ResetsAt, RetryAfter: e.RetryAfter, Metadata: raw(runMetadata{RateLimit: &limit})})
+	r.out.emit(failedRun(r.thread.id, r.log.id, e, &runMetadata{RateLimit: &limit}))
 	r.log.log.close(errDone)
 	r.release()
 	close(r.finished)

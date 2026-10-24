@@ -1,3 +1,7 @@
+# Protocol
+
+`protocol/openapi.yaml` is the contract with every client. A change to what a route accepts or returns, or to a run's events or error codes, changes it in the same commit, following the rules in its description. The tests check every request, response and event against it, so the harness cannot send a member it does not name.
+
 # Testing
 
 A test earns its place by failing on a plausible wrong implementation that no other test catches. Before adding or keeping one, name that bug. If the test still passes when the production code is replaced with a no-op or the obvious wrong branch, delete it.

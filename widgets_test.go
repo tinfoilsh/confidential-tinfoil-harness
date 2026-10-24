@@ -47,9 +47,9 @@ func invokeWidget(t *testing.T, set *toolset, call toolCall) (string, []string) 
 	t.Helper()
 	out := &stream{run: newRun("00")}
 	var results []string
-	out.observe = func(e event) {
-		if e.Type == "TOOL_CALL_RESULT" {
-			results = append(results, string(e.Content))
+	out.observe = func(e runEvent, _ string) {
+		if result, ok := e.(toolCallResult); ok {
+			results = append(results, string(result.Content))
 		}
 	}
 	var reply struct {

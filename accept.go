@@ -220,7 +220,7 @@ func (h *harness) admit(ctx context.Context, p *principal, credential inferenceC
 	if s.active != nil {
 		r.queued = true
 		s.queue = append(s.queue, r)
-		r.out.emit(event{Type: "STATE_DELTA", ThreadID: id, RunID: r.log.id, Delta: []statePatch{{"add", "/queue/-", r.queueItem()}}})
+		r.out.emit(stateDelta{ThreadID: id, RunID: r.log.id, Delta: []statePatch{{"add", "/queue/-", r.queueItem()}}})
 		queueChanged(s)
 		return nil
 	}
