@@ -270,14 +270,15 @@ paths:
                 limit: {type: integer}
       responses:
         "200":
-          description: The stored chats that match, and whether the search index is still being built.
+          description: The stored chats that match, how many more match that the harness could not open, and whether the search index is still being built. A chat sync could not fetch in time fails the search with UPSTREAM_REFUSED, and one the search index could not be rebuilt for with SEARCH_INDEX_FAILED.
           content:
             application/json:
               schema:
                 type: object
-                required: [results, indexing]
+                required: [results, unreadable, indexing]
                 properties:
                   results: {type: array, items: {$ref: "#/components/schemas/ThreadSummary"}}
+                  unreadable: {type: integer, minimum: 0, description: "Matching chats left out of results because they cannot be opened, such as one sealed with another key or stored in a format this harness cannot read."}
                   indexing: {type: boolean}
         default: {$ref: "#/components/responses/Error"}
 

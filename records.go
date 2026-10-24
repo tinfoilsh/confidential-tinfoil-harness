@@ -494,22 +494,19 @@ func (h *harness) searchThreads(ctx context.Context, p *principal, key contentKe
 			}
 		}
 	}
+	found, unreadable, err := h.searchResults(ctx, p, key, ids)
+	if err != nil {
+		return nil, err
+	}
 	flags := h.auth.flaggedChats(ctx, p)
 	results := []threadSummary{}
-	for _, id := range ids {
-		row, err := h.loadThread(ctx, p, key, id)
-		if err != nil {
-			// A deleted or unreadable chat leaves the other results intact.
-			if code := asAPIError(err).HTTP; code == 404 || code == 409 {
-				continue
-			}
-			return nil, err
-		}
+	for _, row := range found {
 		flags.mark(&row.Thread)
 		results = append(results, summarize(&row.Thread))
 	}
 	return struct {
-		Results  []threadSummary `json:"results"`
-		Indexing bool            `json:"indexing"`
-	}{results, indexing}, nil
+		Results    []threadSummary `json:"results"`
+		Unreadable int             `json:"unreadable"`
+		Indexing   bool            `json:"indexing"`
+	}{results, unreadable, indexing}, nil
 }
