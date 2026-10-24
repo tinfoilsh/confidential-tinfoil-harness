@@ -692,9 +692,11 @@ func TestADeadRunNeverLocksItsChat(t *testing.T) {
 	p := &principal{ID: "alice"}
 	recent := nowUTC().Add(time.Hour).Format(time.RFC3339Nano)
 	runs := map[string]object{
-		"stale":     {"runId": "dead", "lastEventId": 7, "expiresAt": nowUTC().Add(-time.Minute).Format(time.RFC3339Nano)},
-		"recent":    {"runId": "dead", "lastEventId": 7, "expiresAt": recent},
-		"unstamped": {"runId": "dead"},
+		"stale":     {"runId": "dead", "instance": instanceID, "lastEventId": 7, "expiresAt": nowUTC().Add(-time.Minute).Format(time.RFC3339Nano)},
+		"recent":    {"runId": "dead", "instance": instanceID, "lastEventId": 7, "expiresAt": recent},
+		"unstamped": {"runId": "dead", "instance": instanceID},
+		// A process from before runs named their instance stored this one.
+		"unnamed": {"runId": "dead", "expiresAt": recent},
 	}
 	for id, run := range runs {
 		storedThread(rows, "alice", id)
@@ -710,7 +712,7 @@ func TestADeadRunNeverLocksItsChat(t *testing.T) {
 	for _, thread := range list.Threads {
 		hints[str(thread["id"])] = thread["activeRun"]
 	}
-	if len(hints) != 3 || hints["stale"] != nil || hints["unstamped"] != nil || !reflect.DeepEqual(hints["recent"], map[string]any{"runId": "dead", "expiresAt": recent}) {
+	if len(hints) != 4 || hints["stale"] != nil || hints["unstamped"] != nil || hints["unnamed"] != nil || !reflect.DeepEqual(hints["recent"], map[string]any{"runId": "dead", "expiresAt": recent, "instance": instanceID}) {
 		t.Fatalf("summaries report %v", hints)
 	}
 	for _, id := range []string{"stale", "recent"} {

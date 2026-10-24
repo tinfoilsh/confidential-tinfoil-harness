@@ -2045,11 +2045,11 @@ components:
         activeRun:
           description: "A hint that a reply may be streaming, until the run's deadline. It never locks the chat."
           type: [object, "null"]
-          required: [runId, expiresAt]
+          required: [runId, expiresAt, instance]
           properties:
             runId: {type: string}
             expiresAt: {$ref: "#/components/schemas/Timestamp"}
-            instance: {type: string, description: "The instance holding the run, which a client following or cancelling it after a reload sends as X-Tinfoil-Harness-Instance. A hint stored before runs named their instance has none."}
+            instance: {type: string, description: "The instance holding the run, which a client following or cancelling it after a reload sends as X-Tinfoil-Harness-Instance."}
         messageCount: {type: integer}
         flagged: {type: boolean, description: "The safeguards flagged the chat, which takes no more turns."}
 
@@ -2079,11 +2079,11 @@ components:
         activeRun:
           description: "A hint that a reply may be streaming, until the run's deadline. It never locks the chat."
           type: [object, "null"]
-          required: [runId, expiresAt]
+          required: [runId, expiresAt, instance]
           properties:
             runId: {type: string}
             expiresAt: {$ref: "#/components/schemas/Timestamp"}
-            instance: {type: string, description: "The instance holding the run, which a client following or cancelling it after a reload sends as X-Tinfoil-Harness-Instance. A hint stored before runs named their instance has none."}
+            instance: {type: string, description: "The instance holding the run, which a client following or cancelling it after a reload sends as X-Tinfoil-Harness-Instance."}
         messageCount: {type: integer}
         flagged: {type: boolean, description: "The safeguards flagged the chat, which takes no more turns."}
         revision: {type: string}
@@ -2241,11 +2241,11 @@ components:
         activeRun:
           description: "A hint that a reply may be streaming, until the run's deadline. It never locks the chat."
           type: [object, "null"]
-          required: [runId, expiresAt]
+          required: [runId, expiresAt, instance]
           properties:
             runId: {type: string}
             expiresAt: {$ref: "#/components/schemas/Timestamp"}
-            instance: {type: string, description: "The instance holding the run, which a client following or cancelling it after a reload sends as X-Tinfoil-Harness-Instance. A hint stored before runs named their instance has none."}
+            instance: {type: string, description: "The instance holding the run, which a client following or cancelling it after a reload sends as X-Tinfoil-Harness-Instance."}
         contextUsage: {$ref: "#/components/schemas/ContextUsage"}
         flagged: {type: boolean}
         harnessHiddenCount: {type: integer, description: "How many leading messages an ask's chat holds as context without showing them."}

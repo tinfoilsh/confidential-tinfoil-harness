@@ -29,8 +29,10 @@ func summarize(t *Thread) threadSummary {
 	s := threadSummary{ID: t.ID, Title: t.Title, TitleState: t.TitleState, CreatedAt: present(t.CreatedAt), UpdatedAt: present(t.UpdatedAt), ProjectID: t.ProjectID, Model: t.Model,
 		WebSearchEnabled: t.WebSearchEnabled, Pinned: t.Pinned, ContextUsage: t.ContextUsage, MessageCount: max(0, len(t.Messages)-t.HiddenCount), Flagged: t.Flagged}
 	s.ActivityAt = t.activityAt()
-	// The hint lapses with the run's deadline.
-	if run := t.ActiveRun; run != nil {
+	// The hint lapses with the run's deadline. One naming no instance was
+	// stored by a process from before runs named theirs, whose runs ended
+	// when it did.
+	if run := t.ActiveRun; run != nil && run.Instance != "" {
 		if expires, err := time.Parse(time.RFC3339Nano, run.ExpiresAt); err == nil && nowUTC().Before(expires) {
 			s.ActiveRun = &ActiveRun{RunID: run.RunID, ExpiresAt: run.ExpiresAt, Instance: run.Instance}
 		}
