@@ -542,7 +542,7 @@ func (h *harness) writeBackup(ctx context.Context, p *principal, key *contentKey
 // document whose content cannot be read is left out and listed as omitted.
 func backupChat(b *backupWriter, rel *backupRelationships, kind string, t *Thread, image func(*Attachment) ([]byte, error), document func(*Attachment) error) error {
 	entry := backupThread{Thread: *t, Messages: make([]backupMessage, 0, len(t.Messages))}
-	entry.ActiveRun, entry.LastRequestID, entry.LastRequestKind, entry.Flagged, entry.HiddenCount = nil, "", "", false, 0
+	entry.ActiveRun, entry.LastRequestID, entry.LastRequestKind, entry.Flagged, entry.HiddenCount, entry.RecordVersion = nil, "", "", false, 0, 0
 	omit := func(id string) {
 		b.omit(backupOmission{Kind: "attachment", SourceID: id, ParentSourceID: t.ID, Category: "unavailable", Reason: "attachment_not_found"})
 	}

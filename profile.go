@@ -57,7 +57,8 @@ type CustomPreset struct {
 // storedProfile is the profile row.
 type storedProfile struct {
 	Profile
-	UpdatedAt string `json:"updatedAt,omitempty"`
+	UpdatedAt     string `json:"updatedAt,omitempty"`
+	RecordVersion int    `json:"recordVersion,omitempty"`
 	// PinnedChatIDs makes favorites available outside the loaded history pages.
 	PinnedChatIDs []string `json:"pinnedChatIds,omitzero"`
 }

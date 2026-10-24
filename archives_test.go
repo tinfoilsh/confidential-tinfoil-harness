@@ -520,7 +520,7 @@ func sameForm(t *testing.T, fake *fakeSync, originals map[string][]byte, thread 
 			a.EncryptionKey = ""
 		}
 	}
-	thread.ID, thread.ProjectID, thread.UpdatedAt = "", nil, ""
+	thread.ID, thread.ProjectID, thread.UpdatedAt, thread.RecordVersion = "", nil, "", 0
 	return string(raw(thread))
 }
 

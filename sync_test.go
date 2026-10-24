@@ -281,3 +281,38 @@ func TestDeletionsLeaveTheWorkToSync(t *testing.T) {
 		t.Fatalf("anonymous bulk deletion accepted: %d", w.Code)
 	}
 }
+
+// The rows the harness writes name the format they are in, which a later
+// format tells apart from rows older clients wrote.
+func TestStoredRowsNameTheirFormat(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	finishedRun(t, h, "/v1/threads/turn", sendInput(key))
+	if w := postRoute(h, "/v1/profile/update", object{"key": key.base64(), "patch": object{"nickname": "Sam"}}, "alice"); w.Code != 200 {
+		t.Fatalf("profile: HTTP %d %s", w.Code, w.Body)
+	}
+	var project Project
+	if w := postRoute(h, "/v1/projects/create", object{"key": key.base64(), "name": "Trip"}, "alice"); w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &project) != nil {
+		t.Fatalf("project: HTTP %d %s", w.Code, w.Body)
+	}
+	if w := uploadRoute(h, "/v1/projects/documents/upload", "notes.txt", []byte("Pack light"), map[string]string{"key": key.base64(), "projectId": project.ID}, "alice"); w.Code != 200 {
+		t.Fatalf("document: HTTP %d %s", w.Code, w.Body)
+	}
+	rows.mu.Lock()
+	defer rows.mu.Unlock()
+	written := map[string]bool{}
+	for name, row := range rows.rows {
+		var stored struct {
+			RecordVersion int `json:"recordVersion"`
+		}
+		json.Unmarshal(row.Data, &stored)
+		if stored.RecordVersion != recordVersion {
+			t.Errorf("%s was stored in format %d", name, stored.RecordVersion)
+		}
+		written[strings.Split(name, "/")[1]] = true
+	}
+	for _, scope := range []string{"chat", "profile", "project", "project_document"} {
+		if !written[scope] {
+			t.Errorf("no %s row was stored", scope)
+		}
+	}
+}

@@ -582,6 +582,7 @@ type importAttachment struct {
 
 func withOriginals(t *Thread) *importThread {
 	line := &importThread{Thread: *t, Messages: make([]importMessage, len(t.Messages))}
+	line.RecordVersion = recordVersion
 	for i, m := range t.Messages {
 		message := importMessage{Message: m}
 		for _, a := range m.Attachments {

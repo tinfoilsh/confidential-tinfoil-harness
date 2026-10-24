@@ -24,3 +24,14 @@ type ProjectDocument struct {
 	CreatedAt       string `json:"createdAt,omitempty"`
 	UpdatedAt       string `json:"updatedAt,omitempty"`
 }
+
+// storedProject and storedDocument are the rows this harness writes.
+type storedProject struct {
+	Project
+	RecordVersion int `json:"recordVersion"`
+}
+
+type storedDocument struct {
+	ProjectDocument
+	RecordVersion int `json:"recordVersion"`
+}

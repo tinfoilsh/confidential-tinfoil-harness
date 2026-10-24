@@ -6,6 +6,11 @@ import (
 	"slices"
 )
 
+// recordVersion is the format of the rows and device records this harness
+// writes. Rows older clients wrote have none; all are read by the legacy
+// reader, and a later format branches on this.
+const recordVersion = 1
+
 // Thread is a chat in the thread format: what the harness stores in sync,
 // what a device keeps, and what a device chat's run returns.
 type Thread struct {
@@ -27,7 +32,8 @@ type Thread struct {
 	Flagged          bool          `json:"flagged,omitempty"` // the safeguards flagged the chat, which takes no more turns
 	// HiddenCount is how many leading messages an ask's thread holds as
 	// context without showing them.
-	HiddenCount int `json:"harnessHiddenCount,omitempty"`
+	HiddenCount   int `json:"harnessHiddenCount,omitempty"`
+	RecordVersion int `json:"recordVersion,omitempty"`
 }
 
 // Message is one turn of a chat. Its pointer fields are absent unless set.

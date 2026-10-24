@@ -2193,7 +2193,7 @@ components:
         including members this document does not list, and sends them back
         unchanged.
       type: object
-      required: [id, title, titleState, model, presetId, pinned, webSearchEnabled, messages]
+      required: [id, title, titleState, model, presetId, pinned, webSearchEnabled, messages, recordVersion]
       properties:
         id: {type: string}
         title: {type: string}
@@ -2218,6 +2218,7 @@ components:
         contextUsage: {$ref: "#/components/schemas/ContextUsage"}
         flagged: {type: boolean}
         harnessHiddenCount: {type: integer, description: "How many leading messages an ask's chat holds as context without showing them."}
+        recordVersion: {type: integer, description: "The format the harness wrote the record in. Records older clients kept have none, and are still read."}
 
     MessageRecord:
       type: object
