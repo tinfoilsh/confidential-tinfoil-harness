@@ -322,7 +322,9 @@ func TestStoredRowsNameTheirFormat(t *testing.T) {
 // one older clients wrote, naming none, through the legacy reader. One naming
 // another format is refused, as is one in the current format holding a
 // member that format does not have, or leaving out or nulling one it
-// requires. A list leaves out what it cannot read.
+// requires. A list or a backup leaves out what it cannot read; a project's
+// turns read every document, so a project with one it cannot read is
+// refused.
 func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	p := &principal{ID: "alice"}
@@ -392,5 +394,20 @@ func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 	rows.rows[rowMapKey(p, "project", "later")] = storedRow{ID: "later", ETag: "1", Data: raw(object{"name": "Trip", "recordVersion": recordVersion + 1})}
 	if w := postRoute(h, "/v1/projects/get", object{"key": key.base64(), "id": "later"}, "alice"); !refused(w) {
 		t.Errorf("opening a project in a later format: HTTP %d %s", w.Code, w.Body)
+	}
+	trip := "trip"
+	rows.rows[rowMapKey(p, "project", trip)] = storedRow{ID: trip, ETag: "1", Data: raw(object{"name": "Trip"})}
+	for doc, data := range map[string]object{"notes": {"filename": "notes.md"}, "later": {"filename": "later.md", "recordVersion": recordVersion + 1}} {
+		rows.rows[rowMapKey(p, "project_document", trip+"/"+doc)] = storedRow{ID: trip + "/" + doc, ETag: "1", Data: raw(data), project: &trip, projectSet: true}
+	}
+	if w := postRoute(h, "/v1/projects/get", object{"key": key.base64(), "id": trip}, "alice"); !refused(w) {
+		t.Errorf("opening a project with a document in a later format: HTTP %d %s", w.Code, w.Body)
+	}
+	w := archiveRoute(h, "/v1/export", "alice", optionsPart(object{"format": "native", "key": key.base64()}))
+	files, _ := unzipped(t, w.Body.Bytes())
+	var manifest backupManifest
+	json.Unmarshal(files[manifestPath], &manifest)
+	if left := (backupOmission{Kind: "project_document", SourceID: "later", ParentSourceID: trip, Category: "invalid", Reason: "row_unreadable"}); w.Code != http.StatusOK || manifest.Counts.ProjectDocuments != 1 || !slices.Contains(manifest.Omissions, left) {
+		t.Errorf("backing up a project with a document in a later format: HTTP %d %+v", w.Code, manifest)
 	}
 }

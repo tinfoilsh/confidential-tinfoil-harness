@@ -434,7 +434,7 @@ func (h *harness) getProject(ctx context.Context, p *principal, key contentKey, 
 	if err != nil {
 		return nil, err
 	}
-	docs, err := h.projectDocuments(ctx, p, key, in.ID)
+	docs, err := h.projectDocuments(ctx, p, key, in.ID, refuseUnreadable)
 	if err != nil {
 		return nil, err
 	}

@@ -489,7 +489,10 @@ func (h *harness) writeBackup(ctx context.Context, p *principal, key *contentKey
 			}
 			b.manifest.Counts.Projects++
 			projects[project.ID] = true
-			docs, err := h.projectDocuments(ctx, p, *key, project.ID)
+			docs, err := h.projectDocuments(ctx, p, *key, project.ID, func(row string, _ error) error {
+				b.omit(backupOmission{Kind: "project_document", SourceID: strings.TrimPrefix(row, project.ID+"/"), ParentSourceID: project.ID, Category: "invalid", Reason: "row_unreadable"})
+				return nil
+			})
 			if err != nil {
 				return err
 			}
@@ -950,7 +953,8 @@ func (h *harness) claudeProjects(ctx context.Context, p *principal, key contentK
 	projects := []claudeProject{}
 	total := 0
 	err := h.eachRow(ctx, p, key, "project", "", func(row *storedRow) error {
-		docs, err := h.projectDocuments(ctx, p, key, row.ID)
+		// A document this harness cannot read is left out, as a chat is.
+		docs, err := h.projectDocuments(ctx, p, key, row.ID, func(string, error) error { return nil })
 		if err != nil {
 			return err
 		}

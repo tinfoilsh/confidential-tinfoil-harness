@@ -91,6 +91,11 @@ func (h *harness) eachRow(ctx context.Context, p *principal, key contentKey, sco
 	return h.eachRowOrUnreadable(ctx, p, key, scope, project, visit, func(string) {})
 }
 
+// refuseUnreadable fails a read that would leave out a row this harness
+// cannot read, as a turn of a project does: it reads every document, and one
+// left out would change what the model is told.
+func refuseUnreadable(_ string, err error) error { return err }
+
 // Chats
 
 func (h *harness) loadThread(ctx context.Context, p *principal, key contentKey, id string) (*threadRow, error) {
@@ -348,8 +353,10 @@ func (h *harness) removeAllProjects(ctx context.Context, p *principal, key conte
 	return result.Deleted, err
 }
 
-// projectDocuments are every document of a project.
-func (h *harness) projectDocuments(ctx context.Context, p *principal, key contentKey, id string) ([]ProjectDocument, error) {
+// projectDocuments are every document of a project. A document this harness
+// cannot read is passed to unreadable, which fails the read by returning an
+// error or leaves the document out by returning nil.
+func (h *harness) projectDocuments(ctx context.Context, p *principal, key contentKey, id string, unreadable func(row string, err error) error) ([]ProjectDocument, error) {
 	list, cursor, index := []ProjectDocument{}, "", map[string]int{}
 	for {
 		page, err := h.storeRows.list(ctx, p, key, "project_document", cursor, id, 100)
@@ -359,7 +366,10 @@ func (h *harness) projectDocuments(ctx context.Context, p *principal, key conten
 		for _, row := range page.Rows {
 			doc, err := readProjectDocument(&row, id)
 			if err != nil {
-				return nil, err
+				if err := unreadable(row.ID, err); err != nil {
+					return nil, err
+				}
+				continue
 			}
 			// Unfiltered pages can repeat a row that changed while listing;
 			// the later copy is the newer one.

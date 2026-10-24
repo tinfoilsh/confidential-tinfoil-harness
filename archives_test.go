@@ -328,7 +328,7 @@ func TestNativeBackupRoundTrips(t *testing.T) {
 		t.Fatalf("the chat lost its project: %v", chat.ProjectID)
 	}
 	restoredProject := mustRead(readProject(&projects.Rows[0]))
-	docs, _ := restored.projectDocuments(context.Background(), alice, key, restoredProject.ID)
+	docs, _ := restored.projectDocuments(context.Background(), alice, key, restoredProject.ID, refuseUnreadable)
 	if restoredProject.Name != "Research" || restoredProject.SystemInstructions != "Cite sources" || valueOr(restoredProject.Color, "") != "teal" || len(docs) != 1 || docs[0].Content != "Paper text" || docs[0].Filename != "paper.md" {
 		t.Fatalf("project: %+v %+v", restoredProject, docs)
 	}
@@ -486,7 +486,7 @@ func TestWebAppBackupsRestore(t *testing.T) {
 				t.Fatalf("the old timeline was not read: %v", names)
 			}
 			projects, _ := rows.list(context.Background(), &principal{ID: "alice"}, key, "project", "", "", 0)
-			docs, _ := h.projectDocuments(context.Background(), &principal{ID: "alice"}, key, *chat.ProjectID)
+			docs, _ := h.projectDocuments(context.Background(), &principal{ID: "alice"}, key, *chat.ProjectID, refuseUnreadable)
 			if len(projects.Rows) != 1 || mustRead(readProject(&projects.Rows[0])).Name != "Research" || len(docs) != 1 || docs[0].Content != "Extracted paper text" {
 				t.Fatalf("project: %v %v", projects.Rows, docs)
 			}
@@ -669,7 +669,7 @@ func TestClaudeProjectsRequireTheCloud(t *testing.T) {
 		t.Fatalf("projects: %d stored, done %+v", len(stored.Rows), result.done)
 	}
 	project := mustRead(readProject(&stored.Rows[0]))
-	docs, _ := h.projectDocuments(context.Background(), &principal{ID: "alice"}, key, project.ID)
+	docs, _ := h.projectDocuments(context.Background(), &principal{ID: "alice"}, key, project.ID, refuseUnreadable)
 	if project.Name != "Release Notes" || project.SystemInstructions != "Write concise release notes." || len(docs) != 1 || docs[0].Filename != "style-guide.md" || docs[0].Content != "# Style guide" {
 		t.Fatalf("project: %+v %+v", project, docs)
 	}
