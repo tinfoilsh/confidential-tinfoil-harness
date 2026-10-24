@@ -251,7 +251,7 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	}
 	r.row, r.running = row, true
 	// Framed under the lock, so no queue change reaches the run before them.
-	r.out.emit(runStarted{ThreadID: s.id, RunID: r.log.id, MessageID: r.out.replyID})
+	r.out.emit(runStarted{ThreadID: s.id, RunID: r.log.id, Instance: instanceID, MessageID: r.out.replyID})
 	r.out.emit(messagesSnapshot{Messages: shown.Messages, HasOlder: shown.HasOlder})
 	r.out.emit(stateSnapshotEvent{stateSnapshot{shown.threadSummary, queueItems(s), r.credential.Limit}})
 	r.out.mu.Lock()
