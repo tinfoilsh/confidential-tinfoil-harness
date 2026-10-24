@@ -36,6 +36,16 @@ info:
     harness adds. The harness's tests hold everything it sends to the closed
     form: it sends no member this document does not name.
 
+    The fixtures beside this document are runs the harness recorded, which
+    each client replays in its tests. A fixture's frames are a run's events
+    with their cursors. A client applies them in order, skipping any whose
+    cursor it has already applied for that run, and must then show what
+    expected names: each message's id and role, a question's content, and a
+    reply's timeline steps with their id, type, and whichever of content,
+    toolCallId, name, arguments, complete, result, progress and display they
+    have; the chat's title and titleState; and whether the run ended idle, or
+    with an error's code and action.
+
 servers:
   - url: https://chat-api.tinfoil.sh
 

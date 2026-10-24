@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -13,8 +12,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -123,39 +120,6 @@ func TestManagedModelRetriesARejectedChatTokenOnce(t *testing.T) {
 	}
 }
 
-// referenceCheck replays a run's events through the web client's harness
-// reducer, found in TINFOIL_WEBAPP or ../tinfoil-webapp with its node_modules.
-func referenceCheck(t *testing.T, events []event, expectedMessages any) {
-	t.Helper()
-	runReference(t, object{"events": events, "expectedMessages": expectedMessages})
-}
-
-// referenceViews reads attachments as the web client's chat view shows them.
-func referenceViews(t *testing.T, attachments, expectedViews any) {
-	t.Helper()
-	runReference(t, object{"events": []event{}, "expectedMessages": []any{}, "attachments": attachments, "expectedViews": expectedViews})
-}
-
-func runReference(t *testing.T, input object) {
-	t.Helper()
-	reference := cmp.Or(os.Getenv("TINFOIL_WEBAPP"), "../tinfoil-webapp")
-	if _, err := os.Stat(reference + "/node_modules/typescript"); err != nil {
-		t.Skip("reference webapp dependencies are not installed")
-	}
-	if _, err := os.Stat(reference + "/src/services/harness/reducer.ts"); err != nil {
-		t.Skip("reference webapp has no harness reducer")
-	}
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("Node is not installed")
-	}
-	cmd := exec.Command(node, "scripts/check-compatibility.cjs", reference)
-	cmd.Stdin = bytes.NewReader(raw(input))
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("reference validation: %v\n%s", err, output)
-	}
-}
 func TestSharedThreadUsesPublicTimelineAndAttachments(t *testing.T) {
 	result := obj(decodeValue(raw(sharedThreadView("share-id", raw(object{"title": "Shared", "createdAt": float64(1700000000000), "messages": []any{
 		object{"role": "assistant", "content": "answer", "timestamp": float64(1700000000000)},
@@ -301,16 +265,17 @@ func TestManagedToolLoopKeepsReasoningAndOneAssistantMessage(t *testing.T) {
 	obj(catalog.Models[0]["chatConfig"])["reasoningConfig"] = object{"reasoningHistoryPolicy": "tool-call-only"}
 	in := sendInput(key)
 	in["widgets"] = []any{"render_clock"}
-	events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice"))
+	w := postRoute(h, "/v1/threads/turn", in, "alice")
+	events := eventsIn(t, w)
 	if events[len(events)-1].Type != "RUN_FINISHED" {
 		t.Fatal(events[len(events)-1])
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
-	messages := readThreadRow(row).Messages
-	if len(messages) != 2 || len(messages[1].Timeline) != 3 {
+	stored := readThreadRow(row)
+	if len(stored.Messages) != 2 || len(stored.Messages[1].Timeline) != 3 {
 		t.Fatal("tool loop did not make one ordered assistant timeline")
 	}
-	referenceCheck(t, events, window(readThreadRow(row), "", 50).Messages)
+	conformance(t, "widget-tool-loop", "A reply that reasons, calls a widget, and answers after its result, all in one assistant message.", framesOf(t, w.Body.Bytes()), &stored.Thread)
 }
 func TestShutdownCommitsPartialOutput(t *testing.T) {
 	started := make(chan struct{})

@@ -2,6 +2,8 @@
 
 `protocol/openapi.yaml` is the contract with every client. A change to what a route accepts or returns, or to a run's events or error codes, changes it in the same commit, following the rules in its description. The tests check every request, response and event against it, so the harness cannot send a member it does not name.
 
+`protocol/fixtures` holds recorded runs that clients replay through their reducers. A change to what a run sends records them again in the same commit: `RECORD_FIXTURES=1 GOWORK=off go test ./...`.
+
 # Testing
 
 A test earns its place by failing on a plausible wrong implementation that no other test catches. Before adding or keeping one, name that bug. If the test still passes when the production code is replaced with a no-op or the obvious wrong branch, delete it.
@@ -30,4 +32,4 @@ Use these instead of building new fakes:
 ## Things that only fail in CI
 
 - Waiting on a fake's flush instead of on the harness: a cancel test that waited for the fake model to write its chunk failed every run with `-cpu=1`. Wait for the run log to contain the frame you need.
-- The reference checks in `compatibility_test.go` use the web client in `TINFOIL_WEBAPP` or `../tinfoil-webapp`, with its harness reducer and `node_modules`, and skip without it, as in CI. Keep each test's Go assertions before its skip.
+- A recorded run in `protocol/fixtures` whose frames can come in more than one order: the harness runs tool calls concurrently, so a run with two of them is not recorded. Check a new fixture with `-count=20 -cpu=1,4`.
