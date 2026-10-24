@@ -155,6 +155,10 @@ type pullItem struct {
 }
 
 // pull returns the rows it could open and the error for each it could not.
+// errRowNotFetched is a row sync could not fetch within its deadline twice
+// running. A later request may fetch it.
+var errRowNotFetched = apiErr(502, "UPSTREAM_REFUSED", "The sync service could not fetch the data in time")
+
 func (s *syncClient) pull(ctx context.Context, p *principal, key contentKey, scope string, ids []string) ([]storedRow, map[string]error, error) {
 	rows, failed := []storedRow{}, map[string]error{}
 	for start := 0; start < len(ids); start += pullBatch {
@@ -180,6 +184,8 @@ func (s *syncClient) pullBatch(ctx context.Context, p *principal, key contentKey
 			case item.Code == "NOT_FOUND":
 			case item.Code == "NETWORK" && retry: // sync could not fetch it within its deadline
 				again = append(again, item.ID)
+			case item.Code == "NETWORK":
+				failed[item.ID] = errRowNotFetched
 			default:
 				// The item has no status of its own; its code says what failed.
 				failed[item.ID] = downstreamError(0, raw(object{"code": item.Code, "key_id": item.KeyID}))

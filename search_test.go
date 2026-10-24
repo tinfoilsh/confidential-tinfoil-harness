@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"reflect"
@@ -104,7 +105,7 @@ func TestSearchReportsRebuildAndRefreshFailures(t *testing.T) {
 		wantCode   string
 		wantCalls  int
 	}{
-		{name: "failed rebuild", job: object{"status": "failed", "error": "embedding failed", "partial": true}, wantStatus: http.StatusBadGateway, wantCode: "UPSTREAM_REFUSED", wantCalls: 2},
+		{name: "failed rebuild", job: object{"status": "failed", "error": "embedding failed", "partial": true}, wantStatus: http.StatusBadGateway, wantCode: "SEARCH_INDEX_FAILED", wantCalls: 2},
 		{name: "failed refreshed query", job: object{"status": "completed"}, refreshErr: true, wantStatus: http.StatusConflict, wantCode: "KEY_MISMATCH", wantCalls: 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -133,6 +134,83 @@ func TestSearchReportsRebuildAndRefreshFailures(t *testing.T) {
 			}
 			if w.Code != tc.wantStatus || obj(got["error"])["code"] != tc.wantCode || got["results"] != nil || calls != tc.wantCalls {
 				t.Fatalf("search answered HTTP %d %s after %d sync requests", w.Code, w.Body.String(), calls)
+			}
+		})
+	}
+}
+
+// A search shows the chats it found in their order, and counts the ones that
+// match but cannot be opened instead of failing on them. A chat deleted since
+// it was indexed is neither. A chat sync could not fetch in time fails the
+// search, which may find it when run again.
+func TestSearchCountsTheChatsItCannotOpen(t *testing.T) {
+	stored := func(id string, version int) string {
+		return base64.StdEncoding.EncodeToString(raw(object{"id": id, "title": id, "titleState": "manual", "model": "auto", "presetId": nil, "pinned": false, "webSearchEnabled": true, "messages": []any{}, "recordVersion": version}))
+	}
+	for _, tc := range []struct {
+		name      string
+		slow      string
+		wantCode  int
+		wantFound []string
+	}{
+		{name: "every chat fetched", wantCode: http.StatusOK, wantFound: []string{"second", "first"}},
+		{name: "a chat not fetched in time", slow: "second", wantCode: http.StatusBadGateway},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _, key := testChatHarness(t, nil)
+			pulls := 0
+			h.syncAPI = &syncClient{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
+				var in object
+				json.NewDecoder(r.Body).Decode(&in)
+				if r.URL.Path == "/v1/search/query" {
+					results := []object{}
+					for _, id := range []string{"second", "gone", "sealed", "broken", "later", "first"} {
+						results = append(results, object{"id": id})
+					}
+					return syncTestResponse(http.StatusOK, object{"results": results})
+				}
+				pulls++
+				items := []object{}
+				for _, value := range arr(in["ids"]) {
+					switch id := str(value); id {
+					case tc.slow:
+						items = append(items, object{"id": id, "ok": false, "code": "NETWORK"})
+					case "gone":
+						items = append(items, object{"id": id, "ok": false, "code": "NOT_FOUND"})
+					case "sealed":
+						items = append(items, object{"id": id, "ok": false, "code": "UNKNOWN_KEY", "key_id": "retired"})
+					case "broken":
+						items = append(items, object{"id": id, "ok": false, "code": "BAD_REQUEST"})
+					case "later":
+						items = append(items, object{"id": id, "ok": true, "etag": "1", "plaintext": stored(id, recordVersion+1)})
+					default:
+						items = append(items, object{"id": id, "ok": true, "etag": "1", "plaintext": stored(id, recordVersion)})
+					}
+				}
+				// Sync answers in an order of its own.
+				slices.Reverse(items)
+				return syncTestResponse(http.StatusOK, object{"items": items})
+			})}}
+			h.storeRows = h.syncAPI
+			w := postRoute(h, "/v1/threads/search", object{"key": key.base64(), "query": "needle"}, "alice")
+			var got struct {
+				Results    []threadSummary `json:"results"`
+				Unreadable int             `json:"unreadable"`
+				Error      object          `json:"error"`
+			}
+			json.Unmarshal(w.Body.Bytes(), &got)
+			found := []string{}
+			for _, result := range got.Results {
+				found = append(found, result.ID)
+			}
+			if tc.slow != "" {
+				if w.Code != tc.wantCode || got.Error["code"] != "UPSTREAM_REFUSED" || got.Error["action"] != "retry" || pulls != 2 {
+					t.Fatalf("search answered HTTP %d %s after %d pulls", w.Code, w.Body, pulls)
+				}
+				return
+			}
+			if w.Code != tc.wantCode || !slices.Equal(found, tc.wantFound) || got.Unreadable != 3 || pulls != 1 {
+				t.Fatalf("search answered HTTP %d %s after %d pulls", w.Code, w.Body, pulls)
 			}
 		})
 	}

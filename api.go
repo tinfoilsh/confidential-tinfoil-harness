@@ -132,6 +132,7 @@ var errorActions = map[string]string{
 	"RUN_IN_FLIGHT":           actionReload,
 	"RUN_LOG_FULL":            actionStop,
 	"RUN_NOT_FOUND":           actionReload,
+	"SEARCH_INDEX_FAILED":     actionRetry,
 	"SYNC_OUTCOME_UNKNOWN":    actionRetry,
 	"TEMP_SPACE_BUSY":         actionRetry,
 	"THREAD_EXISTS":           actionStop,

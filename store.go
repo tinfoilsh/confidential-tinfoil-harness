@@ -209,6 +209,38 @@ func (h *harness) forkStored(ctx context.Context, p *principal, key contentKey, 
 	return h.syncAPI.callKey(ctx, p, "/v1/sync/fork", key, object{"source_id": source, "target_id": target, "message_count": count, "title": title, "created_at": timestamp(), "idempotency_key": uuid.NewString()}, nil)
 }
 
+// searchResults are the chats a search found, in its order, and how many of
+// them sync or this harness cannot open, which are left out. A chat deleted
+// since it was indexed is not a result. One sync could not fetch in time
+// fails the search, which may find it when run again.
+func (h *harness) searchResults(ctx context.Context, p *principal, key contentKey, ids []string) ([]*threadRow, int, error) {
+	rows, failed, err := h.storeRows.pull(ctx, p, key, "chat", ids)
+	if err != nil {
+		return nil, 0, err
+	}
+	pulled := map[string]*storedRow{}
+	for i := range rows {
+		pulled[rows[i].ID] = &rows[i]
+	}
+	found, unreadable := []*threadRow{}, 0
+	for _, id := range ids {
+		row, pulledRow := pulled[id]
+		switch err := failed[id]; {
+		case errors.Is(err, errRowNotFetched):
+			return nil, 0, err
+		case err != nil:
+			unreadable++
+		case pulledRow:
+			if thread, err := readThreadRow(row); err != nil {
+				unreadable++
+			} else {
+				found = append(found, thread)
+			}
+		}
+	}
+	return found, unreadable, nil
+}
+
 // searchChats finds the ids of a user's chats that match a query, and
 // whether sync must index them first.
 func (h *harness) searchChats(ctx context.Context, p *principal, key contentKey, query string, limit int) ([]string, bool, error) {
@@ -249,7 +281,7 @@ func (h *harness) reindexChats(ctx context.Context, p *principal, key contentKey
 		// A clean partial checkpoint resumes on the next request.
 		return job.Partial, nil
 	default:
-		return false, apiErr(http.StatusBadGateway, "UPSTREAM_REFUSED", "The search index could not be rebuilt")
+		return false, apiErr(http.StatusBadGateway, "SEARCH_INDEX_FAILED", "The search index could not be rebuilt")
 	}
 }
 
