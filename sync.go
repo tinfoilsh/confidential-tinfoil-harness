@@ -181,7 +181,8 @@ func (s *syncClient) pullBatch(ctx context.Context, p *principal, key contentKey
 			case item.Code == "NETWORK" && retry: // sync could not fetch it within its deadline
 				again = append(again, item.ID)
 			default:
-				failed[item.ID] = downstreamError(409, raw(object{"code": item.Code, "key_id": item.KeyID}))
+				// The item has no status of its own; its code says what failed.
+				failed[item.ID] = downstreamError(0, raw(object{"code": item.Code, "key_id": item.KeyID}))
 			}
 			continue
 		}

@@ -187,6 +187,8 @@ func TestListPullsInBatchesAndListsUnreadableRows(t *testing.T) {
 			case id == "row-7" && retried == 0:
 				retried++
 				items = append(items, object{"id": id, "ok": false, "code": "NETWORK"})
+			case id == "row-busy":
+				items = append(items, object{"id": id, "ok": false, "code": "BUSY"})
 			default:
 				items = append(items, object{"id": id, "ok": true, "etag": "1", "plaintext": base64.StdEncoding.EncodeToString(raw(object{"title": id}))})
 			}
@@ -209,6 +211,11 @@ func TestListPullsInBatchesAndListsUnreadableRows(t *testing.T) {
 	}
 	if _, err := client.load(context.Background(), &principal{ID: "alice", JWT: "jwt"}, randomKey(), "chat", "row-3"); asAPIError(err).Code != "KEY_MISMATCH" {
 		t.Fatalf("loading an unreadable row: %v", err)
+	}
+	// Sync answered for the row with a code the harness does not know, not
+	// with a refusal of the request, so loading it may be tried again.
+	if _, err := client.load(context.Background(), &principal{ID: "alice", JWT: "jwt"}, randomKey(), "chat", "row-busy"); asAPIError(err).Action != actionRetry || asAPIError(err).Status != 0 {
+		t.Fatalf("loading a row sync could not read: %+v", asAPIError(err))
 	}
 }
 
