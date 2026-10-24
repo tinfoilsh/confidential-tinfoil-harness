@@ -56,6 +56,8 @@ func TestUpstreamRefusalsKeepTheirMeaning(t *testing.T) {
 		{"rejected credential", `{"error":{"message":"Incorrect API key provided.","type":"invalid_request_error","code":"invalid_api_key"}}`, 401, 401, "UNAUTHENTICATED", "Authentication is required", "", "reauthenticate"},
 		{"sync row missing", `{"ok":false,"code":"NOT_FOUND"}`, 404, 404, "THREAD_NOT_FOUND", "The requested data was not found", "", "stop"},
 		{"sync revision", `{"ok":false,"code":"STALE_BLOB"}`, 412, 409, "REVISION_CONFLICT", "The stored row changed", "", "reload"},
+		{"refusal without a message", `{"error":{"type":"invalid_request_error"}}`, 400, 502, "UPSTREAM_REFUSED", "A downstream service refused the request", "", "stop"},
+		{"sync refusal", `{"ok":false,"code":"BAD_REQUEST"}`, 400, 502, "UPSTREAM_REFUSED", "A downstream service refused the request", "", "stop"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := downstreamError(tc.status, []byte(tc.body))

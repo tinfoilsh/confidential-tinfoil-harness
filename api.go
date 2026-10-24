@@ -409,6 +409,7 @@ func downstreamError(status int, body []byte) *apiError {
 			e.ResetsAt = firstString(in["resetsAt"], in["resets_at"])
 			e.RetryAfter = integer(in["retryAfter"])
 		}
+		refusedAsSent(e, status)
 	}
 	return e
 }

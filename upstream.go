@@ -70,8 +70,9 @@ func openAIRefusal(status int, body []byte) *apiError {
 		e = apiErr(413, "CONTEXT_TOO_LARGE", firstString(message, "The conversation exceeds the model's context window"))
 	case (status/100 == 4 || strings.HasPrefix(code, "document_")) && message != "":
 		// Document failures carry fixed messages that describe nothing in the file.
-		e = apiErr(502, "UPSTREAM_REFUSED", message).withAction(actionStop)
+		e = apiErr(502, "UPSTREAM_REFUSED", message)
 	}
+	refusedAsSent(e, status)
 	e.Status = status
 	if strings.HasPrefix(code, "document_") {
 		e.Upstream = code
@@ -82,6 +83,15 @@ func openAIRefusal(status int, body []byte) *apiError {
 		}
 	}
 	return e
+}
+
+// refusedAsSent has a client stop resending a request a downstream service
+// refused with a 4xx it maps to nothing more specific, since sending it
+// unchanged cannot succeed.
+func refusedAsSent(e *apiError, status int) {
+	if e.Code == "UPSTREAM_REFUSED" && status/100 == 4 {
+		e.Action = actionStop
+	}
 }
 
 // streamError maps an error event inside an accepted stream, whose type stands
