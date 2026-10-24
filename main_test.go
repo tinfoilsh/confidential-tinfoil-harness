@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -33,6 +34,14 @@ func TestOutgrowingTheLogStopsTheRun(t *testing.T) {
 	want := asAPIError(errTooLong)
 	if last := events[len(events)-1]; last.Type != "RUN_ERROR" || last.Code != "RUN_LOG_FULL" || last.Code != want.Code || last.Message != want.Message {
 		t.Fatalf("the run ended with %+v, not %+v", last, want)
+	}
+	// A client that applied that error and follows again is sent it alone,
+	// under the same cursor.
+	frames, _, _ := rn.log.read(0)
+	again := httptest.NewRecorder()
+	follow(again, httptest.NewRequest("POST", "/v1/threads/follow", nil), rn, len(frames))
+	if body := again.Body.String(); !strings.HasPrefix(body, "id: "+strconv.Itoa(len(frames))+"\ndata: {\"type\":\"RUN_ERROR\"") || strings.Count(body, "data: ") != 1 {
+		t.Fatalf("following after the error sent %.200s", body)
 	}
 }
 

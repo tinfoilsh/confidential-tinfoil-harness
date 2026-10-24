@@ -113,8 +113,14 @@ func (s *stream) frame(e runEvent, at string) {
 // is sent every frame.
 func follow(w http.ResponseWriter, r *http.Request, rn *run, after int) {
 	from := 0
-	if sent, _, _ := rn.log.read(0); after >= 0 && after < len(sent) {
+	switch sent, _, closed := rn.log.read(0); {
+	case after >= 0 && after < len(sent):
 		from = after + 1
+	// A log that failed ends its streams with the error, under the cursor
+	// after its last frame. A client that applied that error is sent it
+	// again, which ends this stream too.
+	case after == len(sent) && closed != nil && closed != errDone:
+		from = after
 	}
 	flush := http.NewResponseController(w)
 	heartbeat := time.NewTicker(15 * time.Second)
