@@ -41,7 +41,7 @@ func TestAReplyRecordsWhenItsStepsRan(t *testing.T) {
 }
 
 func TestOldRepliesKeepWhenTheirStepsRan(t *testing.T) {
-	thread := readThread("chat", raw(object{"title": "Trip", "messages": []any{
+	thread := mustRead(readThread("chat", raw(object{"title": "Trip", "messages": []any{
 		object{"id": "u", "role": "user", "content": "plan"},
 		object{"id": "a", "role": "assistant", "content": "Go", "timeline": []any{
 			object{"type": "thinking", "id": "t", "content": "Plan", "isThinking": false, "duration": 2.5, "startedAt": 1000, "endedAt": 3500},
@@ -53,7 +53,7 @@ func TestOldRepliesKeepWhenTheirStepsRan(t *testing.T) {
 			object{"type": "content", "id": "c", "content": "Go"},
 		}},
 		object{"id": "b", "role": "assistant", "content": "Sure", "thoughts": "Think", "thinkingDuration": 1.25},
-	}}))
+	}})))
 	type step struct {
 		ID                           string
 		StartedAt, EndedAt, Duration float64

@@ -388,6 +388,14 @@ func postRoute(h *harness, path string, in object, user string) *httptest.Respon
 	return w
 }
 
+// mustRead is what a reader read from a record a test knows is readable.
+func mustRead[T any](v T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return v
+}
+
 // requestOf is a request a route would decode from in.
 func requestOf[T any](in object) *T {
 	request := new(T)
@@ -474,7 +482,7 @@ func TestManagedTurnStoresV2AndKeepsKeyOutOfEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	chat := readThreadRow(row)
+	chat := mustRead(readThreadRow(row))
 	if chat.ActiveRun != nil || len(chat.Messages) != 2 {
 		t.Fatalf("not committed: %s", row.Data)
 	}
@@ -498,7 +506,7 @@ func TestFirstTurnUsesProjectAndPreset(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if chat := readThreadRow(row); valueOr(chat.ProjectID, "") != "project-1" || valueOr(chat.PresetID, "") != "builtin:tutor" {
+	if chat := mustRead(readThreadRow(row)); valueOr(chat.ProjectID, "") != "project-1" || valueOr(chat.PresetID, "") != "builtin:tutor" {
 		t.Fatalf("first turn lost selections: %s", row.Data)
 	}
 	input = sendInput(key)
@@ -600,7 +608,7 @@ func TestNewChatsStartWithTheDefaultPromptPreset(t *testing.T) {
 		t.Helper()
 		events := finishedRun(t, h, "/v1/threads/turn", in)
 		row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
-		return readThreadRow(row).PresetID, <-systems
+		return mustRead(readThreadRow(row)).PresetID, <-systems
 	}
 	if preset, system := turn(sendInput(key)); valueOr(preset, "") != "user:pirate" || system != "Answer like a pirate." {
 		t.Fatalf("a new chat started with preset %v and system prompt %q", preset, system)
@@ -663,7 +671,7 @@ func TestDeletingAMessageRemovesOnlyThatMessage(t *testing.T) {
 		t.Fatalf("after deleting the second question the chat holds %q", got)
 	}
 	row, _ := rows.load(context.Background(), p, key, "chat", "chat-1")
-	messages := readThreadRow(row).Messages
+	messages := mustRead(readThreadRow(row)).Messages
 	if len(messages) != 2 || messages[0].Content != "one" || messages[1].Content != "four" {
 		t.Fatalf("stored messages: %+v", messages)
 	}
@@ -720,7 +728,7 @@ func TestADeadRunNeverLocksItsChat(t *testing.T) {
 		edit["kind"], edit["messageId"], edit["content"] = "edit", "m1", "look again"
 		finishedRun(t, h, "/v1/threads/turn", edit)
 		row, _ := rows.load(context.Background(), p, key, "chat", id)
-		if chat := readThreadRow(row); chat.ActiveRun != nil || len(chat.Messages) != 2 || chat.Messages[0].Content != "look again" {
+		if chat := mustRead(readThreadRow(row)); chat.ActiveRun != nil || len(chat.Messages) != 2 || chat.Messages[0].Content != "look again" {
 			t.Fatalf("%s: the turn stored %s", id, row.Data)
 		}
 		finishedRun(t, h, "/v1/threads/turn", continueInput(key, id))
@@ -818,7 +826,7 @@ func TestAnEditKeepsTheTextAndQuoteItOmits(t *testing.T) {
 		}
 		finishedRun(t, h, "/v1/threads/turn", in)
 		row, _ := rows.load(context.Background(), p, key, "chat", "chat-1")
-		messages := readThreadRow(row).Messages
+		messages := mustRead(readThreadRow(row)).Messages
 		if len(messages) != 4 || messages[2].Content != tc.stored || messages[2].Quote != tc.quoted || messages[3].Content != "New answer" {
 			t.Fatalf("an edit of %v quoting %v stored %+v", tc.content, tc.quote, messages)
 		}
@@ -886,7 +894,7 @@ func TestContinueExtendsTheStoredReplyItNames(t *testing.T) {
 		t.Fatalf("the run committed %v", replies)
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", "chat-1")
-	messages := readThreadRow(row).Messages
+	messages := mustRead(readThreadRow(row)).Messages
 	reply := messages[len(messages)-1]
 	want := []Block{{ID: "t1", Type: "thinking", Content: "rhyme"}, {ID: "c1", Type: "content", Content: "Roses are red, violets are blue."}}
 	if len(messages) != 2 || reply.ID != "a1" || reply.Content != "Roses are red, violets are blue." || !reflect.DeepEqual(reply.Timeline, want) ||
@@ -971,7 +979,7 @@ func TestAContinuedReplyKeepsItsCitations(t *testing.T) {
 	obj(in["options"])["webSearch"] = true
 	finishedRun(t, h, "/v1/threads/turn", in)
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", "chat-1")
-	reply := readThreadRow(row).Messages[1]
+	reply := mustRead(readThreadRow(row)).Messages[1]
 	text := "See [A](https://a.test/1). Also [B](https://b.test)."
 	start := strings.Index(text, "[B]") + 1
 	want := decodeValue(raw([]any{cited, object{"type": "url_citation", "url_citation": object{"url": "https://b.test", "title": "B", "start_index": start, "end_index": start + 1}}}))
@@ -1059,7 +1067,7 @@ func TestCancelCommitsPartialAndLeavesQueue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	messages := readThreadRow(row).Messages
+	messages := mustRead(readThreadRow(row)).Messages
 	if len(messages) < 2 {
 		t.Fatal("partial assistant lost")
 	}
@@ -1130,7 +1138,7 @@ func prioritySend(t *testing.T, when string) {
 	t.Cleanup(release)
 	if when == whileCommitting {
 		rows.refuse = func(row *storedRow) error {
-			if chat := readThreadRow(row); len(chat.Messages) == 2 && chat.ActiveRun == nil {
+			if chat := mustRead(readThreadRow(row)); len(chat.Messages) == 2 && chat.ActiveRun == nil {
 				once.Do(func() {
 					close(committing)
 					<-commit
@@ -1184,7 +1192,7 @@ func TestCASReappliesPatchToTheChangedRow(t *testing.T) {
 		t.Fatal("patch lost")
 	}
 	row, _ := rows.load(context.Background(), p, key, "chat", "existing")
-	if chat := readThreadRow(row); chat.Title != "manual" || len(chat.Messages) != 1 || chat.Messages[0].ID != "concurrent" {
+	if chat := mustRead(readThreadRow(row)); chat.Title != "manual" || len(chat.Messages) != 1 || chat.Messages[0].ID != "concurrent" {
 		t.Fatalf("the patch overwrote the concurrent change: %v", row.Data)
 	}
 }
@@ -1695,7 +1703,7 @@ func TestReasoningPrecedesTheAnswerItArrivesWith(t *testing.T) {
 		t.Fatalf("streamed %v", order)
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
-	timeline := readThreadRow(row).Messages[1].Timeline
+	timeline := mustRead(readThreadRow(row)).Messages[1].Timeline
 	if len(timeline) != 2 || timeline[0].Type != "thinking" || timeline[1].Type != "content" {
 		t.Fatalf("stored timeline %+v", timeline)
 	}
@@ -1735,7 +1743,7 @@ func TestAModelChunkOverAMebibyteIsRead(t *testing.T) {
 	})
 	events := finishedRun(t, h, "/v1/threads/turn", sendInput(key))
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
-	if readThreadRow(row).Messages[1].Content != answer {
+	if mustRead(readThreadRow(row)).Messages[1].Content != answer {
 		t.Fatal("the large chunk was not read whole")
 	}
 }
@@ -1920,7 +1928,7 @@ func TestAnswersAnnotateTheSourcesTheyCite(t *testing.T) {
 		return map[string]any{"type": "url_citation", "url_citation": map[string]any{"url": url, "title": title, "start_index": float64(start), "end_index": float64(start + len(label))}}
 	}
 	want := []any{cite("https://a.test/1/", "A", "A"), cite("https://b.test", "https://b.test", "b")}
-	if got := decodeValue(raw(readThreadRow(row).Messages[1].Annotations)); !reflect.DeepEqual(got, any(want)) {
+	if got := decodeValue(raw(mustRead(readThreadRow(row)).Messages[1].Annotations)); !reflect.DeepEqual(got, any(want)) {
 		t.Fatalf("stored annotations %v", got)
 	}
 	// Clients receive them with the run's end and with the stored chat.
@@ -1950,7 +1958,7 @@ func TestCutModelStreamDoesNotCompleteItsToolCall(t *testing.T) {
 		}
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
-	block := readThreadRow(row).Messages[1].Timeline[0]
+	block := mustRead(readThreadRow(row)).Messages[1].Timeline[0]
 	if block.Arguments != `{"query":"ca` || block.Complete {
 		t.Fatalf("truncated arguments stored as complete: %+v", block)
 	}

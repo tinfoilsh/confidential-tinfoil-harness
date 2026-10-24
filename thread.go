@@ -7,8 +7,7 @@ import (
 )
 
 // recordVersion is the format of the rows and device records this harness
-// writes. Rows older clients wrote have none; all are read by the legacy
-// reader, and a later format branches on this.
+// writes. A change to what they hold changes it.
 const recordVersion = 1
 
 // Thread is a chat in the thread format: what the harness stores in sync,

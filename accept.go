@@ -142,7 +142,11 @@ func (h *harness) admit(ctx context.Context, p *principal, credential inferenceC
 	var source *Thread
 	if in.Kind == "ask" {
 		if local {
-			source = new(readDeviceThread(id, in.Thread))
+			t, err := readDeviceThread(id, in.Thread)
+			if err != nil {
+				return err
+			}
+			source = &t
 		} else {
 			row, err := h.loadThread(ctx, p, key, id)
 			if err != nil {
@@ -170,7 +174,11 @@ func (h *harness) admit(ctx context.Context, p *principal, credential inferenceC
 	switch {
 	case !local || source != nil:
 	case in.Thread != nil:
-		seed = &threadRow{Thread: readDeviceThread(id, in.Thread)}
+		t, err := readDeviceThread(id, in.Thread)
+		if err != nil {
+			return err
+		}
+		seed = &threadRow{Thread: t}
 		if seed.LastRequestID == r.nonce {
 			return errAlreadyApplied
 		}

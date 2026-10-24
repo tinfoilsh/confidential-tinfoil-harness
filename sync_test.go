@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"slices"
 	"strconv"
@@ -204,7 +205,7 @@ func TestListPullsInBatchesAndListsUnreadableRows(t *testing.T) {
 	}
 	titles := []string{}
 	for _, row := range page.Rows {
-		titles = append(titles, readThreadRow(&row).Title)
+		titles = append(titles, mustRead(readThreadRow(&row)).Title)
 	}
 	if len(page.Rows) != pullBatch+4 || !slices.Contains(titles, "row-7") || slices.Contains(titles, "row-3") || !slices.Equal(page.Unreadable, []string{"row-3"}) {
 		t.Fatalf("rows %v, unreadable %v", titles, page.Unreadable)
@@ -314,5 +315,73 @@ func TestStoredRowsNameTheirFormat(t *testing.T) {
 		if !written[scope] {
 			t.Errorf("no %s row was stored", scope)
 		}
+	}
+}
+
+// A record is read by the format it names: the current one as written, and
+// one older clients wrote, naming none, through the legacy reader. One naming
+// another format is refused, as is one in the current format holding a
+// member that format does not have. A list leaves out what it cannot read.
+func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	p := &principal{ID: "alice"}
+	current := func(data object) {
+		data["recordVersion"], data["titleState"], data["model"], data["presetId"], data["pinned"], data["webSearchEnabled"] = recordVersion, "manual", "auto", nil, false, true
+		for _, message := range arr(data["messages"]) {
+			obj(message)["createdAt"] = "2026-01-01T00:00:00Z"
+		}
+	}
+	formats := map[string]func(object){
+		"legacy":  func(object) {},
+		"current": current,
+		"later":   func(data object) { data["recordVersion"] = recordVersion + 1 },
+		"extra": func(data object) {
+			current(data)
+			data["mood"] = "sunny"
+		},
+		"incomplete": func(data object) {
+			current(data)
+			delete(data, "webSearchEnabled")
+		},
+	}
+	readable := map[string]bool{"legacy": true, "current": true}
+	refused := func(w *httptest.ResponseRecorder) bool {
+		e := obj(obj(decodeValue(w.Body.Bytes()))["error"])
+		return w.Code == http.StatusConflict && e["code"] == "RECORD_UNSUPPORTED" && e["action"] == "stop"
+	}
+	for format, edit := range formats {
+		storedThread(rows, "alice", format)
+		row := rows.rows[rowMapKey(p, "chat", format)]
+		editRow(&row, edit)
+		rows.rows[rowMapKey(p, "chat", format)] = row
+		w := postRoute(h, "/v1/threads/get", object{"key": key.base64(), "id": format}, "alice")
+		if readable[format] && w.Code != http.StatusOK || !readable[format] && !refused(w) {
+			t.Errorf("opening the %s chat: HTTP %d %s", format, w.Code, w.Body)
+		}
+		thread := object{"title": "On my device", "messages": []any{object{"id": "m1", "role": "user", "content": "hi"}}}
+		edit(thread)
+		w = postRoute(h, "/v1/threads/turn", localInput(rowID(), thread), "alice")
+		if readable[format] && w.Code != http.StatusOK || !readable[format] && !refused(w) {
+			t.Errorf("a turn of the %s device chat: HTTP %d %s", format, w.Code, w.Body)
+		}
+	}
+	var list struct {
+		Threads []threadSummary `json:"threads"`
+	}
+	json.Unmarshal(postRoute(h, "/v1/threads/list", object{"key": key.base64()}, "alice").Body.Bytes(), &list)
+	listed := []string{}
+	for _, thread := range list.Threads {
+		listed = append(listed, thread.ID)
+	}
+	if slices.Sort(listed); !slices.Equal(listed, []string{"current", "legacy"}) {
+		t.Errorf("the list holds %v", listed)
+	}
+	rows.rows[rowMapKey(p, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: raw(object{"nickname": "Sam", "recordVersion": recordVersion + 1})}
+	if w := postRoute(h, "/v1/profile/get", object{"key": key.base64()}, "alice"); !refused(w) {
+		t.Errorf("opening a profile in a later format: HTTP %d %s", w.Code, w.Body)
+	}
+	rows.rows[rowMapKey(p, "project", "later")] = storedRow{ID: "later", ETag: "1", Data: raw(object{"name": "Trip", "recordVersion": recordVersion + 1})}
+	if w := postRoute(h, "/v1/projects/get", object{"key": key.base64(), "id": "later"}, "alice"); !refused(w) {
+		t.Errorf("opening a project in a later format: HTTP %d %s", w.Code, w.Body)
 	}
 }

@@ -37,7 +37,10 @@ func (h *harness) shareThread(ctx context.Context, p *principal, _ contentKey, i
 	id := in.ThreadID
 	var t Thread
 	if in.Local {
-		t = readDeviceThread(id, in.Thread)
+		var err error
+		if t, err = readDeviceThread(id, in.Thread); err != nil {
+			return nil, err
+		}
 	} else {
 		key, err := decodeContentKey(in.Key)
 		in.clearKey()
@@ -127,8 +130,11 @@ func (h *harness) shareStatus(ctx context.Context, p *principal, _ contentKey, i
 }
 
 // sharedThreadView is an opened share's payload, read like any old chat.
-func sharedThreadView(id string, payload []byte) sharedThread {
-	t := readThread(id, payload)
+func sharedThreadView(id string, payload []byte) (sharedThread, error) {
+	t, err := readThread(id, payload)
+	if err != nil {
+		return sharedThread{}, err
+	}
 	shared := sharedThread{Title: t.Title, CreatedAt: present(t.CreatedAt), Messages: []sharedMessage{}}
 	for i := range t.Messages {
 		m := &t.Messages[i]
@@ -138,7 +144,7 @@ func sharedThreadView(id string, payload []byte) sharedThread {
 		}
 		shared.Messages = append(shared.Messages, view)
 	}
-	return shared
+	return shared, nil
 }
 
 func (h *harness) openShare(ctx context.Context, _ *principal, _ contentKey, in *openShareRequest) (any, error) {
@@ -171,7 +177,7 @@ func (h *harness) openShare(ctx context.Context, _ *principal, _ contentKey, in 
 	if trimmed := bytes.TrimSpace(plain); len(trimmed) == 0 || trimmed[0] != '{' || json.Unmarshal(trimmed, &version) != nil || int(version.V) != 1 {
 		return nil, apiErr(400, "BAD_REQUEST", "Invalid shared thread")
 	}
-	return sharedThreadView(id, plain), nil
+	return sharedThreadView(id, plain)
 }
 
 // An export is one streamed ZIP archive of the chats a client keeps on its
@@ -385,7 +391,7 @@ func (f *exportForm) thread(i int) (Thread, error) {
 	}
 	var named idRequest
 	json.Unmarshal(data, &named)
-	return readDeviceThread(named.ID, data), nil
+	return readDeviceThread(named.ID, data)
 }
 
 // deviceImage is a device chat image's bytes: the original its client
@@ -473,7 +479,11 @@ func (h *harness) writeBackup(ctx context.Context, p *principal, key *contentKey
 	if key != nil {
 		projects := map[string]bool{}
 		err := h.eachRowOrUnreadable(ctx, p, *key, "project", "", func(row *storedRow) error {
-			project := readProject(row)
+			project, err := readProject(row)
+			if err != nil {
+				b.omit(backupOmission{Kind: "project", SourceID: row.ID, Category: "invalid", Reason: "row_unreadable"})
+				return nil
+			}
 			if err := b.addJSON("projects", backupEntityPath("projects", project.ID), project); err != nil {
 				return err
 			}
@@ -499,7 +509,12 @@ func (h *harness) writeBackup(ctx context.Context, p *principal, key *contentKey
 			return err
 		}
 		err = h.eachRowOrUnreadable(ctx, p, *key, "chat", "", func(row *storedRow) error {
-			t := readThreadRow(row).Thread
+			read, err := readThreadRow(row)
+			if err != nil {
+				b.omit(backupOmission{Kind: "cloud_chat", SourceID: row.ID, Category: "invalid", Reason: "row_unreadable"})
+				return nil
+			}
+			t := read.Thread
 			cloudChats[t.ID] = true
 			if project := valueOr(t.ProjectID, ""); project != "" {
 				if projects[project] {
@@ -700,7 +715,13 @@ func (h *harness) writeConversations(ctx context.Context, p *principal, key *con
 	}
 	if key != nil {
 		err := h.eachRow(ctx, p, *key, "chat", "", func(row *storedRow) error {
-			t := readThreadRow(row).Thread
+			// A chat this harness cannot read is left out, as one sync cannot
+			// open is.
+			read, err := readThreadRow(row)
+			if err != nil {
+				return nil
+			}
+			t := read.Thread
 			if device[t.ID] {
 				return nil
 			}
@@ -933,7 +954,10 @@ func (h *harness) claudeProjects(ctx context.Context, p *principal, key contentK
 		if err != nil {
 			return err
 		}
-		project := readProject(row)
+		project, err := readProject(row)
+		if err != nil {
+			return nil
+		}
 		exported := claudeProject{UUID: project.ID, Name: project.Name, Description: project.Description, PromptTemplate: project.SystemInstructions, CreatedAt: project.CreatedAt, UpdatedAt: project.UpdatedAt, Docs: []claudeDocument{}}
 		for _, doc := range docs {
 			exported.Docs = append(exported.Docs, claudeDocument{UUID: doc.ID, Filename: doc.Filename, Content: doc.Content, CreatedAt: doc.CreatedAt})

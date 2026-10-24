@@ -82,7 +82,10 @@ func (h *harness) speechText(ctx context.Context, p *principal, in *speechReques
 		var thread Thread
 		switch {
 		case in.Local:
-			thread = readDeviceThread(in.ThreadID, in.Thread)
+			var err error
+			if thread, err = readDeviceThread(in.ThreadID, in.Thread); err != nil {
+				return "", err
+			}
 		case p.Anonymous:
 			return "", errAnonymousCloud
 		default:

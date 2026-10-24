@@ -217,7 +217,7 @@ func TestAFinishingRunsWritesBlockNothing(t *testing.T) {
 	release := func() { released.Do(func() { close(commit) }) }
 	t.Cleanup(release)
 	rows.refuse = func(row *storedRow) error {
-		if chat := readThreadRow(row); len(chat.Messages) == 2 && chat.ActiveRun == nil {
+		if chat := mustRead(readThreadRow(row)); len(chat.Messages) == 2 && chat.ActiveRun == nil {
 			once.Do(func() {
 				close(committing)
 				<-commit
@@ -366,7 +366,7 @@ func TestARetriedRequestFollowsItsRunOrIsAlreadyApplied(t *testing.T) {
 		}
 	}
 	row, _ := rows.load(context.Background(), p, key, "chat", run.thread.id)
-	chat := readThreadRow(row)
+	chat := mustRead(readThreadRow(row))
 	if len(chat.Messages) != 2 || chat.Messages[0].ID != in["clientRequestId"] || chat.LastRequestID != in["clientRequestId"] {
 		t.Fatalf("the chat holds %s", row.Data)
 	}

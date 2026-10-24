@@ -98,7 +98,7 @@ func (h *harness) loadThread(ctx context.Context, p *principal, key contentKey, 
 	if err != nil {
 		return nil, err
 	}
-	return readThreadRow(row), nil
+	return readThreadRow(row)
 }
 
 func (h *harness) threadBatch(ctx context.Context, p *principal, key contentKey, ids []string) ([]*threadRow, error) {
@@ -111,9 +111,13 @@ func (h *harness) threadBatch(ctx context.Context, p *principal, key contentKey,
 			return nil, err
 		}
 	}
-	threads := make([]*threadRow, len(rows))
+	threads := make([]*threadRow, 0, len(rows))
 	for i := range rows {
-		threads[i] = readThreadRow(&rows[i])
+		// A chat this harness cannot read is left out, as one sync cannot
+		// open is.
+		if t, err := readThreadRow(&rows[i]); err == nil {
+			threads = append(threads, t)
+		}
 	}
 	return threads, nil
 }
@@ -128,9 +132,13 @@ func (h *harness) threadPage(ctx context.Context, p *principal, key contentKey, 
 	if err != nil {
 		return nil, "", err
 	}
-	threads := make([]*threadRow, len(page.Rows))
+	threads := make([]*threadRow, 0, len(page.Rows))
 	for i := range page.Rows {
-		threads[i] = readThreadRow(&page.Rows[i])
+		// A chat this harness cannot read is left out, as one sync cannot
+		// open is.
+		if t, err := readThreadRow(&page.Rows[i]); err == nil {
+			threads = append(threads, t)
+		}
 	}
 	return threads, page.Next, nil
 }
@@ -249,7 +257,10 @@ func (h *harness) loadProfile(ctx context.Context, p *principal, key contentKey)
 		}
 		return nil, err
 	}
-	profile := readProfile(row.Data)
+	profile, err := readProfile(row.Data)
+	if err != nil {
+		return nil, err
+	}
 	return &profile, nil
 }
 
@@ -258,7 +269,10 @@ func (h *harness) mutateProfile(ctx context.Context, p *principal, key contentKe
 	err := h.commitRow(ctx, p, key, "profile", "profile", true, func(row *storedRow, exists bool) error {
 		profile = storedProfile{}
 		if exists {
-			profile = readProfile(row.Data)
+			var err error
+			if profile, err = readProfile(row.Data); err != nil {
+				return err
+			}
 		}
 		before := raw(profile)
 		if err := change(&profile); err != nil {
@@ -287,7 +301,7 @@ func (h *harness) loadProject(ctx context.Context, p *principal, key contentKey,
 	if err != nil {
 		return Project{}, err
 	}
-	return readProject(row), nil
+	return readProject(row)
 }
 
 func (h *harness) projectPage(ctx context.Context, p *principal, key contentKey, cursor string, limit int) ([]Project, string, error) {
@@ -295,9 +309,13 @@ func (h *harness) projectPage(ctx context.Context, p *principal, key contentKey,
 	if err != nil {
 		return nil, "", err
 	}
-	projects := make([]Project, len(page.Rows))
+	projects := make([]Project, 0, len(page.Rows))
 	for i := range page.Rows {
-		projects[i] = readProject(&page.Rows[i])
+		// A project this harness cannot read is left out, as one sync cannot
+		// open is.
+		if project, err := readProject(&page.Rows[i]); err == nil {
+			projects = append(projects, project)
+		}
 	}
 	return projects, page.Next, nil
 }
@@ -308,7 +326,10 @@ func (h *harness) mutateProject(ctx context.Context, p *principal, key contentKe
 	err := h.commitRow(ctx, p, key, "project", id, create, func(row *storedRow, exists bool) error {
 		project = Project{ID: id, CreatedAt: timestamp()}
 		if exists {
-			project = readProject(row)
+			var err error
+			if project, err = readProject(row); err != nil {
+				return err
+			}
 		}
 		change(&project)
 		project.UpdatedAt = timestamp()
@@ -336,7 +357,10 @@ func (h *harness) projectDocuments(ctx context.Context, p *principal, key conten
 			return nil, err
 		}
 		for _, row := range page.Rows {
-			doc := readProjectDocument(&row, id)
+			doc, err := readProjectDocument(&row, id)
+			if err != nil {
+				return nil, err
+			}
 			// Unfiltered pages can repeat a row that changed while listing;
 			// the later copy is the newer one.
 			if i, ok := index[row.ID]; ok {
@@ -363,7 +387,11 @@ func (h *harness) createProjectDocument(ctx context.Context, p *principal, key c
 		row.project, row.projectSet = &doc.ProjectID, true
 		doc.CreatedAt = timestamp()
 		if exists {
-			doc.CreatedAt = readProjectDocument(row, doc.ProjectID).CreatedAt
+			stored, err := readProjectDocument(row, doc.ProjectID)
+			if err != nil {
+				return err
+			}
+			doc.CreatedAt = stored.CreatedAt
 		}
 		doc.UpdatedAt = timestamp()
 		row.Data, row.project, row.projectSet = raw(storedDocument{doc, recordVersion}), &doc.ProjectID, true

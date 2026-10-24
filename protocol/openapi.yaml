@@ -24,9 +24,14 @@ info:
 
     - Changes are additive. A route, member, event or error code is not
       removed, and does not change meaning, while a supported client uses it.
-    - A client ignores members, events and error codes it does not know.
+    - A client ignores members and events it does not know. It handles an
+      error code it does not know by the error's action.
     - A client keeps a ThreadRecord whole, members it does not know included,
       and sends it back as it was returned.
+    - A change to what a ThreadRecord or a stored row holds changes its
+      recordVersion. The harness reads a record in its current version as
+      written, reads one without a version as an older client kept it, and
+      refuses any other with RECORD_UNSUPPORTED.
     - The harness ignores request members it does not know, except in a
       profile patch, which refuses them.
     - Optional behavior is announced in the session's `features`. A client
@@ -1413,7 +1418,8 @@ components:
     ErrorAction:
       description: |
         What a client does about an error it has no handling of its own for.
-        A client treats an action it does not know as stop.
+        An error with an action the client does not know fails the request:
+        the client shows the error and offers nothing more.
 
         - reauthenticate: refresh the caller's identity and chat access, and
           send the request again once, without telling the user. Ask the user
@@ -1461,6 +1467,7 @@ components:
         - QUEUE_FULL
         - QUOTA_EXHAUSTED
         - RATE_LIMITED
+        - RECORD_UNSUPPORTED
         - REQUEST_TIMEOUT
         - REVISION_CONFLICT
         - RUN_IN_FLIGHT
@@ -2232,7 +2239,7 @@ components:
         contextUsage: {$ref: "#/components/schemas/ContextUsage"}
         flagged: {type: boolean}
         harnessHiddenCount: {type: integer, description: "How many leading messages an ask's chat holds as context without showing them."}
-        recordVersion: {type: integer, description: "The format the harness wrote the record in. Records older clients kept have none, and are still read."}
+        recordVersion: {type: integer, description: "The format the harness wrote the record in."}
 
     MessageRecord:
       type: object
@@ -2253,10 +2260,11 @@ components:
         isInterrupted: {type: boolean}
 
     ThreadInput:
-      description: A device chat as its client sends it, a ThreadRecord or one an older client kept. The harness reads the members it knows and keeps the rest.
+      description: "A device chat as its client sends it: a ThreadRecord the harness returned, sent back whole, or a record without a recordVersion that an older client kept or a client made for a new chat. The harness refuses a ThreadRecord with a member its version does not have."
       type: object
       additionalProperties: true
       properties:
+        recordVersion: {type: integer, description: "The version of the ThreadRecord the harness returned. Absent from a record an older client kept or a client made."}
         title: {type: string}
         titleState: {type: string}
         model: {type: string}

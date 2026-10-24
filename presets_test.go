@@ -50,7 +50,7 @@ func storedChat(t *testing.T, rows *memoryRows, key contentKey, id string) Threa
 	if err != nil {
 		t.Fatal(err)
 	}
-	return readThreadRow(row).Thread
+	return mustRead(readThreadRow(row)).Thread
 }
 
 func TestANewChatTakesItsPresetsSettingsUnlessItsTurnSetsThem(t *testing.T) {

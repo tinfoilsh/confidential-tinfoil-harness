@@ -117,7 +117,7 @@ func TestTransferDeletionPreservesRepliesStartedAfterTheCopy(t *testing.T) {
 		t.Fatalf("stale transfer: %d %s", w.Code, w.Body.String())
 	}
 	row, err := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", id)
-	if err != nil || len(readThreadRow(row).Messages) != 4 || readThreadRow(row).Messages[3].Content == "" {
+	if err != nil || len(mustRead(readThreadRow(row)).Messages) != 4 || mustRead(readThreadRow(row)).Messages[3].Content == "" {
 		t.Fatalf("reply lost: %v %+v", err, row)
 	}
 	deletion["revision"] = row.ETag
@@ -146,7 +146,7 @@ func TestFavoriteReturnsWithAChatMovedBackToTheCloud(t *testing.T) {
 	if w := postRoute(h, "/v1/threads/delete", object{"key": key.base64(), "id": id, "revision": copied.Revision}, "alice"); w.Code != 200 {
 		t.Fatalf("transfer: %s", w.Body.String())
 	}
-	if len(readProfile(rows.rows[profileKey].Data).PinnedChatIDs) != 0 {
+	if len(mustRead(readProfile(rows.rows[profileKey].Data)).PinnedChatIDs) != 0 {
 		t.Fatal("device chat left in the cloud favorites index")
 	}
 	if w := postRoute(h, "/v1/threads/import", object{"key": key.base64(), "threadId": id, "thread": copied.Thread}, "alice"); w.Code != 200 {
@@ -185,7 +185,7 @@ func TestImportStoresTheDeviceChatUnderItsID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	attachments := readThreadRow(row).Messages[0].Attachments
+	attachments := mustRead(readThreadRow(row)).Messages[0].Attachments
 	for _, a := range attachments {
 		if !enclaveAttachmentID.MatchString(a.ID) || a.StorageThreadID != "0000000000005_device" || a.Base64 != "" || a.TextContent != "" {
 			t.Fatalf("attachment not stored under the chat: %+v", a)

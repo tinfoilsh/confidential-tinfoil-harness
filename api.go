@@ -125,6 +125,7 @@ var errorActions = map[string]string{
 	"PROJECTS_REQUIRE_CLOUD":  actionStop,
 	"QUEUE_FULL":              actionRetry,
 	"QUOTA_EXHAUSTED":         actionWait,
+	"RECORD_UNSUPPORTED":      actionStop,
 	"RATE_LIMITED":            actionRetry,
 	"REQUEST_TIMEOUT":         actionRetry,
 	"REVISION_CONFLICT":       actionReload,
