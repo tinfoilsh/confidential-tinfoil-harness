@@ -321,7 +321,8 @@ func TestStoredRowsNameTheirFormat(t *testing.T) {
 // A record is read by the format it names: the current one as written, and
 // one older clients wrote, naming none, through the legacy reader. One naming
 // another format is refused, as is one in the current format holding a
-// member that format does not have. A list leaves out what it cannot read.
+// member that format does not have, or leaving out or nulling one it
+// requires. A list leaves out what it cannot read.
 func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	p := &principal{ID: "alice"}
@@ -343,6 +344,10 @@ func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 			current(data)
 			delete(data, "webSearchEnabled")
 		},
+		"nulled": func(data object) {
+			current(data)
+			data["messages"] = nil
+		},
 	}
 	readable := map[string]bool{"legacy": true, "current": true}
 	refused := func(w *httptest.ResponseRecorder) bool {
@@ -352,15 +357,19 @@ func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 	for format, edit := range formats {
 		storedThread(rows, "alice", format)
 		row := rows.rows[rowMapKey(p, "chat", format)]
-		editRow(&row, edit)
+		editRow(&row, func(data object) {
+			data["id"] = format
+			edit(data)
+		})
 		rows.rows[rowMapKey(p, "chat", format)] = row
 		w := postRoute(h, "/v1/threads/get", object{"key": key.base64(), "id": format}, "alice")
 		if readable[format] && w.Code != http.StatusOK || !readable[format] && !refused(w) {
 			t.Errorf("opening the %s chat: HTTP %d %s", format, w.Code, w.Body)
 		}
-		thread := object{"title": "On my device", "messages": []any{object{"id": "m1", "role": "user", "content": "hi"}}}
+		id := rowID()
+		thread := object{"id": id, "title": "On my device", "messages": []any{object{"id": "m1", "role": "user", "content": "hi"}}}
 		edit(thread)
-		w = postRoute(h, "/v1/threads/turn", localInput(rowID(), thread), "alice")
+		w = postRoute(h, "/v1/threads/turn", localInput(id, thread), "alice")
 		if readable[format] && w.Code != http.StatusOK || !readable[format] && !refused(w) {
 			t.Errorf("a turn of the %s device chat: HTTP %d %s", format, w.Code, w.Body)
 		}

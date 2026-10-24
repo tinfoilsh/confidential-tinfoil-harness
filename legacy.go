@@ -52,14 +52,16 @@ func readCurrent(data []byte, v any, required ...string) error {
 	return nil
 }
 
-// holds reports whether a JSON object has every one of the members.
+// holds reports whether a JSON object has every one of the members, each
+// set to a value other than null unless the format allows null for it.
 func holds(data []byte, members []string) bool {
 	var object map[string]json.RawMessage
 	if json.Unmarshal(data, &object) != nil {
 		return false
 	}
 	for _, member := range members {
-		if _, ok := object[member]; !ok {
+		value, ok := object[member]
+		if !ok || string(value) == "null" && !slices.Contains(nullableMembers, member) {
 			return false
 		}
 	}
@@ -70,11 +72,12 @@ func holds(data []byte, members []string) bool {
 // protocol/openapi.yaml names them. Sync files a chat's project apart from
 // it, and leaves projectId out of a fork outside a project.
 var (
-	currentChat     = []string{"title", "titleState", "model", "presetId", "pinned", "webSearchEnabled", "messages"}
+	currentChat     = []string{"id", "title", "titleState", "model", "presetId", "pinned", "webSearchEnabled", "messages"}
 	currentMessage  = []string{"id", "role", "createdAt", "content"}
 	currentProject  = []string{"id", "name", "description", "systemInstructions", "color"}
 	currentDocument = []string{"id", "projectId", "filename", "contentType", "sizeBytes"}
 	titleStates     = []string{"placeholder", "generated", "manual"}
+	nullableMembers = []string{"presetId", "color"}
 )
 
 // readCurrentThread reads a chat in the current format into v, whose
