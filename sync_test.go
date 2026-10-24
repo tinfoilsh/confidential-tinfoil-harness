@@ -387,10 +387,6 @@ func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 	if slices.Sort(listed); !slices.Equal(listed, []string{"current", "legacy"}) {
 		t.Errorf("the list holds %v", listed)
 	}
-	rows.rows[rowMapKey(p, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: raw(object{"nickname": "Sam", "recordVersion": recordVersion + 1})}
-	if w := postRoute(h, "/v1/profile/get", object{"key": key.base64()}, "alice"); !refused(w) {
-		t.Errorf("opening a profile in a later format: HTTP %d %s", w.Code, w.Body)
-	}
 	rows.rows[rowMapKey(p, "project", "later")] = storedRow{ID: "later", ETag: "1", Data: raw(object{"name": "Trip", "recordVersion": recordVersion + 1})}
 	if w := postRoute(h, "/v1/projects/get", object{"key": key.base64(), "id": "later"}, "alice"); !refused(w) {
 		t.Errorf("opening a project in a later format: HTTP %d %s", w.Code, w.Body)
@@ -403,11 +399,22 @@ func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 	if w := postRoute(h, "/v1/projects/get", object{"key": key.base64(), "id": trip}, "alice"); !refused(w) {
 		t.Errorf("opening a project with a document in a later format: HTTP %d %s", w.Code, w.Body)
 	}
+	storedThread(rows, "alice", "trip-chat")
+	row := rows.rows[rowMapKey(p, "chat", "trip-chat")]
+	row.project, row.projectSet = &trip, true
+	rows.rows[rowMapKey(p, "chat", "trip-chat")] = row
+	if w := postRoute(h, "/v1/threads/turn", continueInput(key, "trip-chat"), "alice"); !refused(w) {
+		t.Errorf("a turn in a project with a document in a later format: HTTP %d %s", w.Code, w.Body)
+	}
 	w := archiveRoute(h, "/v1/export", "alice", optionsPart(object{"format": "native", "key": key.base64()}))
 	files, _ := unzipped(t, w.Body.Bytes())
 	var manifest backupManifest
 	json.Unmarshal(files[manifestPath], &manifest)
 	if left := (backupOmission{Kind: "project_document", SourceID: "later", ParentSourceID: trip, Category: "invalid", Reason: "row_unreadable"}); w.Code != http.StatusOK || manifest.Counts.ProjectDocuments != 1 || !slices.Contains(manifest.Omissions, left) {
 		t.Errorf("backing up a project with a document in a later format: HTTP %d %+v", w.Code, manifest)
+	}
+	rows.rows[rowMapKey(p, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: raw(object{"nickname": "Sam", "recordVersion": recordVersion + 1})}
+	if w := postRoute(h, "/v1/profile/get", object{"key": key.base64()}, "alice"); !refused(w) {
+		t.Errorf("opening a profile in a later format: HTTP %d %s", w.Code, w.Body)
 	}
 }
