@@ -44,7 +44,8 @@ info:
     reply's timeline steps with their id, type, and whichever of content,
     toolCallId, name, arguments, complete, result, progress and display they
     have; the chat's title and titleState; and whether the run ended idle, or
-    with an error's code and action.
+    with an error: every member of its RUN_ERROR but type, timestamp,
+    threadId, runId and metadata.
 
 servers:
   - url: https://chat-api.tinfoil.sh

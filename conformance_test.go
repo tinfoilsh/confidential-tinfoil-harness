@@ -39,16 +39,12 @@ type runFixture struct {
 // fixtureChat is the chat a client shows after a run: its messages with the
 // members a client's reducer builds, its title, and how the run ended.
 type fixtureChat struct {
-	Messages   []object     `json:"messages"`
-	Title      string       `json:"title"`
-	TitleState string       `json:"titleState"`
-	Status     string       `json:"status"`
-	Error      *fixtureFail `json:"error,omitempty"`
-}
-
-type fixtureFail struct {
-	Code   string `json:"code"`
-	Action string `json:"action"`
+	Messages   []object `json:"messages"`
+	Title      string   `json:"title"`
+	TitleState string   `json:"titleState"`
+	Status     string   `json:"status"`
+	// Error is what the run's RUN_ERROR reports of why it failed.
+	Error *apiError `json:"error,omitempty"`
 }
 
 // A client that applies a run's frames shows the chat the harness keeps: a
@@ -157,13 +153,12 @@ func conformance(t *testing.T, name, description string, frames []fixtureFrame, 
 		recorded.Expected.Messages = append(recorded.Expected.Messages, projectedMessage(message))
 	}
 	var last struct {
-		Type   string `json:"type"`
-		Code   string `json:"code"`
-		Action string `json:"action"`
+		Type string `json:"type"`
+		apiError
 	}
 	json.Unmarshal(frames[len(frames)-1].Event, &last)
 	if last.Type == "RUN_ERROR" {
-		recorded.Expected.Status, recorded.Expected.Error = "error", &fixtureFail{last.Code, last.Action}
+		recorded.Expected.Status, recorded.Expected.Error = "error", &last.apiError
 	}
 	encoded, err := json.MarshalIndent(recorded, "", "  ")
 	if err != nil {

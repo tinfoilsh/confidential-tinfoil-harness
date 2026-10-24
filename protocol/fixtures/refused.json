@@ -132,7 +132,9 @@
     "status": "error",
     "error": {
       "code": "QUOTA_EXHAUSTED",
-      "action": "wait"
+      "message": "Daily request limit reached.",
+      "action": "wait",
+      "status": 429
     }
   }
 }
