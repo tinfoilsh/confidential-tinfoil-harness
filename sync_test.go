@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -207,7 +209,7 @@ func TestListPullsInBatchesAndListsUnreadableRows(t *testing.T) {
 	for _, row := range page.Rows {
 		titles = append(titles, mustRead(readThreadRow(&row)).Title)
 	}
-	if len(page.Rows) != pullBatch+4 || !slices.Contains(titles, "row-7") || slices.Contains(titles, "row-3") || !slices.Equal(page.Unreadable, []string{"row-3"}) {
+	if len(page.Rows) != pullBatch+4 || !slices.Contains(titles, "row-7") || slices.Contains(titles, "row-3") || !slices.Equal(slices.Sorted(maps.Keys(page.Unreadable)), []string{"row-3"}) {
 		t.Fatalf("rows %v, unreadable %v", titles, page.Unreadable)
 	}
 	if _, err := client.load(context.Background(), &principal{ID: "alice", JWT: "jwt"}, randomKey(), "chat", "row-3"); asAPIError(err).Code != "KEY_MISMATCH" {
@@ -416,5 +418,51 @@ func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 	rows.rows[rowMapKey(p, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: raw(object{"nickname": "Sam", "recordVersion": recordVersion + 1})}
 	if w := postRoute(h, "/v1/profile/get", object{"key": key.base64()}, "alice"); !refused(w) {
 		t.Errorf("opening a profile in a later format: HTTP %d %s", w.Code, w.Body)
+	}
+}
+
+// pagedDocuments serves a project's documents in the pages a test scripts,
+// as sync lists them, and every other scope from the rows.
+type pagedDocuments struct {
+	*memoryRows
+	pages []rowPage
+}
+
+func (s *pagedDocuments) list(ctx context.Context, p *principal, key contentKey, scope, cursor, project string, limit int) (rowPage, error) {
+	if scope != "project_document" {
+		return s.memoryRows.list(ctx, p, key, scope, cursor, project, limit)
+	}
+	page, _ := strconv.Atoi(cmp.Or(cursor, "0"))
+	return s.pages[page], nil
+}
+
+// A document sync cannot open is handled as one this harness cannot read:
+// opening its project fails with sync's reason, and a backup leaves it out
+// and says so. A page that lists a document again holds its newer copy.
+func TestADocumentSyncCannotOpenIsNeverLeftOutUnsaid(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	p := &principal{ID: "alice"}
+	trip := "trip"
+	rows.rows[rowMapKey(p, "project", trip)] = storedRow{ID: trip, ETag: "1", Data: raw(object{"name": "Trip"})}
+	doc := func(id, filename string) storedRow {
+		return storedRow{ID: trip + "/" + id, ETag: "1", Data: raw(object{"filename": filename}), project: &trip, projectSet: true}
+	}
+	h.storeRows = &pagedDocuments{memoryRows: rows, pages: []rowPage{
+		{Rows: []storedRow{doc("notes", "draft.md"), doc("map", "map.md")}, Next: "1"},
+		{Rows: []storedRow{doc("notes", "notes.md")}, Unreadable: map[string]error{trip + "/map": apiErr(409, "KEY_MISMATCH", "sealed to another key")}},
+	}}
+	w := postRoute(h, "/v1/projects/get", object{"key": key.base64(), "id": trip}, "alice")
+	if e := obj(obj(decodeValue(w.Body.Bytes()))["error"]); w.Code != http.StatusConflict || e["code"] != "KEY_MISMATCH" || e["action"] != "unlock" {
+		t.Errorf("opening the project: HTTP %d %s", w.Code, w.Body)
+	}
+	w = archiveRoute(h, "/v1/export", "alice", optionsPart(object{"format": "native", "key": key.base64()}))
+	files, _ := unzipped(t, w.Body.Bytes())
+	var manifest backupManifest
+	json.Unmarshal(files[manifestPath], &manifest)
+	var notes backupDocument
+	json.Unmarshal(files[backupDocumentPath(trip, "notes")], &notes)
+	left := backupOmission{Kind: "project_document", SourceID: "map", ParentSourceID: trip, Category: "invalid", Reason: "row_unreadable"}
+	if manifest.Counts.ProjectDocuments != 1 || notes.Filename != "notes.md" || !reflect.DeepEqual(manifest.Omissions, []backupOmission{left}) {
+		t.Errorf("backup: %+v, notes %+v", manifest, notes)
 	}
 }

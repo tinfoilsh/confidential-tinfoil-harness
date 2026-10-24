@@ -6,7 +6,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -69,7 +71,7 @@ func (h *harness) eachRowOrUnreadable(ctx context.Context, p *principal, key con
 		if err != nil {
 			return err
 		}
-		for _, id := range page.Unreadable {
+		for _, id := range slices.Sorted(maps.Keys(page.Unreadable)) {
 			unreadable(id)
 		}
 		for _, row := range page.Rows {
@@ -353,41 +355,63 @@ func (h *harness) removeAllProjects(ctx context.Context, p *principal, key conte
 	return result.Deleted, err
 }
 
-// projectDocuments are every document of a project. A document this harness
-// cannot read is passed to unreadable, which fails the read by returning an
-// error or leaves the document out by returning nil.
+// projectDocuments are every document of a project. A document sync cannot
+// open, or this harness cannot read, is passed to unreadable with why, which
+// fails the read by returning an error or leaves the document out by
+// returning nil.
 func (h *harness) projectDocuments(ctx context.Context, p *principal, key contentKey, id string, unreadable func(row string, err error) error) ([]ProjectDocument, error) {
-	list, cursor, index := []ProjectDocument{}, "", map[string]int{}
-	for {
+	// Unfiltered pages can repeat a row that changed while listing; the
+	// later copy is the newer one.
+	var order []string
+	latest := map[string]documentCopy{}
+	keep := func(rowID string, listed documentCopy) {
+		if _, ok := latest[rowID]; !ok {
+			order = append(order, rowID)
+		}
+		latest[rowID] = listed
+	}
+	for cursor := ""; ; {
 		page, err := h.storeRows.list(ctx, p, key, "project_document", cursor, id, 100)
 		if err != nil {
 			return nil, err
 		}
-		for _, row := range page.Rows {
-			doc, err := readProjectDocument(&row, id)
-			if err != nil {
-				if err := unreadable(row.ID, err); err != nil {
-					return nil, err
-				}
-				continue
-			}
-			// Unfiltered pages can repeat a row that changed while listing;
-			// the later copy is the newer one.
-			if i, ok := index[row.ID]; ok {
-				list[i] = doc
-				continue
-			}
-			index[row.ID] = len(list)
-			list = append(list, doc)
+		for i := range page.Rows {
+			keep(page.Rows[i].ID, documentCopy{row: &page.Rows[i]})
+		}
+		for _, rowID := range slices.Sorted(maps.Keys(page.Unreadable)) {
+			keep(rowID, documentCopy{err: page.Unreadable[rowID]})
 		}
 		if page.Next == "" {
-			return list, nil
+			break
 		}
 		if page.Next == cursor {
 			return nil, apiErr(502, "UPSTREAM_REFUSED", "The document cursor did not advance")
 		}
 		cursor = page.Next
 	}
+	list := []ProjectDocument{}
+	for _, rowID := range order {
+		listed := latest[rowID]
+		doc, err := ProjectDocument{}, listed.err
+		if err == nil {
+			doc, err = readProjectDocument(listed.row, id)
+		}
+		if err != nil {
+			if err := unreadable(rowID, err); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		list = append(list, doc)
+	}
+	return list, nil
+}
+
+// documentCopy is a document row as a page listed it, or why sync could not
+// open it.
+type documentCopy struct {
+	row *storedRow
+	err error
 }
 
 // createProjectDocument stores a new document under its project.

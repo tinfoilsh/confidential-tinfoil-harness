@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -135,13 +136,13 @@ func (s *memoryRows) list(_ context.Context, p *principal, key contentKey, scope
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
-	page := rowPage{Rows: []storedRow{}}
+	page := rowPage{Rows: []storedRow{}, Unreadable: map[string]error{}}
 	for name, row := range s.rows {
 		if !strings.HasPrefix(name, p.scope()+"/"+scope+"/") || project != "" && rowProject(row) != project {
 			continue
 		}
 		if !s.opens(name, key) {
-			page.Unreadable = append(page.Unreadable, row.ID)
+			page.Unreadable[row.ID] = apiErr(409, "KEY_MISMATCH", "sealed to another key")
 			continue
 		}
 		page.Rows = append(page.Rows, *row.copy())
@@ -191,7 +192,7 @@ func (s *memoryRows) remove(_ context.Context, p *principal, _ contentKey, scope
 }
 func (s *memoryRows) ids(_ context.Context, p *principal, scope, project string) ([]string, error) {
 	page, _ := s.list(context.Background(), p, s.key, scope, "", project, 0)
-	ids := page.Unreadable
+	ids := slices.Collect(maps.Keys(page.Unreadable))
 	for _, row := range page.Rows {
 		ids = append(ids, row.ID)
 	}
