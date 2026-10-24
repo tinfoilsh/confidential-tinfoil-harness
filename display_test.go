@@ -42,5 +42,4 @@ func TestSearchesShowWhatTheyFoundAsTheyRun(t *testing.T) {
 	if blocks := stored.Messages[1].Timeline; len(blocks) < 2 || !reflect.DeepEqual(blocks[0].Display, &searched) || blocks[1].Display.Status != "failed" {
 		t.Fatalf("the reply stored %+v", blocks)
 	}
-	referenceCheck(t, events, window(stored, "", messageWindow).Messages)
 }

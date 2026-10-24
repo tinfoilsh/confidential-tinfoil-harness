@@ -427,5 +427,4 @@ func TestAnImageKeepsOneFormFromUploadToView(t *testing.T) {
 			t.Fatalf("an attachment is shown as %v", view)
 		}
 	}
-	referenceViews(t, views[1:2], []any{object{"id": stored["id"], "type": "image", "fileName": "photo.png", "mimeType": "image/png", "fileSize": source.Len(), "thumbnailBase64": sent["thumbnail"]}})
 }

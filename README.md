@@ -12,7 +12,7 @@ GOWORK=off go vet ./...
 GOWORK=off go build ./...
 ```
 
-With a web client checkout and its `node_modules` in `TINFOIL_WEBAPP` (or `../tinfoil-webapp`), the tests also replay run events through its harness reducer and read attachments through its chat view.
+[protocol/openapi.yaml](protocol/openapi.yaml) describes the API clients use, and the tests hold the harness to it. After a change to what runs send, record the runs in [protocol/fixtures](protocol/fixtures), which clients replay, with `RECORD_FIXTURES=1 GOWORK=off go test ./...`.
 
 Anonymous chat works only from a deployed harness, because Tinfoil validates `free_` keys only for registered Tinfoil hosts.
 
