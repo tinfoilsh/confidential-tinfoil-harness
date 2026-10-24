@@ -8,16 +8,19 @@ info:
 
     Every request is a POST through an attested, EHBP-sealed transport, so
     bodies are private to the client and the enclave while headers are
-    visible to the gateway. Nothing but authentication goes in headers:
+    visible to the gateway. Headers carry only what is not private:
     `Authorization` carries the caller's identity (a Clerk session token, or
-    a `free_` key for a signed-out caller) and `X-Tinfoil-Inference-Key` the
-    chat access the client minted. A client also sends `Accept-Language`.
-    The account's content key, when a route needs it, is the `key` member of
-    the body.
+    a `free_` key for a signed-out caller), `X-Tinfoil-Inference-Key` the
+    chat access the client minted, and `Accept-Language` the caller's
+    languages. A request about a run names the instance holding it and, when
+    following it, the last event the client applied. Everything else,
+    including the account's content key when a route needs it, is in the
+    body.
 
     A run's events arrive as server-sent events. Each frame's `data` is one
     event, described by `x-item-schema` (OpenAPI 3.2's `itemSchema`), and its
-    `id` is the event's cursor in the run.
+    `id` is the event's cursor in the run, which a client following the run
+    again sends back as `Last-Event-ID`.
 
     This document changes by these rules, so a client released against it
     keeps working:
@@ -160,7 +163,9 @@ paths:
       operationId: follow
       summary: Rejoin a live run
       tags: [runs]
-      parameters: [{$ref: "#/components/parameters/HarnessInstance"}]
+      parameters:
+        - {$ref: "#/components/parameters/HarnessInstance"}
+        - {$ref: "#/components/parameters/LastEventId"}
       description: Streams a live run again, for a client that lost its stream, from after the last event it applied.
       requestBody:
         required: true
@@ -1247,6 +1252,12 @@ paths:
 
 components:
   parameters:
+    LastEventId:
+      name: Last-Event-ID
+      in: header
+      description: The cursor of the last event of the run the client applied. The stream resumes after it, and starts from the run's first event without it. A cursor the run never sent is refused.
+      schema: {type: integer, minimum: 0}
+
     HarnessInstance:
       name: X-Tinfoil-Harness-Instance
       in: header
@@ -1671,7 +1682,6 @@ components:
         key: {type: string, description: "The account's content key, base64. Absent for device chats and signed-out callers."}
         threadId: {$ref: "#/components/schemas/Identifier"}
         runId: {type: string}
-        after: {type: integer, minimum: 0, description: "The cursor of the last event the client applied. The stream resumes after it. Without one, or with one the run never sent, it starts from the run's first event."}
 
     RunRequest:
       description: A run, or a turn queued behind one, of a chat.
