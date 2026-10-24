@@ -193,11 +193,17 @@ func (h *harness) handlers() map[string]http.HandlerFunc {
 		"POST /v1/attachments/get":           h.handleAttachmentGet,
 		"POST /v1/attachments/get-public":    h.handleAttachmentGet,
 	}
+	add := func(pattern string, handler http.HandlerFunc) {
+		if handlers[pattern] != nil {
+			panic("two handlers serve " + pattern)
+		}
+		handlers[pattern] = handler
+	}
 	for _, spec := range h.apiRoutes() {
-		handlers["POST "+spec.path] = h.jsonRoute(spec)
+		add("POST "+spec.path, h.jsonRoute(spec))
 	}
 	for path, handler := range h.threadOperations() {
-		handlers["POST "+path] = h.threadOperation(handler)
+		add("POST "+path, h.threadOperation(handler))
 	}
 	return handlers
 }
