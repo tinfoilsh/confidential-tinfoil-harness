@@ -1484,6 +1484,7 @@ components:
         - RUN_IN_FLIGHT
         - RUN_LOG_FULL
         - RUN_NOT_FOUND
+        - SEARCH_INDEX_FAILED
         - SYNC_OUTCOME_UNKNOWN
         - TEMP_SPACE_BUSY
         - THREAD_EXISTS

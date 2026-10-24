@@ -249,7 +249,7 @@ func (h *harness) reindexChats(ctx context.Context, p *principal, key contentKey
 		// A clean partial checkpoint resumes on the next request.
 		return job.Partial, nil
 	default:
-		return false, apiErr(http.StatusBadGateway, "UPSTREAM_REFUSED", "The search index could not be rebuilt")
+		return false, apiErr(http.StatusBadGateway, "SEARCH_INDEX_FAILED", "The search index could not be rebuilt")
 	}
 }
 

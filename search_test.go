@@ -104,7 +104,7 @@ func TestSearchReportsRebuildAndRefreshFailures(t *testing.T) {
 		wantCode   string
 		wantCalls  int
 	}{
-		{name: "failed rebuild", job: object{"status": "failed", "error": "embedding failed", "partial": true}, wantStatus: http.StatusBadGateway, wantCode: "UPSTREAM_REFUSED", wantCalls: 2},
+		{name: "failed rebuild", job: object{"status": "failed", "error": "embedding failed", "partial": true}, wantStatus: http.StatusBadGateway, wantCode: "SEARCH_INDEX_FAILED", wantCalls: 2},
 		{name: "failed refreshed query", job: object{"status": "completed"}, refreshErr: true, wantStatus: http.StatusConflict, wantCode: "KEY_MISMATCH", wantCalls: 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
