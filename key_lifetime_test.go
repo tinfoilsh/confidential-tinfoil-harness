@@ -84,7 +84,7 @@ func TestRunDropsKeyBeforeScreening(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	thread := readThreadRow(row)
+	thread := mustRead(readThreadRow(row))
 	if len(thread.Messages) != 2 || thread.Messages[1].Content != "hello" || thread.ActiveRun != nil {
 		t.Fatal("the reply was not committed before the key was dropped")
 	}

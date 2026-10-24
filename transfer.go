@@ -128,7 +128,11 @@ func (h *harness) importThread(ctx context.Context, p *principal, key contentKey
 		return nil, err
 	}
 	id := in.ThreadID
-	row := &threadRow{Thread: readDeviceThread(id, in.Thread), restore: true}
+	thread, err := readDeviceThread(id, in.Thread)
+	if err != nil {
+		return nil, err
+	}
+	row := &threadRow{Thread: thread, restore: true}
 	if err := h.placeAttachments(ctx, p, id, &row.Thread); err != nil {
 		return nil, err
 	}

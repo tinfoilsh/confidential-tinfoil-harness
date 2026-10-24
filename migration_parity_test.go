@@ -72,10 +72,10 @@ func TestMergingDeviceSettingsPreservesBothPromptLibraries(t *testing.T) {
 		t.Fatalf("clearing the device default was lost: %v", cleared["defaultPromptPresetId"])
 	}
 	stored, _ := rows.load(context.Background(), p, key, "profile", "profile")
-	if readProfile(stored.Data).DefaultPromptPresetID != nil {
+	if mustRead(readProfile(stored.Data)).DefaultPromptPresetID != nil {
 		t.Fatal("the cleared default was not stored")
 	}
-	if len(readProfile(stored.Data).CustomPromptPresets) != 3 {
+	if len(mustRead(readProfile(stored.Data)).CustomPromptPresets) != 3 {
 		t.Fatal("merge was not stored")
 	}
 }
@@ -193,7 +193,7 @@ func TestACloudRunUsesItsStorageCredentialForTheFinalSave(t *testing.T) {
 	in := sendInput(key)
 	events := finishedRun(t, h, "/v1/threads/turn", in)
 	row, err := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", str(in["threadId"]))
-	if err != nil || grantCalls.Load() != 1 || eventOfType(events, "RUN_FINISHED") == nil || len(readThreadRow(row).Messages) != 2 || readThreadRow(row).Messages[1].Content != "hello" {
+	if err != nil || grantCalls.Load() != 1 || eventOfType(events, "RUN_FINISHED") == nil || len(mustRead(readThreadRow(row)).Messages) != 2 || mustRead(readThreadRow(row)).Messages[1].Content != "hello" {
 		t.Fatalf("reply was not stored with the run credential: %v", err)
 	}
 }
@@ -300,7 +300,7 @@ func TestAQueuedTurnRefreshesStorageAccessBeforeStarting(t *testing.T) {
 	release()
 	<-queued.finished
 	row, err := rows.load(context.Background(), p, key, "chat", str(in["threadId"]))
-	if err != nil || len(readThreadRow(row).Messages) != 4 || readThreadRow(row).Messages[2].Content != "Queued question" || readThreadRow(row).Messages[3].Content == "" || grants.grants.Load() != 3 {
+	if err != nil || len(mustRead(readThreadRow(row)).Messages) != 4 || mustRead(readThreadRow(row)).Messages[2].Content != "Queued question" || mustRead(readThreadRow(row)).Messages[3].Content == "" || grants.grants.Load() != 3 {
 		t.Fatalf("queued reply did not renew and save: %v, grants=%d, row=%+v", err, grants.grants.Load(), row)
 	}
 }

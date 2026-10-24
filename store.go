@@ -6,7 +6,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -69,7 +71,7 @@ func (h *harness) eachRowOrUnreadable(ctx context.Context, p *principal, key con
 		if err != nil {
 			return err
 		}
-		for _, id := range page.Unreadable {
+		for _, id := range slices.Sorted(maps.Keys(page.Unreadable)) {
 			unreadable(id)
 		}
 		for _, row := range page.Rows {
@@ -91,6 +93,11 @@ func (h *harness) eachRow(ctx context.Context, p *principal, key contentKey, sco
 	return h.eachRowOrUnreadable(ctx, p, key, scope, project, visit, func(string) {})
 }
 
+// refuseUnreadable fails a read that would leave out a row this harness
+// cannot read, as a turn of a project does: it reads every document, and one
+// left out would change what the model is told.
+func refuseUnreadable(_ string, err error) error { return err }
+
 // Chats
 
 func (h *harness) loadThread(ctx context.Context, p *principal, key contentKey, id string) (*threadRow, error) {
@@ -98,7 +105,7 @@ func (h *harness) loadThread(ctx context.Context, p *principal, key contentKey, 
 	if err != nil {
 		return nil, err
 	}
-	return readThreadRow(row), nil
+	return readThreadRow(row)
 }
 
 func (h *harness) threadBatch(ctx context.Context, p *principal, key contentKey, ids []string) ([]*threadRow, error) {
@@ -111,9 +118,13 @@ func (h *harness) threadBatch(ctx context.Context, p *principal, key contentKey,
 			return nil, err
 		}
 	}
-	threads := make([]*threadRow, len(rows))
+	threads := make([]*threadRow, 0, len(rows))
 	for i := range rows {
-		threads[i] = readThreadRow(&rows[i])
+		// A chat this harness cannot read is left out, as one sync cannot
+		// open is.
+		if t, err := readThreadRow(&rows[i]); err == nil {
+			threads = append(threads, t)
+		}
 	}
 	return threads, nil
 }
@@ -128,9 +139,13 @@ func (h *harness) threadPage(ctx context.Context, p *principal, key contentKey, 
 	if err != nil {
 		return nil, "", err
 	}
-	threads := make([]*threadRow, len(page.Rows))
+	threads := make([]*threadRow, 0, len(page.Rows))
 	for i := range page.Rows {
-		threads[i] = readThreadRow(&page.Rows[i])
+		// A chat this harness cannot read is left out, as one sync cannot
+		// open is.
+		if t, err := readThreadRow(&page.Rows[i]); err == nil {
+			threads = append(threads, t)
+		}
 	}
 	return threads, page.Next, nil
 }
@@ -249,7 +264,10 @@ func (h *harness) loadProfile(ctx context.Context, p *principal, key contentKey)
 		}
 		return nil, err
 	}
-	profile := readProfile(row.Data)
+	profile, err := readProfile(row.Data)
+	if err != nil {
+		return nil, err
+	}
 	return &profile, nil
 }
 
@@ -258,7 +276,10 @@ func (h *harness) mutateProfile(ctx context.Context, p *principal, key contentKe
 	err := h.commitRow(ctx, p, key, "profile", "profile", true, func(row *storedRow, exists bool) error {
 		profile = storedProfile{}
 		if exists {
-			profile = readProfile(row.Data)
+			var err error
+			if profile, err = readProfile(row.Data); err != nil {
+				return err
+			}
 		}
 		before := raw(profile)
 		if err := change(&profile); err != nil {
@@ -287,7 +308,7 @@ func (h *harness) loadProject(ctx context.Context, p *principal, key contentKey,
 	if err != nil {
 		return Project{}, err
 	}
-	return readProject(row), nil
+	return readProject(row)
 }
 
 func (h *harness) projectPage(ctx context.Context, p *principal, key contentKey, cursor string, limit int) ([]Project, string, error) {
@@ -295,9 +316,13 @@ func (h *harness) projectPage(ctx context.Context, p *principal, key contentKey,
 	if err != nil {
 		return nil, "", err
 	}
-	projects := make([]Project, len(page.Rows))
+	projects := make([]Project, 0, len(page.Rows))
 	for i := range page.Rows {
-		projects[i] = readProject(&page.Rows[i])
+		// A project this harness cannot read is left out, as one sync cannot
+		// open is.
+		if project, err := readProject(&page.Rows[i]); err == nil {
+			projects = append(projects, project)
+		}
 	}
 	return projects, page.Next, nil
 }
@@ -308,7 +333,10 @@ func (h *harness) mutateProject(ctx context.Context, p *principal, key contentKe
 	err := h.commitRow(ctx, p, key, "project", id, create, func(row *storedRow, exists bool) error {
 		project = Project{ID: id, CreatedAt: timestamp()}
 		if exists {
-			project = readProject(row)
+			var err error
+			if project, err = readProject(row); err != nil {
+				return err
+			}
 		}
 		change(&project)
 		project.UpdatedAt = timestamp()
@@ -327,33 +355,63 @@ func (h *harness) removeAllProjects(ctx context.Context, p *principal, key conte
 	return result.Deleted, err
 }
 
-// projectDocuments are every document of a project.
-func (h *harness) projectDocuments(ctx context.Context, p *principal, key contentKey, id string) ([]ProjectDocument, error) {
-	list, cursor, index := []ProjectDocument{}, "", map[string]int{}
-	for {
+// projectDocuments are every document of a project. A document sync cannot
+// open, or this harness cannot read, is passed to unreadable with why, which
+// fails the read by returning an error or leaves the document out by
+// returning nil.
+func (h *harness) projectDocuments(ctx context.Context, p *principal, key contentKey, id string, unreadable func(row string, err error) error) ([]ProjectDocument, error) {
+	// Unfiltered pages can repeat a row that changed while listing; the
+	// later copy is the newer one.
+	var order []string
+	latest := map[string]documentCopy{}
+	keep := func(rowID string, listed documentCopy) {
+		if _, ok := latest[rowID]; !ok {
+			order = append(order, rowID)
+		}
+		latest[rowID] = listed
+	}
+	for cursor := ""; ; {
 		page, err := h.storeRows.list(ctx, p, key, "project_document", cursor, id, 100)
 		if err != nil {
 			return nil, err
 		}
-		for _, row := range page.Rows {
-			doc := readProjectDocument(&row, id)
-			// Unfiltered pages can repeat a row that changed while listing;
-			// the later copy is the newer one.
-			if i, ok := index[row.ID]; ok {
-				list[i] = doc
-				continue
-			}
-			index[row.ID] = len(list)
-			list = append(list, doc)
+		for i := range page.Rows {
+			keep(page.Rows[i].ID, documentCopy{row: &page.Rows[i]})
+		}
+		for _, rowID := range slices.Sorted(maps.Keys(page.Unreadable)) {
+			keep(rowID, documentCopy{err: page.Unreadable[rowID]})
 		}
 		if page.Next == "" {
-			return list, nil
+			break
 		}
 		if page.Next == cursor {
 			return nil, apiErr(502, "UPSTREAM_REFUSED", "The document cursor did not advance")
 		}
 		cursor = page.Next
 	}
+	list := []ProjectDocument{}
+	for _, rowID := range order {
+		listed := latest[rowID]
+		doc, err := ProjectDocument{}, listed.err
+		if err == nil {
+			doc, err = readProjectDocument(listed.row, id)
+		}
+		if err != nil {
+			if err := unreadable(rowID, err); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		list = append(list, doc)
+	}
+	return list, nil
+}
+
+// documentCopy is a document row as a page listed it, or why sync could not
+// open it.
+type documentCopy struct {
+	row *storedRow
+	err error
 }
 
 // createProjectDocument stores a new document under its project.
@@ -363,7 +421,11 @@ func (h *harness) createProjectDocument(ctx context.Context, p *principal, key c
 		row.project, row.projectSet = &doc.ProjectID, true
 		doc.CreatedAt = timestamp()
 		if exists {
-			doc.CreatedAt = readProjectDocument(row, doc.ProjectID).CreatedAt
+			stored, err := readProjectDocument(row, doc.ProjectID)
+			if err != nil {
+				return err
+			}
+			doc.CreatedAt = stored.CreatedAt
 		}
 		doc.UpdatedAt = timestamp()
 		row.Data, row.project, row.projectSet = raw(storedDocument{doc, recordVersion}), &doc.ProjectID, true

@@ -7,8 +7,7 @@ import (
 )
 
 // recordVersion is the format of the rows and device records this harness
-// writes. Rows older clients wrote have none; all are read by the legacy
-// reader, and a later format branches on this.
+// writes. A change to what they hold changes it.
 const recordVersion = 1
 
 // Thread is a chat in the thread format: what the harness stores in sync,
@@ -194,8 +193,7 @@ type URLCitation struct {
 type ActiveRun struct {
 	RunID     string `json:"runId"`
 	ExpiresAt string `json:"expiresAt"`
-	// Instance holds the run; a hint stored before runs named theirs has none.
-	Instance string `json:"instance,omitempty"`
+	Instance  string `json:"instance"` // the process holding the run
 }
 
 // ContextUsage is how much of the model's window the chat's last prompt filled.

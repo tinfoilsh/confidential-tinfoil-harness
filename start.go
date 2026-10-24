@@ -79,7 +79,7 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *principal, cre
 				return nil, err
 			}
 			project = &stored
-			docs, err = h.projectDocuments(ctx, p, r.key, id)
+			docs, err = h.projectDocuments(ctx, p, r.key, id, refuseUnreadable)
 			if err != nil {
 				return nil, err
 			}

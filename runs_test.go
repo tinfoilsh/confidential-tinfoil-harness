@@ -217,7 +217,7 @@ func TestAFinishingRunsWritesBlockNothing(t *testing.T) {
 	release := func() { released.Do(func() { close(commit) }) }
 	t.Cleanup(release)
 	rows.refuse = func(row *storedRow) error {
-		if chat := readThreadRow(row); len(chat.Messages) == 2 && chat.ActiveRun == nil {
+		if chat := mustRead(readThreadRow(row)); len(chat.Messages) == 2 && chat.ActiveRun == nil {
 			once.Do(func() {
 				close(committing)
 				<-commit
@@ -279,8 +279,9 @@ func TestARunNamesTheInstanceHoldingIt(t *testing.T) {
 }
 
 // Re-attaching to a live run resumes after the last frame the client applied,
-// or replays it from its first frame when the client names none, or names
-// one the run never sent. A run that is no longer live is not found.
+// as Last-Event-ID names it, or replays it from its first frame when the
+// client names none. A cursor the run never sent is refused. A run that is no
+// longer live is not found.
 func TestFollowResumesALiveRunAfterTheClientsCursor(t *testing.T) {
 	model, release := heldModel()
 	h, _, key := testChatHarness(t, model)
@@ -290,42 +291,41 @@ func TestFollowResumesALiveRunAfterTheClientsCursor(t *testing.T) {
 		t.Fatal(err)
 	}
 	awaitFrame(t, run.log, "TEXT_MESSAGE_CHUNK")
-	request := func(after ...int) *http.Request {
+	request := func(lastEventID string) *http.Request {
 		in := object{"key": key.base64(), "threadId": run.thread.id, "runId": run.log.id}
-		if len(after) > 0 {
-			in["after"] = after[0]
-		}
 		req := httptest.NewRequest(http.MethodPost, "/v1/threads/follow", bytes.NewReader(raw(in)))
 		signIn(req, "alice")
-		// The cursor is the body's, which the gateway cannot read.
-		req.Header.Set("Last-Event-ID", "2")
+		if lastEventID != "" {
+			req.Header.Set("Last-Event-ID", lastEventID)
+		}
 		return req
 	}
 	frames, _, _ := run.log.log.read(0)
 	for _, tc := range []struct {
-		name  string
-		req   *http.Request
-		first int
-	}{
-		{"without a cursor", request(), 0},
-		{"after frame 1", request(1), 2},
-		{"after a frame the run never sent", request(len(frames)), 0},
-	} {
-		w := replayOf(h, tc.req)
+		lastEventID string
+		first       int
+	}{{"", 0}, {"1", 2}} {
+		w := replayOf(h, request(tc.lastEventID))
 		ids := regexp.MustCompile(`(?m)^id: (\d+)$`).FindAllStringSubmatch(w.Body.String(), -1)
 		events := eventsIn(t, w)
 		if len(ids) != len(frames)-tc.first || len(events) != len(ids) || eventOfType(events, "TEXT_MESSAGE_CHUNK") == nil {
-			t.Fatalf("%s: replayed %d of %d frames: %s", tc.name, len(events), len(frames), w.Body.String())
+			t.Fatalf("after %q: replayed %d of %d frames: %s", tc.lastEventID, len(events), len(frames), w.Body.String())
 		}
 		for i, id := range ids {
 			if id[1] != strconv.Itoa(tc.first+i) {
-				t.Fatalf("%s: frame %d replayed as id %s", tc.name, tc.first+i, id[1])
+				t.Fatalf("after %q: frame %d replayed as id %s", tc.lastEventID, tc.first+i, id[1])
 			}
+		}
+	}
+	for _, lastEventID := range []string{strconv.Itoa(len(frames)), "-1", "first"} {
+		w := replayOf(h, request(lastEventID))
+		if e := obj(obj(decodeValue(w.Body.Bytes()))["error"]); w.Code != 400 || e["code"] != "BAD_REQUEST" || e["action"] != "stop" {
+			t.Fatalf("following after %q: HTTP %d %s", lastEventID, w.Code, w.Body.String())
 		}
 	}
 	release()
 	<-run.finished
-	if w := replayOf(h, request()); w.Code != 404 || !strings.Contains(w.Body.String(), "RUN_NOT_FOUND") {
+	if w := replayOf(h, request("")); w.Code != 404 || !strings.Contains(w.Body.String(), "RUN_NOT_FOUND") {
 		t.Fatalf("following a finished run: HTTP %d %s", w.Code, w.Body.String())
 	}
 }
@@ -366,7 +366,7 @@ func TestARetriedRequestFollowsItsRunOrIsAlreadyApplied(t *testing.T) {
 		}
 	}
 	row, _ := rows.load(context.Background(), p, key, "chat", run.thread.id)
-	chat := readThreadRow(row)
+	chat := mustRead(readThreadRow(row))
 	if len(chat.Messages) != 2 || chat.Messages[0].ID != in["clientRequestId"] || chat.LastRequestID != in["clientRequestId"] {
 		t.Fatalf("the chat holds %s", row.Data)
 	}

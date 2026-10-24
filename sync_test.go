@@ -2,11 +2,14 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"slices"
 	"strconv"
@@ -204,9 +207,9 @@ func TestListPullsInBatchesAndListsUnreadableRows(t *testing.T) {
 	}
 	titles := []string{}
 	for _, row := range page.Rows {
-		titles = append(titles, readThreadRow(&row).Title)
+		titles = append(titles, mustRead(readThreadRow(&row)).Title)
 	}
-	if len(page.Rows) != pullBatch+4 || !slices.Contains(titles, "row-7") || slices.Contains(titles, "row-3") || !slices.Equal(page.Unreadable, []string{"row-3"}) {
+	if len(page.Rows) != pullBatch+4 || !slices.Contains(titles, "row-7") || slices.Contains(titles, "row-3") || !slices.Equal(slices.Sorted(maps.Keys(page.Unreadable)), []string{"row-3"}) {
 		t.Fatalf("rows %v, unreadable %v", titles, page.Unreadable)
 	}
 	if _, err := client.load(context.Background(), &principal{ID: "alice", JWT: "jwt"}, randomKey(), "chat", "row-3"); asAPIError(err).Code != "KEY_MISMATCH" {
@@ -314,5 +317,152 @@ func TestStoredRowsNameTheirFormat(t *testing.T) {
 		if !written[scope] {
 			t.Errorf("no %s row was stored", scope)
 		}
+	}
+}
+
+// A record is read by the format it names: the current one as written, and
+// one older clients wrote, naming none, through the legacy reader. One naming
+// another format is refused, as is one in the current format holding a
+// member that format does not have, or leaving out or nulling one it
+// requires. A list or a backup leaves out what it cannot read; a project's
+// turns read every document, so a project with one it cannot read is
+// refused.
+func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	p := &principal{ID: "alice"}
+	current := func(data object) {
+		data["recordVersion"], data["titleState"], data["model"], data["presetId"], data["pinned"], data["webSearchEnabled"] = recordVersion, "manual", "auto", nil, false, true
+		for _, message := range arr(data["messages"]) {
+			obj(message)["createdAt"] = "2026-01-01T00:00:00Z"
+		}
+	}
+	formats := map[string]func(object){
+		"legacy":  func(object) {},
+		"current": current,
+		"later":   func(data object) { data["recordVersion"] = recordVersion + 1 },
+		"extra": func(data object) {
+			current(data)
+			data["mood"] = "sunny"
+		},
+		"incomplete": func(data object) {
+			current(data)
+			delete(data, "webSearchEnabled")
+		},
+		"nulled": func(data object) {
+			current(data)
+			data["messages"] = nil
+		},
+	}
+	readable := map[string]bool{"legacy": true, "current": true}
+	refused := func(w *httptest.ResponseRecorder) bool {
+		e := obj(obj(decodeValue(w.Body.Bytes()))["error"])
+		return w.Code == http.StatusConflict && e["code"] == "RECORD_UNSUPPORTED" && e["action"] == "stop"
+	}
+	for format, edit := range formats {
+		storedThread(rows, "alice", format)
+		row := rows.rows[rowMapKey(p, "chat", format)]
+		editRow(&row, func(data object) {
+			data["id"] = format
+			edit(data)
+		})
+		rows.rows[rowMapKey(p, "chat", format)] = row
+		w := postRoute(h, "/v1/threads/get", object{"key": key.base64(), "id": format}, "alice")
+		if readable[format] && w.Code != http.StatusOK || !readable[format] && !refused(w) {
+			t.Errorf("opening the %s chat: HTTP %d %s", format, w.Code, w.Body)
+		}
+		id := rowID()
+		thread := object{"id": id, "title": "On my device", "messages": []any{object{"id": "m1", "role": "user", "content": "hi"}}}
+		edit(thread)
+		w = postRoute(h, "/v1/threads/turn", localInput(id, thread), "alice")
+		if readable[format] && w.Code != http.StatusOK || !readable[format] && !refused(w) {
+			t.Errorf("a turn of the %s device chat: HTTP %d %s", format, w.Code, w.Body)
+		}
+	}
+	var list struct {
+		Threads []threadSummary `json:"threads"`
+	}
+	json.Unmarshal(postRoute(h, "/v1/threads/list", object{"key": key.base64()}, "alice").Body.Bytes(), &list)
+	listed := []string{}
+	for _, thread := range list.Threads {
+		listed = append(listed, thread.ID)
+	}
+	if slices.Sort(listed); !slices.Equal(listed, []string{"current", "legacy"}) {
+		t.Errorf("the list holds %v", listed)
+	}
+	rows.rows[rowMapKey(p, "project", "later")] = storedRow{ID: "later", ETag: "1", Data: raw(object{"name": "Trip", "recordVersion": recordVersion + 1})}
+	if w := postRoute(h, "/v1/projects/get", object{"key": key.base64(), "id": "later"}, "alice"); !refused(w) {
+		t.Errorf("opening a project in a later format: HTTP %d %s", w.Code, w.Body)
+	}
+	trip := "trip"
+	rows.rows[rowMapKey(p, "project", trip)] = storedRow{ID: trip, ETag: "1", Data: raw(object{"name": "Trip"})}
+	for doc, data := range map[string]object{"notes": {"filename": "notes.md"}, "later": {"filename": "later.md", "recordVersion": recordVersion + 1}} {
+		rows.rows[rowMapKey(p, "project_document", trip+"/"+doc)] = storedRow{ID: trip + "/" + doc, ETag: "1", Data: raw(data), project: &trip, projectSet: true}
+	}
+	if w := postRoute(h, "/v1/projects/get", object{"key": key.base64(), "id": trip}, "alice"); !refused(w) {
+		t.Errorf("opening a project with a document in a later format: HTTP %d %s", w.Code, w.Body)
+	}
+	storedThread(rows, "alice", "trip-chat")
+	row := rows.rows[rowMapKey(p, "chat", "trip-chat")]
+	row.project, row.projectSet = &trip, true
+	rows.rows[rowMapKey(p, "chat", "trip-chat")] = row
+	if w := postRoute(h, "/v1/threads/turn", continueInput(key, "trip-chat"), "alice"); !refused(w) {
+		t.Errorf("a turn in a project with a document in a later format: HTTP %d %s", w.Code, w.Body)
+	}
+	w := archiveRoute(h, "/v1/export", "alice", optionsPart(object{"format": "native", "key": key.base64()}))
+	files, _ := unzipped(t, w.Body.Bytes())
+	var manifest backupManifest
+	json.Unmarshal(files[manifestPath], &manifest)
+	if left := (backupOmission{Kind: "project_document", SourceID: "later", ParentSourceID: trip, Category: "invalid", Reason: "row_unreadable"}); w.Code != http.StatusOK || manifest.Counts.ProjectDocuments != 1 || !slices.Contains(manifest.Omissions, left) {
+		t.Errorf("backing up a project with a document in a later format: HTTP %d %+v", w.Code, manifest)
+	}
+	rows.rows[rowMapKey(p, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: raw(object{"nickname": "Sam", "recordVersion": recordVersion + 1})}
+	if w := postRoute(h, "/v1/profile/get", object{"key": key.base64()}, "alice"); !refused(w) {
+		t.Errorf("opening a profile in a later format: HTTP %d %s", w.Code, w.Body)
+	}
+}
+
+// pagedDocuments serves a project's documents in the pages a test scripts,
+// as sync lists them, and every other scope from the rows.
+type pagedDocuments struct {
+	*memoryRows
+	pages []rowPage
+}
+
+func (s *pagedDocuments) list(ctx context.Context, p *principal, key contentKey, scope, cursor, project string, limit int) (rowPage, error) {
+	if scope != "project_document" {
+		return s.memoryRows.list(ctx, p, key, scope, cursor, project, limit)
+	}
+	page, _ := strconv.Atoi(cmp.Or(cursor, "0"))
+	return s.pages[page], nil
+}
+
+// A document sync cannot open is handled as one this harness cannot read:
+// opening its project fails with sync's reason, and a backup leaves it out
+// and says so. A page that lists a document again holds its newer copy.
+func TestADocumentSyncCannotOpenIsNeverLeftOutUnsaid(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	p := &principal{ID: "alice"}
+	trip := "trip"
+	rows.rows[rowMapKey(p, "project", trip)] = storedRow{ID: trip, ETag: "1", Data: raw(object{"name": "Trip"})}
+	doc := func(id, filename string) storedRow {
+		return storedRow{ID: trip + "/" + id, ETag: "1", Data: raw(object{"filename": filename}), project: &trip, projectSet: true}
+	}
+	h.storeRows = &pagedDocuments{memoryRows: rows, pages: []rowPage{
+		{Rows: []storedRow{doc("notes", "draft.md"), doc("map", "map.md")}, Next: "1"},
+		{Rows: []storedRow{doc("notes", "notes.md")}, Unreadable: map[string]error{trip + "/map": apiErr(409, "KEY_MISMATCH", "sealed to another key")}},
+	}}
+	w := postRoute(h, "/v1/projects/get", object{"key": key.base64(), "id": trip}, "alice")
+	if e := obj(obj(decodeValue(w.Body.Bytes()))["error"]); w.Code != http.StatusConflict || e["code"] != "KEY_MISMATCH" || e["action"] != "unlock" {
+		t.Errorf("opening the project: HTTP %d %s", w.Code, w.Body)
+	}
+	w = archiveRoute(h, "/v1/export", "alice", optionsPart(object{"format": "native", "key": key.base64()}))
+	files, _ := unzipped(t, w.Body.Bytes())
+	var manifest backupManifest
+	json.Unmarshal(files[manifestPath], &manifest)
+	var notes backupDocument
+	json.Unmarshal(files[backupDocumentPath(trip, "notes")], &notes)
+	left := backupOmission{Kind: "project_document", SourceID: "map", ParentSourceID: trip, Category: "invalid", Reason: "row_unreadable"}
+	if manifest.Counts.ProjectDocuments != 1 || notes.Filename != "notes.md" || !reflect.DeepEqual(manifest.Omissions, []backupOmission{left}) {
+		t.Errorf("backup: %+v, notes %+v", manifest, notes)
 	}
 }

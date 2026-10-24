@@ -188,7 +188,11 @@ func (h *harness) changeThread(ctx context.Context, p *principal, key contentKey
 	if !source.Local {
 		return h.mutateThread(ctx, p, key, id, change)
 	}
-	row := &threadRow{Thread: readDeviceThread(id, source.Thread)}
+	t, err := readDeviceThread(id, source.Thread)
+	if err != nil {
+		return nil, err
+	}
+	row := &threadRow{Thread: t}
 	if err := change(&row.Thread); err != nil {
 		return nil, err
 	}
@@ -259,7 +263,10 @@ func startFork(t *Thread) {
 // copies of the attachments; a device chat's fork keeps their ids.
 func (h *harness) forkThread(ctx context.Context, p *principal, key contentKey, in *messageRequest) (any, error) {
 	if in.Local {
-		source := readDeviceThread(in.ThreadID, in.Thread)
+		source, err := readDeviceThread(in.ThreadID, in.Thread)
+		if err != nil {
+			return nil, err
+		}
 		count, err := forkedCount(&source, in.MessageID)
 		if err != nil {
 			return nil, err
@@ -427,7 +434,7 @@ func (h *harness) getProject(ctx context.Context, p *principal, key contentKey, 
 	if err != nil {
 		return nil, err
 	}
-	docs, err := h.projectDocuments(ctx, p, key, in.ID)
+	docs, err := h.projectDocuments(ctx, p, key, in.ID, refuseUnreadable)
 	if err != nil {
 		return nil, err
 	}

@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"slices"
 	"strings"
 	"time"
 
@@ -31,9 +30,10 @@ type storedRow struct {
 type rowPage struct {
 	Rows []storedRow
 	Next string
-	// Rows sync holds but cannot open, such as one sealed to a retired key.
-	// A page lists them rather than failing, so one row cannot hide the rest.
-	Unreadable []string
+	// Rows sync holds but cannot open, such as one sealed to a retired key,
+	// and why. A page lists them rather than failing, so one row cannot hide
+	// the rest.
+	Unreadable map[string]error
 }
 type rowStore interface {
 	authorizeRun(context.Context, *principal, contentKey, string, *string) (storageGrant, error)
@@ -274,12 +274,7 @@ func (s *syncClient) list(ctx context.Context, p *principal, key contentKey, sco
 	}
 	page := rowPage{Rows: []storedRow{}, Next: next}
 	if len(ids) != 0 {
-		var failed map[string]error
-		page.Rows, failed, err = s.pull(ctx, p, key, scope, ids)
-		for id := range failed {
-			page.Unreadable = append(page.Unreadable, id)
-		}
-		slices.Sort(page.Unreadable)
+		page.Rows, page.Unreadable, err = s.pull(ctx, p, key, scope, ids)
 	}
 	return page, err
 }

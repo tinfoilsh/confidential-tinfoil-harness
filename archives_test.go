@@ -153,7 +153,7 @@ func storedChats(rows *memoryRows, user string) map[string]Thread {
 	chats := map[string]Thread{}
 	page, _ := rows.list(context.Background(), &principal{ID: user}, rows.key, "chat", "", "", 0)
 	for _, row := range page.Rows {
-		t := readThreadRow(&row).Thread
+		t := mustRead(readThreadRow(&row)).Thread
 		chats[t.Title] = t
 	}
 	return chats
@@ -316,7 +316,7 @@ func TestNativeBackupRoundTrips(t *testing.T) {
 	if !ok || len(chat.Messages) != 2 || !chat.Pinned || chat.Model != "kimi-k3" || chat.TitleState != "manual" {
 		t.Fatalf("cloud chat: %+v", chats)
 	}
-	if !reflect.DeepEqual(decodeValue(raw(chat.Messages[1].Timeline)), decodeValue(raw(readThread("chat-1", raw(cloudChat)).Messages[1].Timeline))) || len(chat.Messages[1].Annotations) != 1 {
+	if !reflect.DeepEqual(decodeValue(raw(chat.Messages[1].Timeline)), decodeValue(raw(mustRead(readThread("chat-1", raw(cloudChat))).Messages[1].Timeline))) || len(chat.Messages[1].Annotations) != 1 {
 		t.Fatalf("the reply changed: %s", raw(chat.Messages[1]))
 	}
 	attachments := chat.Messages[0].Attachments
@@ -327,8 +327,8 @@ func TestNativeBackupRoundTrips(t *testing.T) {
 	if len(projects.Rows) != 1 || valueOr(chat.ProjectID, "") != projects.Rows[0].ID {
 		t.Fatalf("the chat lost its project: %v", chat.ProjectID)
 	}
-	restoredProject := readProject(&projects.Rows[0])
-	docs, _ := restored.projectDocuments(context.Background(), alice, key, restoredProject.ID)
+	restoredProject := mustRead(readProject(&projects.Rows[0]))
+	docs, _ := restored.projectDocuments(context.Background(), alice, key, restoredProject.ID, refuseUnreadable)
 	if restoredProject.Name != "Research" || restoredProject.SystemInstructions != "Cite sources" || valueOr(restoredProject.Color, "") != "teal" || len(docs) != 1 || docs[0].Content != "Paper text" || docs[0].Filename != "paper.md" {
 		t.Fatalf("project: %+v %+v", restoredProject, docs)
 	}
@@ -486,8 +486,8 @@ func TestWebAppBackupsRestore(t *testing.T) {
 				t.Fatalf("the old timeline was not read: %v", names)
 			}
 			projects, _ := rows.list(context.Background(), &principal{ID: "alice"}, key, "project", "", "", 0)
-			docs, _ := h.projectDocuments(context.Background(), &principal{ID: "alice"}, key, *chat.ProjectID)
-			if len(projects.Rows) != 1 || readProject(&projects.Rows[0]).Name != "Research" || len(docs) != 1 || docs[0].Content != "Extracted paper text" {
+			docs, _ := h.projectDocuments(context.Background(), &principal{ID: "alice"}, key, *chat.ProjectID, refuseUnreadable)
+			if len(projects.Rows) != 1 || mustRead(readProject(&projects.Rows[0])).Name != "Research" || len(docs) != 1 || docs[0].Content != "Extracted paper text" {
 				t.Fatalf("project: %v %v", projects.Rows, docs)
 			}
 		})
@@ -668,8 +668,8 @@ func TestClaudeProjectsRequireTheCloud(t *testing.T) {
 	if result.done.JobID == nil || len(stored.Rows) != 1 {
 		t.Fatalf("projects: %d stored, done %+v", len(stored.Rows), result.done)
 	}
-	project := readProject(&stored.Rows[0])
-	docs, _ := h.projectDocuments(context.Background(), &principal{ID: "alice"}, key, project.ID)
+	project := mustRead(readProject(&stored.Rows[0]))
+	docs, _ := h.projectDocuments(context.Background(), &principal{ID: "alice"}, key, project.ID, refuseUnreadable)
 	if project.Name != "Release Notes" || project.SystemInstructions != "Write concise release notes." || len(docs) != 1 || docs[0].Filename != "style-guide.md" || docs[0].Content != "# Style guide" {
 		t.Fatalf("project: %+v %+v", project, docs)
 	}

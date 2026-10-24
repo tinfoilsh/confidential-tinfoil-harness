@@ -255,7 +255,7 @@ func TestARetriedLinkPreviewReadsItsPage(t *testing.T) {
 		t.Fatalf("the retry showed %+v", shown)
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", "chat")
-	if call := readThreadRow(row).Messages[1].Timeline[1]; call.Arguments != fixed || !reflect.DeepEqual(decodeValue(call.Result), want) {
+	if call := mustRead(readThreadRow(row)).Messages[1].Timeline[1]; call.Arguments != fixed || !reflect.DeepEqual(decodeValue(call.Result), want) {
 		t.Fatalf("the retried widget was stored with arguments %s and result %s", call.Arguments, call.Result)
 	}
 }

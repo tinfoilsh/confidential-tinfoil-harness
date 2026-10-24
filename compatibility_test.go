@@ -113,7 +113,7 @@ func TestManagedModelRetriesARejectedChatTokenOnce(t *testing.T) {
 				t.Fatal("unexpected run result", last)
 			}
 			row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
-			if !rejectAgain && len(readThreadRow(row).Messages) != 2 {
+			if !rejectAgain && len(mustRead(readThreadRow(row)).Messages) != 2 {
 				t.Fatal("credential retry duplicated the turn")
 			}
 		})
@@ -121,10 +121,10 @@ func TestManagedModelRetriesARejectedChatTokenOnce(t *testing.T) {
 }
 
 func TestSharedThreadUsesPublicTimelineAndAttachments(t *testing.T) {
-	result := obj(decodeValue(raw(sharedThreadView("share-id", raw(object{"title": "Shared", "createdAt": float64(1700000000000), "messages": []any{
+	result := obj(decodeValue(raw(mustRead(sharedThreadView("share-id", raw(object{"title": "Shared", "createdAt": float64(1700000000000), "messages": []any{
 		object{"role": "assistant", "content": "answer", "timestamp": float64(1700000000000)},
 		object{"role": "user", "content": "photo", "timestamp": float64(1700000000000), "attachments": []any{object{"id": "attachment", "type": "image", "fileName": "photo.png", "mimeType": "image/png", "encryptionKey": "share-attachment-key", "thumbnailBase64": "thumbnail"}}},
-	}})))))
+	}}))))))
 	if !strings.HasPrefix(str(result["createdAt"]), "2023-") {
 		t.Fatalf("invalid timestamp: %v", result)
 	}
@@ -154,7 +154,7 @@ func TestTruncatedModelStreamPreservesPartialAnswer(t *testing.T) {
 		t.Fatalf("a failed chat was screened: %+v", got)
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
-	if last := readThreadRow(row).Messages[1]; last.Content != "partial" || !valueOr(last.IsError, false) {
+	if last := mustRead(readThreadRow(row)).Messages[1]; last.Content != "partial" || !valueOr(last.IsError, false) {
 		t.Fatal("partial answer lost")
 	}
 }
@@ -188,7 +188,7 @@ func TestTitleRunsBeforeAnswerFinishes(t *testing.T) {
 	close(release)
 	<-run.finished
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", run.thread.id)
-	if readThreadRow(row).Title != "A generated title" {
+	if mustRead(readThreadRow(row)).Title != "A generated title" {
 		t.Fatal("title did not commit")
 	}
 }
@@ -231,7 +231,7 @@ func TestWidgetRetryReplacesOnlyTheArguments(t *testing.T) {
 		t.Fatalf("retry failed: %+v", last)
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", "chat")
-	messages := readThreadRow(row).Messages
+	messages := mustRead(readThreadRow(row)).Messages
 	if len(messages) != 2 || len(messages[1].Timeline) != 2 || messages[1].Timeline[1].Arguments != replacement {
 		t.Fatal("retry changed message structure")
 	}
@@ -271,7 +271,7 @@ func TestManagedToolLoopKeepsReasoningAndOneAssistantMessage(t *testing.T) {
 		t.Fatal(events[len(events)-1])
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
-	stored := readThreadRow(row)
+	stored := mustRead(readThreadRow(row))
 	if len(stored.Messages) != 2 || len(stored.Messages[1].Timeline) != 3 {
 		t.Fatal("tool loop did not make one ordered assistant timeline")
 	}
@@ -300,7 +300,7 @@ func TestShutdownCommitsPartialOutput(t *testing.T) {
 		t.Fatal("shutdown did not finish the run")
 	}
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", run.thread.id)
-	if readThreadRow(row).ActiveRun != nil {
+	if mustRead(readThreadRow(row)).ActiveRun != nil {
 		t.Fatal("shutdown left an active marker")
 	}
 	if _, err := h.acceptTurn(context.Background(), &principal{ID: "alice"}, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key))); err == nil {

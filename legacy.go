@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/base64"
 	"encoding/json"
@@ -12,11 +13,94 @@ import (
 	"time"
 )
 
-// The legacy reader is the one place that reads rows of any age: chats the
-// web and iOS apps stored in sync, device chats the old web client kept, old
-// shares, profiles and projects old clients wrote, and records in the
-// current format. It returns them in the current format. A field of the
-// wrong type reads as absent, so one odd field never hides a chat.
+// A row or device record names the format it is in. One in the current
+// format is read as written. One that names no format was written before
+// formats were named, by the web and iOS apps, the old web client, or a
+// client's blank record of a new chat, and the legacy reader reads it into
+// the current format. One in any other format is refused.
+//
+// The legacy reader reads rows of any age: chats the apps stored in sync,
+// device chats the old web client kept, old shares, and profiles and
+// projects old clients wrote. A field of the wrong type reads as absent, so
+// one odd field never hides a chat.
+
+// errRecordUnsupported refuses a record in a format this harness does not
+// read, as a later harness writes, or that breaks the format it names.
+var errRecordUnsupported = apiErr(409, "RECORD_UNSUPPORTED", "The record is in a format this harness cannot read")
+
+// currentFormat reports whether a record is in the current format, as
+// opposed to one written before formats were named.
+func currentFormat(data []byte) (bool, error) {
+	var marker struct {
+		RecordVersion int `json:"recordVersion"`
+	}
+	if json.Unmarshal(data, &marker) != nil || marker.RecordVersion != 0 && marker.RecordVersion != recordVersion {
+		return false, errRecordUnsupported
+	}
+	return marker.RecordVersion == recordVersion, nil
+}
+
+// readCurrent reads a record in the current format into v, refusing one
+// that leaves out a member the format requires or holds one it does not
+// have.
+func readCurrent(data []byte, v any, required ...string) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(v) != nil || decoder.More() || !holds(data, required) {
+		return errRecordUnsupported
+	}
+	return nil
+}
+
+// holds reports whether a JSON object has every one of the members, each
+// set to a value other than null unless the format allows null for it.
+func holds(data []byte, members []string) bool {
+	var object map[string]json.RawMessage
+	if json.Unmarshal(data, &object) != nil {
+		return false
+	}
+	for _, member := range members {
+		value, ok := object[member]
+		if !ok || string(value) == "null" && !slices.Contains(nullableMembers, member) {
+			return false
+		}
+	}
+	return true
+}
+
+// The members a record in the current format requires, as
+// protocol/openapi.yaml names them. Sync files a chat's project apart from
+// it, and leaves projectId out of a fork outside a project.
+var (
+	currentChat     = []string{"id", "title", "titleState", "model", "presetId", "pinned", "webSearchEnabled", "messages"}
+	currentMessage  = []string{"id", "role", "createdAt", "content"}
+	currentProject  = []string{"id", "name", "description", "systemInstructions", "color"}
+	currentDocument = []string{"id", "projectId", "filename", "contentType", "sizeBytes"}
+	titleStates     = []string{"placeholder", "generated", "manual"}
+	nullableMembers = []string{"presetId", "color"}
+)
+
+// readCurrentThread reads a chat in the current format into v, whose
+// thread is t, refusing one whose messages or values that format does not
+// allow.
+func readCurrentThread(data []byte, v any, t *Thread) error {
+	if err := readCurrent(data, v, currentChat...); err != nil {
+		return err
+	}
+	var shape struct {
+		Messages []json.RawMessage `json:"messages"`
+	}
+	json.Unmarshal(data, &shape)
+	for _, message := range shape.Messages {
+		if !holds(message, currentMessage) {
+			return errRecordUnsupported
+		}
+	}
+	if !slices.Contains(titleStates, t.TitleState) || slices.ContainsFunc(t.Messages, func(m Message) bool { return m.Role != "user" && m.Role != "assistant" }) {
+		return errRecordUnsupported
+	}
+	return nil
+}
 
 // readLenient decodes data into v, leaving out each field of the wrong
 // type. Rows reach it as valid JSON objects.
@@ -192,7 +276,26 @@ type legacyImage struct {
 }
 
 // readThread reads a chat row into the thread format.
-func readThread(id string, data []byte) Thread { return upgradeThread(id, data, "") }
+func readThread(id string, data []byte) (Thread, error) {
+	switch current, err := currentFormat(data); {
+	case err != nil:
+		return Thread{}, err
+	case !current:
+		return upgradeThread(id, data, ""), nil
+	}
+	// Sync marks a chat it copies, as a fork, as kept in the cloud. The mark
+	// is sync's, and the harness leaves it out.
+	var stored struct {
+		Thread
+		IsLocalOnly *bool `json:"isLocalOnly"`
+	}
+	if err := readCurrentThread(data, &stored, &stored.Thread); err != nil {
+		return Thread{}, err
+	}
+	t := stored.Thread
+	t.ID = id
+	return t, nil
+}
 
 // upgradeThread reads a chat, dated created when it holds no date.
 func upgradeThread(id string, data []byte, created string) Thread {
@@ -233,20 +336,34 @@ func readThreadWith(id string, data []byte, created string, images backupImages)
 
 // readThreadRow reads a stored chat. Sync files a chat under its project
 // apart from the sealed row, and that filing is the chat's project.
-func readThreadRow(row *storedRow) *threadRow {
-	t := readThread(row.ID, row.Data)
+func readThreadRow(row *storedRow) (*threadRow, error) {
+	t, err := readThread(row.ID, row.Data)
+	if err != nil {
+		return nil, err
+	}
 	if row.projectSet {
 		t.ProjectID = row.project
 	}
-	return &threadRow{Thread: t, etag: row.ETag}
+	return &threadRow{Thread: t, etag: row.ETag}, nil
 }
 
 // readDeviceThread reads a thread a client keeps on its device. The fields
 // the harness owns are never taken from a client's copy.
-func readDeviceThread(id string, data []byte) Thread {
-	t := upgradeThread(id, data, timestamp())
+func readDeviceThread(id string, data []byte) (Thread, error) {
+	var t Thread
+	switch current, err := currentFormat(data); {
+	case err != nil:
+		return Thread{}, err
+	case !current:
+		t = upgradeThread(id, data, timestamp())
+	default:
+		if err := readCurrentThread(data, &t, &t); err != nil {
+			return Thread{}, err
+		}
+		t.ID = id
+	}
 	t.ActiveRun, t.HiddenCount, t.ProjectID, t.ContextUsage = nil, 0, nil, nil
-	return t
+	return t, nil
 }
 
 // timeline is a reply's timeline, built from its old flat fields when it
@@ -439,8 +556,15 @@ func legacySection(combined, heading, next string) string {
 	return strings.TrimSpace(section)
 }
 
-// readProfile reads a profile row. A missing row is an empty profile.
-func readProfile(data []byte) storedProfile {
+// readProfile reads a profile row.
+func readProfile(data []byte) (storedProfile, error) {
+	switch current, err := currentFormat(data); {
+	case err != nil:
+		return storedProfile{}, err
+	case current:
+		var profile storedProfile
+		return profile, readCurrent(data, &profile)
+	}
 	var stored struct {
 		storedProfile
 		UpdatedAt looseTime `json:"updatedAt"`
@@ -456,7 +580,7 @@ func readProfile(data []byte) storedProfile {
 		written = undatedProfile
 	}
 	upgradeProfile(&profile.Profile, written)
-	return profile
+	return profile, nil
 }
 
 // undatedProfile is the date a profile without one is read as written.
@@ -500,7 +624,18 @@ func upgradeProfile(p *Profile, now time.Time) {
 }
 
 // readProject reads a project row.
-func readProject(row *storedRow) Project {
+func readProject(row *storedRow) (Project, error) {
+	switch current, err := currentFormat(row.Data); {
+	case err != nil:
+		return Project{}, err
+	case current:
+		var stored storedProject
+		if err := readCurrent(row.Data, &stored, currentProject...); err != nil {
+			return Project{}, err
+		}
+		stored.Project.ID = row.ID
+		return stored.Project, nil
+	}
 	var stored struct {
 		Project
 		CreatedAt looseTime `json:"createdAt"`
@@ -509,22 +644,34 @@ func readProject(row *storedRow) Project {
 	readLenient(row.Data, &stored)
 	project := stored.Project
 	project.ID, project.CreatedAt, project.UpdatedAt = row.ID, string(stored.CreatedAt), string(stored.UpdatedAt)
-	return project
+	return project, nil
 }
 
 // readProjectDocument reads a project document row, which sync files under
 // the project's id.
-func readProjectDocument(row *storedRow, projectID string) ProjectDocument {
-	var stored struct {
-		ProjectDocument
-		CreatedAt looseTime `json:"createdAt"`
-		UpdatedAt looseTime `json:"updatedAt"`
+func readProjectDocument(row *storedRow, projectID string) (ProjectDocument, error) {
+	var doc ProjectDocument
+	switch current, err := currentFormat(row.Data); {
+	case err != nil:
+		return ProjectDocument{}, err
+	case current:
+		var stored storedDocument
+		if err := readCurrent(row.Data, &stored, currentDocument...); err != nil {
+			return ProjectDocument{}, err
+		}
+		doc = stored.ProjectDocument
+	default:
+		var stored struct {
+			ProjectDocument
+			CreatedAt looseTime `json:"createdAt"`
+			UpdatedAt looseTime `json:"updatedAt"`
+		}
+		readLenient(row.Data, &stored)
+		doc = stored.ProjectDocument
+		doc.CreatedAt, doc.UpdatedAt = string(stored.CreatedAt), string(stored.UpdatedAt)
 	}
-	readLenient(row.Data, &stored)
-	doc := stored.ProjectDocument
 	doc.ID, doc.ProjectID = strings.TrimPrefix(row.ID, projectID+"/"), projectID
-	doc.CreatedAt, doc.UpdatedAt = string(stored.CreatedAt), string(stored.UpdatedAt)
-	return doc
+	return doc, nil
 }
 
 // handleUpgrade reads chats the previous web client kept on a device, or in
@@ -566,7 +713,11 @@ func (h *harness) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// The thread is one its client can send back with a turn.
-		thread := readDeviceThread(named.ID, item)
+		thread, err := readDeviceThread(named.ID, item)
+		if err != nil {
+			respond(w, nil, err)
+			return
+		}
 		modelCopies(&thread)
 		thread.checkWidgets()
 		thread.RecordVersion = recordVersion

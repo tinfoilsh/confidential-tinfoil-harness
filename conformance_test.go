@@ -103,7 +103,7 @@ func TestRunsShowTheChatTheHarnessKeeps(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				kept = readThreadRow(row).Thread
+				kept = mustRead(readThreadRow(row)).Thread
 			}
 			if last := events[len(events)-1].Type; last != map[bool]string{true: "RUN_ERROR", false: "RUN_FINISHED"}[tc.name == "refused"] {
 				t.Fatalf("the run ended with %s", last)

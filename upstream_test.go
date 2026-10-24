@@ -104,7 +104,7 @@ func TestModelRefusalsReachTheRunWithTheirMeaning(t *testing.T) {
 			}
 			if tc.status == 200 {
 				row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
-				if reply := readThreadRow(row).Messages[1]; reply.Content != "partial" || !valueOr(reply.IsError, false) {
+				if reply := mustRead(readThreadRow(row)).Messages[1]; reply.Content != "partial" || !valueOr(reply.IsError, false) {
 					t.Fatalf("the streamed answer was lost: %+v", reply)
 				}
 			}
