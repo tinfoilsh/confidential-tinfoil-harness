@@ -321,7 +321,7 @@ func (h *harness) refuseFlagged(ctx context.Context, r *chatRun, p *principal) e
 
 // activeRun marks a chat's reply as streaming until the run's deadline.
 func activeRun(runID string) *ActiveRun {
-	return &ActiveRun{RunID: runID, ExpiresAt: nowUTC().Add(runTimeout).Format(time.RFC3339Nano)}
+	return &ActiveRun{RunID: runID, ExpiresAt: nowUTC().Add(runTimeout).Format(time.RFC3339Nano), Instance: instanceID}
 }
 
 func usageForRun(r *chatRun) usagereporting.Context {

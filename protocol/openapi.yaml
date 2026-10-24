@@ -2032,6 +2032,7 @@ components:
           properties:
             runId: {type: string}
             expiresAt: {$ref: "#/components/schemas/Timestamp"}
+            instance: {type: string, description: "The instance holding the run, which a client following or cancelling it after a reload sends as X-Tinfoil-Harness-Instance. A hint stored before runs named their instance has none."}
         messageCount: {type: integer}
         flagged: {type: boolean, description: "The safeguards flagged the chat, which takes no more turns."}
 
@@ -2065,6 +2066,7 @@ components:
           properties:
             runId: {type: string}
             expiresAt: {$ref: "#/components/schemas/Timestamp"}
+            instance: {type: string, description: "The instance holding the run, which a client following or cancelling it after a reload sends as X-Tinfoil-Harness-Instance. A hint stored before runs named their instance has none."}
         messageCount: {type: integer}
         flagged: {type: boolean, description: "The safeguards flagged the chat, which takes no more turns."}
         revision: {type: string}
@@ -2226,6 +2228,7 @@ components:
           properties:
             runId: {type: string}
             expiresAt: {$ref: "#/components/schemas/Timestamp"}
+            instance: {type: string, description: "The instance holding the run, which a client following or cancelling it after a reload sends as X-Tinfoil-Harness-Instance. A hint stored before runs named their instance has none."}
         contextUsage: {$ref: "#/components/schemas/ContextUsage"}
         flagged: {type: boolean}
         harnessHiddenCount: {type: integer, description: "How many leading messages an ask's chat holds as context without showing them."}

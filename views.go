@@ -32,7 +32,7 @@ func summarize(t *Thread) threadSummary {
 	// The hint lapses with the run's deadline.
 	if run := t.ActiveRun; run != nil {
 		if expires, err := time.Parse(time.RFC3339Nano, run.ExpiresAt); err == nil && nowUTC().Before(expires) {
-			s.ActiveRun = &ActiveRun{RunID: run.RunID, ExpiresAt: run.ExpiresAt}
+			s.ActiveRun = &ActiveRun{RunID: run.RunID, ExpiresAt: run.ExpiresAt, Instance: run.Instance}
 		}
 	}
 	return s

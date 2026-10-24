@@ -259,12 +259,18 @@ func TestAFinishingRunsWritesBlockNothing(t *testing.T) {
 }
 
 // A run names the instance holding it, the same for every run of the
-// process, so requests about any of its runs can be routed back to it.
+// process, so requests about any of its runs can be routed back to it. The
+// chat's hint that the run is streaming names it too, for a client that
+// opens the chat again.
 func TestARunNamesTheInstanceHoldingIt(t *testing.T) {
 	h, _, key := testChatHarness(t, nil)
 	var named []string
 	for range 2 {
 		events := eventsIn(t, postRoute(h, "/v1/threads/turn", sendInput(key), "alice"))
+		run := obj(obj(obj(eventOfType(events, "STATE_SNAPSHOT").Snapshot)["thread"])["activeRun"])
+		if run["instance"] != events[0].Instance {
+			t.Fatalf("the chat's running hint is %v, not the run's instance %q", run, events[0].Instance)
+		}
 		named = append(named, events[0].Instance)
 	}
 	if named[0] == "" || named[0] != named[1] || named[0] != instanceID {
