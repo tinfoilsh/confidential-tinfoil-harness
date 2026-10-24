@@ -39,27 +39,30 @@ func TestUpstreamRefusalsKeepTheirMeaning(t *testing.T) {
 		name, body                  string
 		status, http                int
 		code, message, upstreamCode string
+		action                      string
 	}{
-		{"exhausted free key", `{"error":{"message":"Daily request limit reached.","type":"insufficient_quota","code":"insufficient_quota"}}`, 429, 429, "QUOTA_EXHAUSTED", "Daily request limit reached.", ""},
-		{"rate limited", `{"error":{"message":"Rate limit reached for requests. Retry after 5 seconds.","type":"rate_limit_error","code":"rate_limit_exceeded"}}`, 429, 429, "RATE_LIMITED", "Rate limit reached for requests. Retry after 5 seconds.", ""},
-		{"queue full behind the router", `{"error":{"message":"The server had an error while processing your request.","type":"server_error","param":null,"code":"upstream_error"}}`, 429, 429, "RATE_LIMITED", "The server had an error while processing your request.", ""},
-		{"model unavailable", `{"error":{"message":"The model 'kimi-k3' is temporarily unavailable. Please try again later.","type":"service_unavailable_error","code":"model_unavailable"}}`, 503, 503, "MODEL_UNAVAILABLE", "The model 'kimi-k3' is temporarily unavailable. Please try again later.", ""},
-		{"overloaded", `{"error":{"message":"The model 'kimi-k3' is currently overloaded. Retry after 3 seconds.","type":"service_unavailable_error","code":"server_is_overloaded"}}`, 503, 503, "UPSTREAM_REFUSED", "The model 'kimi-k3' is currently overloaded. Retry after 3 seconds.", ""},
-		{"flat context length", `{"object":"error","message":"This model's maximum context length is 8192 tokens.","type":"BadRequestError","param":null,"code":400}`, 400, 413, "CONTEXT_TOO_LARGE", "This model's maximum context length is 8192 tokens.", ""},
-		{"invalid request", `{"error":{"message":"Invalid parameter: 'tools' must be an array.","type":"invalid_request_error","param":"tools"}}`, 400, 502, "UPSTREAM_REFUSED", "Invalid parameter: 'tools' must be an array.", ""},
-		{"unknown gateway model", `{"error":{"message":"unknown model: X-Tinfoil-Model must name a configured model","type":"invalid_request_error"}}`, 404, 502, "UPSTREAM_REFUSED", "unknown model: X-Tinfoil-Model must name a configured model", ""},
-		{"unsealable request", `{"error":{"message":"payload is sealed to a.example, which is not where this request routes","type":"invalid_request_error"}}`, 412, 502, "UPSTREAM_REFUSED", "payload is sealed to a.example, which is not where this request routes", ""},
-		{"long message", `{"error":{"message":"` + long + `","type":"invalid_request_error"}}`, 400, 502, "UPSTREAM_REFUSED", long[:511], ""},
-		{"document failure", `{"error":"Document processing exceeded the time limit. Try splitting the document into smaller files.","object":"error","message":"Document processing exceeded the time limit. Try splitting the document into smaller files.","type":"server_error","code":"document_parser_timeout","param":null}`, 502, 502, "UPSTREAM_REFUSED", "Document processing exceeded the time limit. Try splitting the document into smaller files.", "document_parser_timeout"},
-		{"server internals", `{"error":{"message":"Traceback: secret internals","type":"server_error"}}`, 500, 502, "UPSTREAM_REFUSED", "A downstream service refused the request", ""},
-		{"rejected credential", `{"error":{"message":"Incorrect API key provided.","type":"invalid_request_error","code":"invalid_api_key"}}`, 401, 401, "UNAUTHENTICATED", "Authentication is required", ""},
-		{"sync row missing", `{"ok":false,"code":"NOT_FOUND"}`, 404, 404, "THREAD_NOT_FOUND", "The requested data was not found", ""},
-		{"sync revision", `{"ok":false,"code":"STALE_BLOB"}`, 412, 409, "REVISION_CONFLICT", "The stored row changed", ""},
+		{"exhausted free key", `{"error":{"message":"Daily request limit reached.","type":"insufficient_quota","code":"insufficient_quota"}}`, 429, 429, "QUOTA_EXHAUSTED", "Daily request limit reached.", "", "wait"},
+		{"rate limited", `{"error":{"message":"Rate limit reached for requests. Retry after 5 seconds.","type":"rate_limit_error","code":"rate_limit_exceeded"}}`, 429, 429, "RATE_LIMITED", "Rate limit reached for requests. Retry after 5 seconds.", "", "retry"},
+		{"queue full behind the router", `{"error":{"message":"The server had an error while processing your request.","type":"server_error","param":null,"code":"upstream_error"}}`, 429, 429, "RATE_LIMITED", "The server had an error while processing your request.", "", "retry"},
+		{"model unavailable", `{"error":{"message":"The model 'kimi-k3' is temporarily unavailable. Please try again later.","type":"service_unavailable_error","code":"model_unavailable"}}`, 503, 503, "MODEL_UNAVAILABLE", "The model 'kimi-k3' is temporarily unavailable. Please try again later.", "", "retry"},
+		{"overloaded", `{"error":{"message":"The model 'kimi-k3' is currently overloaded. Retry after 3 seconds.","type":"service_unavailable_error","code":"server_is_overloaded"}}`, 503, 503, "UPSTREAM_REFUSED", "The model 'kimi-k3' is currently overloaded. Retry after 3 seconds.", "", "retry"},
+		{"flat context length", `{"object":"error","message":"This model's maximum context length is 8192 tokens.","type":"BadRequestError","param":null,"code":400}`, 400, 413, "CONTEXT_TOO_LARGE", "This model's maximum context length is 8192 tokens.", "", "revise"},
+		{"invalid request", `{"error":{"message":"Invalid parameter: 'tools' must be an array.","type":"invalid_request_error","param":"tools"}}`, 400, 502, "UPSTREAM_REFUSED", "Invalid parameter: 'tools' must be an array.", "", "stop"},
+		{"unknown gateway model", `{"error":{"message":"unknown model: X-Tinfoil-Model must name a configured model","type":"invalid_request_error"}}`, 404, 502, "UPSTREAM_REFUSED", "unknown model: X-Tinfoil-Model must name a configured model", "", "stop"},
+		{"unsealable request", `{"error":{"message":"payload is sealed to a.example, which is not where this request routes","type":"invalid_request_error"}}`, 412, 502, "UPSTREAM_REFUSED", "payload is sealed to a.example, which is not where this request routes", "", "stop"},
+		{"long message", `{"error":{"message":"` + long + `","type":"invalid_request_error"}}`, 400, 502, "UPSTREAM_REFUSED", long[:511], "", "stop"},
+		{"document failure", `{"error":"Document processing exceeded the time limit. Try splitting the document into smaller files.","object":"error","message":"Document processing exceeded the time limit. Try splitting the document into smaller files.","type":"server_error","code":"document_parser_timeout","param":null}`, 502, 502, "UPSTREAM_REFUSED", "Document processing exceeded the time limit. Try splitting the document into smaller files.", "document_parser_timeout", "revise"},
+		{"server internals", `{"error":{"message":"Traceback: secret internals","type":"server_error"}}`, 500, 502, "UPSTREAM_REFUSED", "A downstream service refused the request", "", "retry"},
+		{"rejected credential", `{"error":{"message":"Incorrect API key provided.","type":"invalid_request_error","code":"invalid_api_key"}}`, 401, 401, "UNAUTHENTICATED", "Authentication is required", "", "reauthenticate"},
+		{"sync row missing", `{"ok":false,"code":"NOT_FOUND"}`, 404, 404, "THREAD_NOT_FOUND", "The requested data was not found", "", "stop"},
+		{"sync revision", `{"ok":false,"code":"STALE_BLOB"}`, 412, 409, "REVISION_CONFLICT", "The stored row changed", "", "reload"},
+		{"refusal without a message", `{"error":{"type":"invalid_request_error"}}`, 400, 502, "UPSTREAM_REFUSED", "A downstream service refused the request", "", "stop"},
+		{"sync refusal", `{"ok":false,"code":"BAD_REQUEST"}`, 400, 502, "UPSTREAM_REFUSED", "A downstream service refused the request", "", "stop"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := downstreamError(tc.status, []byte(tc.body))
-			if e.HTTP != tc.http || e.Code != tc.code || e.Message != tc.message || e.Upstream != tc.upstreamCode {
-				t.Fatalf("got HTTP %d %s %q upstream %q", e.HTTP, e.Code, e.Message, e.Upstream)
+			if e.HTTP != tc.http || e.Code != tc.code || e.Message != tc.message || e.Upstream != tc.upstreamCode || e.Action != tc.action {
+				t.Fatalf("got HTTP %d %s %q upstream %q action %s", e.HTTP, e.Code, e.Message, e.Upstream, e.Action)
 			}
 			if !utf8.ValidString(e.Message) {
 				t.Fatal("clipped message is not UTF-8")

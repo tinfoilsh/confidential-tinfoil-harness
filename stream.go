@@ -141,7 +141,9 @@ func follow(w http.ResponseWriter, r *http.Request, rn *run) {
 		if closed != nil {
 			open()
 			if closed != errDone {
-				encoded, _ := encodeEvent(runError{Code: asAPIError(closed).Code, Message: closed.Error()}, "")
+				e := *asAPIError(closed)
+				e.Message = closed.Error()
+				encoded, _ := encodeEvent(runError{apiError: &e}, "")
 				fmt.Fprintf(w, "id: %d\ndata: %s\n\n", from, encoded)
 				flush.Flush()
 			}

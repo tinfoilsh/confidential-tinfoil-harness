@@ -201,7 +201,7 @@ func newAuthenticator(ctx context.Context, issuer, cp string) (*authenticator, e
 // session, or, where anonymous is allowed, a signed-out caller's free key.
 func (a *authenticator) authenticate(r *http.Request, anonymous bool) (*principal, error) {
 	if a == nil {
-		return nil, apiErr(503, "UNAUTHENTICATED", "Authentication is not configured")
+		return nil, apiErr(503, "UNAUTHENTICATED", "Authentication is not configured").withAction(actionStop)
 	}
 	token := bearer(r.Header.Get("Authorization"))
 	if token == "" {
@@ -312,12 +312,12 @@ func (a *authenticator) validateFreeKey(ctx context.Context, p *principal) (infe
 	case resp.StatusCode/100 == 2:
 		return inferenceCredential{}, errors.New("invalid key validation response")
 	case resp.StatusCode == http.StatusPaymentRequired:
-		return inferenceCredential{}, apiErr(403, "UPSTREAM_REFUSED", "This chat key is disabled")
+		return inferenceCredential{}, apiErr(403, "UPSTREAM_REFUSED", "This chat key is disabled").withAction(actionStop)
 	case resp.StatusCode == http.StatusUnauthorized && str(detail["error"]) != "":
 		// A refused caller address, not a refused key: the controlplane
 		// answers only Tinfoil hosts registered for key validation.
 		slog.Error("controlplane refused key validation from this host", "status", resp.StatusCode)
-		return inferenceCredential{}, apiErr(503, "UPSTREAM_REFUSED", "Anonymous chat is unavailable on this deployment")
+		return inferenceCredential{}, apiErr(503, "UPSTREAM_REFUSED", "Anonymous chat is unavailable on this deployment").withAction(actionStop)
 	case resp.StatusCode == http.StatusServiceUnavailable:
 		e := apiErr(503, "UPSTREAM_REFUSED", "Key validation is temporarily unavailable")
 		e.RetryAfter = retryAfter(resp.Header)

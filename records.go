@@ -65,6 +65,7 @@ func (h *harness) session(ctx context.Context, p *principal, _ contentKey, _ jso
 		widgets = []string{}
 	}
 	return sessionView{
+		Protocol:        protocolView{Version: protocolVersion, Minimum: minimumProtocolVersion},
 		User:            sessionUser{ID: p.ID, Anonymous: p.Anonymous},
 		RateLimit:       credential.Limit,
 		Models:          c.displayModels(),

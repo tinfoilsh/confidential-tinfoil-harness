@@ -73,9 +73,12 @@ func firstString(values ...any) string {
 }
 
 type apiError struct {
-	HTTP       int    `json:"-"`
-	Code       string `json:"code"`
-	Message    string `json:"message"`
+	HTTP    int    `json:"-"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	// Action is what a client does about the error when it has no handling
+	// of its own for the code.
+	Action     string `json:"action"`
 	Kind       string `json:"kind,omitempty"`
 	ResetsAt   string `json:"resetsAt,omitempty"`
 	RetryAfter int    `json:"retryAfter,omitempty"`
@@ -88,9 +91,66 @@ type apiError struct {
 	missing []string // attachment ids sync did not find under the pushed chat
 }
 
+// The actions protocol/openapi.yaml describes as ErrorAction.
+const (
+	actionReauthenticate = "reauthenticate"
+	actionReload         = "reload"
+	actionRetry          = "retry"
+	actionWait           = "wait"
+	actionUnlock         = "unlock"
+	actionRevise         = "revise"
+	actionStop           = "stop"
+)
+
+// errorActions is what a client does about each code, unless an error says
+// otherwise.
+var errorActions = map[string]string{
+	"ALREADY_APPLIED":         actionReload,
+	"ARCHIVE_TOO_LARGE":       actionRevise,
+	"ATTACHMENT_TOO_LARGE":    actionRevise,
+	"ATTACHMENT_UNSUPPORTED":  actionRevise,
+	"ATTACHMENTS_UNAVAILABLE": actionRetry,
+	"BAD_REQUEST":             actionStop,
+	"CHAT_FLAGGED":            actionStop,
+	"CONTEXT_TOO_LARGE":       actionRevise,
+	"CREDENTIAL_REQUIRED":     actionReauthenticate,
+	"IMPORT_INVALID":          actionRevise,
+	"IMPORT_TOO_LARGE":        actionRevise,
+	"KEY_MISMATCH":            actionUnlock,
+	"KEY_REQUIRED":            actionUnlock,
+	"MAX_TURNS":               actionRetry,
+	"MISSING_ATTACHMENT":      actionStop,
+	"MODEL_UNAVAILABLE":       actionRevise,
+	"PAYLOAD_TOO_LARGE":       actionRevise,
+	"PROJECTS_REQUIRE_CLOUD":  actionStop,
+	"QUEUE_FULL":              actionRetry,
+	"QUOTA_EXHAUSTED":         actionWait,
+	"RATE_LIMITED":            actionRetry,
+	"REQUEST_TIMEOUT":         actionRetry,
+	"REVISION_CONFLICT":       actionReload,
+	"RUN_IN_FLIGHT":           actionReload,
+	"RUN_LOG_FULL":            actionStop,
+	"RUN_NOT_FOUND":           actionReload,
+	"SYNC_OUTCOME_UNKNOWN":    actionRetry,
+	"TEMP_SPACE_BUSY":         actionRetry,
+	"THREAD_EXISTS":           actionStop,
+	"THREAD_NOT_FOUND":        actionStop,
+	"THREAD_TOO_LARGE":        actionRevise,
+	"TOOL_UNAVAILABLE":        actionRetry,
+	"UNAUTHENTICATED":         actionReauthenticate,
+	"UPSTREAM_REFUSED":        actionRetry,
+}
+
 func (e *apiError) Error() string { return e.Message }
 func apiErr(status int, code, message string) *apiError {
-	return &apiError{HTTP: status, Code: code, Message: message}
+	return &apiError{HTTP: status, Code: code, Message: message, Action: errorActions[code]}
+}
+
+// withAction has a client take another action about a new error than its
+// code's.
+func (e *apiError) withAction(action string) *apiError {
+	e.Action = action
+	return e
 }
 func asAPIError(err error) *apiError {
 	var a *apiError
@@ -297,7 +357,7 @@ func (h *harness) threadOperation(handler jsonEndpoint) http.HandlerFunc {
 }
 
 // errAnonymousCloud refuses a signed-out caller a stored chat.
-var errAnonymousCloud = apiErr(401, "UNAUTHENTICATED", "Anonymous chats are kept on the device")
+var errAnonymousCloud = apiErr(401, "UNAUTHENTICATED", "Anonymous chats are kept on the device").withAction(actionStop)
 
 func downstreamError(status int, body []byte) *apiError {
 	var in object
@@ -322,7 +382,7 @@ func downstreamError(status int, body []byte) *apiError {
 	case "PAYLOAD_TOO_LARGE":
 		e = apiErr(413, "THREAD_TOO_LARGE", "The chat is too large to store")
 	case "SYNC_PROTOCOL_UPGRADE_REQUIRED":
-		e.Message = "The sync service requires a newer protocol"
+		e.Message, e.Action = "The sync service requires a newer protocol", actionStop
 	case "UPSTREAM":
 		if str(in["reason"]) == "outcome_unknown" {
 			// The write may have been stored. Retrying reapplies the change
@@ -349,6 +409,7 @@ func downstreamError(status int, body []byte) *apiError {
 			e.ResetsAt = firstString(in["resetsAt"], in["resets_at"])
 			e.RetryAfter = integer(in["retryAfter"])
 		}
+		refusedAsSent(e, status)
 	}
 	return e
 }

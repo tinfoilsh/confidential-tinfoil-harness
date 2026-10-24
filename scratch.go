@@ -32,7 +32,7 @@ const (
 
 var (
 	errArchiveTooLarge = apiErr(413, "ARCHIVE_TOO_LARGE", "The archive needs more temporary space than this service has")
-	errScratchBusy     = &apiError{HTTP: 503, Code: "TEMP_SPACE_BUSY", Message: "Other archives are using this service's temporary space; retry shortly", RetryAfter: 30}
+	errScratchBusy     = &apiError{HTTP: 503, Code: "TEMP_SPACE_BUSY", Message: "Other archives are using this service's temporary space; retry shortly", Action: actionRetry, RetryAfter: 30}
 )
 
 type scratchSpace struct {

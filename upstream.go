@@ -63,7 +63,7 @@ func openAIRefusal(status int, body []byte) *apiError {
 	case status == http.StatusTooManyRequests:
 		e = apiErr(429, "RATE_LIMITED", firstString(message, "Too many requests; retry shortly"))
 	case status == http.StatusServiceUnavailable && code == "model_unavailable":
-		e = apiErr(503, "MODEL_UNAVAILABLE", firstString(message, "The model is temporarily unavailable"))
+		e = apiErr(503, "MODEL_UNAVAILABLE", firstString(message, "The model is temporarily unavailable")).withAction(actionRetry)
 	case status == http.StatusServiceUnavailable && code == "server_is_overloaded":
 		e = apiErr(503, "UPSTREAM_REFUSED", firstString(message, "The model is overloaded"))
 	case status/100 == 4 && (code == "context_length_exceeded" || strings.Contains(strings.ToLower(message), "context length")):
@@ -72,11 +72,26 @@ func openAIRefusal(status int, body []byte) *apiError {
 		// Document failures carry fixed messages that describe nothing in the file.
 		e = apiErr(502, "UPSTREAM_REFUSED", message)
 	}
+	refusedAsSent(e, status)
 	e.Status = status
 	if strings.HasPrefix(code, "document_") {
 		e.Upstream = code
+		// A document that failed to convert is the file's doing, as its
+		// message says, so the user sends another.
+		if e.Code == "UPSTREAM_REFUSED" {
+			e.Action = actionRevise
+		}
 	}
 	return e
+}
+
+// refusedAsSent has a client stop resending a request a downstream service
+// refused with a 4xx it maps to nothing more specific, since sending it
+// unchanged cannot succeed.
+func refusedAsSent(e *apiError, status int) {
+	if e.Code == "UPSTREAM_REFUSED" && status/100 == 4 {
+		e.Action = actionStop
+	}
 }
 
 // streamError maps an error event inside an accepted stream, whose type stands

@@ -82,8 +82,9 @@ func TestDeviceAndStoredChatsChangeTheSameWay(t *testing.T) {
 	if id := str(fork["id"]); !rowIDPattern.MatchString(id) || fork["title"] != "Trip (fork)" || len(forked) != 2 || fork["flagged"] != nil || fork["lastRequestKind"] != nil || obj(arr(obj(forked[0])["attachments"])[0])["id"] != "img" || obj(arr(obj(forked[0])["attachments"])[0])["base64"] != nil {
 		t.Fatalf("the device fork is %v", fork)
 	}
-	if w := postRoute(h, "/v1/threads/update", object{"id": "chat-1", "title": "x"}, ""); w.Code != 401 {
-		t.Fatalf("a signed-out caller changed a stored chat: HTTP %d", w.Code)
+	// Signing in again would not let a signed-out caller have one.
+	if w := postRoute(h, "/v1/threads/update", object{"id": "chat-1", "title": "x"}, ""); w.Code != 401 || obj(obj(decodeValue(w.Body.Bytes()))["error"])["action"] != "stop" {
+		t.Fatalf("a signed-out caller changed a stored chat, or was told to sign in again: HTTP %d %s", w.Code, w.Body)
 	}
 	if w := postRoute(h, "/v1/threads/update", object{"id": "chat-1", "local": true, "thread": tripThread(), "pinned": true}, ""); w.Code != 400 {
 		t.Fatalf("a device chat was pinned: HTTP %d", w.Code)

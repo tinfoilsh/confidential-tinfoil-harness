@@ -155,7 +155,7 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *principal, cre
 			return nil, apiErr(404, "THREAD_NOT_FOUND", "The widget call was not found")
 		}
 		if !slices.ContainsFunc(h.catalog.get().selectedWidgets(r.input.Widgets, true), func(w widget) bool { return w.Name == plan.retryTarget.block.Name }) {
-			return nil, apiErr(503, "TOOL_UNAVAILABLE", "This widget is not enabled for the client")
+			return nil, apiErr(503, "TOOL_UNAVAILABLE", "This widget is not enabled for the client").withAction(actionStop)
 		}
 	}
 	t.ContextUsage = requestContextUsage(request)

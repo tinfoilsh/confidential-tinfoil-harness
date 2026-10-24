@@ -115,21 +115,17 @@ type runFinished struct {
 	Metadata runMetadata `json:"metadata"`
 }
 
-// runError ends a failed run. One a stream ends with after its run was lost
-// names neither the chat nor the run.
+// runError ends a failed run with the members a refusal has. One a stream
+// ends with after its run was lost names neither the chat nor the run.
 type runError struct {
-	ThreadID   string       `json:"threadId,omitempty"`
-	RunID      string       `json:"runId,omitempty"`
-	Code       string       `json:"code"`
-	Message    string       `json:"message"`
-	Kind       string       `json:"kind,omitempty"`
-	ResetsAt   string       `json:"resetsAt,omitempty"`
-	RetryAfter int          `json:"retryAfter,omitempty"`
-	Metadata   *runMetadata `json:"metadata,omitempty"`
+	ThreadID string `json:"threadId,omitempty"`
+	RunID    string `json:"runId,omitempty"`
+	*apiError
+	Metadata *runMetadata `json:"metadata,omitempty"`
 }
 
 func failedRun(threadID, runID string, e *apiError, metadata *runMetadata) runError {
-	return runError{ThreadID: threadID, RunID: runID, Code: e.Code, Message: e.Message, Kind: e.Kind, ResetsAt: e.ResetsAt, RetryAfter: e.RetryAfter, Metadata: metadata}
+	return runError{ThreadID: threadID, RunID: runID, apiError: e, Metadata: metadata}
 }
 
 func (runStarted) eventType() string         { return "RUN_STARTED" }
