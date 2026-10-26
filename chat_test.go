@@ -1028,7 +1028,10 @@ func TestChatsOutsideTheCloudAreDeviceChats(t *testing.T) {
 		t.Fatalf("an anonymous chat ended with %+v after %d storage calls", events[len(events)-1], rows.calls)
 	}
 }
-func TestCancelCommitsPartialAndLeavesQueue(t *testing.T) {
+
+// A stop commits the partial reply and ends the turns queued behind it, each
+// cancelled, so the harness keeps nothing of the chat.
+func TestCancelCommitsPartialAndEndsQueue(t *testing.T) {
 	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
 		w.(http.Flusher).Flush()
@@ -1042,29 +1045,47 @@ func TestCancelCommitsPartialAndLeavesQueue(t *testing.T) {
 	}
 	// Cancel only once the run has streamed the partial reply.
 	awaitFrame(t, run.log, "TEXT_MESSAGE_CHUNK")
-	queued := sendInput(key)
-	queued["threadId"] = run.thread.id
-	next, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](queued))
-	if err != nil {
-		t.Fatal(err)
+	queue := func() *chatRun {
+		queued := sendInput(key)
+		queued["threadId"] = run.thread.id
+		next, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](queued))
+		if err != nil || !next.queued {
+			t.Fatalf("turn not queued: %v", err)
+		}
+		return next
 	}
-	if !next.queued {
-		t.Fatal("turn was not queued")
-	}
+	next, after := queue(), queue()
 	_, err = h.cancelThread(context.Background(), p, key, requestOf[runRequest](object{"key": key.base64(), "threadId": run.thread.id, "runId": run.log.id}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case <-run.finished:
-	case <-time.After(3 * time.Second):
-		t.Fatal("cancel timed out")
+	for _, r := range []*chatRun{run, next, after} {
+		select {
+		case <-r.finished:
+		case <-time.After(3 * time.Second):
+			t.Fatal("a run did not end with the stop")
+		}
 	}
-	h.live.mu.Lock()
-	queueLength := len(run.thread.queue)
-	h.live.mu.Unlock()
-	if queueLength != 1 {
-		t.Fatal("cancel drained the queue")
+	// The stopped reply's last snapshot shows the queue gone, and each
+	// queued turn's stream ends cancelled.
+	events := eventsOf(t, run.log)
+	var last *event
+	for i := range events {
+		if events[i].Type == "STATE_SNAPSHOT" {
+			last = &events[i]
+		}
+	}
+	if queue := arr(obj(last.Snapshot)["queue"]); len(queue) != 0 {
+		t.Fatalf("the stopped reply's snapshot still queues %v", queue)
+	}
+	for _, r := range []*chatRun{next, after} {
+		var metadata runMetadata
+		if ended := eventsOf(t, r.log); ended[len(ended)-1].Type != "RUN_FINISHED" || json.Unmarshal(ended[len(ended)-1].Metadata, &metadata) != nil || !valueOr(metadata.Cancelled, false) {
+			t.Fatalf("a queued turn ended with %+v", ended[len(ended)-1])
+		}
+	}
+	if threads, runs, requests := liveCount(h); threads+runs+requests != 0 {
+		t.Fatalf("the stopped chat is still live: %d chats, %d runs, %d requests", threads, runs, requests)
 	}
 	row, err := rows.load(context.Background(), p, key, "chat", run.thread.id)
 	if err != nil {
@@ -1077,21 +1098,38 @@ func TestCancelCommitsPartialAndLeavesQueue(t *testing.T) {
 	if m := messages[1]; m.Content != "partial" || !valueOr(m.IsInterrupted, false) {
 		t.Fatalf("partial output not kept and marked interrupted: %v", m)
 	}
-	_, err = h.removeQueued(context.Background(), p, key, requestOf[runRequest](object{"key": key.base64(), "threadId": run.thread.id, "queueId": next.log.id}))
-	if err != nil {
-		t.Fatal(err)
+	ended := object{"key": key.base64(), "threadId": run.thread.id, "queueId": next.log.id}
+	if _, err := h.sendQueued(context.Background(), p, key, requestOf[runRequest](ended)); asAPIError(err).Code != "RUN_NOT_FOUND" {
+		t.Fatalf("sending the ended turn: %v", err)
 	}
+	if _, err := h.removeQueued(context.Background(), p, key, requestOf[runRequest](ended)); asAPIError(err).Code != "RUN_NOT_FOUND" {
+		t.Fatalf("removing the ended turn: %v", err)
+	}
+}
+
+// eventsOf is every event a run's log holds.
+func eventsOf(t *testing.T, log *run) []event {
+	t.Helper()
+	frames, _, _ := log.log.read(0)
+	events := []event{}
+	for _, frame := range frames {
+		var e event
+		if err := json.Unmarshal(frame, &e); err != nil {
+			t.Fatal("unreadable run log frame", err)
+		}
+		events = append(events, e)
+	}
+	return events
 }
 
 // The moments a queued turn may be sent ahead of the reply before it.
 const (
 	whileStreaming  = "while a reply streams"
 	whileCommitting = "while a stopped reply commits"
-	afterAStop      = "after a stop"
 )
 
 func TestPrioritySendStartsTheChosenTurnNext(t *testing.T) {
-	for _, when := range []string{whileStreaming, whileCommitting, afterAStop} {
+	for _, when := range []string{whileStreaming, whileCommitting} {
 		t.Run(when, func(t *testing.T) { prioritySend(t, when) })
 	}
 }
@@ -1150,16 +1188,11 @@ func prioritySend(t *testing.T, when string) {
 			return nil
 		}
 	}
-	if when != whileStreaming {
+	if when == whileCommitting {
 		if _, err := h.cancelThread(context.Background(), p, key, requestOf[runRequest](object{"key": key.base64(), "threadId": run.thread.id, "runId": run.log.id})); err != nil {
 			t.Fatal(err)
 		}
-	}
-	switch when {
-	case whileCommitting:
 		<-committing
-	case afterAStop:
-		<-run.finished
 	}
 	if _, err := h.sendQueued(context.Background(), p, key, requestOf[runRequest](object{"key": key.base64(), "threadId": run.thread.id, "queueId": second.log.id})); err != nil {
 		t.Fatal(err)

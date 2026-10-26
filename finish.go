@@ -104,11 +104,11 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 		metadata.Thread = new(deviceThread(&r.row.Thread))
 	}
 	h.live.mu.Lock()
-	queue := queueItems(s)
 	if s.local {
 		s.row = r.row
 	}
 	next := h.advance(r, !cancelled || r.yielded)
+	queue := queueItems(s)
 	deleted = s.deleted
 	h.live.mu.Unlock()
 	r.out.emit(stateSnapshotEvent{stateSnapshot{summary, queue, limit}})
