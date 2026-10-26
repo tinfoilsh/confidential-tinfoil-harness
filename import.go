@@ -67,10 +67,10 @@ type importOptions struct {
 	Target string `json:"target"`
 }
 
-func (h *harness) handleImport(w http.ResponseWriter, r *http.Request) {
+func (ar *archives) handleImport(w http.ResponseWriter, r *http.Request) {
 	// An archive calls no model, so any signed-in caller may make one,
 	// with or without chat access.
-	p, err := h.auth.Authenticate(r, false)
+	p, err := ar.auth.Authenticate(r, false)
 	if err != nil {
 		api.Respond(w, nil, err)
 		return
@@ -80,13 +80,13 @@ func (h *harness) handleImport(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, err)
 		return
 	}
-	lease, err := h.scratch.lease(r.Context(), importSpaceFactor*size)
+	lease, err := ar.scratch.lease(r.Context(), importSpaceFactor*size)
 	if err != nil {
 		api.Respond(w, nil, err)
 		return
 	}
 	defer lease.release()
-	lift := h.scratch.idleBody(w, r)
+	lift := ar.scratch.idleBody(w, r)
 	r.Body = http.MaxBytesReader(w, r.Body, maxImportBody)
 	upload, options, err := readImportForm(r, lease, func(options importOptions) error {
 		if options.Target != "cloud" {
@@ -95,7 +95,7 @@ func (h *harness) handleImport(w http.ResponseWriter, r *http.Request) {
 		if len(options.Key) == 0 {
 			return api.Err(401, "KEY_REQUIRED", "A content key is required")
 		}
-		return h.store.AuthorizeArchive(r.Context(), p, options.Key, "import")
+		return ar.store.AuthorizeArchive(r.Context(), p, options.Key, "import")
 	})
 	defer options.ClearKey()
 	if err != nil {
@@ -103,7 +103,7 @@ func (h *harness) handleImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lift()
-	run := &importRun{h: h, p: p, lease: lease, out: &importStream{w: w}, seen: map[string]bool{}}
+	run := &importRun{h: ar, p: p, lease: lease, out: &importStream{w: w}, seen: map[string]bool{}}
 	switch options.Target {
 	case "device":
 		options.ClearKey()
@@ -215,7 +215,7 @@ func decodeFormField(part *multipart.Part, v any) error {
 
 // importRun is one import: where its chats go and what it left out.
 type importRun struct {
-	h     *harness
+	h     *archives
 	p     *auth.Principal
 	key   *auth.ContentKey // set when the import goes to the cloud
 	lease *scratchLease
@@ -856,7 +856,7 @@ type importChunkUpload struct {
 	Data        string `json:"data"`
 }
 
-func (h *harness) stageImport(ctx context.Context, p *auth.Principal, key auth.ContentKey, archive *scratchFile) (string, error) {
+func (ar *archives) stageImport(ctx context.Context, p *auth.Principal, key auth.ContentKey, archive *scratchFile) (string, error) {
 	defer clear(key[:])
 	size := archive.Size()
 	if size > maxCloudImport {
@@ -871,7 +871,7 @@ func (h *harness) stageImport(ctx context.Context, p *auth.Principal, key auth.C
 		JobID    string `json:"job_id"`
 		UploadID string `json:"upload_id"`
 	}
-	if err := h.store.SyncImport(ctx, p, "create", importCreate{Source: cloudImportSource, TotalBytes: size, TotalChunks: chunks, ArchiveSHA256: hex.EncodeToString(hash.Sum(nil))}, &created); err != nil {
+	if err := ar.store.SyncImport(ctx, p, "create", importCreate{Source: cloudImportSource, TotalBytes: size, TotalChunks: chunks, ArchiveSHA256: hex.EncodeToString(hash.Sum(nil))}, &created); err != nil {
 		return "", err
 	}
 	for i := int64(0); i < chunks; i++ {
@@ -879,13 +879,13 @@ func (h *harness) stageImport(ctx context.Context, p *auth.Principal, key auth.C
 		if _, err := archive.ReadAt(data, i*importChunk); err != nil && err != io.EOF {
 			return "", err
 		}
-		err := h.store.SyncImport(ctx, p, "upload", importChunkUpload{UploadID: created.UploadID, ChunkIndex: i, ChunkSHA256: api.HashHex(data), Data: base64.StdEncoding.EncodeToString(data)}, nil)
+		err := ar.store.SyncImport(ctx, p, "upload", importChunkUpload{UploadID: created.UploadID, ChunkIndex: i, ChunkSHA256: api.HashHex(data), Data: base64.StdEncoding.EncodeToString(data)}, nil)
 		clear(data)
 		if err != nil {
 			return "", err
 		}
 	}
-	return created.JobID, h.store.API.CallKey(ctx, p, "/v1/import/start", key, api.Object{"job_id": created.JobID}, nil)
+	return created.JobID, ar.store.API.CallKey(ctx, p, "/v1/import/start", key, api.Object{"job_id": created.JobID}, nil)
 }
 
 // importKindCounts is what sync's job did with one kind of item.
@@ -912,13 +912,13 @@ type importStatusView struct {
 	FailureDetail string                      `json:"failureDetail,omitempty"`
 }
 
-func (h *harness) importStatus(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *importStatusRequest) (any, error) {
+func (ar *archives) importStatus(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *importStatusRequest) (any, error) {
 	var status struct {
 		importStatusView
 		FailureReason string `json:"failure_reason"`
 		FailureDetail string `json:"failure_detail"`
 	}
-	if err := h.store.SyncImport(ctx, p, "status", struct {
+	if err := ar.store.SyncImport(ctx, p, "status", struct {
 		JobID string `json:"job_id"`
 	}{in.JobID}, &status); err != nil {
 		return nil, err

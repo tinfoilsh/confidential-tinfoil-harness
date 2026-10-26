@@ -806,7 +806,7 @@ func TestArchivesNeedNoChatAccess(t *testing.T) {
 // told to retry.
 func TestArchivesWaitForScratchSpace(t *testing.T) {
 	h, _, _ := testChatHarness(t, nil)
-	h.scratch = newScratchSpace(t.TempDir(), 64<<10)
+	h.archives.scratch = newScratchSpace(t.TempDir(), 64<<10)
 	thread := threadPart(api.Object{"id": "local-chat", "title": "Tab chat", "messages": []any{api.Object{"id": "m", "role": "user", "content": strings.Repeat("x", 8<<10)}}})
 	if w := archiveRoute(h, "/v1/import", "alice", optionsPart(api.Object{"target": "device"}), formPart{name: "file", filename: "big.json", data: bytes.Repeat([]byte(" "), 40<<10)}); w.Code != 413 || !strings.Contains(w.Body.String(), "ARCHIVE_TOO_LARGE") {
 		t.Fatalf("an import that cannot fit: HTTP %d %s", w.Code, w.Body.String())
@@ -821,7 +821,7 @@ func TestArchivesWaitForScratchSpace(t *testing.T) {
 	go func() {
 		done <- archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "conversations"}), thread)
 	}()
-	for h.scratch.waiting() == 0 {
+	for h.archives.scratch.waiting() == 0 {
 		select {
 		case w := <-done:
 			t.Fatalf("an export ran without space: HTTP %d", w.Code)
@@ -834,7 +834,7 @@ func TestArchivesWaitForScratchSpace(t *testing.T) {
 	}
 	held = heldScratch(t, h, 60<<10)
 	defer held.release()
-	h.scratch.wait = 10 * time.Millisecond
+	h.archives.scratch.wait = 10 * time.Millisecond
 	if w := archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "conversations"}), thread); w.Code != 503 || w.Header().Get("Retry-After") == "" || !strings.Contains(w.Body.String(), "TEMP_SPACE_BUSY") {
 		t.Fatalf("an export that waited too long: HTTP %d %s", w.Code, w.Body.String())
 	}
@@ -843,7 +843,7 @@ func TestArchivesWaitForScratchSpace(t *testing.T) {
 // heldScratch holds n bytes of the harness's scratch space.
 func heldScratch(t *testing.T, h *harness, n int64) *scratchLease {
 	t.Helper()
-	held, err := h.scratch.lease(context.Background(), n)
+	held, err := h.archives.scratch.lease(context.Background(), n)
 	if err == nil {
 		err = held.take(n)
 	}
@@ -881,8 +881,8 @@ func TestStartupRemovesTheSpoolFilesAPreviousProcessLeft(t *testing.T) {
 func TestStalledArchivesFreeTheirSpace(t *testing.T) {
 	h, _, _ := testChatHarness(t, nil)
 	dir := t.TempDir()
-	h.scratch = newScratchSpace(dir, 64<<10)
-	h.scratch.wait, h.scratch.idle = time.Millisecond, 500*time.Millisecond
+	h.archives.scratch = newScratchSpace(dir, 64<<10)
+	h.archives.scratch.wait, h.archives.scratch.idle = time.Millisecond, 500*time.Millisecond
 	server := httptest.NewServer(h.routes())
 	t.Cleanup(server.Close)
 
@@ -904,7 +904,7 @@ func TestStalledArchivesFreeTheirSpace(t *testing.T) {
 		body := form.Bytes()
 		for piece := (len(body) + 7) / 8; len(body) > 0; body = body[min(piece, len(body)):] {
 			slow.Write(body[:min(piece, len(body))])
-			time.Sleep(h.scratch.idle / 5)
+			time.Sleep(h.archives.scratch.idle / 5)
 		}
 	}()
 
@@ -919,7 +919,7 @@ func TestStalledArchivesFreeTheirSpace(t *testing.T) {
 	if r, body := rawResponse(t, slow); r.StatusCode != 200 || !strings.Contains(body, `"title":"Slow"`) || !strings.Contains(body, `"done"`) {
 		t.Fatalf("an import whose body kept arriving: HTTP %d %s", r.StatusCode, body)
 	}
-	for start := time.Now(); !h.scratch.empty(); time.Sleep(time.Millisecond) {
+	for start := time.Now(); !h.archives.scratch.empty(); time.Sleep(time.Millisecond) {
 		if time.Since(start) > 10*time.Second {
 			t.Fatal("the stalled import kept its space")
 		}
@@ -932,7 +932,7 @@ func TestStalledArchivesFreeTheirSpace(t *testing.T) {
 func TestArchivesHoldingSpaceDoNotWaitForMore(t *testing.T) {
 	h, _, _ := testChatHarness(t, nil)
 	dir := t.TempDir()
-	h.scratch = newScratchSpace(dir, 64<<10)
+	h.archives.scratch = newScratchSpace(dir, 64<<10)
 	server := httptest.NewServer(h.routes())
 	t.Cleanup(server.Close)
 	chat := func(id string) formPart {

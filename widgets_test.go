@@ -158,7 +158,7 @@ func TestEveryViewMarksWidgetArgumentsTheDeclarationRefuses(t *testing.T) {
 	cp := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer cp.Close()
 	h.atControlplane(cp.URL)
-	h.cpClient = &http.Client{Transport: &auth.CallerTransport{Inner: cp.Client().Transport}}
+	h.archives.cpClient = &http.Client{Transport: &auth.CallerTransport{Inner: cp.Client().Transport}}
 	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat-1")] = domain.StoredRow{ID: "chat-1", ETag: "1", Data: api.Raw(statsThread())}
 	marks := func(view string, messages any) {
 		t.Helper()

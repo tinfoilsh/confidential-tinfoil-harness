@@ -22,14 +22,13 @@ import (
 
 type harness struct {
 	controlplane string
-	cpClient     *http.Client
 	auth         *auth.Authenticator
 	safeguards   *submitter // nil unless SAFEGUARDS_URL names the sidecar
 	live         liveRuns
-	scratch      *scratchSpace
 	store        *store.Store
 	models       *inference.Models
 	attachments  *attach.Service
+	archives     *archives
 }
 
 // listenAddr is the shim's upstream port in tinfoil-config.yml, which also
@@ -58,9 +57,7 @@ func main() {
 	}
 	h := &harness{models: &inference.Models{Gateway: gw, Controlplane: controlplane},
 		controlplane: controlplane,
-		cpClient:     &http.Client{Transport: &auth.CallerTransport{Inner: http.DefaultTransport}},
 		safeguards:   newSubmitter(os.Getenv("SAFEGUARDS_URL")),
-		scratch:      scratch,
 		store:        &store.Store{}}
 
 	if err := h.bootChat(ctx, usageSecret); err != nil {
@@ -69,6 +66,7 @@ func main() {
 	}
 	h.attachments = &attach.Service{Auth: h.auth, Controlplane: h.controlplane, Models: h.models, Store: h.store}
 	h.store.Repair = h.attachments
+	h.archives = &archives{scratch: scratch, cpClient: &http.Client{Transport: &auth.CallerTransport{Inner: http.DefaultTransport}}, store: h.store, attachments: h.attachments, auth: h.auth, controlplane: h.controlplane}
 
 	srv := &http.Server{Addr: listenAddr, Handler: h.routes(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: time.Minute}
 	stop := make(chan os.Signal, 1)

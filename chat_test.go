@@ -224,10 +224,11 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 	}))
 	t.Cleanup(cp.Close)
 	rows := &memoryRows{rows: map[string]domain.StoredRow{}, sealed: map[string]auth.ContentKey{}}
-	h := &harness{models: &inference.Models{Gateway: server.URL, Controlplane: cp.URL, Services: map[string]*inference.Service{}}, controlplane: cp.URL, cpClient: cp.Client(), store: &store.Store{Rows: rows}, scratch: newScratchSpace(t.TempDir(), 1<<30)}
+	h := &harness{models: &inference.Models{Gateway: server.URL, Controlplane: cp.URL, Services: map[string]*inference.Service{}}, controlplane: cp.URL, store: &store.Store{Rows: rows}}
 	h.attachments = &attach.Service{Auth: testAuth(cp), Controlplane: cp.URL, Models: h.models, Store: h.store}
 	h.auth = h.attachments.Auth
 	h.store.Repair = h.attachments
+	h.archives = &archives{scratch: newScratchSpace(t.TempDir(), 1<<30), cpClient: cp.Client(), store: h.store, attachments: h.attachments, auth: h.auth, controlplane: cp.URL}
 	m := &inference.Model{Name: "kimi-k3", Context: 8192, Client: &http.Client{Transport: &auth.CallerTransport{Inner: server.Client().Transport, UsageSecret: "test-usage-secret"}}}
 	h.models.Offer.Set([]*inference.Model{m}, nil)
 	h.models.Auto = m
@@ -2028,11 +2029,11 @@ func testAuth(cp *httptest.Server) *auth.Authenticator {
 
 // useAuth has the harness and every layer that checks callers use a.
 func (h *harness) useAuth(a *auth.Authenticator) {
-	h.auth, h.attachments.Auth = a, a
+	h.auth, h.attachments.Auth, h.archives.auth = a, a, a
 }
 
 // atControlplane points the harness and every layer that reads the control
 // plane at url.
 func (h *harness) atControlplane(url string) {
-	h.controlplane, h.models.Controlplane, h.attachments.Controlplane = url, url, url
+	h.controlplane, h.models.Controlplane, h.attachments.Controlplane, h.archives.controlplane = url, url, url, url
 }
