@@ -38,7 +38,7 @@ func (h *harness) handleSpeech(w http.ResponseWriter, r *http.Request) {
 	}
 	credential, err := h.auth.Inference(r.Context(), p)
 	if err != nil {
-		api.Respond(w, nil, h.withQuota(p, credential.Limit, err))
+		api.Respond(w, nil, auth.WithQuota(p, credential.Limit, err))
 		return
 	}
 	body, err := api.ReadBody(w, r, domain.MaxTurnBody)
@@ -53,7 +53,7 @@ func (h *harness) handleSpeech(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, err)
 		return
 	}
-	if err := in.validate(); err != nil {
+	if err := in.Validate(); err != nil {
 		api.Respond(w, nil, err)
 		return
 	}
@@ -75,7 +75,7 @@ func (h *harness) handleSpeech(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := auth.WithCallerKey(r.Context(), string(credential.Key))
 	if err := streamSpeech(ctx, w, router, pieces); err != nil {
-		api.Respond(w, nil, h.withQuota(p, credential.Limit, err))
+		api.Respond(w, nil, auth.WithQuota(p, credential.Limit, err))
 	}
 }
 
@@ -92,7 +92,7 @@ func (h *harness) speechText(ctx context.Context, p *auth.Principal, in *speechR
 				return "", err
 			}
 		case p.Anonymous:
-			return "", errAnonymousCloud
+			return "", auth.ErrAnonymousCloud
 		default:
 			key, err := auth.DecodeContentKey(in.Key)
 			if err != nil {

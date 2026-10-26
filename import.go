@@ -518,7 +518,7 @@ func (j *importRun) prepare(t *domain.Thread) error {
 	}
 	messages := t.Messages[:0]
 	for _, m := range t.Messages {
-		if !slices.Contains(messageRoles, m.Role) {
+		if !slices.Contains(domain.MessageRoles, m.Role) {
 			continue
 		}
 		if _, err := time.Parse(time.RFC3339Nano, m.CreatedAt); err != nil {

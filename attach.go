@@ -173,7 +173,7 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	cred, err := h.auth.Inference(r.Context(), p)
 	if err != nil {
-		api.Respond(w, nil, h.withQuota(p, cred.Limit, err))
+		api.Respond(w, nil, auth.WithQuota(p, cred.Limit, err))
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxTextBytes+(1<<20))
@@ -253,12 +253,12 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 	ctx := auth.WithCallerKey(r.Context(), string(cred.Key))
 	if r.URL.Path == "/v1/transcriptions" {
 		text, err := h.transcribe(ctx, filename, file)
-		api.Respond(w, api.Object{"text": text}, h.withQuota(p, cred.Limit, err))
+		api.Respond(w, api.Object{"text": text}, auth.WithQuota(p, cred.Limit, err))
 		return
 	}
 	descriptor, err := h.preprocess(ctx, filename, file)
 	if err != nil {
-		api.Respond(w, nil, h.withQuota(p, cred.Limit, err))
+		api.Respond(w, nil, auth.WithQuota(p, cred.Limit, err))
 		return
 	}
 	// An upload is only converted. Its client sends the descriptor back with
@@ -283,7 +283,7 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 		if descriptor.IsImage() {
 			descriptor.TextContent, err = h.describeImage(ctx, descriptor.Base64)
 			if err != nil {
-				api.Respond(w, nil, h.withQuota(p, cred.Limit, err))
+				api.Respond(w, nil, auth.WithQuota(p, cred.Limit, err))
 				return
 			}
 		}
@@ -666,7 +666,7 @@ func (h *harness) legacyAttachmentBytes(ctx context.Context, id, encodedKey stri
 const opaqueContentType = "application/octet-stream"
 
 func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
-	p, err := h.caller(r, true)
+	p, err := h.auth.Caller(r, true)
 	if err != nil {
 		api.Respond(w, nil, err)
 		return
@@ -684,7 +684,7 @@ func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, err)
 		return
 	}
-	if err := in.validate(); err != nil {
+	if err := in.Validate(); err != nil {
 		api.Respond(w, nil, err)
 		return
 	}
@@ -703,7 +703,7 @@ func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 		descriptor = &domain.Attachment{ID: in.ID, EncryptionKey: in.AttKey, Kind: cmp.Or(in.Kind, in.Type), FileName: in.FileName, MimeType: in.MimeType, TextContent: in.TextContent, Pages: in.Pages}
 		data, err = h.attachmentBytes(r.Context(), &auth.Principal{Anonymous: true}, descriptor, true)
 	} else {
-		key, keyErr := requestKey(in.Key)
+		key, keyErr := auth.RequestKey(in.Key)
 		in.ClearKey()
 		if keyErr != nil {
 			api.Respond(w, nil, keyErr)
@@ -753,10 +753,10 @@ func documentRequest(a *domain.Attachment, data []byte) bool {
 
 // turnAttachments resolves the attachments a turn names: an upload sent
 // whole, or by id one the thread already holds, as an edit sends it.
-func turnAttachments(in *turnRequest, t *domain.Thread) ([]domain.Attachment, error) {
+func turnAttachments(attachments []sentAttachment, t *domain.Thread) ([]domain.Attachment, error) {
 	result := []domain.Attachment{}
-	for i := range in.Attachments {
-		sent := &in.Attachments[i]
+	for i := range attachments {
+		sent := &attachments[i]
 		if sent.whole() {
 			stored, err := sent.stored()
 			if err != nil {

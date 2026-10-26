@@ -15,7 +15,7 @@ import (
 func (h *harness) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	// A signed-out tab upgrades the old chats it holds once its free key is
 	// accepted.
-	if _, err := h.caller(r, true); err != nil {
+	if _, err := h.auth.Caller(r, true); err != nil {
 		api.Respond(w, nil, err)
 		return
 	}
@@ -38,11 +38,11 @@ func (h *harness) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 		}
 		var named idRequest
 		json.Unmarshal(item, &named)
-		if err := named.validate(); err != nil {
+		if err := named.Validate(); err != nil {
 			api.Respond(w, nil, err)
 			return
 		}
-		if err := validateLocalThread(item); err != nil {
+		if err := domain.ValidateLocalThread(item); err != nil {
 			api.Respond(w, nil, err)
 			return
 		}

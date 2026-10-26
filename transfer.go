@@ -128,7 +128,7 @@ func (h *harness) handleThreadImport(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *harness) importThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *threadImportRequest) (any, error) {
-	if err := in.validate(); err != nil {
+	if err := in.Validate(); err != nil {
 		return nil, err
 	}
 	id := in.ThreadID

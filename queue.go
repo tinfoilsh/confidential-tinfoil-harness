@@ -9,7 +9,7 @@ import (
 )
 
 func (h *harness) cancelThread(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *runRequest) (any, error) {
-	key, err := requestKey(in.Key)
+	key, err := auth.RequestKey(in.Key)
 	if err != nil {
 		return nil, err
 	}
@@ -30,7 +30,7 @@ func (h *harness) cancelThread(ctx context.Context, p *auth.Principal, _ auth.Co
 
 // Move the selected queued turn first, then finish the active run normally.
 func (h *harness) sendQueued(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *runRequest) (any, error) {
-	key, err := requestKey(in.Key)
+	key, err := auth.RequestKey(in.Key)
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +59,7 @@ func (h *harness) sendQueued(ctx context.Context, p *auth.Principal, _ auth.Cont
 }
 
 func (h *harness) removeQueued(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *runRequest) (any, error) {
-	key, err := requestKey(in.Key)
+	key, err := auth.RequestKey(in.Key)
 	if err != nil {
 		return nil, err
 	}

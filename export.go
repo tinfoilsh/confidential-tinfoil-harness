@@ -316,10 +316,10 @@ func readExportForm(r *http.Request, lease *scratchLease, authorize func(exportO
 			}
 			var named idRequest
 			json.Unmarshal(data, &named)
-			if err := named.validate(); err != nil {
+			if err := named.Validate(); err != nil {
 				return nil, err
 			}
-			if err := validateLocalThread(data); err != nil {
+			if err := domain.ValidateLocalThread(data); err != nil {
 				return nil, err
 			}
 			if ids[named.ID] {

@@ -134,11 +134,11 @@ func (h *harness) updateThread(ctx context.Context, p *auth.Principal, key auth.
 	var profile domain.Profile
 	if in.PresetID.Value != nil {
 		var err error
-		if profile, err = h.sourceProfile(ctx, p, key, in.threadSource); err != nil {
+		if profile, err = h.sourceProfile(ctx, p, key, in.ThreadSource); err != nil {
 			return nil, err
 		}
 	}
-	row, err := h.changeThread(ctx, p, key, in.threadSource, in.ID, func(t *domain.Thread) error {
+	row, err := h.changeThread(ctx, p, key, in.ThreadSource, in.ID, func(t *domain.Thread) error {
 		in.apply(t, h.models.Catalog.Get(), &profile)
 		t.Pinned = domain.ValueOr(in.Pinned, t.Pinned)
 		if in.ProjectID.Set {
@@ -189,7 +189,7 @@ func (h *harness) pinnedThreads(ctx context.Context, p *auth.Principal, key auth
 
 // changeThread applies change to a chat: a stored one as read now, saved
 // once changed, or the device chat its client sent.
-func (h *harness) changeThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, source threadSource, id string, change func(*domain.Thread) error) (*domain.ThreadRow, error) {
+func (h *harness) changeThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, source domain.ThreadSource, id string, change func(*domain.Thread) error) (*domain.ThreadRow, error) {
 	if !source.Local {
 		return h.store.MutateThread(ctx, p, key, id, change)
 	}
@@ -207,7 +207,7 @@ func (h *harness) changeThread(ctx context.Context, p *auth.Principal, key auth.
 
 // sourceProfile is the settings a chat's prompt reads: the stored profile,
 // or the one a device chat's client sends.
-func (h *harness) sourceProfile(ctx context.Context, p *auth.Principal, key auth.ContentKey, source threadSource) (domain.Profile, error) {
+func (h *harness) sourceProfile(ctx context.Context, p *auth.Principal, key auth.ContentKey, source domain.ThreadSource) (domain.Profile, error) {
 	if !source.Local {
 		return h.profile(ctx, p, key)
 	}
@@ -328,7 +328,7 @@ func (h *harness) updateMessage(ctx context.Context, p *auth.Principal, key auth
 	})
 }
 func (h *harness) changeMessages(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *messageRequest, change func(*domain.Thread, int) error) (any, error) {
-	row, err := h.changeThread(ctx, p, key, in.threadSource, in.ThreadID, func(t *domain.Thread) error {
+	row, err := h.changeThread(ctx, p, key, in.ThreadSource, in.ThreadID, func(t *domain.Thread) error {
 		index := t.MessageIndex(in.MessageID)
 		if index < 0 {
 			return api.Err(404, "THREAD_NOT_FOUND", "The message was not found")

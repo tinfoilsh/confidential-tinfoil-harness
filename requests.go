@@ -10,22 +10,12 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 // Each route decodes its JSON body into one of these. A field of the wrong
 // type refuses the request; a field the route does not read is ignored,
 // except in a profile patch.
-
-// A missing key is checked against the run: keyless threads accept it, and
-// every other thread compares the key's fingerprint.
-func requestKey(key []byte) (auth.ContentKey, error) {
-	if len(key) == 0 {
-		return auth.ContentKey{}, nil
-	}
-	return auth.DecodeContentKey(key)
-}
 
 type idRequest struct {
 	ID string `json:"id"`
@@ -36,13 +26,13 @@ type deleteThreadRequest struct {
 	Revision string `json:"revision,omitempty"`
 }
 
-func (in *idRequest) validate() error { return api.RequireID("id", in.ID) }
+func (in *idRequest) Validate() error { return api.RequireID("id", in.ID) }
 
 type threadRequest struct {
 	ThreadID string `json:"threadId"`
 }
 
-func (in *threadRequest) validate() error { return api.RequireID("threadId", in.ThreadID) }
+func (in *threadRequest) Validate() error { return api.RequireID("threadId", in.ThreadID) }
 
 type listRequest struct {
 	Cursor    string `json:"cursor"`
@@ -56,35 +46,10 @@ type windowRequest struct {
 	Limit  int    `json:"limit"`
 }
 
-func (in *windowRequest) validate() error { return api.RequireID("id", in.ID) }
-
-// threadSource is where the chat an operation changes is kept: in the cloud,
-// named by id with the content key, or on the device that sends it with
-// the settings its prompt reads.
-type threadSource struct {
-	Local   bool            `json:"local"`
-	Thread  json.RawMessage `json:"thread"`
-	Profile json.RawMessage `json:"profile"`
-}
-
-func (s *threadSource) validate() error {
-	if !s.Local {
-		if s.Thread != nil || s.Profile != nil {
-			return api.Err(400, "BAD_REQUEST", "thread and profile are only accepted for local threads")
-		}
-		return nil
-	}
-	if !api.IsObject(s.Thread) {
-		return api.Err(400, "BAD_REQUEST", "A local thread requires its transcript")
-	}
-	if s.Profile != nil && !api.IsObject(s.Profile) {
-		return api.Err(400, "BAD_REQUEST", "profile must be an object")
-	}
-	return validateLocalThread(s.Thread)
-}
+func (in *windowRequest) Validate() error { return api.RequireID("id", in.ID) }
 
 type updateThreadRequest struct {
-	threadSource
+	domain.ThreadSource
 	ID               string               `json:"id"`
 	Title            *string              `json:"title"`
 	Model            *string              `json:"model"`
@@ -94,11 +59,11 @@ type updateThreadRequest struct {
 	PresetID         api.Nullable[string] `json:"presetId"`
 }
 
-func (in *updateThreadRequest) validate() error {
+func (in *updateThreadRequest) Validate() error {
 	if in.Local && (in.Pinned != nil || in.ProjectID.Set) {
 		return api.Err(400, "BAD_REQUEST", "Pins and projects require cloud storage")
 	}
-	return cmp.Or(in.ProjectID.Check("projectId"), in.PresetID.Check("presetId"), api.RequireID("id", in.ID), in.threadSource.validate())
+	return cmp.Or(in.ProjectID.Check("projectId"), in.PresetID.Check("presetId"), api.RequireID("id", in.ID), in.ThreadSource.Validate())
 }
 
 // apply makes the settings change a chat's client asks for. Choosing another
@@ -116,20 +81,20 @@ func (in *updateThreadRequest) apply(t *domain.Thread, c *domain.Catalog, profil
 
 // messageRequest names a message of a chat; an edit sends its text.
 type messageRequest struct {
-	threadSource
+	domain.ThreadSource
 	ThreadID  string  `json:"threadId"`
 	MessageID string  `json:"messageId"`
 	Content   *string `json:"content"`
 }
 
-func (in *messageRequest) validate() error {
+func (in *messageRequest) Validate() error {
 	if err := api.RequireID("threadId", in.ThreadID); err != nil {
 		return err
 	}
 	if err := api.RequireID("messageId", in.MessageID); err != nil {
 		return err
 	}
-	return in.threadSource.validate()
+	return in.ThreadSource.Validate()
 }
 
 type searchRequest struct {
@@ -188,7 +153,7 @@ type profileMergeRequest struct {
 	ChangedFields []string `json:"changedFields"`
 }
 
-func (in *profileUpgradeRequest) validate() error {
+func (in *profileUpgradeRequest) Validate() error {
 	if !api.IsObject(in.Profile) {
 		return api.Err(400, "BAD_REQUEST", "profile must be an object")
 	}
@@ -203,14 +168,14 @@ type projectRequest struct {
 	Color              api.Nullable[string] `json:"color"`
 }
 
-func (in *projectRequest) validate() error { return in.Color.Check("color") }
+func (in *projectRequest) Validate() error { return in.Color.Check("color") }
 
 type projectDocumentRequest struct {
 	ProjectID  string `json:"projectId"`
 	DocumentID string `json:"documentId"`
 }
 
-func (in *projectDocumentRequest) validate() error {
+func (in *projectDocumentRequest) Validate() error {
 	if err := api.RequireID("projectId", in.ProjectID); err != nil {
 		return err
 	}
@@ -226,7 +191,7 @@ type shareRequest struct {
 	Thread   json.RawMessage `json:"thread"`
 }
 
-func (in *shareRequest) validate() error {
+func (in *shareRequest) Validate() error {
 	if err := api.RequireID("threadId", in.ThreadID); err != nil {
 		return err
 	}
@@ -236,7 +201,7 @@ func (in *shareRequest) validate() error {
 	if !api.IsObject(in.Thread) {
 		return api.Err(400, "BAD_REQUEST", "A local thread requires its transcript")
 	}
-	return validateLocalThread(in.Thread)
+	return domain.ValidateLocalThread(in.Thread)
 }
 
 type openShareRequest struct {
@@ -244,52 +209,13 @@ type openShareRequest struct {
 	Fragment string `json:"fragment"`
 }
 
-func (in *openShareRequest) validate() error { return api.RequireID("shareId", in.ShareID) }
+func (in *openShareRequest) Validate() error { return api.RequireID("shareId", in.ShareID) }
 
 type importStatusRequest struct {
 	JobID string `json:"jobId"`
 }
 
-func (in *importStatusRequest) validate() error { return api.RequireID("jobId", in.JobID) }
-
-// pageRequest names a page whose details the metadata service reads.
-type pageRequest struct {
-	URL string `json:"url"`
-}
-
-func (in *pageRequest) validate() error {
-	if strings.TrimSpace(in.URL) == "" {
-		return api.Err(400, "BAD_REQUEST", "A page URL is required")
-	}
-	return nil
-}
-
-// speechRequest names a message to read aloud: one of a stored chat, named
-// with the content key, or of a device chat its client sends. Text a client
-// selected, or a shared chat's message, is sent as it is.
-type speechRequest struct {
-	threadSource
-	api.KeyRequest
-	ThreadID  string  `json:"threadId"`
-	MessageID string  `json:"messageId"`
-	Text      *string `json:"text"`
-}
-
-func (in *speechRequest) validate() error {
-	if in.MessageID == "" {
-		if strings.TrimSpace(domain.ValueOr(in.Text, "")) == "" {
-			return api.Err(400, "BAD_REQUEST", "A message or text is required")
-		}
-		return nil
-	}
-	if err := api.RequireID("threadId", in.ThreadID); err != nil {
-		return err
-	}
-	if err := api.RequireID("messageId", in.MessageID); err != nil {
-		return err
-	}
-	return in.threadSource.validate()
-}
+func (in *importStatusRequest) Validate() error { return api.RequireID("jobId", in.JobID) }
 
 // threadImportRequest stores a device chat in the cloud under its id.
 type threadImportRequest struct {
@@ -298,43 +224,18 @@ type threadImportRequest struct {
 	Thread   json.RawMessage `json:"thread"`
 }
 
-func (in *threadImportRequest) validate() error {
+func (in *threadImportRequest) Validate() error {
 	if err := api.RequireID("threadId", in.ThreadID); err != nil {
 		return err
 	}
 	if !api.IsObject(in.Thread) {
 		return api.Err(400, "BAD_REQUEST", "thread must be an object")
 	}
-	return validateLocalThread(in.Thread)
+	return domain.ValidateLocalThread(in.Thread)
 }
 
 type upgradeRequest struct {
 	Threads *[]json.RawMessage `json:"threads"`
-}
-
-// attachmentRequest downloads an attachment of a stored chat, or one a share
-// names by the key its link carries.
-type attachmentRequest struct {
-	api.KeyRequest
-	ID          string                `json:"id"`
-	ThreadID    string                `json:"threadId"`
-	AttKey      string                `json:"attKey"`
-	Type        string                `json:"type"`
-	Kind        string                `json:"kind"`
-	FileName    string                `json:"fileName"`
-	MimeType    string                `json:"mimeType"`
-	TextContent string                `json:"textContent"`
-	Pages       []domain.DocumentPage `json:"pages"`
-}
-
-func (in *attachmentRequest) validate() error {
-	if err := api.RequireID("id", in.ID); err != nil {
-		return err
-	}
-	if in.ThreadID != "" {
-		return api.RequireID("threadId", in.ThreadID)
-	}
-	return nil
 }
 
 // turnRequest is one user action on a chat, which its run carries out.
@@ -375,28 +276,13 @@ type turnOptions struct {
 
 var cacheSecretPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-// sentAttachment is an upload's descriptor as a turn sends it back, or the
-// id alone of an attachment the thread already holds.
-type sentAttachment struct {
-	ID          string                `json:"id"`
-	Kind        string                `json:"kind,omitempty"`
-	FileName    string                `json:"fileName,omitempty"`
-	MimeType    string                `json:"mimeType,omitempty"`
-	Size        *int64                `json:"size,omitempty"`
-	Thumbnail   *string               `json:"thumbnail,omitempty"`
-	TextContent string                `json:"textContent,omitempty"`
-	Description string                `json:"description,omitempty"`
-	Pages       []domain.DocumentPage `json:"pages,omitempty"`
-	Base64      string                `json:"base64,omitempty"`
-}
-
 var (
 	turnKinds = []string{"send", "edit", "regenerate", "continue", "retryToolCall", "ask", "retry"}
 )
 
-// validate refuses a turn its run could not carry out. Who may send it is
+// Validate refuses a turn its run could not carry out. Who may send it is
 // checked with the caller.
-func (in *turnRequest) validate() error {
+func (in *turnRequest) Validate() error {
 	if _, err := uuid.Parse(in.ClientRequestID); err != nil {
 		return api.Err(400, "BAD_REQUEST", "clientRequestId must be a UUID")
 	}
@@ -437,7 +323,7 @@ func (in *turnRequest) validateContent() error {
 		}
 	}
 	if in.Thread != nil {
-		if err := validateLocalThread(in.Thread); err != nil {
+		if err := domain.ValidateLocalThread(in.Thread); err != nil {
 			return err
 		}
 	} else if in.Local && in.Kind == "ask" {
@@ -446,7 +332,7 @@ func (in *turnRequest) validateContent() error {
 	}
 	pixels := int64(0)
 	for i := range in.Attachments {
-		if err := in.Attachments[i].validate(); err != nil {
+		if err := in.Attachments[i].Validate(); err != nil {
 			return err
 		}
 		pixels += in.Attachments[i].resizePixels()
@@ -460,72 +346,10 @@ func (in *turnRequest) validateContent() error {
 	return nil
 }
 
-func (a *sentAttachment) validate() error {
-	if err := api.RequireID("id", a.ID); err != nil {
-		return err
-	}
-	if a.Kind != "" && !slices.Contains(domain.AttachmentKinds, a.Kind) {
-		return api.Err(400, "BAD_REQUEST", "An attachment kind must be image, document, or audio")
-	}
-	if a.whole() {
-		return a.fitsUpload()
-	}
-	return nil
-}
-
-// whole reports whether the turn sends the attachment's descriptor rather
-// than naming one its thread holds.
-func (a *sentAttachment) whole() bool { return a.Kind != "" }
-
 // digest identifies a turn's content, so a retry of the request is told from
 // another request under the same id.
 func (in *turnRequest) digest() string {
 	copy := *in
 	copy.Key = nil
 	return api.HashHex(api.Raw(copy))
-}
-
-// threadInput is what a client's copy of a thread must hold before the
-// legacy reader reads the rest.
-type threadInput struct {
-	Title            *string        `json:"title"`
-	TitleState       *string        `json:"titleState"`
-	Model            *string        `json:"model"`
-	LastRequestID    *string        `json:"lastRequestId"`
-	Pinned           *bool          `json:"pinned"`
-	WebSearchEnabled *bool          `json:"webSearchEnabled"`
-	PresetID         *string        `json:"presetId"`
-	Messages         []messageInput `json:"messages"`
-}
-
-type messageInput struct {
-	ID          string            `json:"id"`
-	Role        string            `json:"role"`
-	Content     *string           `json:"content"`
-	Attachments []json.RawMessage `json:"attachments"`
-	Timeline    []json.RawMessage `json:"timeline"`
-}
-
-// maxLocalMessages bounds the messages a client's thread may hold.
-const maxLocalMessages = 10000
-
-var messageRoles = []string{"user", "assistant"}
-
-func validateLocalThread(data []byte) error {
-	var thread threadInput
-	if err := api.DecodeRequest(data, &thread); err != nil {
-		return err
-	}
-	if len(thread.Messages) > maxLocalMessages {
-		return api.Err(413, "CONTEXT_TOO_LARGE", "The thread has too many messages")
-	}
-	for _, message := range thread.Messages {
-		if !slices.Contains(messageRoles, message.Role) {
-			return api.Err(400, "BAD_REQUEST", "A message role must be user or assistant")
-		}
-		if message.ID != "" && !api.IsIdentifier(message.ID) {
-			return api.Err(400, "BAD_REQUEST", "A message id must be a valid identifier")
-		}
-	}
-	return nil
 }

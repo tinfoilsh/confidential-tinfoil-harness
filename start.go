@@ -112,7 +112,7 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *auth.Principal
 		t.WebSearchEnabled = domain.ValueOr(profile.WebSearchEnabled, t.WebSearchEnabled)
 		c.ApplyPreset(t, &profile, preset)
 	}
-	attachments, err := turnAttachments(turn, t)
+	attachments, err := turnAttachments(turn.Attachments, t)
 	if err != nil {
 		return nil, err
 	}
@@ -353,7 +353,7 @@ func (h *harness) endUnstarted(r *chatRun, err error) *chatRun {
 	h.live.mu.Lock()
 	next := h.advance(r, true)
 	h.live.mu.Unlock()
-	e := api.AsError(h.withQuota(r.principal, r.credential.Limit, err))
+	e := api.AsError(auth.WithQuota(r.principal, r.credential.Limit, err))
 	limit := domain.ValueOr(e.RateLimit, r.credential.Limit)
 	r.out.emit(domain.FailedRun(r.thread.id, r.log.id, e, &domain.RunMetadata{RateLimit: &limit}))
 	r.log.log.close(errDone)

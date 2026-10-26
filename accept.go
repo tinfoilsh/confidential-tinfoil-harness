@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
@@ -92,7 +91,7 @@ func (h *harness) acceptTurn(ctx context.Context, p *auth.Principal, credential 
 		return r, nil
 	}
 	if err := h.launch(ctx, r); err != nil {
-		err = h.withQuota(p, r.credential.Limit, err)
+		err = auth.WithQuota(p, r.credential.Limit, err)
 		if next := h.endUnstarted(r, err); next != nil {
 			go h.runQueue(next)
 		}
@@ -110,18 +109,6 @@ func quotaExhausted(limit api.RateLimit) error {
 	e.Kind, _ = limit.Kind.(string)
 	e.ResetsAt, e.RateLimit = limit.ResetsAt, &limit
 	return e
-}
-
-// withQuota gives a refusal for an exhausted quota the caller's quota as the
-// refusal leaves it. A signed-out caller's is the one its request held.
-func (h *harness) withQuota(p *auth.Principal, held api.RateLimit, err error) error {
-	var e *api.Error
-	if p == nil || !errors.As(err, &e) || e.Code != "QUOTA_EXHAUSTED" || e.RateLimit != nil {
-		return err
-	}
-	refused, limit := *e, auth.Exhausted(p, held)
-	refused.RateLimit = &limit
-	return &refused
 }
 
 // newThread is a chat's first form, filed under a project and preset.
