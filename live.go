@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"sync"
-	"time"
 )
 
 // liveRuns holds what this instance is executing: each chat's running reply
@@ -44,8 +43,6 @@ type threadSession struct {
 	row    *threadRow
 	active *chatRun
 	queue  []*chatRun
-	// waiting ends the queue a stopped run leaves if its client never sends it.
-	waiting *time.Timer
 }
 
 type chatRun struct {
@@ -109,10 +106,6 @@ func (h *harness) authorizedRun(p *principal, key contentKey, id, runID string) 
 // makeActive gives a chat's running slot to a turn about to start; live.mu is held.
 func (h *harness) makeActive(s *threadSession, r *chatRun) {
 	s.active = r
-	if s.waiting != nil {
-		s.waiting.Stop()
-		s.waiting = nil
-	}
 }
 
 // queueChanged tells a chat's running reply its queue; live.mu is held. A
@@ -140,9 +133,10 @@ func queueItems(s *threadSession) []queueItem {
 }
 
 // advance retires a run from its chat and returns the queued turn to start
-// next, if the chat goes on; live.mu is held. A chat with nothing running or
-// queued leaves the registry. A queue a stopped run leaves waits for its
-// client to send or remove a turn, as long as a run may last.
+// next, if the chat goes on; live.mu is held. A chat whose reply was stopped
+// ends the turns queued behind it, so the harness keeps nothing of a chat
+// once its reply stops. A chat with nothing running or queued leaves the
+// registry.
 func (h *harness) advance(r *chatRun, goOn bool) *chatRun {
 	s := r.thread
 	h.live.forget(r)
@@ -153,9 +147,11 @@ func (h *harness) advance(r *chatRun, goOn bool) *chatRun {
 	if goOn && !s.deleted && !h.live.closing && len(s.queue) > 0 {
 		next, s.queue = s.queue[0], s.queue[1:]
 		h.makeActive(s, next)
-	}
-	if s.active == nil && len(s.queue) > 0 && s.waiting == nil {
-		s.waiting = time.AfterFunc(runTimeout, func() { h.endWaitingQueue(s) })
+	} else {
+		for _, queued := range s.queue {
+			h.endQueued(queued, nil)
+		}
+		s.queue = nil
 	}
 	h.dropIdle(s)
 	return next
@@ -166,10 +162,6 @@ func (h *harness) advance(r *chatRun, goOn bool) *chatRun {
 func (h *harness) dropIdle(s *threadSession) {
 	if s.active != nil || len(s.queue) > 0 {
 		return
-	}
-	if s.waiting != nil {
-		s.waiting.Stop()
-		s.waiting = nil
 	}
 	if h.live.threads[s.owner+"/"+s.id] == s {
 		delete(h.live.threads, s.owner+"/"+s.id)
@@ -188,18 +180,4 @@ func (h *harness) endQueued(r *chatRun, why error) {
 	r.log.log.close(errDone)
 	r.release()
 	close(r.finished)
-}
-
-// endWaitingQueue ends the queue of a stopped run that nobody came back to.
-func (h *harness) endWaitingQueue(s *threadSession) {
-	h.live.mu.Lock()
-	defer h.live.mu.Unlock()
-	if s.active != nil || h.live.threads[s.owner+"/"+s.id] != s {
-		return
-	}
-	for _, r := range s.queue {
-		h.endQueued(r, nil)
-	}
-	s.queue = nil
-	h.dropIdle(s)
 }

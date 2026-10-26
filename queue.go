@@ -44,22 +44,14 @@ func (h *harness) sendQueued(ctx context.Context, p *principal, _ contentKey, in
 		return nil, apiErr(409, "RUN_IN_FLIGHT", "The queued turn has started")
 	}
 	s.queue = append([]*chatRun{r}, slices.Delete(s.queue, index, index+1)...)
-	if s.active != nil {
-		queueChanged(s)
-		// A reply already stopped and finishing still hands the chat on.
-		s.active.yielded = true
-		if !s.active.ending {
-			s.active.cancelled = true
-			s.active.log.stop()
-		}
-		h.live.mu.Unlock()
-		return struct{}{}, nil
+	queueChanged(s)
+	// A reply already stopped and finishing still hands the chat on.
+	s.active.yielded = true
+	if !s.active.ending {
+		s.active.cancelled = true
+		s.active.log.stop()
 	}
-	// After a stop the queue waits, so there is no run to yield.
-	s.queue = s.queue[1:]
-	h.makeActive(s, r)
 	h.live.mu.Unlock()
-	h.runQueue(r)
 	return struct{}{}, nil
 }
 
