@@ -59,8 +59,8 @@ func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
 		h.services[config.role] = &downstreamService{URL: "https://" + host, Client: client}
 	}
 	s := h.services["sync"]
-	h.syncAPI = &syncClient{URL: s.URL, Client: s.Client, MinimumGrant: runTimeout + commitTimeout}
-	h.storeRows = h.syncAPI
+	h.store.api = &syncClient{URL: s.URL, Client: s.Client, MinimumGrant: runTimeout + commitTimeout}
+	h.store.rows = h.store.api
 	router := h.services["router"]
 	h.autoModel = &model{name: "auto", client: router.Client, endpoint: router.URL + "/v1/chat/completions"}
 	if err := h.refreshCatalog(ctx); err != nil {

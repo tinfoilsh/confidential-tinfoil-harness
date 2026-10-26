@@ -334,7 +334,7 @@ func TestNativeBackupRoundTrips(t *testing.T) {
 		t.Fatalf("the chat lost its project: %v", chat.ProjectID)
 	}
 	restoredProject := mustRead(domain.ReadProject(&projects.Rows[0]))
-	docs, _ := restored.projectDocuments(context.Background(), alice, key, restoredProject.ID, refuseUnreadable)
+	docs, _ := restored.store.projectDocuments(context.Background(), alice, key, restoredProject.ID, refuseUnreadable)
 	if restoredProject.Name != "Research" || restoredProject.SystemInstructions != "Cite sources" || domain.ValueOr(restoredProject.Color, "") != "teal" || len(docs) != 1 || docs[0].Content != "Paper text" || docs[0].Filename != "paper.md" {
 		t.Fatalf("project: %+v %+v", restoredProject, docs)
 	}
@@ -492,7 +492,7 @@ func TestWebAppBackupsRestore(t *testing.T) {
 				t.Fatalf("the old timeline was not read: %v", names)
 			}
 			projects, _ := rows.list(context.Background(), &auth.Principal{ID: "alice"}, key, "project", "", "", 0)
-			docs, _ := h.projectDocuments(context.Background(), &auth.Principal{ID: "alice"}, key, *chat.ProjectID, refuseUnreadable)
+			docs, _ := h.store.projectDocuments(context.Background(), &auth.Principal{ID: "alice"}, key, *chat.ProjectID, refuseUnreadable)
 			if len(projects.Rows) != 1 || mustRead(domain.ReadProject(&projects.Rows[0])).Name != "Research" || len(docs) != 1 || docs[0].Content != "Extracted paper text" {
 				t.Fatalf("project: %v %v", projects.Rows, docs)
 			}
@@ -675,7 +675,7 @@ func TestClaudeProjectsRequireTheCloud(t *testing.T) {
 		t.Fatalf("projects: %d stored, done %+v", len(stored.Rows), result.done)
 	}
 	project := mustRead(domain.ReadProject(&stored.Rows[0]))
-	docs, _ := h.projectDocuments(context.Background(), &auth.Principal{ID: "alice"}, key, project.ID, refuseUnreadable)
+	docs, _ := h.store.projectDocuments(context.Background(), &auth.Principal{ID: "alice"}, key, project.ID, refuseUnreadable)
 	if project.Name != "Release Notes" || project.SystemInstructions != "Write concise release notes." || len(docs) != 1 || docs[0].Filename != "style-guide.md" || docs[0].Content != "# Style guide" {
 		t.Fatalf("project: %+v %+v", project, docs)
 	}

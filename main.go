@@ -66,16 +66,14 @@ type harness struct {
 	modelClient  *http.Client
 	controlplane string
 	cpClient     *http.Client
-	storeRows    rowStore
-	syncAPI      *syncClient
 	auth         *auth.Authenticator
 	catalog      catalogCache
 	autoModel    *model
 	services     map[string]*downstreamService
 	safeguards   *submitter // nil unless SAFEGUARDS_URL names the sidecar
 	live         liveRuns
-	repairs      attachmentRepairer
 	scratch      *scratchSpace
+	store        *store
 }
 
 // listenAddr is the shim's upstream port in tinfoil-config.yml, which also
@@ -106,8 +104,9 @@ func main() {
 		controlplane: controlplane,
 		cpClient:     &http.Client{Transport: &auth.CallerTransport{Inner: http.DefaultTransport}},
 		safeguards:   newSubmitter(os.Getenv("SAFEGUARDS_URL")),
-		scratch:      scratch}
-	h.repairs = h
+		scratch:      scratch,
+		store:        &store{}}
+	h.store.repair = h
 
 	if err := h.bootChat(ctx, usageSecret); err != nil {
 		slog.Error("initialize chat service", "error", err)

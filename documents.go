@@ -131,7 +131,7 @@ func (h *harness) placeAttachment(ctx context.Context, p *auth.Principal, thread
 		return nil
 	}
 	defer clear(data)
-	storedID, key, err := h.putAttachment(ctx, p, threadID, a.ID, data)
+	storedID, key, err := h.store.putAttachment(ctx, p, threadID, a.ID, data)
 	if err != nil {
 		return err
 	}

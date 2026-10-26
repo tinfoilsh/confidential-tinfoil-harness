@@ -59,7 +59,7 @@ func TestGetProjectLoadsDocumentsAcrossSyncPages(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h, _, key := testChatHarness(t, nil)
 			var cursors, pulled []string
-			h.storeRows = &syncClient{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
+			h.store.rows = &syncClient{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
 				var in api.Object
 				if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 					t.Errorf("decode sync request: %v", err)
@@ -232,7 +232,7 @@ func TestDeletionsLeaveTheWorkToSync(t *testing.T) {
 	h, _, key := testChatHarness(t, nil)
 	var requests []api.Object
 	pages := map[string]api.Object{"": {"updates": []api.Object{{"id": "one"}, {"id": "sealed-to-a-retired-key"}}, "next_cursor": "more"}, "more": {"updates": []api.Object{{"id": "two"}}}}
-	h.syncAPI = &syncClient{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
+	h.store.api = &syncClient{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
 		var in api.Object
 		json.NewDecoder(r.Body).Decode(&in)
 		in["path"] = r.URL.Path
@@ -253,7 +253,7 @@ func TestDeletionsLeaveTheWorkToSync(t *testing.T) {
 		}
 		return syncTestResponse(404, api.Object{"code": "NOT_FOUND"})
 	})}}
-	h.storeRows = h.syncAPI
+	h.store.rows = h.store.api
 	deleted := func(scope, id string) api.Object {
 		return api.Object{"path": "/v1/sync/delete", "scope": scope, "id": id, "key": keyBase64(key), "if_match": ""}
 	}
@@ -451,7 +451,7 @@ func TestADocumentSyncCannotOpenIsNeverLeftOutUnsaid(t *testing.T) {
 	doc := func(id, filename string) domain.StoredRow {
 		return domain.StoredRow{ID: trip + "/" + id, ETag: "1", Data: api.Raw(api.Object{"filename": filename}), Project: &trip, ProjectSet: true}
 	}
-	h.storeRows = &pagedDocuments{memoryRows: rows, pages: []rowPage{
+	h.store.rows = &pagedDocuments{memoryRows: rows, pages: []rowPage{
 		{Rows: []domain.StoredRow{doc("notes", "draft.md"), doc("map", "map.md")}, Next: "1"},
 		{Rows: []domain.StoredRow{doc("notes", "notes.md")}, Unreadable: map[string]error{trip + "/map": api.Err(409, "KEY_MISMATCH", "sealed to another key")}},
 	}}

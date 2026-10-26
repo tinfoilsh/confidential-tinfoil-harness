@@ -193,7 +193,7 @@ func TestACloudRunUsesItsStorageCredentialForTheFinalSave(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	h.storeRows = &syncClient{URL: server.URL, Client: server.Client()}
+	h.store.rows = &syncClient{URL: server.URL, Client: server.Client()}
 	in := sendInput(key)
 	events := finishedRun(t, h, "/v1/threads/turn", in)
 	row, err := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", api.Str(in["threadId"]))
@@ -229,7 +229,7 @@ func TestRemoteChangesReadOnlyStorageMetadata(t *testing.T) {
 		json.NewEncoder(w).Encode(api.Object{"updates": []api.Object{{"id": scope, "etag": revisions[scope]}}})
 	}))
 	defer server.Close()
-	h.syncAPI = &syncClient{URL: server.URL, Client: server.Client()}
+	h.store.api = &syncClient{URL: server.URL, Client: server.Client()}
 	read := func() api.Object {
 		t.Helper()
 		w := postRoute(h, "/v1/changes", api.Object{}, "alice")
@@ -284,7 +284,7 @@ func TestAQueuedTurnRefreshesStorageAccessBeforeStarting(t *testing.T) {
 	h, rows, key := testChatHarness(t, model)
 	t.Cleanup(release)
 	grants := &countedRunGrants{memoryRows: rows}
-	h.storeRows = grants
+	h.store.rows = grants
 	p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
 	in := sendInput(key)
 	first, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](in))

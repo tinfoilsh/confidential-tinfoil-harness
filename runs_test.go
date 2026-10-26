@@ -362,7 +362,7 @@ func TestARetriedRequestFollowsItsRunOrIsAlreadyApplied(t *testing.T) {
 	release()
 	<-run.finished
 	fresh, _, _ := testChatHarness(t, nil)
-	fresh.storeRows = rows
+	fresh.store.rows = rows
 	for _, instance := range []*harness{h, fresh} {
 		w := httptest.NewRecorder()
 		instance.routes().ServeHTTP(w, retry(instance))

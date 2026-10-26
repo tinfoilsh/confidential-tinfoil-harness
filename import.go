@@ -94,7 +94,7 @@ func (h *harness) handleImport(w http.ResponseWriter, r *http.Request) {
 		if len(options.Key) == 0 {
 			return api.Err(401, "KEY_REQUIRED", "A content key is required")
 		}
-		return h.authorizeArchive(r.Context(), p, options.Key, "import")
+		return h.store.authorizeArchive(r.Context(), p, options.Key, "import")
 	})
 	defer options.ClearKey()
 	if err != nil {
@@ -870,7 +870,7 @@ func (h *harness) stageImport(ctx context.Context, p *auth.Principal, key auth.C
 		JobID    string `json:"job_id"`
 		UploadID string `json:"upload_id"`
 	}
-	if err := h.syncImport(ctx, p, "create", importCreate{Source: cloudImportSource, TotalBytes: size, TotalChunks: chunks, ArchiveSHA256: hex.EncodeToString(hash.Sum(nil))}, &created); err != nil {
+	if err := h.store.syncImport(ctx, p, "create", importCreate{Source: cloudImportSource, TotalBytes: size, TotalChunks: chunks, ArchiveSHA256: hex.EncodeToString(hash.Sum(nil))}, &created); err != nil {
 		return "", err
 	}
 	for i := int64(0); i < chunks; i++ {
@@ -878,13 +878,13 @@ func (h *harness) stageImport(ctx context.Context, p *auth.Principal, key auth.C
 		if _, err := archive.ReadAt(data, i*importChunk); err != nil && err != io.EOF {
 			return "", err
 		}
-		err := h.syncImport(ctx, p, "upload", importChunkUpload{UploadID: created.UploadID, ChunkIndex: i, ChunkSHA256: api.HashHex(data), Data: base64.StdEncoding.EncodeToString(data)}, nil)
+		err := h.store.syncImport(ctx, p, "upload", importChunkUpload{UploadID: created.UploadID, ChunkIndex: i, ChunkSHA256: api.HashHex(data), Data: base64.StdEncoding.EncodeToString(data)}, nil)
 		clear(data)
 		if err != nil {
 			return "", err
 		}
 	}
-	return created.JobID, h.syncAPI.callKey(ctx, p, "/v1/import/start", key, api.Object{"job_id": created.JobID}, nil)
+	return created.JobID, h.store.api.callKey(ctx, p, "/v1/import/start", key, api.Object{"job_id": created.JobID}, nil)
 }
 
 // importKindCounts is what sync's job did with one kind of item.
@@ -917,7 +917,7 @@ func (h *harness) importStatus(ctx context.Context, p *auth.Principal, _ auth.Co
 		FailureReason string `json:"failure_reason"`
 		FailureDetail string `json:"failure_detail"`
 	}
-	if err := h.syncImport(ctx, p, "status", struct {
+	if err := h.store.syncImport(ctx, p, "status", struct {
 		JobID string `json:"job_id"`
 	}{in.JobID}, &status); err != nil {
 		return nil, err

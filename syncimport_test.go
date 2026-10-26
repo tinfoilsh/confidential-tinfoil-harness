@@ -66,7 +66,7 @@ func (f *fakeSync) importStep(t *testing.T, h *harness, r *http.Request, in api.
 		user := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		user = strings.TrimPrefix(strings.TrimPrefix(user, "clerk-"), "sync-archive:")
 		p := &auth.Principal{ID: user}
-		counts, err := f.storeImport(h.storeRows.(*memoryRows), p, key, archive)
+		counts, err := f.storeImport(h.store.rows.(*memoryRows), p, key, archive)
 		if err != nil {
 			t.Errorf("sync would refuse the import: %v", err)
 			job.status = api.Object{"status": "failed", "failure_reason": "invalid_archive"}

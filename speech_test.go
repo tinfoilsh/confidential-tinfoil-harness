@@ -154,7 +154,7 @@ func TestAMessageIsReadAloudInOrderWithoutItsCode(t *testing.T) {
 		w.Header().Set("Content-Type", "audio/pcm")
 		io.WriteString(w, "<"+body.Input+">")
 	})
-	rows := h.storeRows.(*memoryRows)
+	rows := h.store.rows.(*memoryRows)
 	key := rows.key
 	reply := "# Trip plan\n\nPack light, see [the guide](https://guide.test) and [1](https://cite.test). More at https://bare.test.\n\n" +
 		"```python\nprint(\"never read\")\n```\n\n![a map](https://img.test/map.png)\n\nUse `rsync` and compute $x^2$ steps.[^1]\n\n[^1]: A footnote nobody hears.\n"

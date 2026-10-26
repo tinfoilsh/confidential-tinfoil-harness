@@ -85,7 +85,7 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 				runErr = err
 			}
 		} else {
-			row, err := h.mutateThread(ctx, p, r.key, s.id, commit)
+			row, err := h.store.mutateThread(ctx, p, r.key, s.id, commit)
 			if err != nil {
 				runErr = err
 			} else {

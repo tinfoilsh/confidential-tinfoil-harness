@@ -59,7 +59,7 @@ func newFakeSync(t *testing.T, h *harness) *fakeSync {
 		f.received[r.URL.Path] = append(f.received[r.URL.Path], in)
 		switch r.URL.Path {
 		case "/v1/sync/fork":
-			rows := h.storeRows.(*memoryRows)
+			rows := h.store.rows.(*memoryRows)
 			rows.mu.Lock()
 			defer rows.mu.Unlock()
 			p := &auth.Principal{ID: strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer clerk-")}
@@ -108,7 +108,7 @@ func newFakeSync(t *testing.T, h *harness) *fakeSync {
 		}
 	}))
 	t.Cleanup(f.server.Close)
-	h.syncAPI = &syncClient{URL: f.server.URL, Client: f.server.Client()}
+	h.store.api = &syncClient{URL: f.server.URL, Client: f.server.Client()}
 	return f
 }
 

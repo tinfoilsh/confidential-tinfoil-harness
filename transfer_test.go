@@ -233,7 +233,7 @@ func TestImportMayReuseADeletedChatID(t *testing.T) {
 		return syncTestResponse(200, api.Object{"ok": true, "etag": "1"})
 	})}}
 	h, _, key := testChatHarness(t, nil)
-	h.storeRows = client
+	h.store.rows = client
 	if _, err := h.importThread(context.Background(), &auth.Principal{ID: "alice", JWT: "jwt"}, key, requestOf[threadImportRequest](api.Object{"threadId": "chat-1", "thread": api.Object{"messages": []any{}}})); err != nil {
 		t.Fatal(err)
 	}

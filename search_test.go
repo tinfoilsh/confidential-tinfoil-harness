@@ -44,7 +44,7 @@ func TestSearchRefreshesResultsAfterACompletedRebuild(t *testing.T) {
 			}
 			var paths []string
 			queries := 0
-			h.syncAPI = &syncClient{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
+			h.store.api = &syncClient{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
 				paths = append(paths, r.URL.Path)
 				var in api.Object
 				if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
@@ -115,7 +115,7 @@ func TestSearchReportsRebuildAndRefreshFailures(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h, _, key := testChatHarness(t, nil)
 			calls, queries := 0, 0
-			h.syncAPI = &syncClient{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
+			h.store.api = &syncClient{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
 				calls++
 				switch r.URL.Path {
 				case "/v1/search/query":
@@ -163,7 +163,7 @@ func TestSearchCountsTheChatsItCannotOpen(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h, _, key := testChatHarness(t, nil)
 			pulls := 0
-			h.syncAPI = &syncClient{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
+			h.store.api = &syncClient{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
 				var in api.Object
 				json.NewDecoder(r.Body).Decode(&in)
 				if r.URL.Path == "/v1/search/query" {
@@ -195,7 +195,7 @@ func TestSearchCountsTheChatsItCannotOpen(t *testing.T) {
 				slices.Reverse(items)
 				return syncTestResponse(http.StatusOK, api.Object{"items": items})
 			})}}
-			h.storeRows = h.syncAPI
+			h.store.rows = h.store.api
 			w := postRoute(h, "/v1/threads/search", api.Object{"key": keyBase64(key), "query": "needle"}, "alice")
 			var got struct {
 				Results    []domain.ThreadSummary `json:"results"`

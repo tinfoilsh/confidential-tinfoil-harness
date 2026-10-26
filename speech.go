@@ -98,7 +98,7 @@ func (h *harness) speechText(ctx context.Context, p *auth.Principal, in *speechR
 				return "", err
 			}
 			defer clear(key[:])
-			row, err := h.loadThread(ctx, p, key, in.ThreadID)
+			row, err := h.store.loadThread(ctx, p, key, in.ThreadID)
 			clear(key[:])
 			if err != nil {
 				return "", err

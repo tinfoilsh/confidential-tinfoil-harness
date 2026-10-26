@@ -221,8 +221,8 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 	}))
 	t.Cleanup(cp.Close)
 	rows := &memoryRows{rows: map[string]domain.StoredRow{}, sealed: map[string]auth.ContentKey{}}
-	h := &harness{gateway: server.URL, controlplane: cp.URL, cpClient: cp.Client(), storeRows: rows, services: map[string]*downstreamService{}, scratch: newScratchSpace(t.TempDir(), 1<<30)}
-	h.repairs = h
+	h := &harness{gateway: server.URL, controlplane: cp.URL, cpClient: cp.Client(), store: &store{rows: rows}, services: map[string]*downstreamService{}, scratch: newScratchSpace(t.TempDir(), 1<<30)}
+	h.store.repair = h
 	h.auth = testAuth(cp)
 	m := &model{name: "kimi-k3", context: 8192, client: &http.Client{Transport: &auth.CallerTransport{Inner: server.Client().Transport, UsageSecret: "test-usage-secret"}}}
 	h.offer.models = []*model{m}
@@ -546,7 +546,7 @@ func TestAProjectUpdateClearsItsColorWithNull(t *testing.T) {
 	json.Unmarshal(postRoute(h, "/v1/projects/create", api.Object{"key": keyBase64(key), "name": "Research", "color": "blue"}, "alice").Body.Bytes(), &created)
 	stored := func() domain.Project {
 		t.Helper()
-		project, err := h.loadProject(context.Background(), &auth.Principal{ID: "alice"}, key, created.ID)
+		project, err := h.store.loadProject(context.Background(), &auth.Principal{ID: "alice"}, key, created.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
