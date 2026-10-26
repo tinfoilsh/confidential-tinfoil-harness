@@ -37,19 +37,24 @@ func (h *harness) handleFollow(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, err)
 		return
 	}
+	h.live.mu.Lock()
+	if h.live.runs[liveKey(p, in.RunID)] != live {
+		h.live.mu.Unlock()
+		respond(w, nil, errRunNotFound)
+		return
+	}
+	live.log.log.attach()
+	if !p.Anonymous && !live.ending {
+		p.SyncToken = live.principal.SyncToken
+		p.SyncExpires = live.principal.SyncExpires
+		live.principal = p
+	}
+	h.live.mu.Unlock()
+	defer live.log.log.detach()
 	from, err := resumeFrom(live.log.log, r.Header.Get(lastEventIDHeader))
 	if err != nil {
 		respond(w, nil, err)
 		return
-	}
-	if !p.Anonymous {
-		h.live.mu.Lock()
-		if !live.ending && h.live.runs[liveKey(p, in.RunID)] == live {
-			p.SyncToken = live.principal.SyncToken
-			p.SyncExpires = live.principal.SyncExpires
-			live.principal = p
-		}
-		h.live.mu.Unlock()
 	}
 	follow(w, r, live.log, from)
 }

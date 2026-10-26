@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"net/http/httptest"
 	"strconv"
@@ -15,6 +16,8 @@ func caller(apiKey string) context.Context {
 
 func TestOutgrowingTheLogStopsTheRun(t *testing.T) {
 	rn := newRun("00")
+	// The request that started the run is draining it.
+	rn.log.attach()
 	stopped := false
 	rn.stop = func() { stopped = true }
 	out := &stream{run: rn}
@@ -38,6 +41,9 @@ func TestOutgrowingTheLogStopsTheRun(t *testing.T) {
 	// A client that applied that error and follows again is sent it alone,
 	// under the same cursor.
 	frames, _, _ := rn.log.read(0)
+	if len(frames) == 0 {
+		t.Fatal("the log kept none of the frames a client is draining")
+	}
 	from, err := resumeFrom(rn.log, strconv.Itoa(len(frames)))
 	if err != nil {
 		t.Fatalf("following after the error: %v", err)
@@ -46,6 +52,17 @@ func TestOutgrowingTheLogStopsTheRun(t *testing.T) {
 	follow(again, httptest.NewRequest("POST", "/v1/threads/follow", nil), rn, from)
 	if body := again.Body.String(); !strings.HasPrefix(body, "id: "+strconv.Itoa(len(frames))+"\ndata: {\"type\":\"RUN_ERROR\"") || strings.Count(body, "data: ") != 1 {
 		t.Fatalf("following after the error sent %.200s", body)
+	}
+	// The run is still live, so a follower arriving once its client has left
+	// is sent the frames; they are wiped only once the run ends.
+	rn.log.detach()
+	kept, _, _ := rn.log.read(0)
+	if len(kept) == 0 {
+		t.Fatal("the frames were wiped while the run was live")
+	}
+	rn.log.close(errDone)
+	if frames, _, closed := rn.log.read(0); frames != nil || closed != errTooLong || bytes.ContainsFunc(kept[0], func(b rune) bool { return b != 0 }) {
+		t.Fatalf("the ended run kept %d frames, closed with %v; first frame %.40q", len(frames), closed, kept[0])
 	}
 }
 
