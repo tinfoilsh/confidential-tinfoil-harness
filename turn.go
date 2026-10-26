@@ -56,5 +56,6 @@ func (h *harness) handleTurn(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, h.withQuota(p, rateLimit{}, err))
 		return
 	}
+	defer accepted.log.log.detach()
 	follow(w, r, accepted.log, 0)
 }

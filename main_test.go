@@ -15,6 +15,8 @@ func caller(apiKey string) context.Context {
 
 func TestOutgrowingTheLogStopsTheRun(t *testing.T) {
 	rn := newRun("00")
+	// The request that started the run is draining it.
+	rn.log.attach()
 	stopped := false
 	rn.stop = func() { stopped = true }
 	out := &stream{run: rn}
@@ -38,6 +40,9 @@ func TestOutgrowingTheLogStopsTheRun(t *testing.T) {
 	// A client that applied that error and follows again is sent it alone,
 	// under the same cursor.
 	frames, _, _ := rn.log.read(0)
+	if len(frames) == 0 {
+		t.Fatal("the log kept none of the frames a client is draining")
+	}
 	from, err := resumeFrom(rn.log, strconv.Itoa(len(frames)))
 	if err != nil {
 		t.Fatalf("following after the error: %v", err)

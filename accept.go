@@ -60,7 +60,17 @@ func (h *harness) acceptTurn(ctx context.Context, p *principal, credential infer
 			if !previous.thread.keyless && previous.thread.keyHash != key.fingerprint() {
 				return nil, apiErr(409, "REVISION_CONFLICT", "The request nonce was already used")
 			}
-			return previous, nil
+			// A run that ended meanwhile is checked against the chat as a
+			// new request is.
+			h.live.mu.Lock()
+			live := h.live.requests[liveKey(p, nonce)] == previous
+			if live {
+				previous.log.log.attach()
+			}
+			h.live.mu.Unlock()
+			if live {
+				return previous, nil
+			}
 		}
 	}
 	if err := h.admit(ctx, p, credential, key, in, r); err != nil {
@@ -82,6 +92,7 @@ func (h *harness) acceptTurn(ctx context.Context, p *principal, credential infer
 		if next := h.endUnstarted(r, err); next != nil {
 			go h.runQueue(next)
 		}
+		r.log.log.detach()
 		r.refused = err
 		close(r.accepted)
 		return nil, err
@@ -226,6 +237,8 @@ func (h *harness) admit(ctx context.Context, p *principal, credential inferenceC
 	}
 	r.thread = s
 	h.live.runs[liveKey(p, r.log.id)] = r
+	// The accepting request drains the run until it answers.
+	r.log.log.attach()
 	if s.active != nil {
 		r.queued = true
 		s.queue = append(s.queue, r)

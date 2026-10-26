@@ -22,6 +22,8 @@ type liveRuns struct {
 
 func liveKey(p *principal, id string) string { return p.scope() + "/" + id }
 
+var errRunNotFound = apiErr(404, "RUN_NOT_FOUND", "The run is not live on this instance")
+
 // forget unregisters a run that is ending.
 func (l *liveRuns) forget(r *chatRun) {
 	if key := r.thread.owner + "/" + r.log.id; l.runs[key] == r {
@@ -95,7 +97,7 @@ func (h *harness) authorizedRun(p *principal, key contentKey, id, runID string) 
 	defer h.live.mu.Unlock()
 	r := h.live.runs[liveKey(p, runID)]
 	if r == nil || r.thread.id != id {
-		return nil, apiErr(404, "RUN_NOT_FOUND", "The run is not live on this instance")
+		return nil, errRunNotFound
 	}
 	if !r.thread.keyless && r.thread.keyHash != key.fingerprint() {
 		return nil, apiErr(409, "KEY_MISMATCH", "The run uses another key")

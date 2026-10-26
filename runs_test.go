@@ -476,3 +476,59 @@ func TestAnotherCallerReachesNothingOfALiveRun(t *testing.T) {
 		t.Fatal("another account's requests changed the run")
 	}
 }
+
+// A finished run's log is wiped once nothing drains it, whether its last
+// reader leaves after the run ends or before. A follower attached as the run
+// ends is still sent every frame, and the frames are zeroed, not only
+// dropped.
+func TestAFinishedRunsLogIsWipedOnceNothingDrainsIt(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		leavesBefore bool
+	}{{"last reader leaves after the run ends", false}, {"last reader left before the run ends", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			model, release := heldModel()
+			h, _, key := testChatHarness(t, model)
+			p := &principal{ID: "alice", JWT: "clerk-alice"}
+			run, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			readers := func() int {
+				run.log.log.mu.Lock()
+				defer run.log.log.mu.Unlock()
+				return run.log.log.readers
+			}
+			awaitFrame(t, run.log, "RUN_STARTED")
+			first, _, _ := run.log.log.read(0)
+			kept := first[0]
+			if tc.leavesBefore {
+				run.log.log.detach()
+				release()
+				<-run.finished
+			} else {
+				followed := make(chan *httptest.ResponseRecorder, 1)
+				go func() {
+					followed <- postRoute(h, "/v1/threads/follow", object{"key": key.base64(), "threadId": run.thread.id, "runId": run.log.id}, "alice")
+				}()
+				for deadline := time.Now().Add(5 * time.Second); readers() < 2; {
+					if time.Now().After(deadline) {
+						t.Fatal("the follower never attached")
+					}
+					time.Sleep(time.Millisecond)
+				}
+				release()
+				<-run.finished
+				events := eventsIn(t, <-followed)
+				frames, _, closed := run.log.log.read(0)
+				if closed != errDone || len(frames) == 0 || len(events) != len(frames) || events[len(events)-1].Type != "RUN_FINISHED" {
+					t.Fatalf("the follower got %d of %d frames, ending in %v", len(events), len(frames), closed)
+				}
+				run.log.log.detach()
+			}
+			if frames, _, _ := run.log.log.read(0); frames != nil || readers() != 0 || bytes.ContainsFunc(kept, func(b rune) bool { return b != 0 }) {
+				t.Fatalf("the log kept %d frames for %d readers; first frame %q", len(frames), readers(), kept)
+			}
+		})
+	}
+}

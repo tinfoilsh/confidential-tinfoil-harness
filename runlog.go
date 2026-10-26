@@ -42,6 +42,9 @@ type runlog struct {
 	bytes  int
 	closed error
 	wake   chan struct{}
+	// readers counts the streams draining the log. A closed log its last
+	// reader leaves is wiped.
+	readers int
 }
 
 func newRunlog() *runlog { return &runlog{wake: make(chan struct{})} }
@@ -52,13 +55,43 @@ func (l *runlog) grow(frame []byte) error {
 	defer l.mu.Unlock()
 	if l.closed == nil {
 		if l.bytes+len(frame) > maxRunLog {
-			l.closed = errTooLong
+			l.end(errTooLong)
 		} else {
 			l.frames, l.bytes = append(l.frames, frame), l.bytes+len(frame)
+			l.signal()
 		}
-		l.signal()
 	}
 	return l.closed
+}
+
+// attach counts a stream about to drain the log. It is called while the run
+// is registered, which a run is until just before its log closes, so the
+// log still holds every frame.
+func (l *runlog) attach() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.readers++
+}
+
+// detach ends a stream's draining of the log.
+func (l *runlog) detach() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.readers--
+	l.wipe()
+}
+
+// wipe zeroes and drops the frames of a closed log that nothing drains, so
+// the run's plaintext leaves memory as its last stream ends rather than when
+// the collector reuses it. l.mu is held.
+func (l *runlog) wipe() {
+	if l.closed == nil || l.readers > 0 {
+		return
+	}
+	for _, frame := range l.frames {
+		clear(frame)
+	}
+	l.frames = nil
 }
 
 func (l *runlog) signal() {
@@ -72,8 +105,14 @@ func (l *runlog) close(err error) {
 	if l.closed != nil {
 		return
 	}
+	l.end(err)
+}
+
+// end closes the log with err; l.mu is held.
+func (l *runlog) end(err error) {
 	l.closed = err
 	l.signal()
+	l.wipe()
 }
 
 func (l *runlog) read(from int) ([][]byte, <-chan struct{}, error) {
