@@ -42,8 +42,10 @@ type runlog struct {
 	bytes  int
 	closed error
 	wake   chan struct{}
-	// readers counts the streams draining the log. A closed log its last
-	// reader leaves is wiped.
+	// ended marks the run as ended and no longer registered, so nothing
+	// more attaches; a log that is ended and that its last reader has left
+	// is wiped. A log a run outgrew is closed before the run ends.
+	ended   bool
 	readers int
 }
 
@@ -55,17 +57,17 @@ func (l *runlog) grow(frame []byte) error {
 	defer l.mu.Unlock()
 	if l.closed == nil {
 		if l.bytes+len(frame) > maxRunLog {
-			l.end(errTooLong)
+			l.closed = errTooLong
 		} else {
 			l.frames, l.bytes = append(l.frames, frame), l.bytes+len(frame)
-			l.signal()
 		}
+		l.signal()
 	}
 	return l.closed
 }
 
 // attach counts a stream about to drain the log. It is called while the run
-// is registered, which a run is until just before its log closes, so the
+// is registered, which a run is until just before its log is ended, so the
 // log still holds every frame.
 func (l *runlog) attach() {
 	l.mu.Lock()
@@ -81,11 +83,11 @@ func (l *runlog) detach() {
 	l.wipe()
 }
 
-// wipe zeroes and drops the frames of a closed log that nothing drains, so
+// wipe zeroes and drops the frames of an ended log that nothing drains, so
 // the run's plaintext leaves memory as its last stream ends rather than when
 // the collector reuses it. l.mu is held.
 func (l *runlog) wipe() {
-	if l.closed == nil || l.readers > 0 {
+	if !l.ended || l.readers > 0 {
 		return
 	}
 	for _, frame := range l.frames {
@@ -99,19 +101,16 @@ func (l *runlog) signal() {
 	l.wake = make(chan struct{})
 }
 
+// close ends the log with err, once its run has left the registry. A log
+// already closed, because the run outgrew it, keeps that error.
 func (l *runlog) close(err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.closed != nil {
-		return
+	if l.closed == nil {
+		l.closed = err
+		l.signal()
 	}
-	l.end(err)
-}
-
-// end closes the log with err; l.mu is held.
-func (l *runlog) end(err error) {
-	l.closed = err
-	l.signal()
+	l.ended = true
 	l.wipe()
 }
 

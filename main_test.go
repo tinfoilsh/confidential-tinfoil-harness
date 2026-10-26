@@ -52,6 +52,16 @@ func TestOutgrowingTheLogStopsTheRun(t *testing.T) {
 	if body := again.Body.String(); !strings.HasPrefix(body, "id: "+strconv.Itoa(len(frames))+"\ndata: {\"type\":\"RUN_ERROR\"") || strings.Count(body, "data: ") != 1 {
 		t.Fatalf("following after the error sent %.200s", body)
 	}
+	// The run is still live, so a follower arriving once its client has left
+	// is sent the frames; they are wiped only once the run ends.
+	rn.log.detach()
+	if frames, _, _ := rn.log.read(0); len(frames) == 0 {
+		t.Fatal("the frames were wiped while the run was live")
+	}
+	rn.log.close(errDone)
+	if frames, _, closed := rn.log.read(0); frames != nil || closed != errTooLong {
+		t.Fatalf("the ended run kept %d frames and closed with %v", len(frames), closed)
+	}
 }
 
 func TestAPanickingToolCallDoesNotTakeTheRun(t *testing.T) {
