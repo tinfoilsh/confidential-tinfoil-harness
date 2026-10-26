@@ -21,10 +21,10 @@ func (h *harness) apiRoutes() []routeSpec {
 		{"/v1/changes", false, false, h.changes},
 		{"/v1/threads/list", false, true, decoded(h.listThreads)}, {"/v1/threads/get", false, true, decoded(h.getThread)},
 		{"/v1/threads/delete", false, true, decoded(h.deleteThread)},
-		{"/v1/threads/search", false, true, decoded(h.searchThreads)}, {"/v1/threads/cancel", true, false, decoded(h.cancelThread)},
-		{"/v1/threads/queue/send", true, false, decoded(h.sendQueued)}, {"/v1/threads/queue/remove", true, false, decoded(h.removeQueued)}, {"/v1/threads/share", false, false, decoded(h.archives.ShareThread)},
+		{"/v1/threads/search", false, true, decoded(h.searchThreads)}, {"/v1/threads/cancel", true, false, decoded(h.engine.cancelThread)},
+		{"/v1/threads/queue/send", true, false, decoded(h.engine.sendQueued)}, {"/v1/threads/queue/remove", true, false, decoded(h.engine.removeQueued)}, {"/v1/threads/share", false, false, decoded(h.archives.ShareThread)},
 		{"/v1/threads/share/revoke", false, false, decoded(h.archives.RevokeShare)}, {"/v1/threads/share/status", false, false, decoded(h.archives.ShareStatus)},
-		{"/v1/threads/transcript", false, true, decoded(h.threadTranscript)},
+		{"/v1/threads/transcript", false, true, decoded(h.engine.threadTranscript)},
 		{"/v1/profile/get", false, true, h.getProfile}, {"/v1/profile/update", false, true, decoded(h.updateProfile)}, {"/v1/profile/upgrade", true, false, decoded(h.upgradeDeviceProfile)},
 		{"/v1/profile/merge", false, true, decoded(h.mergeDeviceProfile)},
 		{"/v1/projects/list", false, true, decoded(h.listProjects)}, {"/v1/projects/get", false, true, decoded(h.getProject)},
@@ -226,9 +226,9 @@ func deviceReply(row *domain.ThreadRow) any {
 func (h *harness) deleteThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *api.DeleteRequest) (any, error) {
 	var err error
 	if in.Revision != "" {
-		err = h.finishTransfer(ctx, p, key, in)
+		err = h.engine.finishTransfer(ctx, p, key, in)
 	} else {
-		h.stopThread(p, in.ID)
+		h.engine.stopThread(p, in.ID)
 		err = h.store.RemoveRow(ctx, p, key, "chat", in.ID)
 	}
 	if err != nil {

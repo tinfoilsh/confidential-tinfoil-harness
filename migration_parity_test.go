@@ -288,18 +288,18 @@ func TestAQueuedTurnRefreshesStorageAccessBeforeStarting(t *testing.T) {
 	h.store.Rows = grants
 	p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
 	in := sendInput(key)
-	first, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](in))
+	first, err := h.engine.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](in))
 	if err != nil {
 		t.Fatal(err)
 	}
 	awaitFrame(t, first.log, "TEXT_MESSAGE_CHUNK")
 	next := sendInput(key)
 	next["threadId"], next["content"] = in["threadId"], "Queued question"
-	queued, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](next))
+	queued, err := h.engine.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](next))
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.live.locked(func() { queued.principal.SyncExpires = api.Now() })
+	h.engine.live.locked(func() { queued.principal.SyncExpires = api.Now() })
 	release()
 	<-queued.finished
 	row, err := rows.Load(context.Background(), p, key, "chat", api.Str(in["threadId"]))

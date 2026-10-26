@@ -5,9 +5,21 @@ import (
 	"sync"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
+
+type engine struct {
+	live        liveRuns
+	safeguards  *submitter
+	attachments *attach.Service
+	auth        *auth.Authenticator
+	models      *inference.Models
+	store       *store.Store
+}
 
 // liveRuns holds what this instance is executing: each chat's running reply
 // and the turns queued behind it, and nothing once they end. A run is found
@@ -107,16 +119,16 @@ func (r *chatRun) release() {
 	r.credential.Key = ""
 }
 
-func (h *harness) authorizedRun(p *auth.Principal, key auth.ContentKey, id, runID string) (*chatRun, error) {
+func (eng *engine) authorizedRun(p *auth.Principal, key auth.ContentKey, id, runID string) (*chatRun, error) {
 	if err := api.RequireID("threadId", id); err != nil {
 		return nil, err
 	}
 	if err := api.RequireID("runId", runID); err != nil {
 		return nil, err
 	}
-	h.live.mu.Lock()
-	defer h.live.mu.Unlock()
-	r := h.live.runs[liveKey(p, runID)]
+	eng.live.mu.Lock()
+	defer eng.live.mu.Unlock()
+	r := eng.live.runs[liveKey(p, runID)]
 	if r == nil || r.thread.id != id {
 		return nil, errRunNotFound
 	}
@@ -127,7 +139,7 @@ func (h *harness) authorizedRun(p *auth.Principal, key auth.ContentKey, id, runI
 }
 
 // makeActive gives a chat's running slot to a turn about to start; live.mu is held.
-func (h *harness) makeActive(s *threadSession, r *chatRun) {
+func (eng *engine) makeActive(s *threadSession, r *chatRun) {
 	s.active = r
 }
 
@@ -160,41 +172,41 @@ func queueItems(s *threadSession) []domain.QueueItem {
 // ends the turns queued behind it, so the harness keeps nothing of a chat
 // once its reply stops. A chat with nothing running or queued leaves the
 // registry.
-func (h *harness) advance(r *chatRun, goOn bool) *chatRun {
+func (eng *engine) advance(r *chatRun, goOn bool) *chatRun {
 	s := r.thread
-	h.live.forget(r)
+	eng.live.forget(r)
 	if s.active == r {
 		s.active = nil
 	}
 	var next *chatRun
-	if goOn && !s.deleted && !h.live.closing && len(s.queue) > 0 {
+	if goOn && !s.deleted && !eng.live.closing && len(s.queue) > 0 {
 		next, s.queue = s.queue[0], s.queue[1:]
-		h.makeActive(s, next)
+		eng.makeActive(s, next)
 	} else {
 		for _, queued := range s.queue {
-			h.endQueued(queued, nil)
+			eng.endQueued(queued, nil)
 		}
 		s.queue = nil
 	}
-	h.dropIdle(s)
+	eng.dropIdle(s)
 	return next
 }
 
 // dropIdle removes a chat with nothing running or queued from the registry;
 // live.mu is held.
-func (h *harness) dropIdle(s *threadSession) {
+func (eng *engine) dropIdle(s *threadSession) {
 	if s.active != nil || len(s.queue) > 0 {
 		return
 	}
-	if h.live.threads[s.owner+"/"+s.id] == s {
-		delete(h.live.threads, s.owner+"/"+s.id)
+	if eng.live.threads[s.owner+"/"+s.id] == s {
+		delete(eng.live.threads, s.owner+"/"+s.id)
 	}
 }
 
 // endQueued ends a turn that never started: removed when why is nil, and
 // failed with why otherwise. live.mu is held.
-func (h *harness) endQueued(r *chatRun, why error) {
-	h.live.forget(r)
+func (eng *engine) endQueued(r *chatRun, why error) {
+	eng.live.forget(r)
 	if why == nil {
 		r.out.emit(domain.RunFinished{ThreadID: r.thread.id, RunID: r.log.id, Metadata: domain.RunMetadata{Cancelled: new(true)}})
 	} else {

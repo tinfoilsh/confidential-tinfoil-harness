@@ -72,7 +72,7 @@ func TestTranscriptWaitsForALiveReply(t *testing.T) {
 	h, _, key := testChatHarness(t, model)
 	t.Cleanup(release)
 	p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
-	run, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
+	run, err := h.engine.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestTransferDeletionPreservesRepliesStartedAfterTheCopy(t *testing.T) {
 	if copy.Code != 200 || json.Unmarshal(copy.Body.Bytes(), &copied) != nil || copied.Revision == "" {
 		t.Fatalf("copy: %s", copy.Body.String())
 	}
-	run, err := h.acceptTurn(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[turnRequest](in))
+	run, err := h.engine.acceptTurn(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[turnRequest](in))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +235,7 @@ func TestImportMayReuseADeletedChatID(t *testing.T) {
 	})}}
 	h, _, key := testChatHarness(t, nil)
 	h.store.Rows = client
-	if _, err := h.importThread(context.Background(), &auth.Principal{ID: "alice", JWT: "jwt"}, key, requestOf[threadImportRequest](api.Object{"threadId": "chat-1", "thread": api.Object{"messages": []any{}}})); err != nil {
+	if _, err := h.engine.importThread(context.Background(), &auth.Principal{ID: "alice", JWT: "jwt"}, key, requestOf[threadImportRequest](api.Object{"threadId": "chat-1", "thread": api.Object{"messages": []any{}}})); err != nil {
 		t.Fatal(err)
 	}
 	if metadata["restoreDeleted"] != true {

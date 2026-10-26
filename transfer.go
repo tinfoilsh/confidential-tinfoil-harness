@@ -19,19 +19,19 @@ import (
 // threadTranscript is a stored chat in the form the device keeps: every
 // attachment's content inline and no server bookkeeping. It refuses when any
 // attachment cannot be read, so moving the chat never loses content.
-func (h *harness) threadTranscript(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *api.ThreadRequest) (any, error) {
-	h.live.mu.Lock()
-	live := h.live.threads[liveKey(p, in.ThreadID)]
+func (eng *engine) threadTranscript(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *api.ThreadRequest) (any, error) {
+	eng.live.mu.Lock()
+	live := eng.live.threads[liveKey(p, in.ThreadID)]
 	running := live != nil && (live.active != nil || len(live.queue) > 0)
-	h.live.mu.Unlock()
+	eng.live.mu.Unlock()
 	if running {
 		return nil, api.Err(409, "RUN_IN_FLIGHT", "Wait for the reply to finish before moving this chat").WithAction(api.ActionRetry)
 	}
-	row, err := h.store.LoadThread(ctx, p, key, in.ThreadID)
+	row, err := eng.store.LoadThread(ctx, p, key, in.ThreadID)
 	if err != nil {
 		return nil, err
 	}
-	if err := h.store.ApplyPins(ctx, p, key, []*domain.ThreadRow{row}); err != nil {
+	if err := eng.store.ApplyPins(ctx, p, key, []*domain.ThreadRow{row}); err != nil {
 		return nil, err
 	}
 	missing := 0
@@ -39,7 +39,7 @@ func (h *harness) threadTranscript(ctx context.Context, p *auth.Principal, key a
 		if a.StorageKey() == "" {
 			return nil
 		}
-		data, err := h.attachments.Bytes(ctx, p, a, false)
+		data, err := eng.attachments.Bytes(ctx, p, a, false)
 		if err == nil && a.IsImage() {
 			a.Base64 = base64.StdEncoding.EncodeToString(data)
 		} else if err == nil {
@@ -73,34 +73,34 @@ func (h *harness) threadTranscript(ctx context.Context, p *auth.Principal, key a
 	}{domain.DeviceTranscript{Thread: row.Thread}, row.ETag}, nil
 }
 
-func (h *harness) finishTransfer(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *api.DeleteRequest) error {
-	h.live.mu.Lock()
+func (eng *engine) finishTransfer(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *api.DeleteRequest) error {
+	eng.live.mu.Lock()
 	name := liveKey(p, in.ID)
-	s := h.live.threads[name]
+	s := eng.live.threads[name]
 	if s != nil && (s.deleted || s.active != nil || len(s.queue) > 0) {
-		h.live.mu.Unlock()
+		eng.live.mu.Unlock()
 		return api.Err(409, "RUN_IN_FLIGHT", "Wait for the reply to finish before moving this chat").WithAction(api.ActionRetry)
 	}
-	if h.live.threads == nil {
-		h.live.threads = map[string]*threadSession{}
+	if eng.live.threads == nil {
+		eng.live.threads = map[string]*threadSession{}
 	}
 	s = &threadSession{id: in.ID, owner: p.Scope(), deleted: true}
-	h.live.threads[name] = s
-	h.live.mu.Unlock()
+	eng.live.threads[name] = s
+	eng.live.mu.Unlock()
 	defer func() {
-		h.live.mu.Lock()
-		h.dropIdle(s)
-		h.live.mu.Unlock()
+		eng.live.mu.Lock()
+		eng.dropIdle(s)
+		eng.live.mu.Unlock()
 	}()
-	return h.store.RemoveThreadRevision(ctx, p, key, in.ID, in.Revision)
+	return eng.store.RemoveThreadRevision(ctx, p, key, in.ID, in.Revision)
 }
 
 // handleThreadImport stores a chat from the device as a cloud chat under the
 // same id. Its attachments are stored under the new chat first, as sync
 // requires; the chat itself is a create, so an existing cloud chat is never
 // overwritten.
-func (h *harness) handleThreadImport(w http.ResponseWriter, r *http.Request) {
-	p, err := h.auth.Authenticate(r, false)
+func (eng *engine) handleThreadImport(w http.ResponseWriter, r *http.Request) {
+	p, err := eng.auth.Authenticate(r, false)
 	if err != nil {
 		api.Respond(w, nil, err)
 		return
@@ -124,11 +124,11 @@ func (h *harness) handleThreadImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer clear(key[:])
-	result, err := h.importThread(r.Context(), p, key, &in)
+	result, err := eng.importThread(r.Context(), p, key, &in)
 	api.Respond(w, result, err)
 }
 
-func (h *harness) importThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *threadImportRequest) (any, error) {
+func (eng *engine) importThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *threadImportRequest) (any, error) {
 	if err := in.Validate(); err != nil {
 		return nil, err
 	}
@@ -138,18 +138,18 @@ func (h *harness) importThread(ctx context.Context, p *auth.Principal, key auth.
 		return nil, err
 	}
 	row := &domain.ThreadRow{Thread: thread, Restore: true}
-	if err := h.attachments.PlaceAttachments(ctx, p, id, &row.Thread); err != nil {
+	if err := eng.attachments.PlaceAttachments(ctx, p, id, &row.Thread); err != nil {
 		return nil, err
 	}
 	attach.StripInlineAttachments(&row.Thread)
-	if err := h.store.SaveThread(ctx, p, key, row); err != nil {
+	if err := eng.store.SaveThread(ctx, p, key, row); err != nil {
 		if api.AsError(err).Code == "REVISION_CONFLICT" {
 			return nil, api.Err(409, "THREAD_EXISTS", "This chat is already in the cloud")
 		}
 		return nil, err
 	}
 	if row.Pinned {
-		if err := h.store.SetPin(ctx, p, key, id, true); err != nil {
+		if err := eng.store.SetPin(ctx, p, key, id, true); err != nil {
 			return nil, err
 		}
 	}

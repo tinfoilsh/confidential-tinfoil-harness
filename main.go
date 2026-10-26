@@ -23,12 +23,11 @@ import (
 type harness struct {
 	controlplane string
 	auth         *auth.Authenticator
-	safeguards   *submitter // nil unless SAFEGUARDS_URL names the sidecar
-	live         liveRuns
 	store        *store.Store
 	models       *inference.Models
 	attachments  *attach.Service
 	archives     *archives.Service
+	engine       *engine
 }
 
 // listenAddr is the shim's upstream port in tinfoil-config.yml, which also
@@ -57,7 +56,6 @@ func main() {
 	}
 	h := &harness{models: &inference.Models{Gateway: gw, Controlplane: controlplane},
 		controlplane: controlplane,
-		safeguards:   newSubmitter(os.Getenv("SAFEGUARDS_URL")),
 		store:        &store.Store{}}
 
 	if err := h.bootChat(ctx, usageSecret); err != nil {
@@ -66,6 +64,7 @@ func main() {
 	}
 	h.attachments = &attach.Service{Auth: h.auth, Controlplane: h.controlplane, Models: h.models, Store: h.store}
 	h.store.Repair = h.attachments
+	h.engine = &engine{safeguards: newSubmitter(os.Getenv("SAFEGUARDS_URL")), store: h.store, models: h.models, attachments: h.attachments, auth: h.auth}
 	h.archives = &archives.Service{Scratch: scratch, CPClient: &http.Client{Transport: &auth.CallerTransport{Inner: http.DefaultTransport}}, Store: h.store, Attachments: h.attachments, Auth: h.auth, Controlplane: h.controlplane}
 
 	srv := &http.Server{Addr: listenAddr, Handler: h.routes(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: time.Minute}
@@ -75,14 +74,14 @@ func main() {
 	go func() {
 		<-stop
 		defer close(stopped)
-		h.stopRuns()
+		h.engine.stopRuns()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		srv.Shutdown(ctx)
-		h.waitRuns(ctx)
+		h.engine.waitRuns(ctx)
 	}()
 
-	slog.Info("listening", "addr", listenAddr, "gateway", gw, "models", inference.Served(h.models.Offer.Get()), "safeguards", h.safeguards != nil)
+	slog.Info("listening", "addr", listenAddr, "gateway", gw, "models", inference.Served(h.models.Offer.Get()), "safeguards", h.engine.safeguards != nil)
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		slog.Error("serve", "error", err)
 		os.Exit(1)

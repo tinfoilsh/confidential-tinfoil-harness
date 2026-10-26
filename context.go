@@ -183,8 +183,8 @@ func timeReminder(now time.Time, zone string) (string, error) {
 	return "<system-reminder>Current time: " + englishTime(now.In(loc), zone) + " (" + zone + ")</system-reminder>", nil
 }
 
-func (h *harness) buildRequest(thread *domain.Thread, profile *domain.Profile, project *domain.Project, documents []domain.ProjectDocument, in *turnRequest, runID string) (*request, *inference.Model, error) {
-	c := h.models.Catalog.Get()
+func (eng *engine) buildRequest(thread *domain.Thread, profile *domain.Profile, project *domain.Project, documents []domain.ProjectDocument, in *turnRequest, runID string) (*request, *inference.Model, error) {
+	c := eng.models.Catalog.Get()
 	options := in.Options
 	name := cmp.Or(thread.Model, "auto")
 	req := &request{threadID: thread.ID, runID: runID, model: name}
@@ -194,13 +194,13 @@ func (h *harness) buildRequest(thread *domain.Thread, profile *domain.Profile, p
 	}
 	def, display, policy, window := c.Definition(name), "Auto", "none", 0
 	var picked *inference.Model
-	for _, m := range h.models.Offer.Get() {
+	for _, m := range eng.models.Offer.Get() {
 		if m.Name == name {
 			picked = m
 		}
 	}
 	if name == "auto" {
-		picked = h.models.Auto
+		picked = eng.models.Auto
 		for _, candidate := range c.Models {
 			limit := api.Int(candidate["budgetWindow"])
 			if window == 0 || limit < window {

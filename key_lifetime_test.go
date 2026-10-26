@@ -66,7 +66,7 @@ func TestRunDropsKeyBeforeScreening(t *testing.T) {
 		}
 	}()
 	p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
-	r, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
+	r, err := h.engine.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
 	}

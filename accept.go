@@ -19,29 +19,29 @@ const maxQueuedTurns = 32
 // quota, which stays as it was.
 var errQueueFull = api.Err(429, "QUEUE_FULL", "The turn queue is full")
 
-func (h *harness) acceptTurn(ctx context.Context, p *auth.Principal, credential auth.Credential, key auth.ContentKey, in *turnRequest) (*chatRun, error) {
+func (eng *engine) acceptTurn(ctx context.Context, p *auth.Principal, credential auth.Credential, key auth.ContentKey, in *turnRequest) (*chatRun, error) {
 	defer clear(key[:])
 	in.ClearKey()
 	nonce, digest := in.ClientRequestID, in.digest()
 	var r *chatRun
 	for r == nil {
-		h.live.mu.Lock()
-		if h.live.closing {
-			h.live.mu.Unlock()
+		eng.live.mu.Lock()
+		if eng.live.closing {
+			eng.live.mu.Unlock()
 			return nil, errShutdown
 		}
-		if h.live.requests == nil {
-			h.live.runs, h.live.requests = map[string]*chatRun{}, map[string]*chatRun{}
-			if h.live.threads == nil {
-				h.live.threads = map[string]*threadSession{}
+		if eng.live.requests == nil {
+			eng.live.runs, eng.live.requests = map[string]*chatRun{}, map[string]*chatRun{}
+			if eng.live.threads == nil {
+				eng.live.threads = map[string]*threadSession{}
 			}
 		}
-		previous := h.live.requests[liveKey(p, nonce)]
+		previous := eng.live.requests[liveKey(p, nonce)]
 		if previous == nil {
 			r = &chatRun{nonce: nonce, digest: digest, accepted: make(chan struct{}), finished: make(chan struct{})}
-			h.live.requests[liveKey(p, nonce)] = r
+			eng.live.requests[liveKey(p, nonce)] = r
 		}
-		h.live.mu.Unlock()
+		eng.live.mu.Unlock()
 		if previous == nil {
 			break
 		}
@@ -65,24 +65,24 @@ func (h *harness) acceptTurn(ctx context.Context, p *auth.Principal, credential 
 			}
 			// A run that ended meanwhile is checked against the chat as a
 			// new request is.
-			h.live.mu.Lock()
-			live := h.live.requests[liveKey(p, nonce)] == previous
+			eng.live.mu.Lock()
+			live := eng.live.requests[liveKey(p, nonce)] == previous
 			if live {
 				previous.log.log.attach()
 			}
-			h.live.mu.Unlock()
+			eng.live.mu.Unlock()
 			if live {
 				return previous, nil
 			}
 		}
 	}
-	if err := h.admit(ctx, p, credential, key, in, r); err != nil {
+	if err := eng.admit(ctx, p, credential, key, in, r); err != nil {
 		clear(r.key[:])
-		h.live.mu.Lock()
-		if h.live.requests[liveKey(p, nonce)] == r {
-			delete(h.live.requests, liveKey(p, nonce))
+		eng.live.mu.Lock()
+		if eng.live.requests[liveKey(p, nonce)] == r {
+			delete(eng.live.requests, liveKey(p, nonce))
 		}
-		h.live.mu.Unlock()
+		eng.live.mu.Unlock()
 		r.refused = err
 		close(r.accepted)
 		return nil, err
@@ -90,10 +90,10 @@ func (h *harness) acceptTurn(ctx context.Context, p *auth.Principal, credential 
 	if r.queued {
 		return r, nil
 	}
-	if err := h.launch(ctx, r); err != nil {
+	if err := eng.launch(ctx, r); err != nil {
 		err = auth.WithQuota(p, r.credential.Limit, err)
-		if next := h.endUnstarted(r, err); next != nil {
-			go h.runQueue(next)
+		if next := eng.endUnstarted(r, err); next != nil {
+			go eng.runQueue(next)
 		}
 		r.log.log.detach()
 		r.refused = err
@@ -126,7 +126,7 @@ func askThread(id string, source *domain.Thread) *domain.ThreadRow {
 
 // admit gives a turn its chat: it starts now if the chat has no running
 // reply, or waits in the chat's queue.
-func (h *harness) admit(ctx context.Context, p *auth.Principal, credential auth.Credential, key auth.ContentKey, in *turnRequest, r *chatRun) error {
+func (eng *engine) admit(ctx context.Context, p *auth.Principal, credential auth.Credential, key auth.ContentKey, in *turnRequest, r *chatRun) error {
 	defer clear(key[:])
 	if credential.Limit.Exhausted() {
 		return quotaExhausted(credential.Limit)
@@ -134,7 +134,7 @@ func (h *harness) admit(ctx context.Context, p *auth.Principal, credential auth.
 	id, local := in.ThreadID, in.Local
 	keyless := p.Anonymous || local
 	if !keyless {
-		granted, err := h.store.Rows.AuthorizeRun(ctx, p, key, in.ThreadID, in.ProjectID)
+		granted, err := eng.store.Rows.AuthorizeRun(ctx, p, key, in.ThreadID, in.ProjectID)
 		if err != nil {
 			return err
 		}
@@ -151,7 +151,7 @@ func (h *harness) admit(ctx context.Context, p *auth.Principal, credential auth.
 			}
 			source = &t
 		} else {
-			row, err := h.store.LoadThread(ctx, p, key, id)
+			row, err := eng.store.LoadThread(ctx, p, key, id)
 			if err != nil {
 				return err
 			}
@@ -205,12 +205,12 @@ func (h *harness) admit(ctx context.Context, p *auth.Principal, credential auth.
 	}
 	r.out = &stream{run: r.log}
 
-	h.live.mu.Lock()
-	defer h.live.mu.Unlock()
-	if h.live.closing {
+	eng.live.mu.Lock()
+	defer eng.live.mu.Unlock()
+	if eng.live.closing {
 		return errShutdown
 	}
-	s := h.live.threads[liveKey(p, id)]
+	s := eng.live.threads[liveKey(p, id)]
 	// An ask's run holds its row, as a device chat's does.
 	held := local || source != nil
 	if s != nil && (s.deleted || s.local != held || !s.keyless && s.keyHash != key.Fingerprint()) {
@@ -224,10 +224,10 @@ func (h *harness) admit(ctx context.Context, p *auth.Principal, credential auth.
 	}
 	if s == nil {
 		s = &threadSession{id: id, owner: p.Scope(), keyHash: key.Fingerprint(), local: held, keyless: keyless}
-		h.live.threads[liveKey(p, id)] = s
+		eng.live.threads[liveKey(p, id)] = s
 	}
 	r.thread = s
-	h.live.runs[liveKey(p, r.log.id)] = r
+	eng.live.runs[liveKey(p, r.log.id)] = r
 	// The accepting request drains the run until it answers.
 	r.log.log.attach()
 	if s.active != nil {
@@ -247,6 +247,6 @@ func (h *harness) admit(ctx context.Context, p *auth.Principal, credential auth.
 	case source != nil:
 		s.row = askThread(id, source)
 	}
-	h.makeActive(s, r)
+	eng.makeActive(s, r)
 	return nil
 }

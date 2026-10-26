@@ -65,7 +65,7 @@ func TestAQueuedTurnThatCannotStartDoesNotStallTheQueue(t *testing.T) {
 	h, _, key := testChatHarness(t, model)
 	t.Cleanup(release)
 	p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
-	first, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
+	first, err := h.engine.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestAQueuedTurnThatCannotStartDoesNotStallTheQueue(t *testing.T) {
 	broken["kind"], broken["messageId"] = "edit", "no-such-message"
 	queue := []*chatRun{}
 	for _, in := range []api.Object{broken, continueInput(key, first.thread.id)} {
-		run, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](in))
+		run, err := h.engine.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](in))
 		if err != nil || !run.queued {
 			t.Fatalf("turn not queued: %v", err)
 		}
@@ -97,17 +97,17 @@ func TestAFullQueueIsNotAnExhaustedQuota(t *testing.T) {
 	h, _, key := testChatHarness(t, model)
 	t.Cleanup(release)
 	p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
-	first, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
+	first, err := h.engine.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	awaitFrame(t, first.log, "TEXT_MESSAGE_CHUNK")
 	for range maxQueuedTurns {
-		if run, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](continueInput(key, first.thread.id))); err != nil || !run.queued {
+		if run, err := h.engine.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](continueInput(key, first.thread.id))); err != nil || !run.queued {
 			t.Fatalf("turn not queued: %v", err)
 		}
 	}
-	_, err = h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](continueInput(key, first.thread.id)))
+	_, err = h.engine.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](continueInput(key, first.thread.id)))
 	if e := api.AsError(err); e.HTTP != 429 || e.Code != "QUEUE_FULL" {
 		t.Fatalf("a turn past a full queue was refused with %v", err)
 	}
@@ -119,12 +119,12 @@ func TestDeletingAChatEndsItsQueuedTurns(t *testing.T) {
 	h, rows, key := testChatHarness(t, model)
 	t.Cleanup(release)
 	p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
-	first, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
+	first, err := h.engine.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	awaitFrame(t, first.log, "TEXT_MESSAGE_CHUNK")
-	queued, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](continueInput(key, first.thread.id)))
+	queued, err := h.engine.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](continueInput(key, first.thread.id)))
 	if err != nil || !queued.queued {
 		t.Fatalf("turn not queued: %v", err)
 	}
@@ -231,7 +231,7 @@ func TestAFinishingRunsWritesBlockNothing(t *testing.T) {
 		return nil
 	}
 	p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
-	run, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
+	run, err := h.engine.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +248,7 @@ func TestAFinishingRunsWritesBlockNothing(t *testing.T) {
 		return nil
 	})
 	within(t, "cancelling", func() error {
-		if _, err := h.cancelThread(context.Background(), p, key, requestOf[runRequest](api.Object{"key": keyBase64(key), "threadId": run.thread.id, "runId": run.log.id})); api.AsError(err).Code != "RUN_IN_FLIGHT" {
+		if _, err := h.engine.cancelThread(context.Background(), p, key, requestOf[runRequest](api.Object{"key": keyBase64(key), "threadId": run.thread.id, "runId": run.log.id})); api.AsError(err).Code != "RUN_IN_FLIGHT" {
 			return fmt.Errorf("a finishing run answered %v", err)
 		}
 		return nil
@@ -291,7 +291,7 @@ func TestFollowResumesALiveRunAfterTheClientsCursor(t *testing.T) {
 	model, release := heldModel()
 	h, _, key := testChatHarness(t, model)
 	t.Cleanup(release)
-	run, err := h.acceptTurn(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
+	run, err := h.engine.acceptTurn(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,7 +344,7 @@ func TestARetriedRequestFollowsItsRunOrIsAlreadyApplied(t *testing.T) {
 	t.Cleanup(release)
 	p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
 	in := sendInput(key)
-	run, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](in))
+	run, err := h.engine.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](in))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,7 +447,7 @@ func TestAnotherCallerReachesNothingOfALiveRun(t *testing.T) {
 	})
 	p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
 	in := sendInput(key)
-	run, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](in))
+	run, err := h.engine.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](in))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -455,7 +455,7 @@ func TestAnotherCallerReachesNothingOfALiveRun(t *testing.T) {
 	awaitFrame(t, run.log, "RUN_STARTED")
 	queued := sendInput(key)
 	queued["threadId"] = run.thread.id
-	next, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](queued))
+	next, err := h.engine.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](queued))
 	if err != nil || !next.queued {
 		t.Fatalf("turn not queued: %v", err)
 	}
@@ -474,7 +474,7 @@ func TestAnotherCallerReachesNothingOfALiveRun(t *testing.T) {
 		t.Fatalf("another account's turn with the same nonce was not its own: %v", events)
 	}
 	var stillQueued, stillActive bool
-	h.live.locked(func() { stillQueued, stillActive = slices.Contains(run.thread.queue, next), run.thread.active == run })
+	h.engine.live.locked(func() { stillQueued, stillActive = slices.Contains(run.thread.queue, next), run.thread.active == run })
 	if !stillQueued || !stillActive {
 		t.Fatal("another account's requests changed the run")
 	}
@@ -493,7 +493,7 @@ func TestAFinishedRunsLogIsWipedOnceNothingDrainsIt(t *testing.T) {
 			model, release := heldModel()
 			h, _, key := testChatHarness(t, model)
 			p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
-			run, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
+			run, err := h.engine.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
 			if err != nil {
 				t.Fatal(err)
 			}

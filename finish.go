@@ -14,17 +14,17 @@ import (
 // finishRun commits what the run produced and frames its end, then hands the
 // chat to the next queued turn. Its slower work, the safeguards submission,
 // follows the terminal frame and holds no lock.
-func (h *harness) finishRun(r *chatRun, runErr error) {
-	defer h.live.working.Done()
+func (eng *engine) finishRun(r *chatRun, runErr error) {
+	defer eng.live.working.Done()
 	defer close(r.finished)
 	if r.titleDone != nil {
 		<-r.titleDone
 	}
 	s := r.thread
-	h.live.mu.Lock()
+	eng.live.mu.Lock()
 	r.ending = true
 	p, cancelled, deleted, held := r.principal, r.cancelled, s.deleted, r.credential.Limit
-	h.live.mu.Unlock()
+	eng.live.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), commitTimeout)
 	defer cancel()
 	ctx = auth.WithCallerKey(ctx, string(r.credential.Key))
@@ -45,7 +45,7 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 		m := &messages[i]
 		m.IsInterrupted, m.IsError = new(cancelled), new(runErr != nil && !cancelled)
 		m.Model = cmp.Or(r.out.concreteModel, r.row.Model)
-		m.ModelDisplayName = h.models.Catalog.Get().DisplayName(m.Model)
+		m.ModelDisplayName = eng.models.Catalog.Get().DisplayName(m.Model)
 		m.Usage = api.Raw(domain.MessageUsage{PromptTokens: spend.Prompt, CompletionTokens: spend.Completion})
 		// A continued reply keeps the citations it already had.
 		for _, annotation := range citationAnnotations(m.Content, sources) {
@@ -86,7 +86,7 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 				runErr = err
 			}
 		} else {
-			row, err := h.store.MutateThread(ctx, p, r.key, s.id, commit)
+			row, err := eng.store.MutateThread(ctx, p, r.key, s.id, commit)
 			if err != nil {
 				runErr = err
 			} else {
@@ -108,14 +108,14 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 	if s.local && r.input.Kind != "ask" {
 		metadata.Thread = new(domain.DeviceThread(&r.row.Thread))
 	}
-	h.live.mu.Lock()
+	eng.live.mu.Lock()
 	if s.local {
 		s.row = r.row
 	}
-	next := h.advance(r, !cancelled || r.yielded)
+	next := eng.advance(r, !cancelled || r.yielded)
 	queue := queueItems(s)
 	deleted = s.deleted
-	h.live.mu.Unlock()
+	eng.live.mu.Unlock()
 	r.out.emit(domain.StateSnapshotEvent{Snapshot: domain.StateSnapshot{Thread: summary, Queue: queue, RateLimit: limit}})
 	metadata.RateLimit = &limit
 	if runErr != nil && !cancelled {
@@ -126,9 +126,9 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 	}
 	r.log.log.close(errDone)
 	if next != nil {
-		go h.runQueue(next)
+		go eng.runQueue(next)
 	}
-	h.screen(r, messages, runErr)
+	eng.screen(r, messages, runErr)
 	r.release()
 }
 

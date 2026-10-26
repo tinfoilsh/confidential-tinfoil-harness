@@ -181,7 +181,7 @@ func TestTitleRunsBeforeAnswerFinishes(t *testing.T) {
 	}))
 	defer server.Close()
 	h.models.Services["summarizer"] = &inference.Service{URL: server.URL, Client: server.Client()}
-	run, err := h.acceptTurn(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
+	run, err := h.engine.acceptTurn(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,15 +291,15 @@ func TestShutdownCommitsPartialOutput(t *testing.T) {
 		close(started)
 		<-r.Context().Done()
 	})
-	run, err := h.acceptTurn(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
+	run, err := h.engine.acceptTurn(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	<-started
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	h.stopRuns()
-	h.waitRuns(ctx)
+	h.engine.stopRuns()
+	h.engine.waitRuns(ctx)
 	select {
 	case <-run.finished:
 	default:
@@ -309,7 +309,7 @@ func TestShutdownCommitsPartialOutput(t *testing.T) {
 	if mustRead(domain.ReadThreadRow(row)).ActiveRun != nil {
 		t.Fatal("shutdown left an active marker")
 	}
-	if _, err := h.acceptTurn(context.Background(), &auth.Principal{ID: "alice"}, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key))); err == nil {
+	if _, err := h.engine.acceptTurn(context.Background(), &auth.Principal{ID: "alice"}, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key))); err == nil {
 		t.Fatal("accepted a turn during shutdown")
 	}
 }

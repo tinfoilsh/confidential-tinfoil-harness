@@ -8,18 +8,18 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
-func (h *harness) cancelThread(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *runRequest) (any, error) {
+func (eng *engine) cancelThread(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *runRequest) (any, error) {
 	key, err := auth.RequestKey(in.Key)
 	if err != nil {
 		return nil, err
 	}
 	defer clear(key[:])
-	r, err := h.authorizedRun(p, key, in.ThreadID, in.RunID)
+	r, err := eng.authorizedRun(p, key, in.ThreadID, in.RunID)
 	if err != nil {
 		return nil, err
 	}
-	h.live.mu.Lock()
-	defer h.live.mu.Unlock()
+	eng.live.mu.Lock()
+	defer eng.live.mu.Unlock()
 	if r.thread.active != r || r.ending {
 		return nil, api.Err(409, "RUN_IN_FLIGHT", "This run is no longer active")
 	}
@@ -29,21 +29,21 @@ func (h *harness) cancelThread(ctx context.Context, p *auth.Principal, _ auth.Co
 }
 
 // Move the selected queued turn first, then finish the active run normally.
-func (h *harness) sendQueued(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *runRequest) (any, error) {
+func (eng *engine) sendQueued(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *runRequest) (any, error) {
 	key, err := auth.RequestKey(in.Key)
 	if err != nil {
 		return nil, err
 	}
 	defer clear(key[:])
-	r, err := h.authorizedRun(p, key, in.ThreadID, in.QueueID)
+	r, err := eng.authorizedRun(p, key, in.ThreadID, in.QueueID)
 	if err != nil {
 		return nil, err
 	}
-	h.live.mu.Lock()
+	eng.live.mu.Lock()
 	s := r.thread
 	index := slices.Index(s.queue, r)
 	if index < 0 {
-		h.live.mu.Unlock()
+		eng.live.mu.Unlock()
 		return nil, api.Err(409, "RUN_IN_FLIGHT", "The queued turn has started")
 	}
 	s.queue = append([]*chatRun{r}, slices.Delete(s.queue, index, index+1)...)
@@ -54,22 +54,22 @@ func (h *harness) sendQueued(ctx context.Context, p *auth.Principal, _ auth.Cont
 		s.active.cancelled = true
 		s.active.log.stop()
 	}
-	h.live.mu.Unlock()
+	eng.live.mu.Unlock()
 	return struct{}{}, nil
 }
 
-func (h *harness) removeQueued(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *runRequest) (any, error) {
+func (eng *engine) removeQueued(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *runRequest) (any, error) {
 	key, err := auth.RequestKey(in.Key)
 	if err != nil {
 		return nil, err
 	}
 	defer clear(key[:])
-	r, err := h.authorizedRun(p, key, in.ThreadID, in.QueueID)
+	r, err := eng.authorizedRun(p, key, in.ThreadID, in.QueueID)
 	if err != nil {
 		return nil, err
 	}
-	h.live.mu.Lock()
-	defer h.live.mu.Unlock()
+	eng.live.mu.Lock()
+	defer eng.live.mu.Unlock()
 	s := r.thread
 	index := slices.Index(s.queue, r)
 	if index < 0 {
@@ -77,18 +77,18 @@ func (h *harness) removeQueued(ctx context.Context, p *auth.Principal, _ auth.Co
 	}
 	s.queue = slices.Delete(s.queue, index, index+1)
 	r.cancelled = true
-	h.endQueued(r, nil)
+	eng.endQueued(r, nil)
 	queueChanged(s)
-	h.dropIdle(s)
+	eng.dropIdle(s)
 	return struct{}{}, nil
 }
 
 // stopThread stops a chat being deleted: its running reply is cancelled and
 // each queued turn ends.
-func (h *harness) stopThread(p *auth.Principal, id string) {
-	h.live.mu.Lock()
-	defer h.live.mu.Unlock()
-	s := h.live.threads[liveKey(p, id)]
+func (eng *engine) stopThread(p *auth.Principal, id string) {
+	eng.live.mu.Lock()
+	defer eng.live.mu.Unlock()
+	s := eng.live.threads[liveKey(p, id)]
 	if s == nil {
 		return
 	}
@@ -98,8 +98,8 @@ func (h *harness) stopThread(p *auth.Principal, id string) {
 		s.active.log.stop()
 	}
 	for _, r := range s.queue {
-		h.endQueued(r, nil)
+		eng.endQueued(r, nil)
 	}
 	s.queue = nil
-	h.dropIdle(s)
+	eng.dropIdle(s)
 }

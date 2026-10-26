@@ -67,7 +67,7 @@ func TestAThinkingReplysReasoningIsSummarized(t *testing.T) {
 		}))
 		t.Cleanup(summarizer.Close)
 		h.models.Services["summarizer"] = &inference.Service{URL: summarizer.URL, Client: summarizer.Client()}
-		run, err := h.acceptTurn(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
+		run, err := h.engine.acceptTurn(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
 		if err != nil {
 			t.Fatal(err)
 		}

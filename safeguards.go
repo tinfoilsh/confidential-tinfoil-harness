@@ -148,8 +148,8 @@ type screening struct {
 // screening captures the prompt and history a run was asked, without tool
 // results. Turns through auto are screened here too: the router is not told
 // their chat, so the control plane ignores the router's report of them.
-func (h *harness) screening(req *request) *screening {
-	if h.safeguards == nil {
+func (eng *engine) screening(req *request) *screening {
+	if eng.safeguards == nil {
 		return nil
 	}
 	var messages []safeguardMessage
@@ -172,10 +172,10 @@ func (h *harness) screening(req *request) *screening {
 
 // screen submits a run that completed with a reply, under a first-party chat
 // credential, for classification.
-func (h *harness) screen(r *chatRun, reply []domain.Message, runErr error) {
-	h.live.mu.Lock()
+func (eng *engine) screen(r *chatRun, reply []domain.Message, runErr error) {
+	eng.live.mu.Lock()
 	deleted := r.thread.deleted
-	h.live.mu.Unlock()
+	eng.live.mu.Unlock()
 	if r.screening == nil || runErr != nil || r.cancelled || deleted || r.retryTarget != nil || r.principal.Anonymous || !r.credential.FirstParty {
 		return
 	}
@@ -190,5 +190,5 @@ func (h *harness) screen(r *chatRun, reply []domain.Message, runErr error) {
 	if r.turn.Kind == "continue" && len(history) > 0 && history[len(history)-1].Role == "assistant" {
 		history = history[:len(history)-1]
 	}
-	h.safeguards.submit(string(r.credential.Key), r.screening.conversation, append(history, safeguardMessage{Role: "assistant", Content: strings.Join(text, "\n")}))
+	eng.safeguards.submit(string(r.credential.Key), r.screening.conversation, append(history, safeguardMessage{Role: "assistant", Content: strings.Join(text, "\n")}))
 }

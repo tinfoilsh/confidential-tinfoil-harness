@@ -60,9 +60,9 @@ var contractCheck func(http.Handler) http.Handler
 func (h *harness) handlers() map[string]http.HandlerFunc {
 	handlers := map[string]http.HandlerFunc{
 		"GET /healthz":                       func(w http.ResponseWriter, r *http.Request) { api.Respond(w, api.Object{"ok": true}, nil) },
-		"POST /v1/threads/turn":              h.handleTurn,
-		"POST /v1/threads/import":            h.handleThreadImport,
-		"POST /v1/threads/follow":            h.handleFollow,
+		"POST /v1/threads/turn":              h.engine.handleTurn,
+		"POST /v1/threads/import":            h.engine.handleThreadImport,
+		"POST /v1/threads/follow":            h.engine.handleFollow,
 		"POST /v1/threads/upgrade":           h.handleUpgrade,
 		"POST /v1/speech":                    h.attachments.HandleSpeech,
 		"POST /v1/attachments/upload":        boundedHandler(uploadSlots, h.attachments.HandleUpload),

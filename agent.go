@@ -31,7 +31,7 @@ const (
 	continueInstruction    = "Continue your previous response exactly where it left off. Do not repeat, summarize, or restate anything you already wrote, and do not add any preamble."
 )
 
-func (h *harness) loop(ctx context.Context, out *stream, req *request, m *inference.Model) error {
+func (eng *engine) loop(ctx context.Context, out *stream, req *request, m *inference.Model) error {
 	apiKey := auth.CallerKey(ctx)
 	inRun := usagereporting.Context{
 		ContextID:     req.runID,
@@ -54,7 +54,7 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *infere
 	for _, w := range req.widgets {
 		set.widgets[w.Name] = w
 	}
-	set.local = h.widgetResult
+	set.local = eng.widgetResult
 
 	defs, err := offer(set, req.rendered)
 	if err != nil {
@@ -84,7 +84,7 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *infere
 		if turn == 1 {
 			turnCtx = first
 		}
-		calls, answer, err := h.turn(turnCtx, out, m, payload, set.widgets)
+		calls, answer, err := eng.turn(turnCtx, out, m, payload, set.widgets)
 		if err != nil && req.refreshAuth != nil && !refreshed && api.AsError(err).HTTP == http.StatusUnauthorized {
 			// A 401 rejected this model request before processing. Replay its
 			// exact body once, retaining the run ID and request billing flag.
@@ -101,7 +101,7 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *infere
 				billing.APIKeyHash = inRun.APIKeyHash
 				turnCtx = auth.WithUsage(ctx, billing)
 			}
-			calls, answer, err = h.turn(turnCtx, out, m, payload, set.widgets)
+			calls, answer, err = eng.turn(turnCtx, out, m, payload, set.widgets)
 		}
 		if err != nil {
 			return err
@@ -228,10 +228,10 @@ func clip(out string, limit int) string {
 	return out
 }
 
-func (h *harness) turn(ctx context.Context, out *stream, m *inference.Model, payload []byte, widgets map[string]domain.Widget) ([]toolCall, string, error) {
+func (eng *engine) turn(ctx context.Context, out *stream, m *inference.Model, payload []byte, widgets map[string]domain.Widget) ([]toolCall, string, error) {
 	endpoint := m.Endpoint
 	if endpoint == "" {
-		endpoint = h.models.Gateway + "/v1/chat/completions"
+		endpoint = eng.models.Gateway + "/v1/chat/completions"
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {

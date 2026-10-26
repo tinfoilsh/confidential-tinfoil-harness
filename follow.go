@@ -9,8 +9,8 @@ import (
 )
 
 // handleFollow re-attaches a client to a run that is live on this instance.
-func (h *harness) handleFollow(w http.ResponseWriter, r *http.Request) {
-	p, err := h.auth.Caller(r, true)
+func (eng *engine) handleFollow(w http.ResponseWriter, r *http.Request) {
+	p, err := eng.auth.Caller(r, true)
 	if err != nil {
 		api.Respond(w, nil, err)
 		return
@@ -34,15 +34,15 @@ func (h *harness) handleFollow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer clear(key[:])
-	live, err := h.authorizedRun(p, key, in.ThreadID, in.RunID)
+	live, err := eng.authorizedRun(p, key, in.ThreadID, in.RunID)
 	clear(key[:])
 	if err != nil {
 		api.Respond(w, nil, err)
 		return
 	}
-	h.live.mu.Lock()
-	if h.live.runs[liveKey(p, in.RunID)] != live {
-		h.live.mu.Unlock()
+	eng.live.mu.Lock()
+	if eng.live.runs[liveKey(p, in.RunID)] != live {
+		eng.live.mu.Unlock()
 		api.Respond(w, nil, errRunNotFound)
 		return
 	}
@@ -52,7 +52,7 @@ func (h *harness) handleFollow(w http.ResponseWriter, r *http.Request) {
 		p.SyncExpires = live.principal.SyncExpires
 		live.principal = p
 	}
-	h.live.mu.Unlock()
+	eng.live.mu.Unlock()
 	defer live.log.log.detach()
 	from, err := resumeFrom(live.log.log, r.Header.Get(lastEventIDHeader))
 	if err != nil {

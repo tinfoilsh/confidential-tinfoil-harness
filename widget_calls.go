@@ -11,7 +11,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 )
 
-func (h *harness) widgetResult(ctx context.Context, call toolCall) (any, error) {
+func (eng *engine) widgetResult(ctx context.Context, call toolCall) (any, error) {
 	if call.name != "render_link_preview" {
 		return "[rendered for the user]", nil
 	}
@@ -19,10 +19,10 @@ func (h *harness) widgetResult(ctx context.Context, call toolCall) (any, error) 
 	if json.Unmarshal([]byte(call.args), &args) != nil {
 		return nil, api.Err(400, "BAD_REQUEST", "Invalid widget arguments")
 	}
-	return h.attachments.LinkDetails(ctx, api.Str(args["url"]))
+	return eng.attachments.LinkDetails(ctx, api.Str(args["url"]))
 }
 
-func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *inference.Model) error {
+func (eng *engine) retryWidget(ctx context.Context, r *chatRun, req *request, m *inference.Model) error {
 	var declaration domain.Widget
 	for _, w := range domain.WidgetCatalog() {
 		if w.Name == r.retryTarget.block.Name {
@@ -41,7 +41,7 @@ func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *
 	}
 	usage := usageForRun(r)
 	usage.BillCustomerRequest = true
-	content, err := h.models.Completion(auth.WithUsage(ctx, usage), m, payload)
+	content, err := eng.models.Completion(auth.WithUsage(ctx, usage), m, payload)
 	if err != nil {
 		return err
 	}
@@ -55,7 +55,7 @@ func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *
 	r.out.callArgs(id, content)
 	r.out.callEnd(id)
 	// The widget's result is the one a call with these arguments returns.
-	result, err := h.widgetResult(ctx, toolCall{id: id, name: declaration.Name, args: content})
+	result, err := eng.widgetResult(ctx, toolCall{id: id, name: declaration.Name, args: content})
 	if err != nil {
 		result = api.Object{"error": api.AsError(err).Message}
 	}

@@ -83,7 +83,7 @@ func TestSubmitter_TrimsOversizedHistory(t *testing.T) {
 }
 
 func TestScreeningIsThePromptAndHistoryWithoutToolResults(t *testing.T) {
-	h := &harness{safeguards: &submitter{}}
+	h := &engine{safeguards: &submitter{}}
 	req := &request{system: "be helpful", conversation: "chat-1", groups: [][]json.RawMessage{
 		{api.Raw(api.Object{"role": "user", "content": []any{api.Object{"type": "text", "text": "look"}, api.Object{"type": "image_url", "image_url": api.Object{"url": "data:..."}}}})},
 		{api.Raw(api.Object{"role": "assistant", "content": "", "reasoning_content": "hidden", "tool_calls": []any{api.Object{"id": "c1"}}}), api.Raw(api.Object{"role": "tool", "tool_call_id": "c1", "content": "42"})},
@@ -93,7 +93,7 @@ func TestScreeningIsThePromptAndHistoryWithoutToolResults(t *testing.T) {
 	if got := h.screening(req); !reflect.DeepEqual(got, want) {
 		t.Fatalf("captured %+v\nwant %+v", got, want)
 	}
-	if (&harness{}).screening(req) != nil {
+	if (&engine{}).screening(req) != nil {
 		t.Fatal("a conversation was captured with no sidecar configured")
 	}
 }
@@ -123,7 +123,7 @@ func TestOnlyCompletedFirstPartyChatsAreScreened(t *testing.T) {
 				w.WriteHeader(http.StatusAccepted)
 			}))
 			defer sidecar.Close()
-			h := &harness{safeguards: newSubmitter(sidecar.URL)}
+			h := &engine{safeguards: newSubmitter(sidecar.URL)}
 			r := &chatRun{thread: &threadSession{id: "chat-1"}, turn: &turnRequest{Kind: "send"}, principal: &auth.Principal{ID: "alice"}, credential: chatToken,
 				screening: &screening{conversation: "chat-1", messages: []safeguardMessage{{Role: "user", Content: "hi"}}}}
 			tc.change(r)
