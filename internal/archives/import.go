@@ -1,4 +1,4 @@
-package main
+package archives
 
 import (
 	"archive/zip"
@@ -41,8 +41,8 @@ const (
 	maxImportBody = 512<<20 + 1<<20
 	// maxCloudImport is the largest archive sync's import job takes.
 	maxCloudImport = 512 << 20
-	// importChunk is the size sync's import job takes an archive in.
-	importChunk = 8 << 20
+	// ImportChunk is the size sync's import job takes an archive in.
+	ImportChunk = 8 << 20
 	// importSpaceFactor is the space an import expects to need: its upload
 	// and the cloud import written from it, which is no larger than the
 	// upload it comes from.
@@ -67,10 +67,10 @@ type importOptions struct {
 	Target string `json:"target"`
 }
 
-func (ar *archives) handleImport(w http.ResponseWriter, r *http.Request) {
+func (ar *Service) HandleImport(w http.ResponseWriter, r *http.Request) {
 	// An archive calls no model, so any signed-in caller may make one,
 	// with or without chat access.
-	p, err := ar.auth.Authenticate(r, false)
+	p, err := ar.Auth.Authenticate(r, false)
 	if err != nil {
 		api.Respond(w, nil, err)
 		return
@@ -80,13 +80,13 @@ func (ar *archives) handleImport(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, err)
 		return
 	}
-	lease, err := ar.scratch.lease(r.Context(), importSpaceFactor*size)
+	lease, err := ar.Scratch.Lease(r.Context(), importSpaceFactor*size)
 	if err != nil {
 		api.Respond(w, nil, err)
 		return
 	}
-	defer lease.release()
-	lift := ar.scratch.idleBody(w, r)
+	defer lease.Release()
+	lift := ar.Scratch.idleBody(w, r)
 	r.Body = http.MaxBytesReader(w, r.Body, maxImportBody)
 	upload, options, err := readImportForm(r, lease, func(options importOptions) error {
 		if options.Target != "cloud" {
@@ -95,7 +95,7 @@ func (ar *archives) handleImport(w http.ResponseWriter, r *http.Request) {
 		if len(options.Key) == 0 {
 			return api.Err(401, "KEY_REQUIRED", "A content key is required")
 		}
-		return ar.store.AuthorizeArchive(r.Context(), p, options.Key, "import")
+		return ar.Store.AuthorizeArchive(r.Context(), p, options.Key, "import")
 	})
 	defer options.ClearKey()
 	if err != nil {
@@ -136,7 +136,7 @@ func requestSize(r *http.Request, limit int64) (int64, error) {
 	return r.ContentLength, nil
 }
 
-func readImportForm(r *http.Request, lease *scratchLease, authorize func(importOptions) error) (*scratchFile, importOptions, error) {
+func readImportForm(r *http.Request, lease *Lease, authorize func(importOptions) error) (*scratchFile, importOptions, error) {
 	var options importOptions
 	reader, err := r.MultipartReader()
 	if err != nil {
@@ -215,10 +215,10 @@ func decodeFormField(part *multipart.Part, v any) error {
 
 // importRun is one import: where its chats go and what it left out.
 type importRun struct {
-	h     *archives
+	h     *Service
 	p     *auth.Principal
 	key   *auth.ContentKey // set when the import goes to the cloud
-	lease *scratchLease
+	lease *Lease
 	out   *importStream
 	cloud *cloudArchive
 	jobID *string
@@ -325,7 +325,7 @@ func (j *importRun) export(ctx context.Context, zr *zip.Reader) error {
 		if !safeEntryName(f) || files[f.Name] != nil {
 			continue
 		}
-		if expanded += f.UncompressedSize64; expanded > maxArchiveExpansion {
+		if expanded += f.UncompressedSize64; expanded > MaxArchiveExpansion {
 			return api.Err(413, "IMPORT_TOO_LARGE", "The archive expands past the size limit")
 		}
 		files[f.Name] = f
@@ -566,10 +566,10 @@ func (j *importRun) toDevice(sourceID string, t *domain.Thread) error {
 	return j.out.thread(withOriginals(t))
 }
 
-// importThread is a device chat as its line carries it: each image as the
+// ImportThread is a device chat as its line carries it: each image as the
 // copy and thumbnail an upload makes, with the archive's original beside it
 // for its client to keep apart from the thread.
-type importThread struct {
+type ImportThread struct {
 	domain.Thread
 	Messages []importMessage `json:"messages"`
 }
@@ -584,8 +584,8 @@ type importAttachment struct {
 	OriginalBase64 string `json:"originalBase64,omitempty"`
 }
 
-func withOriginals(t *domain.Thread) *importThread {
-	line := &importThread{Thread: *t, Messages: make([]importMessage, len(t.Messages))}
+func withOriginals(t *domain.Thread) *ImportThread {
+	line := &ImportThread{Thread: *t, Messages: make([]importMessage, len(t.Messages))}
 	line.RecordVersion = domain.RecordVersion
 	for i, m := range t.Messages {
 		message := importMessage{Message: m}
@@ -658,12 +658,12 @@ type importStream struct {
 }
 
 type importLine struct {
-	Thread *importThread `json:"thread,omitempty"`
-	Done   *importDone   `json:"done,omitempty"`
+	Thread *ImportThread `json:"thread,omitempty"`
+	Done   *ImportDone   `json:"done,omitempty"`
 	Error  *api.Error    `json:"error,omitempty"`
 }
 
-type importDone struct {
+type ImportDone struct {
 	JobID    *string  `json:"jobId"`
 	Warnings []string `json:"warnings"`
 }
@@ -679,7 +679,7 @@ func (s *importStream) start() {
 	s.enc = json.NewEncoder(s.w)
 }
 
-func (s *importStream) thread(t *importThread) error {
+func (s *importStream) thread(t *ImportThread) error {
 	s.start()
 	if err := s.enc.Encode(importLine{Thread: t}); err != nil {
 		return err
@@ -698,7 +698,7 @@ func (s *importStream) finish(jobID *string, warnings []string, err error) {
 		s.enc.Encode(importLine{Error: api.AsError(err)})
 		return
 	}
-	s.enc.Encode(importLine{Done: &importDone{JobID: jobID, Warnings: warnings}})
+	s.enc.Encode(importLine{Done: &ImportDone{JobID: jobID, Warnings: warnings}})
 }
 
 // errAttachmentMissing is an attachment whose bytes its source does not hold.
@@ -834,7 +834,7 @@ func (c *cloudArchive) chat(sourceID, projectSourceID string, t *domain.Thread) 
 }
 
 func (c *cloudArchive) finish() error {
-	if err := writeEntry(c.zip, manifestPath, api.Raw(c.manifest), true); err != nil {
+	if err := writeEntry(c.zip, ManifestPath, api.Raw(c.manifest), true); err != nil {
 		return err
 	}
 	return c.zip.Close()
@@ -856,7 +856,7 @@ type importChunkUpload struct {
 	Data        string `json:"data"`
 }
 
-func (ar *archives) stageImport(ctx context.Context, p *auth.Principal, key auth.ContentKey, archive *scratchFile) (string, error) {
+func (ar *Service) stageImport(ctx context.Context, p *auth.Principal, key auth.ContentKey, archive *scratchFile) (string, error) {
 	defer clear(key[:])
 	size := archive.Size()
 	if size > maxCloudImport {
@@ -866,26 +866,26 @@ func (ar *archives) stageImport(ctx context.Context, p *auth.Principal, key auth
 	if _, err := io.Copy(hash, archive.section(0, size)); err != nil {
 		return "", err
 	}
-	chunks := (size + importChunk - 1) / importChunk
+	chunks := (size + ImportChunk - 1) / ImportChunk
 	var created struct {
 		JobID    string `json:"job_id"`
 		UploadID string `json:"upload_id"`
 	}
-	if err := ar.store.SyncImport(ctx, p, "create", importCreate{Source: cloudImportSource, TotalBytes: size, TotalChunks: chunks, ArchiveSHA256: hex.EncodeToString(hash.Sum(nil))}, &created); err != nil {
+	if err := ar.Store.SyncImport(ctx, p, "create", importCreate{Source: cloudImportSource, TotalBytes: size, TotalChunks: chunks, ArchiveSHA256: hex.EncodeToString(hash.Sum(nil))}, &created); err != nil {
 		return "", err
 	}
 	for i := int64(0); i < chunks; i++ {
-		data := make([]byte, min(importChunk, size-i*importChunk))
-		if _, err := archive.ReadAt(data, i*importChunk); err != nil && err != io.EOF {
+		data := make([]byte, min(ImportChunk, size-i*ImportChunk))
+		if _, err := archive.ReadAt(data, i*ImportChunk); err != nil && err != io.EOF {
 			return "", err
 		}
-		err := ar.store.SyncImport(ctx, p, "upload", importChunkUpload{UploadID: created.UploadID, ChunkIndex: i, ChunkSHA256: api.HashHex(data), Data: base64.StdEncoding.EncodeToString(data)}, nil)
+		err := ar.Store.SyncImport(ctx, p, "upload", importChunkUpload{UploadID: created.UploadID, ChunkIndex: i, ChunkSHA256: api.HashHex(data), Data: base64.StdEncoding.EncodeToString(data)}, nil)
 		clear(data)
 		if err != nil {
 			return "", err
 		}
 	}
-	return created.JobID, ar.store.API.CallKey(ctx, p, "/v1/import/start", key, api.Object{"job_id": created.JobID}, nil)
+	return created.JobID, ar.Store.API.CallKey(ctx, p, "/v1/import/start", key, api.Object{"job_id": created.JobID}, nil)
 }
 
 // importKindCounts is what sync's job did with one kind of item.
@@ -912,13 +912,13 @@ type importStatusView struct {
 	FailureDetail string                      `json:"failureDetail,omitempty"`
 }
 
-func (ar *archives) importStatus(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *importStatusRequest) (any, error) {
+func (ar *Service) ImportStatus(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *importStatusRequest) (any, error) {
 	var status struct {
 		importStatusView
 		FailureReason string `json:"failure_reason"`
 		FailureDetail string `json:"failure_detail"`
 	}
-	if err := ar.store.SyncImport(ctx, p, "status", struct {
+	if err := ar.Store.SyncImport(ctx, p, "status", struct {
 		JobID string `json:"job_id"`
 	}{in.JobID}, &status); err != nil {
 		return nil, err

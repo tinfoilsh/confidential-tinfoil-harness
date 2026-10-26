@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/archives"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
@@ -105,7 +106,7 @@ type imported struct {
 	// originals are the original bytes of the threads' images by attachment
 	// id, which a client keeps apart from its threads.
 	originals map[string][]byte
-	done      *importDone
+	done      *archives.ImportDone
 }
 
 // importOf posts an archive to /v1/import and reads its lines.
@@ -125,11 +126,11 @@ func importLines(t *testing.T, w *httptest.ResponseRecorder) imported {
 	scanner.Buffer(nil, 64<<20)
 	for scanner.Scan() {
 		var line struct {
-			Thread *domain.Thread `json:"thread"`
-			Done   *importDone    `json:"done"`
+			Thread *domain.Thread       `json:"thread"`
+			Done   *archives.ImportDone `json:"done"`
 		}
 		var originals struct {
-			Thread *importThread `json:"thread"`
+			Thread *archives.ImportThread `json:"thread"`
 		}
 		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil || json.Unmarshal(scanner.Bytes(), &originals) != nil || out.done != nil {
 			t.Fatalf("a line after the last, or not JSON: %s", scanner.Bytes())
@@ -233,8 +234,8 @@ func withEntries(t *testing.T, archive []byte, replaced map[string][]byte) []byt
 func withBackupEntries(t *testing.T, archive []byte, replaced map[string][]byte) []byte {
 	t.Helper()
 	files, _ := unzipped(t, archive)
-	var manifest backupManifest
-	if err := json.Unmarshal(files[manifestPath], &manifest); err != nil {
+	var manifest archives.BackupManifest
+	if err := json.Unmarshal(files[archives.ManifestPath], &manifest); err != nil {
 		t.Fatal(err)
 	}
 	for i, file := range manifest.Files {
@@ -242,7 +243,7 @@ func withBackupEntries(t *testing.T, archive []byte, replaced map[string][]byte)
 			manifest.Files[i].SHA256, manifest.Files[i].SizeBytes = api.HashHex(data), int64(len(data))
 		}
 	}
-	replaced[manifestPath] = api.Raw(manifest)
+	replaced[archives.ManifestPath] = api.Raw(manifest)
 	return withEntries(t, archive, replaced)
 }
 
@@ -284,15 +285,15 @@ func TestNativeBackupRoundTrips(t *testing.T) {
 		t.Fatalf("export: HTTP %d: %s", w.Code, w.Body.String())
 	}
 	files, _ := unzipped(t, w.Body.Bytes())
-	var manifest backupManifest
-	json.Unmarshal(files[manifestPath], &manifest)
+	var manifest archives.BackupManifest
+	json.Unmarshal(files[archives.ManifestPath], &manifest)
 	for _, file := range manifest.Files {
-		if data, ok := files[file.Path]; !ok || api.HashHex(data) != file.SHA256 || int64(len(data)) != file.SizeBytes || backupKind(file.Path) != file.Kind {
+		if data, ok := files[file.Path]; !ok || api.HashHex(data) != file.SHA256 || int64(len(data)) != file.SizeBytes || archives.BackupKind(file.Path) != file.Kind {
 			t.Fatalf("the manifest does not describe %s", file.Path)
 		}
 	}
-	want := backupCounts{Projects: 1, ProjectDocuments: 1, CloudChats: 1, LocalChats: 1, Relationships: 5, Images: 3, Files: len(files) - 1}
-	if manifest.Format != nativeBackupFormat || manifest.Version != 3 || manifest.Counts != want || len(manifest.Files) != len(files)-1 || manifest.Complete ||
+	want := archives.BackupCounts{Projects: 1, ProjectDocuments: 1, CloudChats: 1, LocalChats: 1, Relationships: 5, Images: 3, Files: len(files) - 1}
+	if manifest.Format != archives.NativeBackupFormat || manifest.Version != 3 || manifest.Counts != want || len(manifest.Files) != len(files)-1 || manifest.Complete ||
 		len(manifest.Omissions) != 1 || manifest.Omissions[0].ParentSourceID != "chat-1" || len(manifest.Warnings) != 1 || manifest.Warnings[0].Count != 1 {
 		t.Fatalf("manifest: %+v", manifest)
 	}
@@ -358,16 +359,16 @@ func TestBackupsHoldWhatRestoresTake(t *testing.T) {
 	}
 
 	tooLarge := func(err error) bool { return err != nil && api.AsError(err).Code == "ARCHIVE_TOO_LARGE" }
-	if err := newBackupWriter(io.Discard).add("images", backupImagePath("larger", ".bin"), append(largest, 0)); !tooLarge(err) {
+	if err := archives.NewBackupWriter(io.Discard).Add("images", archives.BackupImagePath("larger", ".bin"), append(largest, 0)); !tooLarge(err) {
 		t.Fatalf("a backup held an image no restore takes: %v", err)
 	}
-	b, written := newBackupWriter(io.Discard), 0
-	for ; written+len(largest) <= maxArchiveExpansion; written += len(largest) {
-		if err := b.add("images", backupImagePath(strconv.Itoa(written), ".bin"), largest); err != nil {
+	b, written := archives.NewBackupWriter(io.Discard), 0
+	for ; written+len(largest) <= archives.MaxArchiveExpansion; written += len(largest) {
+		if err := b.Add("images", archives.BackupImagePath(strconv.Itoa(written), ".bin"), largest); err != nil {
 			t.Fatalf("a backup of %d bytes was refused: %v", written+len(largest), err)
 		}
 	}
-	if err := b.add("images", backupImagePath("past", ".bin"), largest); !tooLarge(err) {
+	if err := b.Add("images", archives.BackupImagePath("past", ".bin"), largest); !tooLarge(err) {
 		t.Fatalf("a backup expanded past what a restore takes: %v", err)
 	}
 }
@@ -383,7 +384,7 @@ func TestARestoreReadsDeviceChatsBeforeStoringTheCloud(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("export: HTTP %d %s", w.Code, w.Body.String())
 	}
-	archive := withBackupEntries(t, w.Body.Bytes(), map[string][]byte{backupEntityPath("local_chats", "local-chat"): api.Raw(api.Object{"id": "another-chat", "title": "On my device"})})
+	archive := withBackupEntries(t, w.Body.Bytes(), map[string][]byte{archives.BackupEntityPath("local_chats", "local-chat"): api.Raw(api.Object{"id": "another-chat", "title": "On my device"})})
 
 	restored, restoredRows, _ := testChatHarness(t, nil)
 	newFakeSync(t, restored)
@@ -414,7 +415,7 @@ func TestRestoresCountTheImagesTheyLeaveOut(t *testing.T) {
 		t.Fatalf("warnings: %v", result.done.Warnings)
 	}
 
-	old := withBackupEntries(t, fixture(t, "web-backup-v1.zip"), map[string][]byte{backupImagePath("legacy:local-1:0:0", ".bin"): []byte("plain text, not an image")})
+	old := withBackupEntries(t, fixture(t, "web-backup-v1.zip"), map[string][]byte{archives.BackupImagePath("legacy:local-1:0:0", ".bin"): []byte("plain text, not an image")})
 	result = importOf(t, h, "alice", old, "backup.zip", api.Object{"target": "device"})
 	if len(result.done.Warnings) != 3 || !strings.HasPrefix(result.done.Warnings[0], "1 images were left out") {
 		t.Fatalf("warnings of an old backup: %v", result.done.Warnings)
@@ -429,7 +430,7 @@ func TestOldBackupImagesKeepTheirType(t *testing.T) {
 	if err := jpeg.Encode(&photo, image.NewGray(image.Rect(0, 0, 4, 4)), nil); err != nil {
 		t.Fatal(err)
 	}
-	backup := withBackupEntries(t, fixture(t, "web-backup-v1.zip"), map[string][]byte{backupImagePath("legacy:local-1:0:0", ".bin"): photo.Bytes()})
+	backup := withBackupEntries(t, fixture(t, "web-backup-v1.zip"), map[string][]byte{archives.BackupImagePath("legacy:local-1:0:0", ".bin"): photo.Bytes()})
 	result := importOf(t, h, "alice", backup, "backup.zip", api.Object{"target": "device"})
 	for _, thread := range result.threads {
 		if thread.Title != "Old device chat" {
@@ -623,7 +624,7 @@ func TestChatGPTRepliesKeepTheirTurnsReasoning(t *testing.T) {
 	if len(result.threads) != 1 || len(result.threads[0].Messages) != 4 {
 		t.Fatalf("threads: %s", api.Raw(result.threads))
 	}
-	if messages := result.threads[0].Messages; timelineText(messages[1].Timeline, "thinking") != "Nearer thought" || timelineText(messages[3].Timeline, "thinking") != "" {
+	if messages := result.threads[0].Messages; archives.TimelineText(messages[1].Timeline, "thinking") != "Nearer thought" || archives.TimelineText(messages[3].Timeline, "thinking") != "" {
 		t.Fatalf("reasoning: %s", api.Raw(messages))
 	}
 }
@@ -732,8 +733,8 @@ func TestConversationsExportMatchesTheWebApp(t *testing.T) {
 	}
 	for _, name := range wantNames {
 		gotEntry, wantEntry := got[name], want[name]
-		if name == manifestPath {
-			var gotManifest, wantManifest conversationsManifest
+		if name == archives.ManifestPath {
+			var gotManifest, wantManifest archives.ConversationsManifest
 			json.Unmarshal(gotEntry, &gotManifest)
 			json.Unmarshal(wantEntry, &wantManifest)
 			if _, err := time.Parse(time.RFC3339, gotManifest.CreatedAt); err != nil {
@@ -767,9 +768,9 @@ func TestAnExportWithoutTheKeyHoldsOnlyItsDeviceChats(t *testing.T) {
 		t.Fatalf("export: HTTP %d %s", w.Code, w.Body.String())
 	}
 	files, _ := unzipped(t, w.Body.Bytes())
-	var manifest backupManifest
-	json.Unmarshal(files[manifestPath], &manifest)
-	if manifest.Counts != (backupCounts{LocalChats: 1, Files: 2}) || files[backupEntityPath("local_chats", "local-chat")] == nil || rows.calls != 0 {
+	var manifest archives.BackupManifest
+	json.Unmarshal(files[archives.ManifestPath], &manifest)
+	if manifest.Counts != (archives.BackupCounts{LocalChats: 1, Files: 2}) || files[archives.BackupEntityPath("local_chats", "local-chat")] == nil || rows.calls != 0 {
 		t.Fatalf("manifest %+v after %d store calls", manifest.Counts, rows.calls)
 	}
 }
@@ -806,7 +807,7 @@ func TestArchivesNeedNoChatAccess(t *testing.T) {
 // told to retry.
 func TestArchivesWaitForScratchSpace(t *testing.T) {
 	h, _, _ := testChatHarness(t, nil)
-	h.archives.scratch = newScratchSpace(t.TempDir(), 64<<10)
+	h.archives.Scratch = archives.NewScratch(t.TempDir(), 64<<10)
 	thread := threadPart(api.Object{"id": "local-chat", "title": "Tab chat", "messages": []any{api.Object{"id": "m", "role": "user", "content": strings.Repeat("x", 8<<10)}}})
 	if w := archiveRoute(h, "/v1/import", "alice", optionsPart(api.Object{"target": "device"}), formPart{name: "file", filename: "big.json", data: bytes.Repeat([]byte(" "), 40<<10)}); w.Code != 413 || !strings.Contains(w.Body.String(), "ARCHIVE_TOO_LARGE") {
 		t.Fatalf("an import that cannot fit: HTTP %d %s", w.Code, w.Body.String())
@@ -821,31 +822,31 @@ func TestArchivesWaitForScratchSpace(t *testing.T) {
 	go func() {
 		done <- archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "conversations"}), thread)
 	}()
-	for h.archives.scratch.waiting() == 0 {
+	for h.archives.Scratch.Waiting() == 0 {
 		select {
 		case w := <-done:
 			t.Fatalf("an export ran without space: HTTP %d", w.Code)
 		case <-time.After(time.Millisecond):
 		}
 	}
-	held.release()
+	held.Release()
 	if w := <-done; w.Code != 200 {
 		t.Fatalf("the waiting export: HTTP %d %s", w.Code, w.Body.String())
 	}
 	held = heldScratch(t, h, 60<<10)
-	defer held.release()
-	h.archives.scratch.wait = 10 * time.Millisecond
+	defer held.Release()
+	h.archives.Scratch.Wait = 10 * time.Millisecond
 	if w := archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "conversations"}), thread); w.Code != 503 || w.Header().Get("Retry-After") == "" || !strings.Contains(w.Body.String(), "TEMP_SPACE_BUSY") {
 		t.Fatalf("an export that waited too long: HTTP %d %s", w.Code, w.Body.String())
 	}
 }
 
 // heldScratch holds n bytes of the harness's scratch space.
-func heldScratch(t *testing.T, h *harness, n int64) *scratchLease {
+func heldScratch(t *testing.T, h *harness, n int64) *archives.Lease {
 	t.Helper()
-	held, err := h.archives.scratch.lease(context.Background(), n)
+	held, err := h.archives.Scratch.Lease(context.Background(), n)
 	if err == nil {
-		err = held.take(n)
+		err = held.Take(n)
 	}
 	if err != nil {
 		t.Fatal(err)
@@ -864,7 +865,7 @@ func TestStartupRemovesTheSpoolFilesAPreviousProcessLeft(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if scratch, err := measuredScratch(); err != nil || scratch.dir != dir {
+	if scratch, err := archives.MeasuredScratch(); err != nil || scratch.Dir != dir {
 		t.Fatalf("measured %v: %v", scratch, err)
 	}
 	if _, err := os.Stat(left); !os.IsNotExist(err) {
@@ -881,8 +882,8 @@ func TestStartupRemovesTheSpoolFilesAPreviousProcessLeft(t *testing.T) {
 func TestStalledArchivesFreeTheirSpace(t *testing.T) {
 	h, _, _ := testChatHarness(t, nil)
 	dir := t.TempDir()
-	h.archives.scratch = newScratchSpace(dir, 64<<10)
-	h.archives.scratch.wait, h.archives.scratch.idle = time.Millisecond, 500*time.Millisecond
+	h.archives.Scratch = archives.NewScratch(dir, 64<<10)
+	h.archives.Scratch.Wait, h.archives.Scratch.Idle = time.Millisecond, 500*time.Millisecond
 	server := httptest.NewServer(h.routes())
 	t.Cleanup(server.Close)
 
@@ -904,7 +905,7 @@ func TestStalledArchivesFreeTheirSpace(t *testing.T) {
 		body := form.Bytes()
 		for piece := (len(body) + 7) / 8; len(body) > 0; body = body[min(piece, len(body)):] {
 			slow.Write(body[:min(piece, len(body))])
-			time.Sleep(h.archives.scratch.idle / 5)
+			time.Sleep(h.archives.Scratch.Idle / 5)
 		}
 	}()
 
@@ -919,7 +920,7 @@ func TestStalledArchivesFreeTheirSpace(t *testing.T) {
 	if r, body := rawResponse(t, slow); r.StatusCode != 200 || !strings.Contains(body, `"title":"Slow"`) || !strings.Contains(body, `"done"`) {
 		t.Fatalf("an import whose body kept arriving: HTTP %d %s", r.StatusCode, body)
 	}
-	for start := time.Now(); !h.archives.scratch.empty(); time.Sleep(time.Millisecond) {
+	for start := time.Now(); !h.archives.Scratch.Empty(); time.Sleep(time.Millisecond) {
 		if time.Since(start) > 10*time.Second {
 			t.Fatal("the stalled import kept its space")
 		}
@@ -932,7 +933,7 @@ func TestStalledArchivesFreeTheirSpace(t *testing.T) {
 func TestArchivesHoldingSpaceDoNotWaitForMore(t *testing.T) {
 	h, _, _ := testChatHarness(t, nil)
 	dir := t.TempDir()
-	h.archives.scratch = newScratchSpace(dir, 64<<10)
+	h.archives.Scratch = archives.NewScratch(dir, 64<<10)
 	server := httptest.NewServer(h.routes())
 	t.Cleanup(server.Close)
 	chat := func(id string) formPart {
@@ -962,8 +963,8 @@ func TestArchivesHoldingSpaceDoNotWaitForMore(t *testing.T) {
 		t.Fatalf("the export left the space: HTTP %d %s", r.StatusCode, body)
 	}
 	files, _ := unzipped(t, []byte(body))
-	var manifest backupManifest
-	json.Unmarshal(files[manifestPath], &manifest)
+	var manifest archives.BackupManifest
+	json.Unmarshal(files[archives.ManifestPath], &manifest)
 	if manifest.Counts.LocalChats != 2 {
 		t.Fatalf("the export left the space holds %+v", manifest.Counts)
 	}
@@ -999,7 +1000,7 @@ func rawResponse(t *testing.T, conn net.Conn) (*http.Response, string) {
 func waitForSpooled(t *testing.T, dir string, count int) {
 	t.Helper()
 	for start := time.Now(); ; time.Sleep(time.Millisecond) {
-		spooled, _ := filepath.Glob(filepath.Join(dir, scratchPattern))
+		spooled, _ := filepath.Glob(filepath.Join(dir, archives.ScratchPattern))
 		written := 0
 		for _, name := range spooled {
 			if info, err := os.Stat(name); err == nil && info.Size() > 0 {

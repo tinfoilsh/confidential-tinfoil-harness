@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/archives"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
@@ -45,7 +46,7 @@ func (f *fakeSync) importStep(t *testing.T, h *harness, r *http.Request, in api.
 	case "/v1/import/upload":
 		job := f.imports[api.Str(in["upload_id"])]
 		data, err := base64.StdEncoding.DecodeString(api.Str(in["data"]))
-		if job == nil || err != nil || api.HashHex(data) != api.Str(in["chunk_sha256"]) || len(data) > importChunk {
+		if job == nil || err != nil || api.HashHex(data) != api.Str(in["chunk_sha256"]) || len(data) > archives.ImportChunk {
 			return 400, api.Object{"code": "BAD_REQUEST"}
 		}
 		job.chunks[api.Int(in["chunk_index"])] = data

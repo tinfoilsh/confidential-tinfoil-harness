@@ -1,4 +1,4 @@
-package main
+package archives
 
 import (
 	"encoding/json"
@@ -7,16 +7,16 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
-// shareRequest shares a stored chat by its key, or a device chat by the
+// ShareRequest shares a stored chat by its key, or a device chat by the
 // thread its client sends.
-type shareRequest struct {
+type ShareRequest struct {
 	api.KeyRequest
 	ThreadID string          `json:"threadId"`
 	Local    bool            `json:"local"`
 	Thread   json.RawMessage `json:"thread"`
 }
 
-func (in *shareRequest) Validate() error {
+func (in *ShareRequest) Validate() error {
 	if err := api.RequireID("threadId", in.ThreadID); err != nil {
 		return err
 	}

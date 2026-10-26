@@ -1,4 +1,4 @@
-package main
+package archives
 
 import (
 	"archive/zip"
@@ -21,7 +21,7 @@ import (
 // nativeBackup is a native backup whose every entry was found listed in
 // its manifest and matching its hash.
 type nativeBackup struct {
-	manifest backupManifest
+	manifest BackupManifest
 	entries  map[string]*zip.File
 	// images are the backup's images by id, and their ids by chat.
 	images     map[string]backupImage
@@ -35,7 +35,7 @@ var errInvalidBackup = func(why string) error { return api.Err(400, "IMPORT_INVA
 func openNativeBackup(zr *zip.Reader) (*nativeBackup, error) {
 	var manifestFile *zip.File
 	for _, f := range zr.File {
-		if f.Name == manifestPath {
+		if f.Name == ManifestPath {
 			manifestFile = f
 		}
 	}
@@ -45,7 +45,7 @@ func openNativeBackup(zr *zip.Reader) (*nativeBackup, error) {
 	var head struct {
 		Format string `json:"format"`
 	}
-	if b, err := readEntry(manifestFile, maxBackupManifestBytes); err != nil || json.Unmarshal(b, &head) != nil || head.Format != nativeBackupFormat {
+	if b, err := readEntry(manifestFile, maxBackupManifestBytes); err != nil || json.Unmarshal(b, &head) != nil || head.Format != NativeBackupFormat {
 		return nil, nil
 	}
 	b := &nativeBackup{entries: map[string]*zip.File{}, images: map[string]backupImage{}, chatImages: map[string][]string{}}
@@ -54,7 +54,7 @@ func openNativeBackup(zr *zip.Reader) (*nativeBackup, error) {
 		if !safeEntryName(f) || f.Flags&0x1 != 0 || !backupPaths.MatchString(f.Name) || b.entries[f.Name] != nil {
 			return nil, errInvalidBackup("it holds an unknown, unsafe or repeated entry")
 		}
-		if expanded += f.UncompressedSize64; f.UncompressedSize64 > backupEntryLimit(f.Name) || expanded > maxArchiveExpansion {
+		if expanded += f.UncompressedSize64; f.UncompressedSize64 > backupEntryLimit(f.Name) || expanded > MaxArchiveExpansion {
 			return nil, api.Err(413, "IMPORT_TOO_LARGE", "The backup exceeds the size limits")
 		}
 		b.entries[f.Name] = f
@@ -66,11 +66,11 @@ func openNativeBackup(zr *zip.Reader) (*nativeBackup, error) {
 	if m.Version < 1 || m.Version > nativeBackupVersion {
 		return nil, errInvalidBackup("its version is not supported")
 	}
-	counts := backupCounts{Files: len(m.Files)}
+	counts := BackupCounts{Files: len(m.Files)}
 	listed := map[string]bool{}
 	for _, file := range m.Files {
 		f := b.entries[file.Path]
-		if f == nil || listed[file.Path] || file.Path == manifestPath || backupKind(file.Path) != file.Kind || int64(f.UncompressedSize64) != file.SizeBytes {
+		if f == nil || listed[file.Path] || file.Path == ManifestPath || BackupKind(file.Path) != file.Kind || int64(f.UncompressedSize64) != file.SizeBytes {
 			return nil, errInvalidBackup("its manifest does not match its entries")
 		}
 		listed[file.Path] = true
@@ -129,7 +129,7 @@ func (b *nativeBackup) readImage(f *zip.File) error {
 	if err := decodeEntry(f, &image); err != nil {
 		return err
 	}
-	if image.ID == "" || backupImagePath(image.ID, ".json") != f.Name || b.entries[backupImagePath(image.ID, ".bin")] == nil {
+	if image.ID == "" || BackupImagePath(image.ID, ".json") != f.Name || b.entries[BackupImagePath(image.ID, ".bin")] == nil {
 		return errInvalidBackup("an image is described apart from its bytes")
 	}
 	b.images[image.ID] = image
@@ -158,7 +158,7 @@ func chatData(f *zip.File) (string, []byte, error) {
 	var head struct {
 		ID string `json:"id"`
 	}
-	if json.Unmarshal(data, &head) != nil || head.ID == "" || backupEntityPath(backupKind(f.Name), head.ID) != f.Name {
+	if json.Unmarshal(data, &head) != nil || head.ID == "" || BackupEntityPath(BackupKind(f.Name), head.ID) != f.Name {
 		return "", nil, errInvalidBackup("a chat is filed under another id")
 	}
 	return head.ID, data, nil
@@ -175,7 +175,7 @@ func (b *nativeBackup) chat(f *zip.File, warnings *importWarnings) (string, doma
 	}
 	images := domain.BackupImages{}
 	for _, id := range b.chatImages[chatID] {
-		bytes, err := readEntry(b.entries[backupImagePath(id, ".bin")], maxArchiveImage)
+		bytes, err := readEntry(b.entries[BackupImagePath(id, ".bin")], maxArchiveImage)
 		if err != nil {
 			return "", domain.Thread{}, err
 		}
@@ -241,7 +241,7 @@ func (j *importRun) nativeCloud(b *nativeBackup) error {
 		if err := decodeEntry(f, &project); err != nil {
 			return err
 		}
-		if project.ID == "" || backupEntityPath("projects", project.ID) != f.Name {
+		if project.ID == "" || BackupEntityPath("projects", project.ID) != f.Name {
 			return errInvalidBackup("a project is filed under another id")
 		}
 		cloud, err := j.cloudArchive()
@@ -254,11 +254,11 @@ func (j *importRun) nativeCloud(b *nativeBackup) error {
 		}
 	}
 	for _, f := range b.listed("project_documents") {
-		var doc backupDocument
+		var doc BackupDocument
 		if err := decodeEntry(f, &doc); err != nil {
 			return err
 		}
-		if !projects[doc.ProjectID] || backupDocumentPath(doc.ProjectID, doc.ID) != f.Name {
+		if !projects[doc.ProjectID] || BackupDocumentPath(doc.ProjectID, doc.ID) != f.Name {
 			return errInvalidBackup("a document is filed apart from its project")
 		}
 		size := int64(len(doc.ExtractedText))

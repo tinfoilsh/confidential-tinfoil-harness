@@ -22,6 +22,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/archives"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
@@ -443,7 +444,7 @@ func TestALocalChatIsSharedFromItsTranscript(t *testing.T) {
 	}))
 	defer cp.Close()
 	h.atControlplane(cp.URL)
-	h.archives.cpClient = &http.Client{Transport: &auth.CallerTransport{Inner: cp.Client().Transport}}
+	h.archives.CPClient = &http.Client{Transport: &auth.CallerTransport{Inner: cp.Client().Transport}}
 	citations := []any{api.Object{"type": "url_citation", "url_citation": api.Object{"url": "https://photos.example/", "title": "Photos", "start_index": 2, "end_index": 7}}}
 	thread := api.Object{"title": "Local chat", "createdAt": "2026-01-01T00:00:00Z", "messages": []any{
 		api.Object{"id": "m1", "role": "user", "content": "what is this?", "createdAt": "2026-01-01T00:00:01Z", "quote": "earlier", "attachments": []any{
@@ -489,7 +490,7 @@ func TestALocalChatIsSharedFromItsTranscript(t *testing.T) {
 		t.Fatalf("sealed %d payloads, the last %s", len(seals), plaintext)
 	}
 	// The opened share lists the reply's citations as its sources.
-	if opened := mustRead(sharedThreadView("0000000000005_local", plaintext)).Messages[1].Annotations; !reflect.DeepEqual(api.Parsed(api.Raw(opened)), api.Parsed(api.Raw(citations))) {
+	if opened := mustRead(archives.SharedThreadView("0000000000005_local", plaintext)).Messages[1].Annotations; !reflect.DeepEqual(api.Parsed(api.Raw(opened)), api.Parsed(api.Raw(citations))) {
 		t.Fatalf("the opened share cites %s", api.Raw(opened))
 	}
 	if len(uploads) != 1 {
@@ -510,8 +511,8 @@ func TestAStoredChatIsSharedFromItsRow(t *testing.T) {
 	cp := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer cp.Close()
 	h.atControlplane(cp.URL)
-	h.archives.cpClient = &http.Client{Transport: &auth.CallerTransport{Inner: cp.Client().Transport}}
-	if _, err := h.archives.shareThread(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, auth.ContentKey{}, requestOf[shareRequest](api.Object{"key": keyBase64(key), "threadId": "chat-1"})); err != nil {
+	h.archives.CPClient = &http.Client{Transport: &auth.CallerTransport{Inner: cp.Client().Transport}}
+	if _, err := h.archives.ShareThread(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, auth.ContentKey{}, requestOf[archives.ShareRequest](api.Object{"key": keyBase64(key), "threadId": "chat-1"})); err != nil {
 		t.Fatal(err)
 	}
 	var shared api.Object
@@ -620,7 +621,7 @@ func TestOpeningAShareNamesOnlyThatShare(t *testing.T) {
 	}))
 	defer cp.Close()
 	h.atControlplane(cp.URL)
-	h.archives.cpClient = cp.Client()
+	h.archives.CPClient = cp.Client()
 	fragment := "v2:" + strings.Repeat("ab", 32)
 	if w := postRoute(h, "/v1/shares/open", api.Object{"shareId": "..", "fragment": fragment}, ""); w.Code != 400 {
 		t.Fatalf("a dot segment share id: HTTP %d", w.Code)
