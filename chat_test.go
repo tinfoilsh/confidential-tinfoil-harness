@@ -1045,31 +1045,29 @@ func TestCancelCommitsPartialAndEndsQueue(t *testing.T) {
 	}
 	// Cancel only once the run has streamed the partial reply.
 	awaitFrame(t, run.log, "TEXT_MESSAGE_CHUNK")
-	queued := sendInput(key)
-	queued["threadId"] = run.thread.id
-	next, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](queued))
-	if err != nil {
-		t.Fatal(err)
+	queue := func() *chatRun {
+		queued := sendInput(key)
+		queued["threadId"] = run.thread.id
+		next, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](queued))
+		if err != nil || !next.queued {
+			t.Fatalf("turn not queued: %v", err)
+		}
+		return next
 	}
-	if !next.queued {
-		t.Fatal("turn was not queued")
-	}
+	next, after := queue(), queue()
 	_, err = h.cancelThread(context.Background(), p, key, requestOf[runRequest](object{"key": key.base64(), "threadId": run.thread.id, "runId": run.log.id}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case <-run.finished:
-	case <-time.After(3 * time.Second):
-		t.Fatal("cancel timed out")
+	for _, r := range []*chatRun{run, next, after} {
+		select {
+		case <-r.finished:
+		case <-time.After(3 * time.Second):
+			t.Fatal("a run did not end with the stop")
+		}
 	}
-	select {
-	case <-next.finished:
-	case <-time.After(3 * time.Second):
-		t.Fatal("the queued turn did not end with the stop")
-	}
-	// The stopped reply's last snapshot shows the queue gone, and the queued
-	// turn's stream ends cancelled.
+	// The stopped reply's last snapshot shows the queue gone, and each
+	// queued turn's stream ends cancelled.
 	events := eventsOf(t, run.log)
 	var last *event
 	for i := range events {
@@ -1080,9 +1078,11 @@ func TestCancelCommitsPartialAndEndsQueue(t *testing.T) {
 	if queue := arr(obj(last.Snapshot)["queue"]); len(queue) != 0 {
 		t.Fatalf("the stopped reply's snapshot still queues %v", queue)
 	}
-	var metadata runMetadata
-	if ended := eventsOf(t, next.log); ended[len(ended)-1].Type != "RUN_FINISHED" || json.Unmarshal(ended[len(ended)-1].Metadata, &metadata) != nil || !valueOr(metadata.Cancelled, false) {
-		t.Fatalf("the queued turn ended with %+v", ended[len(ended)-1])
+	for _, r := range []*chatRun{next, after} {
+		var metadata runMetadata
+		if ended := eventsOf(t, r.log); ended[len(ended)-1].Type != "RUN_FINISHED" || json.Unmarshal(ended[len(ended)-1].Metadata, &metadata) != nil || !valueOr(metadata.Cancelled, false) {
+			t.Fatalf("a queued turn ended with %+v", ended[len(ended)-1])
+		}
 	}
 	if threads, runs, requests := liveCount(h); threads+runs+requests != 0 {
 		t.Fatalf("the stopped chat is still live: %d chats, %d runs, %d requests", threads, runs, requests)

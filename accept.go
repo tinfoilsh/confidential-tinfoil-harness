@@ -74,16 +74,17 @@ func (h *harness) acceptTurn(ctx context.Context, p *principal, credential infer
 		close(r.accepted)
 		return nil, err
 	}
-	if !r.queued {
-		if err := h.launch(ctx, r); err != nil {
-			err = h.withQuota(p, r.credential.Limit, err)
-			if next := h.endUnstarted(r, err); next != nil {
-				go h.runQueue(next)
-			}
-			r.refused = err
-			close(r.accepted)
-			return nil, err
+	if r.queued {
+		return r, nil
+	}
+	if err := h.launch(ctx, r); err != nil {
+		err = h.withQuota(p, r.credential.Limit, err)
+		if next := h.endUnstarted(r, err); next != nil {
+			go h.runQueue(next)
 		}
+		r.refused = err
+		close(r.accepted)
+		return nil, err
 	}
 	close(r.accepted)
 	return r, nil
@@ -230,6 +231,10 @@ func (h *harness) admit(ctx context.Context, p *principal, credential inferenceC
 		s.queue = append(s.queue, r)
 		r.out.emit(stateDelta{ThreadID: id, RunID: r.log.id, Delta: []statePatch{{"add", "/queue/-", r.queueItem()}}})
 		queueChanged(s)
+		// A queued turn is accepted as it is registered, so a stop that
+		// ends it cannot come between the two, and a retried request finds
+		// it either queued or ended, never missing.
+		close(r.accepted)
 		return nil
 	}
 	switch {
