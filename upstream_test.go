@@ -47,7 +47,7 @@ func TestModelRefusalsReachTheRunWithTheirMeaning(t *testing.T) {
 				t.Fatalf("run ended with %s %s %q retry %d", last.Type, last.Code, last.Message, last.RetryAfter)
 			}
 			if tc.status == 200 {
-				row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
+				row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
 				if reply := mustRead(domain.ReadThreadRow(row)).Messages[1]; reply.Content != "partial" || !domain.ValueOr(reply.IsError, false) {
 					t.Fatalf("the streamed answer was lost: %+v", reply)
 				}

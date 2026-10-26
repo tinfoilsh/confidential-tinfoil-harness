@@ -117,7 +117,7 @@ func (h *harness) placeAttachment(ctx context.Context, p *auth.Principal, thread
 		if unreachable(err) {
 			// Sync rejects a push naming an id that is not an enclave id, so
 			// such a reference is retired now. Any other unavailable one fails
-			// the push as missing, and repairAttachments then retires it.
+			// the push as missing, and RepairAttachments then retires it.
 			if !domain.EnclaveAttachmentID.MatchString(a.ID) {
 				retireAttachment(a)
 			}
@@ -131,7 +131,7 @@ func (h *harness) placeAttachment(ctx context.Context, p *auth.Principal, thread
 		return nil
 	}
 	defer clear(data)
-	storedID, key, err := h.store.putAttachment(ctx, p, threadID, a.ID, data)
+	storedID, key, err := h.store.PutAttachment(ctx, p, threadID, a.ID, data)
 	if err != nil {
 		return err
 	}
@@ -180,11 +180,11 @@ func (h *harness) inflateDocument(ctx context.Context, p *auth.Principal, a *dom
 	return nil
 }
 
-// repairAttachments makes a row pushable when sync names references it does
+// RepairAttachments makes a row pushable when sync names references it does
 // not hold under the row's chat: a row the web or iOS app wrote before sync
 // checked references may point at blobs filed under another chat or deleted
 // since.
-func (h *harness) repairAttachments(ctx context.Context, p *auth.Principal, t *domain.Thread, missing []string) error {
+func (h *harness) RepairAttachments(ctx context.Context, p *auth.Principal, t *domain.Thread, missing []string) error {
 	return t.EachAttachment(func(a *domain.Attachment) error {
 		if !slices.Contains(missing, a.ID) {
 			return nil

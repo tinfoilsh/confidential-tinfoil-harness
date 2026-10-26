@@ -258,7 +258,7 @@ func TestARetriedLinkPreviewReadsItsPage(t *testing.T) {
 	if shown := eventOfType(events, "TOOL_CALL_RESULT"); shown == nil || shown.ToolCallID != "call" || !reflect.DeepEqual(api.Parsed(shown.Content), want) {
 		t.Fatalf("the retry showed %+v", shown)
 	}
-	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat")
+	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat")
 	if call := mustRead(domain.ReadThreadRow(row)).Messages[1].Timeline[1]; call.Arguments != fixed || !reflect.DeepEqual(api.Parsed(call.Result), want) {
 		t.Fatalf("the retried widget was stored with arguments %s and result %s", call.Arguments, call.Result)
 	}

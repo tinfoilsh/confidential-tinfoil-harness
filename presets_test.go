@@ -50,7 +50,7 @@ func presetProfile() api.Object {
 // storedChat is a stored chat as the harness reads it back.
 func storedChat(t *testing.T, rows *memoryRows, key auth.ContentKey, id string) domain.Thread {
 	t.Helper()
-	row, err := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", id)
+	row, err := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", id)
 	if err != nil {
 		t.Fatal(err)
 	}

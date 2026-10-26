@@ -134,7 +134,7 @@ func TestDeletingAChatEndsItsQueuedTurns(t *testing.T) {
 	awaitFrame(t, queued.log, "RUN_FINISHED")
 	awaitFrame(t, first.log, "RUN_FINISHED")
 	<-first.finished
-	if _, err := rows.load(context.Background(), p, key, "chat", first.thread.id); api.AsError(err).HTTP != 404 {
+	if _, err := rows.Load(context.Background(), p, key, "chat", first.thread.id); api.AsError(err).HTTP != 404 {
 		t.Fatalf("the deleted chat came back: %v", err)
 	}
 	if threads, runs, requests := liveCount(h); threads+runs+requests != 0 {
@@ -172,7 +172,7 @@ func TestAChatDeletedAsItsTurnStartsStaysDeleted(t *testing.T) {
 		if w := <-refused; w.Code != 404 {
 			t.Fatalf("a turn on a deleted chat: HTTP %d %s", w.Code, w.Body.String())
 		}
-		if _, err := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", api.Str(in["threadId"])); api.AsError(err).HTTP != 404 {
+		if _, err := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", api.Str(in["threadId"])); api.AsError(err).HTTP != 404 {
 			t.Fatalf("the deleted chat came back: %v", err)
 		}
 	})
@@ -192,7 +192,7 @@ func TestAChatDeletedAsItsTurnStartsStaysDeleted(t *testing.T) {
 		if w := postRoute(h, "/v1/threads/turn", in, "alice"); w.Code != 404 {
 			t.Fatalf("a turn on a deleted chat: HTTP %d %s", w.Code, w.Body.String())
 		}
-		if _, err := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", id); api.AsError(err).HTTP != 404 {
+		if _, err := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", id); api.AsError(err).HTTP != 404 {
 			t.Fatalf("the deleted chat came back: %v", err)
 		}
 	})
@@ -362,7 +362,7 @@ func TestARetriedRequestFollowsItsRunOrIsAlreadyApplied(t *testing.T) {
 	release()
 	<-run.finished
 	fresh, _, _ := testChatHarness(t, nil)
-	fresh.store.rows = rows
+	fresh.store.Rows = rows
 	for _, instance := range []*harness{h, fresh} {
 		w := httptest.NewRecorder()
 		instance.routes().ServeHTTP(w, retry(instance))
@@ -370,7 +370,7 @@ func TestARetriedRequestFollowsItsRunOrIsAlreadyApplied(t *testing.T) {
 			t.Fatalf("a retry after the run: HTTP %d %s", w.Code, w.Body.String())
 		}
 	}
-	row, _ := rows.load(context.Background(), p, key, "chat", run.thread.id)
+	row, _ := rows.Load(context.Background(), p, key, "chat", run.thread.id)
 	chat := mustRead(domain.ReadThreadRow(row))
 	if len(chat.Messages) != 2 || chat.Messages[0].ID != in["clientRequestId"] || chat.LastRequestID != in["clientRequestId"] {
 		t.Fatalf("the chat holds %s", row.Data)
@@ -392,7 +392,7 @@ func TestAFirstTurnCreatesItsChatUnderTheClientsID(t *testing.T) {
 	if events[0].ThreadID != in["threadId"] {
 		t.Fatalf("the chat was stored as %s, not %s", events[0].ThreadID, in["threadId"])
 	}
-	if _, err := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", api.Str(in["threadId"])); err != nil {
+	if _, err := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", api.Str(in["threadId"])); err != nil {
 		t.Fatal(err)
 	}
 	in = sendInput(key)

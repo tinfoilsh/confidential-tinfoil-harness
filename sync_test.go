@@ -19,6 +19,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
 
 type syncTestTransport func(*http.Request) (*http.Response, error)
@@ -59,7 +60,7 @@ func TestGetProjectLoadsDocumentsAcrossSyncPages(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h, _, key := testChatHarness(t, nil)
 			var cursors, pulled []string
-			h.store.rows = &syncClient{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
+			h.store.Rows = &store.Client{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
 				var in api.Object
 				if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 					t.Errorf("decode sync request: %v", err)
@@ -148,7 +149,7 @@ func TestGetProjectLoadsDocumentsAcrossSyncPages(t *testing.T) {
 }
 
 func TestSyncListPreservesChatProjectFilter(t *testing.T) {
-	client := &syncClient{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
+	client := &store.Client{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
 		var in api.Object
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			t.Error(err)
@@ -158,7 +159,7 @@ func TestSyncListPreservesChatProjectFilter(t *testing.T) {
 		}
 		return syncTestResponse(200, api.Object{"updates": []api.Object{}, "next_cursor": "after"})
 	})}}
-	page, err := client.list(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, randomKey(), "chat", "before", "project-main", 50)
+	page, err := client.List(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, randomKey(), "chat", "before", "project-main", 50)
 	if err != nil || page.Next != "after" {
 		t.Fatalf("list project chats: page=%+v err=%v", page, err)
 	}
@@ -166,11 +167,11 @@ func TestSyncListPreservesChatProjectFilter(t *testing.T) {
 
 func TestListPullsInBatchesAndListsUnreadableRows(t *testing.T) {
 	ids := []string{}
-	for i := range pullBatch + 5 {
+	for i := range store.PullBatch + 5 {
 		ids = append(ids, "row-"+strconv.Itoa(i))
 	}
 	batches, retried := []int{}, 0
-	client := &syncClient{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
+	client := &store.Client{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
 		if r.Header.Get("X-Sync-Protocol") != "3" {
 			return syncTestResponse(426, api.Object{"code": "SYNC_PROTOCOL_UPGRADE_REQUIRED"})
 		}
@@ -202,26 +203,26 @@ func TestListPullsInBatchesAndListsUnreadableRows(t *testing.T) {
 		}
 		return syncTestResponse(200, api.Object{"items": items})
 	})}}
-	page, err := client.list(context.Background(), &auth.Principal{ID: "alice", JWT: "jwt"}, randomKey(), "chat", "", "", 100)
+	page, err := client.List(context.Background(), &auth.Principal{ID: "alice", JWT: "jwt"}, randomKey(), "chat", "", "", 100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(batches, []int{pullBatch, 1, 5}) {
+	if !slices.Equal(batches, []int{store.PullBatch, 1, 5}) {
 		t.Fatalf("pull batches: %v", batches)
 	}
 	titles := []string{}
 	for _, row := range page.Rows {
 		titles = append(titles, mustRead(domain.ReadThreadRow(&row)).Title)
 	}
-	if len(page.Rows) != pullBatch+4 || !slices.Contains(titles, "row-7") || slices.Contains(titles, "row-3") || !slices.Equal(slices.Sorted(maps.Keys(page.Unreadable)), []string{"row-3"}) {
+	if len(page.Rows) != store.PullBatch+4 || !slices.Contains(titles, "row-7") || slices.Contains(titles, "row-3") || !slices.Equal(slices.Sorted(maps.Keys(page.Unreadable)), []string{"row-3"}) {
 		t.Fatalf("rows %v, unreadable %v", titles, page.Unreadable)
 	}
-	if _, err := client.load(context.Background(), &auth.Principal{ID: "alice", JWT: "jwt"}, randomKey(), "chat", "row-3"); api.AsError(err).Code != "KEY_MISMATCH" {
+	if _, err := client.Load(context.Background(), &auth.Principal{ID: "alice", JWT: "jwt"}, randomKey(), "chat", "row-3"); api.AsError(err).Code != "KEY_MISMATCH" {
 		t.Fatalf("loading an unreadable row: %v", err)
 	}
 	// Sync answered for the row with a code the harness does not know, not
 	// with a refusal of the request, so loading it may be tried again.
-	if _, err := client.load(context.Background(), &auth.Principal{ID: "alice", JWT: "jwt"}, randomKey(), "chat", "row-busy"); api.AsError(err).Action != api.ActionRetry || api.AsError(err).Status != 0 {
+	if _, err := client.Load(context.Background(), &auth.Principal{ID: "alice", JWT: "jwt"}, randomKey(), "chat", "row-busy"); api.AsError(err).Action != api.ActionRetry || api.AsError(err).Status != 0 {
 		t.Fatalf("loading a row sync could not read: %+v", api.AsError(err))
 	}
 }
@@ -232,7 +233,7 @@ func TestDeletionsLeaveTheWorkToSync(t *testing.T) {
 	h, _, key := testChatHarness(t, nil)
 	var requests []api.Object
 	pages := map[string]api.Object{"": {"updates": []api.Object{{"id": "one"}, {"id": "sealed-to-a-retired-key"}}, "next_cursor": "more"}, "more": {"updates": []api.Object{{"id": "two"}}}}
-	h.store.api = &syncClient{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
+	h.store.API = &store.Client{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
 		var in api.Object
 		json.NewDecoder(r.Body).Decode(&in)
 		in["path"] = r.URL.Path
@@ -253,7 +254,7 @@ func TestDeletionsLeaveTheWorkToSync(t *testing.T) {
 		}
 		return syncTestResponse(404, api.Object{"code": "NOT_FOUND"})
 	})}}
-	h.store.rows = h.store.api
+	h.store.Rows = h.store.API
 	deleted := func(scope, id string) api.Object {
 		return api.Object{"path": "/v1/sync/delete", "scope": scope, "id": id, "key": keyBase64(key), "if_match": ""}
 	}
@@ -266,8 +267,8 @@ func TestDeletionsLeaveTheWorkToSync(t *testing.T) {
 		{"/v1/threads/delete", api.Object{"id": "transferred", "revision": "copied-revision"}, []api.Object{{"path": "/v1/sync/delete", "scope": "chat", "id": "transferred", "key": keyBase64(key), "if_match": "copied-revision"}}},
 		{"/v1/projects/delete", api.Object{"id": "project-1"}, []api.Object{deleted("project", "project-1")}},
 		{"/v1/threads/delete-all", api.Object{"projectId": "project-1"}, []api.Object{
-			{"path": "/v1/sync/list-status", "scope": "chat", "project_id": "project-1", "cursor": "", "limit": float64(listStatusPage), "direction": "desc"},
-			{"path": "/v1/sync/list-status", "scope": "chat", "project_id": "project-1", "cursor": "more", "limit": float64(listStatusPage), "direction": "desc"},
+			{"path": "/v1/sync/list-status", "scope": "chat", "project_id": "project-1", "cursor": "", "limit": float64(store.ListStatusPage), "direction": "desc"},
+			{"path": "/v1/sync/list-status", "scope": "chat", "project_id": "project-1", "cursor": "more", "limit": float64(store.ListStatusPage), "direction": "desc"},
 			deleted("chat", "one"), deleted("chat", "sealed-to-a-retired-key"), deleted("chat", "two")}},
 		{"/v1/projects/delete-all", api.Object{}, []api.Object{{"path": "/v1/sync/delete-all-projects", "key": keyBase64(key)}}},
 	} {
@@ -429,12 +430,12 @@ func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 // as sync lists them, and every other scope from the rows.
 type pagedDocuments struct {
 	*memoryRows
-	pages []rowPage
+	pages []store.Page
 }
 
-func (s *pagedDocuments) list(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, cursor, project string, limit int) (rowPage, error) {
+func (s *pagedDocuments) List(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, cursor, project string, limit int) (store.Page, error) {
 	if scope != "project_document" {
-		return s.memoryRows.list(ctx, p, key, scope, cursor, project, limit)
+		return s.memoryRows.List(ctx, p, key, scope, cursor, project, limit)
 	}
 	page, _ := strconv.Atoi(cmp.Or(cursor, "0"))
 	return s.pages[page], nil
@@ -451,7 +452,7 @@ func TestADocumentSyncCannotOpenIsNeverLeftOutUnsaid(t *testing.T) {
 	doc := func(id, filename string) domain.StoredRow {
 		return domain.StoredRow{ID: trip + "/" + id, ETag: "1", Data: api.Raw(api.Object{"filename": filename}), Project: &trip, ProjectSet: true}
 	}
-	h.store.rows = &pagedDocuments{memoryRows: rows, pages: []rowPage{
+	h.store.Rows = &pagedDocuments{memoryRows: rows, pages: []store.Page{
 		{Rows: []domain.StoredRow{doc("notes", "draft.md"), doc("map", "map.md")}, Next: "1"},
 		{Rows: []domain.StoredRow{doc("notes", "notes.md")}, Unreadable: map[string]error{trip + "/map": api.Err(409, "KEY_MISMATCH", "sealed to another key")}},
 	}}

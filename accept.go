@@ -147,7 +147,7 @@ func (h *harness) admit(ctx context.Context, p *auth.Principal, credential auth.
 	id, local := in.ThreadID, in.Local
 	keyless := p.Anonymous || local
 	if !keyless {
-		granted, err := h.store.rows.authorizeRun(ctx, p, key, in.ThreadID, in.ProjectID)
+		granted, err := h.store.Rows.AuthorizeRun(ctx, p, key, in.ThreadID, in.ProjectID)
 		if err != nil {
 			return err
 		}
@@ -164,7 +164,7 @@ func (h *harness) admit(ctx context.Context, p *auth.Principal, credential auth.
 			}
 			source = &t
 		} else {
-			row, err := h.store.loadThread(ctx, p, key, id)
+			row, err := h.store.LoadThread(ctx, p, key, id)
 			if err != nil {
 				return err
 			}

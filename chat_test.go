@@ -28,6 +28,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
@@ -44,11 +45,11 @@ type memoryRows struct {
 	calls  int
 }
 
-func (s *memoryRows) authorizeRun(_ context.Context, _ *auth.Principal, _ auth.ContentKey, id string, _ *string) (storageGrant, error) {
-	return storageGrant{Token: auth.Secret("run-for-" + id), ExpiresAt: api.Now().Add(time.Hour)}, nil
+func (s *memoryRows) AuthorizeRun(_ context.Context, _ *auth.Principal, _ auth.ContentKey, id string, _ *string) (store.Grant, error) {
+	return store.Grant{Token: auth.Secret("run-for-" + id), ExpiresAt: api.Now().Add(time.Hour)}, nil
 }
 
-func (s *memoryRows) authorizeStorage(_ context.Context, p *auth.Principal, _ auth.ContentKey, _, _ string) (auth.Secret, error) {
+func (s *memoryRows) AuthorizeStorage(_ context.Context, p *auth.Principal, _ auth.ContentKey, _, _ string) (auth.Secret, error) {
 	return auth.Secret("sync-archive:" + p.ID), nil
 }
 
@@ -64,7 +65,7 @@ func (s *memoryRows) opens(name string, key auth.ContentKey) bool {
 	}
 	return key == sealed
 }
-func (s *memoryRows) load(_ context.Context, p *auth.Principal, key auth.ContentKey, scope, id string) (*domain.StoredRow, error) {
+func (s *memoryRows) Load(_ context.Context, p *auth.Principal, key auth.ContentKey, scope, id string) (*domain.StoredRow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
@@ -79,10 +80,10 @@ func (s *memoryRows) load(_ context.Context, p *auth.Principal, key auth.Content
 	return row.Copy(), nil
 }
 
-func (s *memoryRows) pull(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope string, ids []string) ([]domain.StoredRow, map[string]error, error) {
+func (s *memoryRows) Pull(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope string, ids []string) ([]domain.StoredRow, map[string]error, error) {
 	rows, failed := []domain.StoredRow{}, map[string]error{}
 	for _, id := range ids {
-		row, err := s.load(ctx, p, key, scope, id)
+		row, err := s.Load(ctx, p, key, scope, id)
 		if err == nil {
 			rows = append(rows, *row)
 		} else if api.AsError(err).HTTP != 404 {
@@ -92,7 +93,7 @@ func (s *memoryRows) pull(ctx context.Context, p *auth.Principal, key auth.Conte
 	return rows, failed, nil
 }
 
-func (s *memoryRows) removeRevision(_ context.Context, p *auth.Principal, _ auth.ContentKey, id, revision string) error {
+func (s *memoryRows) RemoveRevision(_ context.Context, p *auth.Principal, _ auth.ContentKey, id, revision string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	name := rowMapKey(p, "chat", id)
@@ -129,11 +130,11 @@ func rowProject(row domain.StoredRow) string {
 	json.Unmarshal(row.Data, &data)
 	return data.ProjectID
 }
-func (s *memoryRows) list(_ context.Context, p *auth.Principal, key auth.ContentKey, scope, cursor, project string, limit int) (rowPage, error) {
+func (s *memoryRows) List(_ context.Context, p *auth.Principal, key auth.ContentKey, scope, cursor, project string, limit int) (store.Page, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
-	page := rowPage{Rows: []domain.StoredRow{}, Unreadable: map[string]error{}}
+	page := store.Page{Rows: []domain.StoredRow{}, Unreadable: map[string]error{}}
 	for name, row := range s.rows {
 		if !strings.HasPrefix(name, p.Scope()+"/"+scope+"/") || project != "" && rowProject(row) != project {
 			continue
@@ -146,7 +147,7 @@ func (s *memoryRows) list(_ context.Context, p *auth.Principal, key auth.Content
 	}
 	return page, nil
 }
-func (s *memoryRows) push(_ context.Context, p *auth.Principal, key auth.ContentKey, scope string, row *domain.StoredRow, _ string) (string, error) {
+func (s *memoryRows) Push(_ context.Context, p *auth.Principal, key auth.ContentKey, scope string, row *domain.StoredRow, _ string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
@@ -178,7 +179,7 @@ func (s *memoryRows) push(_ context.Context, p *auth.Principal, key auth.Content
 	s.rows[name], s.sealed[name] = *stored, key
 	return next, nil
 }
-func (s *memoryRows) remove(_ context.Context, p *auth.Principal, _ auth.ContentKey, scope, id string) error {
+func (s *memoryRows) Remove(_ context.Context, p *auth.Principal, _ auth.ContentKey, scope, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
@@ -187,8 +188,8 @@ func (s *memoryRows) remove(_ context.Context, p *auth.Principal, _ auth.Content
 	delete(s.sealed, name)
 	return nil
 }
-func (s *memoryRows) ids(_ context.Context, p *auth.Principal, scope, project string) ([]string, error) {
-	page, _ := s.list(context.Background(), p, s.key, scope, "", project, 0)
+func (s *memoryRows) IDs(_ context.Context, p *auth.Principal, scope, project string) ([]string, error) {
+	page, _ := s.List(context.Background(), p, s.key, scope, "", project, 0)
 	ids := slices.Collect(maps.Keys(page.Unreadable))
 	for _, row := range page.Rows {
 		ids = append(ids, row.ID)
@@ -221,8 +222,8 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 	}))
 	t.Cleanup(cp.Close)
 	rows := &memoryRows{rows: map[string]domain.StoredRow{}, sealed: map[string]auth.ContentKey{}}
-	h := &harness{gateway: server.URL, controlplane: cp.URL, cpClient: cp.Client(), store: &store{rows: rows}, services: map[string]*downstreamService{}, scratch: newScratchSpace(t.TempDir(), 1<<30)}
-	h.store.repair = h
+	h := &harness{gateway: server.URL, controlplane: cp.URL, cpClient: cp.Client(), store: &store.Store{Rows: rows}, services: map[string]*downstreamService{}, scratch: newScratchSpace(t.TempDir(), 1<<30)}
+	h.store.Repair = h
 	h.auth = testAuth(cp)
 	m := &model{name: "kimi-k3", context: 8192, client: &http.Client{Transport: &auth.CallerTransport{Inner: server.Client().Transport, UsageSecret: "test-usage-secret"}}}
 	h.offer.models = []*model{m}
@@ -472,7 +473,7 @@ func TestManagedTurnStoresV2AndKeepsKeyOutOfEvents(t *testing.T) {
 	if strings.Contains(response.Body.String(), keyBase64(key)) {
 		t.Fatal("secret in events")
 	}
-	row, err := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
+	row, err := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -496,7 +497,7 @@ func TestFirstTurnUsesProjectAndPreset(t *testing.T) {
 	input["projectId"], input["presetId"] = "project-1", "builtin:tutor"
 	events := eventsIn(t, postRoute(h, "/v1/threads/turn", input, "alice"))
 	id := events[0].ThreadID
-	row, err := rows.load(context.Background(), p, key, "chat", id)
+	row, err := rows.Load(context.Background(), p, key, "chat", id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -546,7 +547,7 @@ func TestAProjectUpdateClearsItsColorWithNull(t *testing.T) {
 	json.Unmarshal(postRoute(h, "/v1/projects/create", api.Object{"key": keyBase64(key), "name": "Research", "color": "blue"}, "alice").Body.Bytes(), &created)
 	stored := func() domain.Project {
 		t.Helper()
-		project, err := h.store.loadProject(context.Background(), &auth.Principal{ID: "alice"}, key, created.ID)
+		project, err := h.store.LoadProject(context.Background(), &auth.Principal{ID: "alice"}, key, created.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -601,7 +602,7 @@ func TestNewChatsStartWithTheDefaultPromptPreset(t *testing.T) {
 	turn := func(in api.Object) (*string, string) {
 		t.Helper()
 		events := finishedRun(t, h, "/v1/threads/turn", in)
-		row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
+		row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
 		return mustRead(domain.ReadThreadRow(row)).PresetID, <-systems
 	}
 	if preset, system := turn(sendInput(key)); domain.ValueOr(preset, "") != "user:pirate" || system != "Answer like a pirate." {
@@ -664,7 +665,7 @@ func TestDeletingAMessageRemovesOnlyThatMessage(t *testing.T) {
 	if got := windowIDs(t, remove("chat-1", "chat-1-message-2")); !reflect.DeepEqual(got, []string{"chat-1-message-0", "chat-1-message-3"}) {
 		t.Fatalf("after deleting the second question the chat holds %q", got)
 	}
-	row, _ := rows.load(context.Background(), p, key, "chat", "chat-1")
+	row, _ := rows.Load(context.Background(), p, key, "chat", "chat-1")
 	messages := mustRead(domain.ReadThreadRow(row)).Messages
 	if len(messages) != 2 || messages[0].Content != "one" || messages[1].Content != "four" {
 		t.Fatalf("stored messages: %+v", messages)
@@ -673,7 +674,7 @@ func TestDeletingAMessageRemovesOnlyThatMessage(t *testing.T) {
 	if image, stored := messages[0].Attachments, api.Obj(api.Arr(rowJSON(row)["messages"])[0]); len(image) != 1 || image[0].Base64 != "aW1hZ2U=" || stored["imageData"] != nil {
 		t.Fatalf("the deletion stored the legacy image as %v", stored)
 	}
-	if row, _ := rows.load(context.Background(), p, key, "chat", "solo"); row.ETag != "1" {
+	if row, _ := rows.Load(context.Background(), p, key, "chat", "solo"); row.ETag != "1" {
 		t.Fatal("a refused deletion changed the chat")
 	}
 }
@@ -723,7 +724,7 @@ func TestADeadRunNeverLocksItsChat(t *testing.T) {
 		edit := continueInput(key, id)
 		edit["kind"], edit["messageId"], edit["content"] = "edit", "m1", "look again"
 		finishedRun(t, h, "/v1/threads/turn", edit)
-		row, _ := rows.load(context.Background(), p, key, "chat", id)
+		row, _ := rows.Load(context.Background(), p, key, "chat", id)
 		if chat := mustRead(domain.ReadThreadRow(row)); chat.ActiveRun != nil || len(chat.Messages) != 2 || chat.Messages[0].Content != "look again" {
 			t.Fatalf("%s: the turn stored %s", id, row.Data)
 		}
@@ -731,7 +732,7 @@ func TestADeadRunNeverLocksItsChat(t *testing.T) {
 		if w := postRoute(h, "/v1/threads/delete", api.Object{"key": keyBase64(key), "id": id}, "alice"); w.Code != 200 {
 			t.Fatalf("%s: deleting: HTTP %d %s", id, w.Code, w.Body.String())
 		}
-		if _, err := rows.load(context.Background(), p, key, "chat", id); api.AsError(err).HTTP != 404 {
+		if _, err := rows.Load(context.Background(), p, key, "chat", id); api.AsError(err).HTTP != 404 {
 			t.Fatalf("%s: the deleted chat remains: %v", id, err)
 		}
 	}
@@ -762,7 +763,7 @@ func TestEditingAReplyCollapsesItsText(t *testing.T) {
 		t.Fatalf("non-text content was accepted: %d", w.Code)
 	}
 	reply := func(index int) api.Object {
-		row, _ := rows.load(context.Background(), p, key, "chat", "chat-1")
+		row, _ := rows.Load(context.Background(), p, key, "chat", "chat-1")
 		return api.Obj(api.Arr(rowJSON(row)["messages"])[index])
 	}
 	if got := windowIDs(t, update("a1", "It is half past twelve.")); !reflect.DeepEqual(got, []string{"u1", "a1", "u2", "a2"}) {
@@ -821,7 +822,7 @@ func TestAnEditKeepsTheTextAndQuoteItOmits(t *testing.T) {
 			}
 		}
 		finishedRun(t, h, "/v1/threads/turn", in)
-		row, _ := rows.load(context.Background(), p, key, "chat", "chat-1")
+		row, _ := rows.Load(context.Background(), p, key, "chat", "chat-1")
 		messages := mustRead(domain.ReadThreadRow(row)).Messages
 		if len(messages) != 4 || messages[2].Content != tc.stored || messages[2].Quote != tc.quoted || messages[3].Content != "New answer" {
 			t.Fatalf("an edit of %v quoting %v stored %+v", tc.content, tc.quote, messages)
@@ -889,7 +890,7 @@ func TestContinueExtendsTheStoredReplyItNames(t *testing.T) {
 	if replies := api.Arr(api.Obj(api.Parsed(events[len(events)-1].Metadata))["messages"]); len(replies) != 1 || api.Obj(replies[0])["id"] != "a1" || api.Obj(replies[0])["isInterrupted"] != false {
 		t.Fatalf("the run committed %v", replies)
 	}
-	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
+	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
 	messages := mustRead(domain.ReadThreadRow(row)).Messages
 	reply := messages[len(messages)-1]
 	want := []domain.Block{{ID: "t1", Type: "thinking", Content: "rhyme"}, {ID: "c1", Type: "content", Content: "Roses are red, violets are blue."}}
@@ -974,7 +975,7 @@ func TestAContinuedReplyKeepsItsCitations(t *testing.T) {
 	in := continueTurn(key, "chat-1", "a1")
 	api.Obj(in["options"])["webSearch"] = true
 	finishedRun(t, h, "/v1/threads/turn", in)
-	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
+	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
 	reply := mustRead(domain.ReadThreadRow(row)).Messages[1]
 	text := "See [A](https://a.test/1). Also [B](https://b.test)."
 	start := strings.Index(text, "[B]") + 1
@@ -1080,7 +1081,7 @@ func TestCancelCommitsPartialAndEndsQueue(t *testing.T) {
 	if threads, runs, requests := liveCount(h); threads+runs+requests != 0 {
 		t.Fatalf("the stopped chat is still live: %d chats, %d runs, %d requests", threads, runs, requests)
 	}
-	row, err := rows.load(context.Background(), p, key, "chat", run.thread.id)
+	row, err := rows.Load(context.Background(), p, key, "chat", run.thread.id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1220,7 +1221,7 @@ func TestCASReappliesPatchToTheChangedRow(t *testing.T) {
 	if result.(domain.ThreadSummary).Title != "manual" {
 		t.Fatal("patch lost")
 	}
-	row, _ := rows.load(context.Background(), p, key, "chat", "existing")
+	row, _ := rows.Load(context.Background(), p, key, "chat", "existing")
 	if chat := mustRead(domain.ReadThreadRow(row)); chat.Title != "manual" || len(chat.Messages) != 1 || chat.Messages[0].ID != "concurrent" {
 		t.Fatalf("the patch overwrote the concurrent change: %v", row.Data)
 	}
@@ -1247,8 +1248,8 @@ func TestSyncWireCarriesJWTProtocolAndBase64(t *testing.T) {
 		io.WriteString(w, `{"ok":true,"etag":"5"}`)
 	}))
 	defer server.Close()
-	client := &syncClient{URL: server.URL, Client: &http.Client{Transport: &auth.CallerTransport{Inner: server.Client().Transport}}}
-	etag, err := client.push(caller("inference-key"), p, key, "profile", &domain.StoredRow{ID: "profile", ETag: "4", Data: api.Raw(api.Object{"nickname": "hello"})}, uuid.NewString())
+	client := &store.Client{URL: server.URL, Client: &http.Client{Transport: &auth.CallerTransport{Inner: server.Client().Transport}}}
+	etag, err := client.Push(caller("inference-key"), p, key, "profile", &domain.StoredRow{ID: "profile", ETag: "4", Data: api.Raw(api.Object{"nickname": "hello"})}, uuid.NewString())
 	if err != nil || etag != "5" {
 		t.Fatal(etag, err)
 	}
@@ -1735,7 +1736,7 @@ func TestReasoningPrecedesTheAnswerItArrivesWith(t *testing.T) {
 	if !reflect.DeepEqual(order, []string{"REASONING_MESSAGE_CHUNK", "TEXT_MESSAGE_CHUNK"}) {
 		t.Fatalf("streamed %v", order)
 	}
-	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
+	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
 	timeline := mustRead(domain.ReadThreadRow(row)).Messages[1].Timeline
 	if len(timeline) != 2 || timeline[0].Type != "thinking" || timeline[1].Type != "content" {
 		t.Fatalf("stored timeline %+v", timeline)
@@ -1775,7 +1776,7 @@ func TestAModelChunkOverAMebibyteIsRead(t *testing.T) {
 		io.WriteString(w, "data: "+string(api.Raw(api.Object{"choices": []api.Object{{"delta": api.Object{"content": answer}}}}))+"\n\ndata: [DONE]\n\n")
 	})
 	events := finishedRun(t, h, "/v1/threads/turn", sendInput(key))
-	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
+	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
 	if mustRead(domain.ReadThreadRow(row)).Messages[1].Content != answer {
 		t.Fatal("the large chunk was not read whole")
 	}
@@ -1955,7 +1956,7 @@ func TestAnswersAnnotateTheSourcesTheyCite(t *testing.T) {
 		io.WriteString(w, "data: "+string(api.Raw(api.Object{"choices": []api.Object{{"delta": api.Object{"content": answer}}}}))+"\n\ndata: [DONE]\n\n")
 	})
 	events := finishedRun(t, h, "/v1/threads/turn", searchInput(key))
-	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
+	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
 	cite := func(url, title, label string) any {
 		start := strings.Index(answer, "["+label+"]") + 1
 		return map[string]any{"type": "url_citation", "url_citation": map[string]any{"url": url, "title": title, "start_index": float64(start), "end_index": float64(start + len(label))}}
@@ -1990,7 +1991,7 @@ func TestCutModelStreamDoesNotCompleteItsToolCall(t *testing.T) {
 			t.Fatal("a cut stream closed its truncated tool call")
 		}
 	}
-	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
+	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
 	block := mustRead(domain.ReadThreadRow(row)).Messages[1].Timeline[0]
 	if block.Arguments != `{"query":"ca` || block.Complete {
 		t.Fatalf("truncated arguments stored as complete: %+v", block)

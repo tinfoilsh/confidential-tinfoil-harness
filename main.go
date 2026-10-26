@@ -21,6 +21,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 	tinfoil "github.com/tinfoilsh/tinfoil-go"
 )
 
@@ -73,7 +74,7 @@ type harness struct {
 	safeguards   *submitter // nil unless SAFEGUARDS_URL names the sidecar
 	live         liveRuns
 	scratch      *scratchSpace
-	store        *store
+	store        *store.Store
 }
 
 // listenAddr is the shim's upstream port in tinfoil-config.yml, which also
@@ -105,8 +106,8 @@ func main() {
 		cpClient:     &http.Client{Transport: &auth.CallerTransport{Inner: http.DefaultTransport}},
 		safeguards:   newSubmitter(os.Getenv("SAFEGUARDS_URL")),
 		scratch:      scratch,
-		store:        &store{}}
-	h.store.repair = h
+		store:        &store.Store{}}
+	h.store.Repair = h
 
 	if err := h.bootChat(ctx, usageSecret); err != nil {
 		slog.Error("initialize chat service", "error", err)

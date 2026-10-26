@@ -123,7 +123,7 @@ func (h *harness) generateTitle(ctx context.Context, r *chatRun, p *auth.Princip
 		r.out.emit(domain.StateDelta{Delta: titleDelta(&r.row.Thread)})
 		return
 	}
-	updated, err := h.store.mutateThread(ctx, p, r.key, r.thread.id, name)
+	updated, err := h.store.MutateThread(ctx, p, r.key, r.thread.id, name)
 	if err != nil {
 		return
 	}

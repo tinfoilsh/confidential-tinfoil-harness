@@ -37,7 +37,7 @@ func (h *harness) shareThread(ctx context.Context, p *auth.Principal, _ auth.Con
 			return nil, err
 		}
 		defer clear(key[:])
-		row, err := h.store.loadThread(ctx, p, key, id)
+		row, err := h.store.LoadThread(ctx, p, key, id)
 		clear(key[:])
 		if err != nil {
 			return nil, err
@@ -54,7 +54,7 @@ func (h *harness) shareThread(ctx context.Context, p *auth.Principal, _ auth.Con
 		}
 		payload.Messages = append(payload.Messages, shared)
 	}
-	ciphertext, shareKey, err := h.store.sealShare(ctx, p, api.Raw(payload))
+	ciphertext, shareKey, err := h.store.SealShare(ctx, p, api.Raw(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -155,7 +155,7 @@ func (h *harness) openShare(ctx context.Context, _ *auth.Principal, _ auth.Conte
 	if resp.StatusCode/100 != 2 {
 		return nil, api.DownstreamError(resp.StatusCode, ciphertext)
 	}
-	plain, err := h.store.openSealedShare(ctx, fragment, ciphertext)
+	plain, err := h.store.OpenSealedShare(ctx, fragment, ciphertext)
 	if err != nil {
 		return nil, err
 	}
@@ -224,7 +224,7 @@ func (h *harness) handleExport(w http.ResponseWriter, r *http.Request) {
 	lift := h.scratch.idleBody(w, r)
 	r.Body = http.MaxBytesReader(w, r.Body, maxExportBody)
 	form, err := readExportForm(r, lease, func(options exportOptions) error {
-		return h.store.authorizeArchive(r.Context(), p, options.Key, "export")
+		return h.store.AuthorizeArchive(r.Context(), p, options.Key, "export")
 	})
 	if err != nil {
 		api.Respond(w, nil, err)
@@ -469,7 +469,7 @@ func (h *harness) writeBackup(ctx context.Context, p *auth.Principal, key *auth.
 	cloudChats := map[string]bool{}
 	if key != nil {
 		projects := map[string]bool{}
-		err := h.store.eachRowOrUnreadable(ctx, p, *key, "project", "", func(row *domain.StoredRow) error {
+		err := h.store.EachRowOrUnreadable(ctx, p, *key, "project", "", func(row *domain.StoredRow) error {
 			project, err := domain.ReadProject(row)
 			if err != nil {
 				b.omit(backupOmission{Kind: "project", SourceID: row.ID, Category: "invalid", Reason: "row_unreadable"})
@@ -480,7 +480,7 @@ func (h *harness) writeBackup(ctx context.Context, p *auth.Principal, key *auth.
 			}
 			b.manifest.Counts.Projects++
 			projects[project.ID] = true
-			docs, err := h.store.projectDocuments(ctx, p, *key, project.ID, func(row string, _ error) error {
+			docs, err := h.store.ProjectDocuments(ctx, p, *key, project.ID, func(row string, _ error) error {
 				b.omit(backupOmission{Kind: "project_document", SourceID: strings.TrimPrefix(row, project.ID+"/"), ParentSourceID: project.ID, Category: "invalid", Reason: "row_unreadable"})
 				return nil
 			})
@@ -502,7 +502,7 @@ func (h *harness) writeBackup(ctx context.Context, p *auth.Principal, key *auth.
 		if err != nil {
 			return err
 		}
-		err = h.store.eachRowOrUnreadable(ctx, p, *key, "chat", "", func(row *domain.StoredRow) error {
+		err = h.store.EachRowOrUnreadable(ctx, p, *key, "chat", "", func(row *domain.StoredRow) error {
 			read, err := domain.ReadThreadRow(row)
 			if err != nil {
 				b.omit(backupOmission{Kind: "cloud_chat", SourceID: row.ID, Category: "invalid", Reason: "row_unreadable"})
@@ -708,7 +708,7 @@ func (h *harness) writeConversations(ctx context.Context, p *auth.Principal, key
 		}
 	}
 	if key != nil {
-		err := h.store.eachRow(ctx, p, *key, "chat", "", func(row *domain.StoredRow) error {
+		err := h.store.EachRow(ctx, p, *key, "chat", "", func(row *domain.StoredRow) error {
 			// A chat this harness cannot read is left out, as one sync cannot
 			// open is.
 			read, err := domain.ReadThreadRow(row)
@@ -943,9 +943,9 @@ type claudeDocument struct {
 func (h *harness) claudeProjects(ctx context.Context, p *auth.Principal, key auth.ContentKey) ([]claudeProject, error) {
 	projects := []claudeProject{}
 	total := 0
-	err := h.store.eachRow(ctx, p, key, "project", "", func(row *domain.StoredRow) error {
+	err := h.store.EachRow(ctx, p, key, "project", "", func(row *domain.StoredRow) error {
 		// A document this harness cannot read is left out, as a chat is.
-		docs, err := h.store.projectDocuments(ctx, p, key, row.ID, func(string, error) error { return nil })
+		docs, err := h.store.ProjectDocuments(ctx, p, key, row.ID, func(string, error) error { return nil })
 		if err != nil {
 			return err
 		}

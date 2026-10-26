@@ -115,7 +115,7 @@ func TestManagedModelRetriesARejectedChatTokenOnce(t *testing.T) {
 			if rejectAgain && last.Code != "UNAUTHENTICATED" || !rejectAgain && last.Type != "RUN_FINISHED" {
 				t.Fatal("unexpected run result", last)
 			}
-			row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
+			row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
 			if !rejectAgain && len(mustRead(domain.ReadThreadRow(row)).Messages) != 2 {
 				t.Fatal("credential retry duplicated the turn")
 			}
@@ -156,7 +156,7 @@ func TestTruncatedModelStreamPreservesPartialAnswer(t *testing.T) {
 	if got := drained(); len(got) != 0 {
 		t.Fatalf("a failed chat was screened: %+v", got)
 	}
-	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
+	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
 	if last := mustRead(domain.ReadThreadRow(row)).Messages[1]; last.Content != "partial" || !domain.ValueOr(last.IsError, false) {
 		t.Fatal("partial answer lost")
 	}
@@ -190,7 +190,7 @@ func TestTitleRunsBeforeAnswerFinishes(t *testing.T) {
 	}
 	close(release)
 	<-run.finished
-	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", run.thread.id)
+	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", run.thread.id)
 	if mustRead(domain.ReadThreadRow(row)).Title != "A generated title" {
 		t.Fatal("title did not commit")
 	}
@@ -233,7 +233,7 @@ func TestWidgetRetryReplacesOnlyTheArguments(t *testing.T) {
 	if last.Type != "RUN_FINISHED" {
 		t.Fatalf("retry failed: %+v", last)
 	}
-	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat")
+	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat")
 	messages := mustRead(domain.ReadThreadRow(row)).Messages
 	if len(messages) != 2 || len(messages[1].Timeline) != 2 || messages[1].Timeline[1].Arguments != replacement {
 		t.Fatal("retry changed message structure")
@@ -273,7 +273,7 @@ func TestManagedToolLoopKeepsReasoningAndOneAssistantMessage(t *testing.T) {
 	if events[len(events)-1].Type != "RUN_FINISHED" {
 		t.Fatal(events[len(events)-1])
 	}
-	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
+	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
 	stored := mustRead(domain.ReadThreadRow(row))
 	if len(stored.Messages) != 2 || len(stored.Messages[1].Timeline) != 3 {
 		t.Fatal("tool loop did not make one ordered assistant timeline")
@@ -302,7 +302,7 @@ func TestShutdownCommitsPartialOutput(t *testing.T) {
 	default:
 		t.Fatal("shutdown did not finish the run")
 	}
-	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", run.thread.id)
+	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", run.thread.id)
 	if mustRead(domain.ReadThreadRow(row)).ActiveRun != nil {
 		t.Fatal("shutdown left an active marker")
 	}

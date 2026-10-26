@@ -412,7 +412,7 @@ func TestAnImageKeepsOneFormFromUploadToView(t *testing.T) {
 	in["attachments"] = []any{sent}
 	events := finishedRun(t, h, "/v1/threads/turn", in)
 	thread := events[0].ThreadID
-	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", thread)
+	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", thread)
 	stored := api.Obj(api.Arr(api.Obj(api.Arr(rowJSON(row)["messages"])[0])["attachments"])[0])
 	if got := fieldsOf(stored); !slices.Equal(got, []string{"encryptionKey", "fileName", "id", "kind", "mimeType", "size", "storageThreadId", "thumbnail"}) || stored["thumbnail"] != sent["thumbnail"] || !bytes.Equal(fake.blobs[api.Str(stored["id"])].data, modelCopy) {
 		t.Fatalf("the chat stored %v", stored)

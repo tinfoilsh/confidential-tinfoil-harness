@@ -24,6 +24,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
 
 type fakeBlob struct {
@@ -59,7 +60,7 @@ func newFakeSync(t *testing.T, h *harness) *fakeSync {
 		f.received[r.URL.Path] = append(f.received[r.URL.Path], in)
 		switch r.URL.Path {
 		case "/v1/sync/fork":
-			rows := h.store.rows.(*memoryRows)
+			rows := h.store.Rows.(*memoryRows)
 			rows.mu.Lock()
 			defer rows.mu.Unlock()
 			p := &auth.Principal{ID: strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer clerk-")}
@@ -108,7 +109,7 @@ func newFakeSync(t *testing.T, h *harness) *fakeSync {
 		}
 	}))
 	t.Cleanup(f.server.Close)
-	h.store.api = &syncClient{URL: f.server.URL, Client: f.server.Client()}
+	h.store.API = &store.Client{URL: f.server.URL, Client: f.server.Client()}
 	return f
 }
 
@@ -188,7 +189,7 @@ func TestStoredUploadIsOffloadedUnderItsThread(t *testing.T) {
 	if put["chat_id"] != thread || string(payload) != `{"textContent":"remember the blue door"}` || put["idempotency_key"] != sent["id"] {
 		t.Fatalf("blob is not the document payload under its thread: %v %s", put, payload)
 	}
-	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", thread)
+	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", thread)
 	stored := api.Obj(api.Arr(api.Obj(api.Arr(rowJSON(row)["messages"])[0])["attachments"])[0])
 	if !domain.EnclaveAttachmentID.MatchString(api.Str(stored["id"])) || api.Str(stored["encryptionKey"]) == "" || stored["storageThreadId"] != thread {
 		t.Fatalf("row does not reference the stored blob: %v", stored)
@@ -207,7 +208,7 @@ func TestStoredUploadIsOffloadedUnderItsThread(t *testing.T) {
 	}
 	edit["clientRequestId"], edit["attachments"] = uuid.NewString(), []any{api.Object{"id": stored["id"]}}
 	finishedRun(t, h, "/v1/threads/turn", edit)
-	row, _ = rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", thread)
+	row, _ = rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", thread)
 	kept := mustRead(domain.ReadThreadRow(row)).Messages[0].Attachments[0]
 	if kept.ID != stored["id"] || kept.EncryptionKey != stored["encryptionKey"] || fake.putCount() != 1 {
 		t.Fatalf("the edit did not keep the stored attachment: %+v after %d blobs", kept, fake.putCount())
@@ -244,7 +245,7 @@ func TestOffloadedDocumentIsReadBackForEachTurn(t *testing.T) {
 	if fake.putCount() != 0 {
 		t.Fatal("a document already stored under its thread was stored again")
 	}
-	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
+	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
 	stored := mustRead(domain.ReadThreadRow(row)).Messages[0].Attachments[0]
 	if stored.ID != id || stored.TextContent != "" {
 		t.Fatalf("the stored reference changed: %+v", stored)
@@ -277,7 +278,7 @@ func TestInlineDocumentIsOffloadedUnderItsThread(t *testing.T) {
 	if fake.puts[0]["chat_id"] != "chat-1" || string(payload) != `{"textContent":"slide text"}` {
 		t.Fatalf("not stored as a payload under the thread: %s", payload)
 	}
-	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
+	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
 	stored := api.Obj(api.Arr(api.Obj(api.Arr(rowJSON(row)["messages"])[0])["attachments"])[0])
 	if !domain.EnclaveAttachmentID.MatchString(api.Str(stored["id"])) || api.Str(stored["encryptionKey"]) == "" || stored["storageThreadId"] != "chat-1" || stored["textContent"] != nil {
 		t.Fatalf("row does not reference the stored blob: %v", stored)
@@ -314,7 +315,7 @@ func TestMissingAttachmentsAreRepairedBeforeRetrying(t *testing.T) {
 	if refused != 1 {
 		t.Fatalf("expected one refused push, got %d", refused)
 	}
-	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
+	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
 	chat := mustRead(domain.ReadThreadRow(row))
 	doc, image := chat.Messages[0].Attachments[0], chat.Messages[0].Attachments[1]
 	if doc.ID == docID || doc.StorageThreadID != "chat-1" || fake.blobs[doc.ID].chat != "chat-1" {
@@ -351,7 +352,7 @@ func TestLegacyKeyedAttachmentIsReadFromTheControlPlane(t *testing.T) {
 	if payload, _ := base64.StdEncoding.DecodeString(api.Str(fake.puts[0]["plaintext"])); fake.puts[0]["chat_id"] != "chat-1" || string(payload) != "old photo" {
 		t.Fatalf("stored %q under %v", payload, fake.puts[0]["chat_id"])
 	}
-	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
+	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
 	stored := mustRead(domain.ReadThreadRow(row)).Messages[0].Attachments[0]
 	if stored.Key != "" || !domain.EnclaveAttachmentID.MatchString(stored.ID) {
 		t.Fatalf("legacy reference kept: %+v", stored)
@@ -413,7 +414,7 @@ func TestForkCopiesAChatThroughItsMessage(t *testing.T) {
 	if summary["id"] != target || summary["title"] != "Trip (fork)" || summary["createdAt"] != domain.ISOTime(request["created_at"]) || summary["pinned"] != false || summary["activeRun"] != nil || summary["contextUsage"] != nil {
 		t.Fatalf("fork summary: %v", summary)
 	}
-	row, _ := rows.load(context.Background(), p, key, "chat", target)
+	row, _ := rows.Load(context.Background(), p, key, "chat", target)
 	if fork := mustRead(domain.ReadThreadRow(row)); fork.Pinned || fork.ContextUsage != nil || fork.ActiveRun != nil || rowJSON(row)["harnessRequests"] != nil {
 		t.Fatalf("the fork kept the source's bookkeeping: %s", row.Data)
 	}
@@ -598,7 +599,7 @@ func TestARetiredDocumentIsDescribedOnlyToTheModel(t *testing.T) {
 	if !strings.Contains(prompt, "old.pdf is no longer available") {
 		t.Fatalf("the model was not told the document is gone: %s", prompt)
 	}
-	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
+	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
 	stored := mustRead(domain.ReadThreadRow(row)).Messages[0].Attachments[0]
 	if stored.EncryptionKey != "" || stored.TextContent != "" || stored.FileName != "old.pdf" {
 		t.Fatalf("the retired document was stored as %+v", stored)

@@ -12,6 +12,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
 
 func TestInvalidKeyEncodingNamesTheKey(t *testing.T) {
@@ -73,7 +74,7 @@ func TestRunDropsKeyBeforeScreening(t *testing.T) {
 	if r.key != (auth.ContentKey{}) {
 		t.Error("the completed run holds its storage key while screening")
 	}
-	row, err := rows.load(context.Background(), p, key, "chat", r.thread.id)
+	row, err := rows.Load(context.Background(), p, key, "chat", r.thread.id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +92,7 @@ func TestSyncRequestKeyReadersAreCleared(t *testing.T) {
 			key := randomKey()
 			var sent *http.Request
 			var late io.ReadCloser
-			s := &syncClient{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
+			s := &store.Client{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
 				sent = r
 				first, err := io.ReadAll(r.Body)
 				if err != nil {
@@ -116,7 +117,7 @@ func TestSyncRequestKeyReadersAreCleared(t *testing.T) {
 				}
 				return syncTestResponse(status, api.Object{})
 			})}}
-			err := s.remove(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, key, "chat", "chat-1")
+			err := s.Remove(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, key, "chat", "chat-1")
 			if (err == nil) != (status == http.StatusOK) || sent == nil || late == nil {
 				t.Fatalf("sync call: %v", err)
 			}

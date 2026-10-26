@@ -11,6 +11,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
 
 type downstreamService struct {
@@ -59,8 +60,8 @@ func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
 		h.services[config.role] = &downstreamService{URL: "https://" + host, Client: client}
 	}
 	s := h.services["sync"]
-	h.store.api = &syncClient{URL: s.URL, Client: s.Client, MinimumGrant: runTimeout + commitTimeout}
-	h.store.rows = h.store.api
+	h.store.API = &store.Client{URL: s.URL, Client: s.Client, MinimumGrant: runTimeout + commitTimeout}
+	h.store.Rows = h.store.API
 	router := h.services["router"]
 	h.autoModel = &model{name: "auto", client: router.Client, endpoint: router.URL + "/v1/chat/completions"}
 	if err := h.refreshCatalog(ctx); err != nil {
