@@ -421,7 +421,7 @@ func TestASignedOutCallersQuotaComesFromItsKey(t *testing.T) {
 	// image, or from another service reports the same quota.
 	var photo bytes.Buffer
 	png.Encode(&photo, image.NewRGBA(image.Rect(0, 0, 4, 4)))
-	h.offer.models = append(h.offer.models, &model{name: "gemma4-31b", vision: true, context: 8192, client: h.offer.models[0].client})
+	h.models.offer.models = append(h.models.offer.models, &model{name: "gemma4-31b", vision: true, context: 8192, client: h.models.offer.models[0].client})
 	described := localInput("", api.Object{})
 	described["attachments"] = []any{api.Object{"id": "att_photo", "kind": "image", "fileName": "photo.png", "mimeType": "image/png", "base64": base64.StdEncoding.EncodeToString(photo.Bytes())}}
 	for _, w := range []*httptest.ResponseRecorder{postRoute(h, "/v1/threads/turn", described, ""), uploadRoute(router, "/v1/transcriptions", "memo.mp3", []byte("ID3 audio"), nil, "")} {

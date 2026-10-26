@@ -14,10 +14,10 @@ func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
 		return err
 	}
 	h.auth = authenticator
-	if err := h.bootModels(ctx, usageSecret); err != nil {
+	if err := h.models.bootModels(ctx, usageSecret); err != nil {
 		return err
 	}
-	s := h.services["sync"]
+	s := h.models.services["sync"]
 	h.store.API = &store.Client{URL: s.URL, Client: s.Client, MinimumGrant: runTimeout + commitTimeout}
 	h.store.Rows = h.store.API
 	return nil

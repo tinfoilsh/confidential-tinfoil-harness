@@ -40,7 +40,7 @@ func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *
 	}
 	usage := usageForRun(r)
 	usage.BillCustomerRequest = true
-	content, err := h.completion(auth.WithUsage(ctx, usage), m, payload)
+	content, err := h.models.completion(auth.WithUsage(ctx, usage), m, payload)
 	if err != nil {
 		return err
 	}

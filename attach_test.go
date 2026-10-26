@@ -31,7 +31,7 @@ func routerHarness(t *testing.T, router http.HandlerFunc) *harness {
 	h, _, _ := testChatHarness(t, nil)
 	server := httptest.NewServer(router)
 	t.Cleanup(server.Close)
-	h.services["router"] = &downstreamService{URL: server.URL, Client: &http.Client{Transport: &auth.CallerTransport{Inner: server.Client().Transport}}}
+	h.models.services["router"] = &downstreamService{URL: server.URL, Client: &http.Client{Transport: &auth.CallerTransport{Inner: server.Client().Transport}}}
 	return h
 }
 

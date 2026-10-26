@@ -65,7 +65,7 @@ func TestAThinkingReplysReasoningIsSummarized(t *testing.T) {
 			json.NewEncoder(w).Encode(api.Object{"summary": " Weighing options "})
 		}))
 		t.Cleanup(summarizer.Close)
-		h.services["summarizer"] = &downstreamService{URL: summarizer.URL, Client: summarizer.Client()}
+		h.models.services["summarizer"] = &downstreamService{URL: summarizer.URL, Client: summarizer.Client()}
 		run, err := h.acceptTurn(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
 		if err != nil {
 			t.Fatal(err)

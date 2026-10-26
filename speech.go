@@ -67,7 +67,7 @@ func (h *harness) handleSpeech(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "There is nothing to read aloud"))
 		return
 	}
-	router := h.services["router"]
+	router := h.models.services["router"]
 	if router == nil {
 		api.Respond(w, nil, api.Err(503, "TOOL_UNAVAILABLE", "Speech is unavailable"))
 		return

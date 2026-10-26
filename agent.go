@@ -230,7 +230,7 @@ func clip(out string, limit int) string {
 func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byte, widgets map[string]domain.Widget) ([]toolCall, string, error) {
 	endpoint := m.endpoint
 	if endpoint == "" {
-		endpoint = h.gateway + "/v1/chat/completions"
+		endpoint = h.models.gateway + "/v1/chat/completions"
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {

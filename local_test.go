@@ -141,7 +141,7 @@ func TestLocalTitleIsGeneratedWithoutStorage(t *testing.T) {
 		json.NewEncoder(w).Encode(api.Object{"summary": "\"Local title\""})
 	}))
 	defer summarizer.Close()
-	h.services["summarizer"] = &downstreamService{URL: summarizer.URL, Client: summarizer.Client()}
+	h.models.services["summarizer"] = &downstreamService{URL: summarizer.URL, Client: summarizer.Client()}
 	events := eventsIn(t, postRoute(h, "/v1/threads/turn", localInput("", api.Object{"messages": []any{}}), "alice"))
 	if rows.calls != 0 {
 		t.Fatalf("local title used storage %d times", rows.calls)
@@ -263,7 +263,7 @@ func TestADeviceChatRunReturnsItsUpdatedThread(t *testing.T) {
 		json.NewEncoder(w).Encode(api.Object{"summary": "Device title"})
 	}))
 	defer summarizer.Close()
-	h.services["summarizer"] = &downstreamService{URL: summarizer.URL, Client: summarizer.Client()}
+	h.models.services["summarizer"] = &downstreamService{URL: summarizer.URL, Client: summarizer.Client()}
 	in := localInput("", api.Object{"messages": []any{}})
 	id := api.Str(in["threadId"])
 	in["content"] = "what is this?"
@@ -429,7 +429,7 @@ func TestAutoReadsImagesAndTextModelsReadTheirDescriptions(t *testing.T) {
 		}
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n")
 	})
-	h.offer.models = append(h.offer.models, &model{name: "gemma4-31b", vision: true, context: 8192, client: h.offer.models[0].client})
+	h.models.offer.models = append(h.models.offer.models, &model{name: "gemma4-31b", vision: true, context: 8192, client: h.models.offer.models[0].client})
 	for _, name := range []string{"auto", "kimi-k3"} {
 		requests = nil
 		in := localInput("", api.Object{})
@@ -470,7 +470,7 @@ func TestChatsShareAPromptCacheOnlyThroughTheClientsSecret(t *testing.T) {
 		}
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n")
 	})
-	h.offer.models = append(h.offer.models, &model{name: "gemma4-31b", vision: true, context: 8192, client: h.offer.models[0].client})
+	h.models.offer.models = append(h.models.offer.models, &model{name: "gemma4-31b", vision: true, context: 8192, client: h.models.offer.models[0].client})
 	scopesOf := func(in api.Object, user string) []string {
 		t.Helper()
 		mu.Lock()

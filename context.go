@@ -183,7 +183,7 @@ func timeReminder(now time.Time, zone string) (string, error) {
 }
 
 func (h *harness) buildRequest(thread *domain.Thread, profile *domain.Profile, project *domain.Project, documents []domain.ProjectDocument, in *turnRequest, runID string) (*request, *model, error) {
-	c := h.catalog.get()
+	c := h.models.catalog.get()
 	options := in.Options
 	name := cmp.Or(thread.Model, "auto")
 	req := &request{threadID: thread.ID, runID: runID, model: name}
@@ -193,13 +193,13 @@ func (h *harness) buildRequest(thread *domain.Thread, profile *domain.Profile, p
 	}
 	def, display, policy, window := c.Definition(name), "Auto", "none", 0
 	var picked *model
-	for _, m := range h.offer.get() {
+	for _, m := range h.models.offer.get() {
 		if m.name == name {
 			picked = m
 		}
 	}
 	if name == "auto" {
-		picked = h.autoModel
+		picked = h.models.auto
 		for _, candidate := range c.Models {
 			limit := api.Int(candidate["budgetWindow"])
 			if window == 0 || limit < window {

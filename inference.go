@@ -20,6 +20,16 @@ import (
 	tinfoil "github.com/tinfoilsh/tinfoil-go"
 )
 
+type models struct {
+	auto         *model
+	catalog      catalogCache
+	gateway      string
+	client       *http.Client
+	offer        offerCache
+	services     map[string]*downstreamService
+	controlplane string
+}
+
 // The pinned repo is the trust anchor; the gateway's catalog supplies the rest.
 type model struct {
 	endpoint string
@@ -108,18 +118,18 @@ func (c *offerCache) set(models []*model, catalog tinfoil.Catalog) {
 // confidentiality. That is what lets the enclave list live in one place, on the
 // side that already owns replica placement. The gateway omits pools without a
 // healthy replica, so a catalog that offers no pinned model keeps the last one.
-func (h *harness) refreshOffer(ctx context.Context) {
-	offered, err := fetchCatalog(ctx, h.gateway)
+func (inf *models) refreshOffer(ctx context.Context) {
+	offered, err := fetchCatalog(ctx, inf.gateway)
 	if err != nil {
 		slog.Warn("gateway catalog unavailable", "error", err)
 		return
 	}
-	models, catalog := offerModels(offered, h.modelClient)
+	models, catalog := offerModels(offered, inf.client)
 	if len(models) == 0 {
 		slog.Warn("gateway offers no pinned model; keeping the last catalog")
 		return
 	}
-	h.offer.set(models, catalog)
+	inf.offer.set(models, catalog)
 }
 
 func offerModels(offered map[string]catalogEntry, client *http.Client) ([]*model, tinfoil.Catalog) {
@@ -184,14 +194,14 @@ type downstreamService struct {
 
 // bootModels verifies the gateway and the downstream enclaves, and reads the
 // catalog of models the harness serves, which it keeps refreshing.
-func (h *harness) bootModels(ctx context.Context, usageSecret string) error {
-	gw, err := newGateway(h.gateway, h.offer.sdk)
+func (inf *models) bootModels(ctx context.Context, usageSecret string) error {
+	gw, err := newGateway(inf.gateway, inf.offer.sdk)
 	if err != nil {
-		return fmt.Errorf("configure gateway %s: %w", h.gateway, err)
+		return fmt.Errorf("configure gateway %s: %w", inf.gateway, err)
 	}
 	// Outermost: the SDK salts each caller's prompt cache with the key set here.
-	h.modelClient = &http.Client{Transport: &auth.CallerTransport{Inner: gw.HTTPClient().Transport, UsageSecret: usageSecret}}
-	h.services = map[string]*downstreamService{}
+	inf.client = &http.Client{Transport: &auth.CallerTransport{Inner: gw.HTTPClient().Transport, UsageSecret: usageSecret}}
+	inf.services = map[string]*downstreamService{}
 	for _, config := range []struct {
 		role, repo, variable string
 		required             bool
@@ -217,11 +227,11 @@ func (h *harness) bootModels(ctx context.Context, usageSecret string) error {
 			slog.Warn("downstream enclave unavailable", "role", config.role, "enclave", host, "error", err)
 			continue
 		}
-		h.services[config.role] = &downstreamService{URL: "https://" + host, Client: client}
+		inf.services[config.role] = &downstreamService{URL: "https://" + host, Client: client}
 	}
-	router := h.services["router"]
-	h.autoModel = &model{name: "auto", client: router.Client, endpoint: router.URL + "/v1/chat/completions"}
-	if err := h.refreshCatalog(ctx); err != nil {
+	router := inf.services["router"]
+	inf.auto = &model{name: "auto", client: router.Client, endpoint: router.URL + "/v1/chat/completions"}
+	if err := inf.refreshCatalog(ctx); err != nil {
 		return err
 	}
 	go func() {
@@ -236,8 +246,8 @@ func (h *harness) bootModels(ctx context.Context, usageSecret string) error {
 			case <-tick.C:
 				refresh++
 				// Every minute until the gateway first offers a model, then every five.
-				if refresh%5 == 0 || len(h.offer.get()) == 0 {
-					if err := h.refreshCatalog(ctx); err != nil {
+				if refresh%5 == 0 || len(inf.offer.get()) == 0 {
+					if err := inf.refreshCatalog(ctx); err != nil {
 						slog.Warn("catalog refresh refused", "error", err)
 					}
 				}
@@ -247,12 +257,12 @@ func (h *harness) bootModels(ctx context.Context, usageSecret string) error {
 	return nil
 }
 
-func (h *harness) serviceReady(role string) bool {
-	service := h.services[role]
+func (inf *models) serviceReady(role string) bool {
+	service := inf.services[role]
 	return service != nil && service.Client != nil
 }
-func (h *harness) serviceCall(ctx context.Context, role, path string, in, out any) error {
-	s := h.services[role]
+func (inf *models) serviceCall(ctx context.Context, role, path string, in, out any) error {
+	s := inf.services[role]
 	if s == nil {
 		return api.Err(503, "TOOL_UNAVAILABLE", role+" is unavailable")
 	}
@@ -273,10 +283,10 @@ type usageSink interface {
 	Meter(usage json.RawMessage)
 }
 
-func (h *harness) completion(ctx context.Context, m *model, payload api.Object) (string, error) {
+func (inf *models) completion(ctx context.Context, m *model, payload api.Object) (string, error) {
 	endpoint := m.endpoint
 	if endpoint == "" {
-		endpoint = h.gateway + "/v1/chat/completions"
+		endpoint = inf.gateway + "/v1/chat/completions"
 	}
 	payload["stream"] = false
 	// Without a scope of its own, a request would share the process-wide

@@ -476,7 +476,7 @@ func resizeImage(data []byte) ([]byte, []byte, error) {
 var conversionDeadline = 10 * time.Minute
 
 func (h *harness) convert(ctx context.Context, filename string, data []byte) ([]byte, error) {
-	router := h.services["router"]
+	router := h.models.services["router"]
 	if router == nil {
 		return nil, api.Err(503, "TOOL_UNAVAILABLE", "Document conversion is unavailable")
 	}
@@ -560,7 +560,7 @@ func (h *harness) transcribe(ctx context.Context, filename string, data []byte) 
 		return "", api.Err(415, "ATTACHMENT_UNSUPPORTED", "Unsupported recording type")
 	}
 	// The router reads the model from the form, as the web client's SDK sends it.
-	router := h.services["router"]
+	router := h.models.services["router"]
 	if router == nil {
 		return "", api.Err(503, "TOOL_UNAVAILABLE", "Transcription is unavailable")
 	}
@@ -776,7 +776,7 @@ func turnAttachments(in *turnRequest, t *domain.Thread) ([]domain.Attachment, er
 // A local transcript may omit older images' bytes to stay small. The model
 // then reads such an image through its description, or not at all.
 func (h *harness) hydrateContext(ctx context.Context, p *auth.Principal, t *domain.Thread, keyless bool) error {
-	vision := h.catalog.get().Vision(t.Model)
+	vision := h.models.catalog.get().Vision(t.Model)
 	return t.EachAttachment(func(a *domain.Attachment) error {
 		if !a.IsImage() || !vision && a.Description != "" {
 			return nil
@@ -815,9 +815,9 @@ func (h *harness) hydrateContext(ctx context.Context, p *auth.Principal, t *doma
 const imageDescriptionTokens = 2048
 
 func (h *harness) describeImage(ctx context.Context, encoded string) (string, error) {
-	for _, m := range h.offer.get() {
+	for _, m := range h.models.offer.get() {
 		if m.vision {
-			return h.completion(ctx, m, api.Object{"model": m.name, "messages": []api.Object{{"role": "user", "content": []api.Object{{"type": "text", "text": "Describe this image faithfully for a text-only assistant. Include visible text and details relevant to understanding it."}, {"type": "image_url", "image_url": api.Object{"url": "data:image/jpeg;base64," + encoded}}}}}, "max_tokens": imageDescriptionTokens})
+			return h.models.completion(ctx, m, api.Object{"model": m.name, "messages": []api.Object{{"role": "user", "content": []api.Object{{"type": "text", "text": "Describe this image faithfully for a text-only assistant. Include visible text and details relevant to understanding it."}, {"type": "image_url", "image_url": api.Object{"url": "data:image/jpeg;base64," + encoded}}}}}, "max_tokens": imageDescriptionTokens})
 		}
 	}
 	return "", api.Err(404, "MODEL_UNAVAILABLE", "No vision model can describe the image")

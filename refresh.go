@@ -38,19 +38,19 @@ func fetchConfig(ctx context.Context, client *http.Client, base, path string, ou
 	}
 	return json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(out)
 }
-func (h *harness) refreshCatalog(ctx context.Context) error {
-	h.refreshOffer(ctx)
+func (inf *models) refreshCatalog(ctx context.Context) error {
+	inf.refreshOffer(ctx)
 	client := &http.Client{Timeout: 15 * time.Second}
 	var models []api.Object
-	if err := fetchConfig(ctx, client, h.controlplane, "/api/config/models", &models); err != nil {
+	if err := fetchConfig(ctx, client, inf.controlplane, "/api/config/models", &models); err != nil {
 		return err
 	}
-	c := buildCatalog(models, h.offer.get())
+	c := buildCatalog(models, inf.offer.get())
 	// The first catalog may offer only Auto; a later one without models keeps the last.
-	if len(c.Models) == 0 && h.catalog.get() != nil {
+	if len(c.Models) == 0 && inf.catalog.get() != nil {
 		return errors.New("no configured chat model is offered by the gateway")
 	}
-	h.catalog.set(c)
+	inf.catalog.set(c)
 	return nil
 }
 func buildCatalog(config []api.Object, models []*model) *domain.Catalog {

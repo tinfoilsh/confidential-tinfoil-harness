@@ -19,19 +19,14 @@ import (
 )
 
 type harness struct {
-	gateway      string
-	offer        offerCache
-	modelClient  *http.Client
 	controlplane string
 	cpClient     *http.Client
 	auth         *auth.Authenticator
-	catalog      catalogCache
-	autoModel    *model
-	services     map[string]*downstreamService
 	safeguards   *submitter // nil unless SAFEGUARDS_URL names the sidecar
 	live         liveRuns
 	scratch      *scratchSpace
 	store        *store.Store
+	models       *models
 }
 
 // listenAddr is the shim's upstream port in tinfoil-config.yml, which also
@@ -58,7 +53,7 @@ func main() {
 		slog.Error("prepare the temporary directory", "error", err)
 		os.Exit(1)
 	}
-	h := &harness{gateway: gw,
+	h := &harness{models: &models{gateway: gw, controlplane: controlplane},
 		controlplane: controlplane,
 		cpClient:     &http.Client{Transport: &auth.CallerTransport{Inner: http.DefaultTransport}},
 		safeguards:   newSubmitter(os.Getenv("SAFEGUARDS_URL")),
@@ -85,7 +80,7 @@ func main() {
 		h.waitRuns(ctx)
 	}()
 
-	slog.Info("listening", "addr", listenAddr, "gateway", gw, "models", served(h.offer.get()), "safeguards", h.safeguards != nil)
+	slog.Info("listening", "addr", listenAddr, "gateway", gw, "models", served(h.models.offer.get()), "safeguards", h.safeguards != nil)
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		slog.Error("serve", "error", err)
 		os.Exit(1)

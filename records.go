@@ -54,7 +54,7 @@ func (h *harness) threadOperations() map[string]jsonEndpoint {
 }
 
 func (h *harness) session(ctx context.Context, p *auth.Principal, _ auth.ContentKey, _ json.RawMessage) (any, error) {
-	c := h.catalog.get()
+	c := h.models.catalog.get()
 	credential, err := h.auth.Inference(ctx, p)
 	// A signed-in client opens the app before or without chat access, as at
 	// its hourly cap, which it learned of when it asked for that access.
@@ -80,7 +80,7 @@ func (h *harness) session(ctx context.Context, p *auth.Principal, _ auth.Content
 		ProfileDefaults: domain.DefaultProfile(),
 		Composer:        composer(),
 		Presets:         presets,
-		Features:        map[string]bool{"webSearch": webSearch.client != nil, "transcription": h.serviceReady("router"), "speech": h.serviceReady("router")},
+		Features:        map[string]bool{"webSearch": webSearch.client != nil, "transcription": h.models.serviceReady("router"), "speech": h.models.serviceReady("router")},
 	}, nil
 }
 
@@ -123,7 +123,7 @@ func (h *harness) getThread(ctx context.Context, p *auth.Principal, key auth.Con
 	return domain.Window(row, in.Before, in.Limit), nil
 }
 func (h *harness) updateThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *updateThreadRequest) (any, error) {
-	if in.Model != nil && !h.catalog.get().Offers(*in.Model) {
+	if in.Model != nil && !h.models.catalog.get().Offers(*in.Model) {
 		return nil, api.Err(404, "MODEL_UNAVAILABLE", "Unknown model")
 	}
 	if project := domain.ValueOr(in.ProjectID.Value, ""); project != "" {
@@ -139,7 +139,7 @@ func (h *harness) updateThread(ctx context.Context, p *auth.Principal, key auth.
 		}
 	}
 	row, err := h.changeThread(ctx, p, key, in.threadSource, in.ID, func(t *domain.Thread) error {
-		in.apply(t, h.catalog.get(), &profile)
+		in.apply(t, h.models.catalog.get(), &profile)
 		t.Pinned = domain.ValueOr(in.Pinned, t.Pinned)
 		if in.ProjectID.Set {
 			t.ProjectID = in.ProjectID.Value
@@ -375,7 +375,7 @@ func (h *harness) profile(ctx context.Context, p *auth.Principal, key auth.Conte
 
 // viewProfile is a stored profile as its client reads it.
 func (h *harness) viewProfile(stored domain.StoredProfile) domain.ProfileView {
-	return domain.ProfileView{Profile: h.catalog.get().EffectiveProfile(stored.Profile), UpdatedAt: stored.UpdatedAt}
+	return domain.ProfileView{Profile: h.models.catalog.get().EffectiveProfile(stored.Profile), UpdatedAt: stored.UpdatedAt}
 }
 func (h *harness) getProfile(ctx context.Context, p *auth.Principal, key auth.ContentKey, _ json.RawMessage) (any, error) {
 	stored, err := h.store.LoadProfile(ctx, p, key)
@@ -393,7 +393,7 @@ func (h *harness) getProfile(ctx context.Context, p *auth.Principal, key auth.Co
 func (h *harness) upgradeDeviceProfile(_ context.Context, _ *auth.Principal, _ auth.ContentKey, in *profileUpgradeRequest) (any, error) {
 	return struct {
 		Profile domain.Profile `json:"profile"`
-	}{h.catalog.get().EffectiveProfile(*domain.LocalProfile(in.Profile))}, nil
+	}{h.models.catalog.get().EffectiveProfile(*domain.LocalProfile(in.Profile))}, nil
 }
 func (h *harness) updateProfile(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *profileUpdateRequest) (any, error) {
 	patch, clearsDefault, err := in.patch()
