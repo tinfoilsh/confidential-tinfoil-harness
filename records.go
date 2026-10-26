@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 func (h *harness) apiRoutes() []routeSpec {
@@ -33,14 +34,14 @@ func (h *harness) apiRoutes() []routeSpec {
 		{"/v1/metadata/favicon", true, false, decoded(h.favicon)}, {"/v1/metadata/link", true, false, decoded(h.linkPreview)},
 	}
 	for _, pair := range [][2]string{{"current", "/v1/key/current"}, {"register", "/v1/key/register"}, {"add-bundle", "/v1/key/add-bundle"}, {"remove-bundle", "/v1/key/remove-bundle"}, {"migrate-all", "/v1/blobs/migrate-all"}} {
-		routes = append(routes, routeSpec{"/v1/keys/" + pair[0], false, false, func(ctx context.Context, p *principal, _ contentKey, in json.RawMessage) (any, error) {
+		routes = append(routes, routeSpec{"/v1/keys/" + pair[0], false, false, func(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in json.RawMessage) (any, error) {
 			return h.keyCall(ctx, p, pair[1], in)
 		}})
 	}
 	return routes
 }
 
-func (h *harness) changes(ctx context.Context, p *principal, _ contentKey, _ json.RawMessage) (any, error) {
+func (h *harness) changes(ctx context.Context, p *auth.Principal, _ auth.ContentKey, _ json.RawMessage) (any, error) {
 	return h.storageChanges(ctx, p)
 }
 
@@ -50,9 +51,9 @@ func (h *harness) threadOperations() map[string]jsonEndpoint {
 		"/v1/threads/messages/delete": decoded(h.deleteMessage), "/v1/threads/messages/update": decoded(h.updateMessage)}
 }
 
-func (h *harness) session(ctx context.Context, p *principal, _ contentKey, _ json.RawMessage) (any, error) {
+func (h *harness) session(ctx context.Context, p *auth.Principal, _ auth.ContentKey, _ json.RawMessage) (any, error) {
 	c := h.catalog.get()
-	credential, err := h.auth.inference(ctx, p)
+	credential, err := h.auth.Inference(ctx, p)
 	// A signed-in client opens the app before or without chat access, as at
 	// its hourly cap, which it learned of when it asked for that access.
 	if err != nil && p.Anonymous {
@@ -81,7 +82,7 @@ func (h *harness) session(ctx context.Context, p *principal, _ contentKey, _ jso
 	}, nil
 }
 
-func (h *harness) listThreads(ctx context.Context, p *principal, key contentKey, in *listRequest) (any, error) {
+func (h *harness) listThreads(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *listRequest) (any, error) {
 	rows, next, err := h.threadPage(ctx, p, key, in.Cursor, in.ProjectID, in.Limit)
 	if err != nil {
 		return nil, err
@@ -89,10 +90,10 @@ func (h *harness) listThreads(ctx context.Context, p *principal, key contentKey,
 	if err := h.applyPins(ctx, p, key, rows); err != nil {
 		return nil, err
 	}
-	flags := h.auth.flaggedChats(ctx, p)
+	flags := h.auth.FlaggedChats(ctx, p)
 	list := []threadSummary{}
 	for _, row := range rows {
-		flags.mark(&row.Thread)
+		markFlagged(flags, &row.Thread)
 		list = append(list, summarize(&row.Thread))
 	}
 	var pinned []threadSummary
@@ -108,7 +109,7 @@ func (h *harness) listThreads(ctx context.Context, p *principal, key contentKey,
 		Pinned     []threadSummary `json:"pinned"`
 	}{list, next, pinned}, nil
 }
-func (h *harness) getThread(ctx context.Context, p *principal, key contentKey, in *windowRequest) (any, error) {
+func (h *harness) getThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *windowRequest) (any, error) {
 	row, err := h.loadThread(ctx, p, key, in.ID)
 	if err != nil {
 		return nil, err
@@ -116,10 +117,10 @@ func (h *harness) getThread(ctx context.Context, p *principal, key contentKey, i
 	if err := h.applyPins(ctx, p, key, []*threadRow{row}); err != nil {
 		return nil, err
 	}
-	h.auth.flaggedChats(ctx, p).mark(&row.Thread)
+	markFlagged(h.auth.FlaggedChats(ctx, p), &row.Thread)
 	return window(row, in.Before, in.Limit), nil
 }
-func (h *harness) updateThread(ctx context.Context, p *principal, key contentKey, in *updateThreadRequest) (any, error) {
+func (h *harness) updateThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *updateThreadRequest) (any, error) {
 	if in.Model != nil && !h.catalog.get().offers(*in.Model) {
 		return nil, api.Err(404, "MODEL_UNAVAILABLE", "Unknown model")
 	}
@@ -146,7 +147,7 @@ func (h *harness) updateThread(ctx context.Context, p *principal, key contentKey
 	if err != nil {
 		return nil, err
 	}
-	h.auth.flaggedChats(ctx, p).mark(&row.Thread)
+	markFlagged(h.auth.FlaggedChats(ctx, p), &row.Thread)
 	if in.Local {
 		return deviceReply(row), nil
 	}
@@ -158,7 +159,7 @@ func (h *harness) updateThread(ctx context.Context, p *principal, key contentKey
 	return summarize(&row.Thread), nil
 }
 
-func (h *harness) pinnedThreads(ctx context.Context, p *principal, key contentKey, flags chatFlags) ([]threadSummary, error) {
+func (h *harness) pinnedThreads(ctx context.Context, p *auth.Principal, key auth.ContentKey, flags auth.ChatFlags) ([]threadSummary, error) {
 	ids, err := h.pinnedIDs(ctx, p, key)
 	if err != nil {
 		return nil, err
@@ -178,7 +179,7 @@ func (h *harness) pinnedThreads(ctx context.Context, p *principal, key contentKe
 			continue
 		}
 		row.Pinned = true
-		flags.mark(&row.Thread)
+		markFlagged(flags, &row.Thread)
 		threads = append(threads, summarize(&row.Thread))
 	}
 	return threads, nil
@@ -186,7 +187,7 @@ func (h *harness) pinnedThreads(ctx context.Context, p *principal, key contentKe
 
 // changeThread applies change to a chat: a stored one as read now, saved
 // once changed, or the device chat its client sent.
-func (h *harness) changeThread(ctx context.Context, p *principal, key contentKey, source threadSource, id string, change func(*Thread) error) (*threadRow, error) {
+func (h *harness) changeThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, source threadSource, id string, change func(*Thread) error) (*threadRow, error) {
 	if !source.Local {
 		return h.mutateThread(ctx, p, key, id, change)
 	}
@@ -204,7 +205,7 @@ func (h *harness) changeThread(ctx context.Context, p *principal, key contentKey
 
 // sourceProfile is the settings a chat's prompt reads: the stored profile,
 // or the one a device chat's client sends.
-func (h *harness) sourceProfile(ctx context.Context, p *principal, key contentKey, source threadSource) (Profile, error) {
+func (h *harness) sourceProfile(ctx context.Context, p *auth.Principal, key auth.ContentKey, source threadSource) (Profile, error) {
 	if !source.Local {
 		return h.profile(ctx, p, key)
 	}
@@ -219,7 +220,7 @@ func deviceReply(row *threadRow) any {
 	}{deviceThread(&row.Thread)}
 }
 
-func (h *harness) deleteThread(ctx context.Context, p *principal, key contentKey, in *deleteThreadRequest) (any, error) {
+func (h *harness) deleteThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *deleteThreadRequest) (any, error) {
 	var err error
 	if in.Revision != "" {
 		err = h.finishTransfer(ctx, p, key, in)
@@ -263,7 +264,7 @@ func startFork(t *Thread) {
 // forkThread starts a new chat from a chat's messages through the given one,
 // under an id the harness makes. Sync copies a stored chat, with its own
 // copies of the attachments; a device chat's fork keeps their ids.
-func (h *harness) forkThread(ctx context.Context, p *principal, key contentKey, in *messageRequest) (any, error) {
+func (h *harness) forkThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *messageRequest) (any, error) {
 	if in.Local {
 		source, err := readDeviceThread(in.ThreadID, in.Thread)
 		if err != nil {
@@ -302,7 +303,7 @@ func (h *harness) forkThread(ctx context.Context, p *principal, key contentKey, 
 }
 
 // Message actions change a chat's transcript.
-func (h *harness) deleteMessage(ctx context.Context, p *principal, key contentKey, in *messageRequest) (any, error) {
+func (h *harness) deleteMessage(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *messageRequest) (any, error) {
 	return h.changeMessages(ctx, p, key, in, func(t *Thread, index int) error {
 		// As on the web client, a chat keeps its last message.
 		if len(t.Messages) == 1 {
@@ -312,7 +313,7 @@ func (h *harness) deleteMessage(ctx context.Context, p *principal, key contentKe
 		return nil
 	})
 }
-func (h *harness) updateMessage(ctx context.Context, p *principal, key contentKey, in *messageRequest) (any, error) {
+func (h *harness) updateMessage(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *messageRequest) (any, error) {
 	if in.Content == nil {
 		return nil, api.Err(400, "BAD_REQUEST", "content must be a string")
 	}
@@ -324,7 +325,7 @@ func (h *harness) updateMessage(ctx context.Context, p *principal, key contentKe
 		return nil
 	})
 }
-func (h *harness) changeMessages(ctx context.Context, p *principal, key contentKey, in *messageRequest, change func(*Thread, int) error) (any, error) {
+func (h *harness) changeMessages(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *messageRequest, change func(*Thread, int) error) (any, error) {
 	row, err := h.changeThread(ctx, p, key, in.threadSource, in.ThreadID, func(t *Thread) error {
 		index := t.messageIndex(in.MessageID)
 		if index < 0 {
@@ -335,13 +336,13 @@ func (h *harness) changeMessages(ctx context.Context, p *principal, key contentK
 	if err != nil {
 		return nil, err
 	}
-	h.auth.flaggedChats(ctx, p).mark(&row.Thread)
+	markFlagged(h.auth.FlaggedChats(ctx, p), &row.Thread)
 	if in.Local {
 		return deviceReply(row), nil
 	}
 	return window(row, "", messageWindow), nil
 }
-func (h *harness) deleteAllThreads(ctx context.Context, p *principal, key contentKey, in *deleteAllRequest) (any, error) {
+func (h *harness) deleteAllThreads(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *deleteAllRequest) (any, error) {
 	// Every id is listed before any is deleted, so a shrinking list cannot
 	// skip a page, and rows this key cannot open are deleted too.
 	ids, err := h.chatIDs(ctx, p, valueOr(in.ProjectID, ""))
@@ -362,7 +363,7 @@ type deletedCount struct {
 }
 
 // profile is a user's settings as a prompt reads them.
-func (h *harness) profile(ctx context.Context, p *principal, key contentKey) (Profile, error) {
+func (h *harness) profile(ctx context.Context, p *auth.Principal, key auth.ContentKey) (Profile, error) {
 	stored, err := h.loadProfile(ctx, p, key)
 	if err != nil || stored == nil {
 		return Profile{}, err
@@ -374,7 +375,7 @@ func (h *harness) profile(ctx context.Context, p *principal, key contentKey) (Pr
 func (h *harness) viewProfile(stored storedProfile) profileView {
 	return profileView{Profile: h.catalog.get().effectiveProfile(stored.Profile), UpdatedAt: stored.UpdatedAt}
 }
-func (h *harness) getProfile(ctx context.Context, p *principal, key contentKey, _ json.RawMessage) (any, error) {
+func (h *harness) getProfile(ctx context.Context, p *auth.Principal, key auth.ContentKey, _ json.RawMessage) (any, error) {
 	stored, err := h.loadProfile(ctx, p, key)
 	if err != nil {
 		return nil, err
@@ -387,12 +388,12 @@ func (h *harness) getProfile(ctx context.Context, p *principal, key contentKey, 
 
 // upgradeDeviceProfile reads the settings a client keeps on its device as
 // the profile a stored one reads as. It stores nothing.
-func (h *harness) upgradeDeviceProfile(_ context.Context, _ *principal, _ contentKey, in *profileUpgradeRequest) (any, error) {
+func (h *harness) upgradeDeviceProfile(_ context.Context, _ *auth.Principal, _ auth.ContentKey, in *profileUpgradeRequest) (any, error) {
 	return struct {
 		Profile Profile `json:"profile"`
 	}{h.catalog.get().effectiveProfile(*localProfile(in.Profile))}, nil
 }
-func (h *harness) updateProfile(ctx context.Context, p *principal, key contentKey, in *profileUpdateRequest) (any, error) {
+func (h *harness) updateProfile(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *profileUpdateRequest) (any, error) {
 	patch, clearsDefault, err := in.patch()
 	if err != nil {
 		return nil, err
@@ -410,7 +411,7 @@ func (h *harness) updateProfile(ctx context.Context, p *principal, key contentKe
 	return h.viewProfile(stored), nil
 }
 
-func (h *harness) mergeDeviceProfile(ctx context.Context, p *principal, key contentKey, in *profileMergeRequest) (any, error) {
+func (h *harness) mergeDeviceProfile(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *profileMergeRequest) (any, error) {
 	local := localProfile(in.Profile)
 	merged, err := h.mutateProfile(ctx, p, key, func(stored *storedProfile) error {
 		stored.Profile = mergeDeviceProfile(stored.Profile, *local, in.ChangedFields)
@@ -421,7 +422,7 @@ func (h *harness) mergeDeviceProfile(ctx context.Context, p *principal, key cont
 	}
 	return h.viewProfile(merged), nil
 }
-func (h *harness) listProjects(ctx context.Context, p *principal, key contentKey, in *listRequest) (any, error) {
+func (h *harness) listProjects(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *listRequest) (any, error) {
 	projects, next, err := h.projectPage(ctx, p, key, in.Cursor, 50)
 	if err != nil {
 		return nil, err
@@ -431,7 +432,7 @@ func (h *harness) listProjects(ctx context.Context, p *principal, key contentKey
 		NextCursor string    `json:"nextCursor"`
 	}{projects, next}, nil
 }
-func (h *harness) getProject(ctx context.Context, p *principal, key contentKey, in *idRequest) (any, error) {
+func (h *harness) getProject(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *idRequest) (any, error) {
 	project, err := h.loadProject(ctx, p, key, in.ID)
 	if err != nil {
 		return nil, err
@@ -445,7 +446,7 @@ func (h *harness) getProject(ctx context.Context, p *principal, key contentKey, 
 		Documents []ProjectDocument `json:"documents"`
 	}{project, docs}, nil
 }
-func (h *harness) createProject(ctx context.Context, p *principal, key contentKey, in *projectRequest) (any, error) {
+func (h *harness) createProject(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *projectRequest) (any, error) {
 	if strings.TrimSpace(valueOr(in.Name, "")) == "" {
 		return nil, api.Err(400, "BAD_REQUEST", "A project name is required")
 	}
@@ -453,7 +454,7 @@ func (h *harness) createProject(ctx context.Context, p *principal, key contentKe
 		project.Name, project.Description, project.SystemInstructions, project.Color = *in.Name, valueOr(in.Description, ""), valueOr(in.SystemInstructions, ""), in.Color.Value
 	})
 }
-func (h *harness) updateProject(ctx context.Context, p *principal, key contentKey, in *projectRequest) (any, error) {
+func (h *harness) updateProject(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *projectRequest) (any, error) {
 	if err := api.RequireID("id", in.ID); err != nil {
 		return nil, err
 	}
@@ -466,11 +467,11 @@ func (h *harness) updateProject(ctx context.Context, p *principal, key contentKe
 		}
 	})
 }
-func (h *harness) deleteProject(ctx context.Context, p *principal, key contentKey, in *idRequest) (any, error) {
+func (h *harness) deleteProject(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *idRequest) (any, error) {
 	return struct{}{}, h.removeRow(ctx, p, key, "project", in.ID)
 }
 
-func (h *harness) deleteAllProjects(ctx context.Context, p *principal, key contentKey, _ json.RawMessage) (any, error) {
+func (h *harness) deleteAllProjects(ctx context.Context, p *auth.Principal, key auth.ContentKey, _ json.RawMessage) (any, error) {
 	deleted, err := h.removeAllProjects(ctx, p, key)
 	if err != nil {
 		return nil, err
@@ -478,10 +479,10 @@ func (h *harness) deleteAllProjects(ctx context.Context, p *principal, key conte
 	return deletedCount{deleted}, nil
 }
 
-func (h *harness) deleteDocument(ctx context.Context, p *principal, key contentKey, in *projectDocumentRequest) (any, error) {
+func (h *harness) deleteDocument(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *projectDocumentRequest) (any, error) {
 	return struct{}{}, h.removeRow(ctx, p, key, "project_document", in.ProjectID+"/"+in.DocumentID)
 }
-func (h *harness) searchThreads(ctx context.Context, p *principal, key contentKey, in *searchRequest) (any, error) {
+func (h *harness) searchThreads(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *searchRequest) (any, error) {
 	ids, indexing, err := h.searchChats(ctx, p, key, in.Query, in.Limit)
 	if err != nil {
 		return nil, err
@@ -500,10 +501,10 @@ func (h *harness) searchThreads(ctx context.Context, p *principal, key contentKe
 	if err != nil {
 		return nil, err
 	}
-	flags := h.auth.flaggedChats(ctx, p)
+	flags := h.auth.FlaggedChats(ctx, p)
 	results := []threadSummary{}
 	for _, row := range found {
-		flags.mark(&row.Thread)
+		markFlagged(flags, &row.Thread)
 		results = append(results, summarize(&row.Thread))
 	}
 	return struct {
@@ -511,4 +512,11 @@ func (h *harness) searchThreads(ctx context.Context, p *principal, key contentKe
 		Unreadable int             `json:"unreadable"`
 		Indexing   bool            `json:"indexing"`
 	}{results, unreadable, indexing}, nil
+}
+
+// markFlagged marks the chats among threads that the safeguards flagged.
+func markFlagged(flags auth.ChatFlags, threads ...*Thread) {
+	for _, t := range threads {
+		t.Flagged = t.Flagged || flags[t.ID]
+	}
 }

@@ -24,6 +24,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/importer"
 )
 
@@ -67,7 +68,7 @@ type importOptions struct {
 func (h *harness) handleImport(w http.ResponseWriter, r *http.Request) {
 	// An archive calls no model, so any signed-in caller may make one,
 	// with or without chat access.
-	p, err := h.auth.authenticate(r, false)
+	p, err := h.auth.Authenticate(r, false)
 	if err != nil {
 		api.Respond(w, nil, err)
 		return
@@ -105,7 +106,7 @@ func (h *harness) handleImport(w http.ResponseWriter, r *http.Request) {
 	case "device":
 		options.ClearKey()
 	case "cloud":
-		key, err := decodeContentKey(options.Key)
+		key, err := auth.DecodeContentKey(options.Key)
 		options.ClearKey()
 		if err != nil {
 			api.Respond(w, nil, err)
@@ -213,8 +214,8 @@ func decodeFormField(part *multipart.Part, v any) error {
 // importRun is one import: where its chats go and what it left out.
 type importRun struct {
 	h     *harness
-	p     *principal
-	key   *contentKey // set when the import goes to the cloud
+	p     *auth.Principal
+	key   *auth.ContentKey // set when the import goes to the cloud
 	lease *scratchLease
 	out   *importStream
 	cloud *cloudArchive
@@ -558,7 +559,7 @@ func (j *importRun) toDevice(sourceID string, t *Thread) error {
 		j.warnings.projectLinksDropped++
 	}
 	created, _ := time.Parse(time.RFC3339Nano, t.CreatedAt)
-	t.ID = fmt.Sprintf("%013d_%s", max(0, maxReverseMillis-created.UnixMilli()), uuid.NewSHA1(importNamespace, []byte(j.p.scope()+"\x00"+j.source+"\x00"+sourceID)))
+	t.ID = fmt.Sprintf("%013d_%s", max(0, maxReverseMillis-created.UnixMilli()), uuid.NewSHA1(importNamespace, []byte(j.p.Scope()+"\x00"+j.source+"\x00"+sourceID)))
 	t.ProjectID, t.Pinned = nil, false
 	return j.out.thread(withOriginals(t))
 }
@@ -790,7 +791,7 @@ func (c *cloudArchive) entity(kind, sourceID, projectSourceID string, payload an
 	if err := writeEntry(c.zip, name, data, true); err != nil {
 		return err
 	}
-	c.manifest.Entities = append(c.manifest.Entities, cloudEntity{Kind: kind, SourceID: sourceID, ProjectSourceID: projectSourceID, Path: name, SHA256: hashHex(data), SizeBytes: len(data)})
+	c.manifest.Entities = append(c.manifest.Entities, cloudEntity{Kind: kind, SourceID: sourceID, ProjectSourceID: projectSourceID, Path: name, SHA256: api.HashHex(data), SizeBytes: len(data)})
 	switch kind {
 	case "project":
 		c.manifest.Counts.Projects++
@@ -819,7 +820,7 @@ func (c *cloudArchive) chat(sourceID, projectSourceID string, t *Thread) error {
 				if err := writeEntry(c.zip, name, data, false); err != nil {
 					return err
 				}
-				c.manifest.Blobs = append(c.manifest.Blobs, cloudBlob{Path: name, SHA256: hashHex(data), SizeBytes: len(data)})
+				c.manifest.Blobs = append(c.manifest.Blobs, cloudBlob{Path: name, SHA256: api.HashHex(data), SizeBytes: len(data)})
 				c.manifest.Counts.Blobs++
 				attachment.Type, attachment.ArchivePath, attachment.Base64 = "image", name, ""
 			}
@@ -853,7 +854,7 @@ type importChunkUpload struct {
 	Data        string `json:"data"`
 }
 
-func (h *harness) stageImport(ctx context.Context, p *principal, key contentKey, archive *scratchFile) (string, error) {
+func (h *harness) stageImport(ctx context.Context, p *auth.Principal, key auth.ContentKey, archive *scratchFile) (string, error) {
 	defer clear(key[:])
 	size := archive.Size()
 	if size > maxCloudImport {
@@ -876,7 +877,7 @@ func (h *harness) stageImport(ctx context.Context, p *principal, key contentKey,
 		if _, err := archive.ReadAt(data, i*importChunk); err != nil && err != io.EOF {
 			return "", err
 		}
-		err := h.syncImport(ctx, p, "upload", importChunkUpload{UploadID: created.UploadID, ChunkIndex: i, ChunkSHA256: hashHex(data), Data: base64.StdEncoding.EncodeToString(data)}, nil)
+		err := h.syncImport(ctx, p, "upload", importChunkUpload{UploadID: created.UploadID, ChunkIndex: i, ChunkSHA256: api.HashHex(data), Data: base64.StdEncoding.EncodeToString(data)}, nil)
 		clear(data)
 		if err != nil {
 			return "", err
@@ -909,7 +910,7 @@ type importStatusView struct {
 	FailureDetail string                      `json:"failureDetail,omitempty"`
 }
 
-func (h *harness) importStatus(ctx context.Context, p *principal, _ contentKey, in *importStatusRequest) (any, error) {
+func (h *harness) importStatus(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *importStatusRequest) (any, error) {
 	var status struct {
 		importStatusView
 		FailureReason string `json:"failure_reason"`

@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 // Read-aloud audio is mono 16-bit 24 kHz PCM. Each piece of a message is
@@ -28,12 +29,12 @@ const (
 )
 
 func (h *harness) handleSpeech(w http.ResponseWriter, r *http.Request) {
-	p, err := h.auth.authenticate(r, true)
+	p, err := h.auth.Authenticate(r, true)
 	if err != nil {
 		api.Respond(w, nil, err)
 		return
 	}
-	credential, err := h.auth.inference(r.Context(), p)
+	credential, err := h.auth.Inference(r.Context(), p)
 	if err != nil {
 		api.Respond(w, nil, h.withQuota(p, credential.Limit, err))
 		return
@@ -78,7 +79,7 @@ func (h *harness) handleSpeech(w http.ResponseWriter, r *http.Request) {
 
 // speechText is what a request reads aloud: a message's markdown, or text
 // a client selected, as it is spoken.
-func (h *harness) speechText(ctx context.Context, p *principal, in *speechRequest) (string, error) {
+func (h *harness) speechText(ctx context.Context, p *auth.Principal, in *speechRequest) (string, error) {
 	source := valueOr(in.Text, "")
 	if in.MessageID != "" {
 		var thread Thread
@@ -91,7 +92,7 @@ func (h *harness) speechText(ctx context.Context, p *principal, in *speechReques
 		case p.Anonymous:
 			return "", errAnonymousCloud
 		default:
-			key, err := decodeContentKey(in.Key)
+			key, err := auth.DecodeContentKey(in.Key)
 			if err != nil {
 				return "", err
 			}

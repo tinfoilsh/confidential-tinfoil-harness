@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 // savedPresets are prompts a user saved: one choosing an offered model with
@@ -24,7 +25,7 @@ var savedPresets = []any{
 
 // presetHarness offers kimi-k3 and gemma4-31b, and serves gpt-oss-120b
 // behind Auto alone. It reports the model each model turn asks for.
-func presetHarness(t *testing.T) (*harness, *memoryRows, contentKey, chan string) {
+func presetHarness(t *testing.T) (*harness, *memoryRows, auth.ContentKey, chan string) {
 	t.Helper()
 	asked := make(chan string, 16)
 	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
@@ -46,9 +47,9 @@ func presetProfile() api.Object {
 }
 
 // storedChat is a stored chat as the harness reads it back.
-func storedChat(t *testing.T, rows *memoryRows, key contentKey, id string) Thread {
+func storedChat(t *testing.T, rows *memoryRows, key auth.ContentKey, id string) Thread {
 	t.Helper()
-	row, err := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", id)
+	row, err := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +58,7 @@ func storedChat(t *testing.T, rows *memoryRows, key contentKey, id string) Threa
 
 func TestANewChatTakesItsPresetsSettingsUnlessItsTurnSetsThem(t *testing.T) {
 	h, rows, key, asked := presetHarness(t)
-	rows.rows[rowMapKey(&principal{ID: "alice"}, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(presetProfile())}
+	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(presetProfile())}
 	for _, tc := range []struct {
 		name      string
 		presetID  any // nil leaves the preset to the profile's default
@@ -104,7 +105,7 @@ func TestANewChatTakesTheProfilesWebSearchSetting(t *testing.T) {
 		{true, api.Object{}, true},
 		{true, api.Object{"webSearch": false}, false},
 	} {
-		rows.rows[rowMapKey(&principal{ID: "alice"}, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(api.Object{"webSearchEnabled": tc.profile})}
+		rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(api.Object{"webSearchEnabled": tc.profile})}
 		in := sendInput(key)
 		in["options"] = tc.options
 		events := finishedRun(t, h, "/v1/threads/turn", in)
@@ -133,7 +134,7 @@ func TestTheWebSearchSettingGatesSearchWithoutChangingChats(t *testing.T) {
 	})
 	serveWebsearch(t, nil)
 	for _, available := range []bool{false, true} {
-		rows.rows[rowMapKey(&principal{ID: "alice"}, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(api.Object{"webSearchAvailable": available})}
+		rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(api.Object{"webSearchAvailable": available})}
 		in := sendInput(key)
 		api.Obj(in["options"])["webSearch"] = true
 		events := finishedRun(t, h, "/v1/threads/turn", in)
@@ -152,8 +153,8 @@ func TestTheWebSearchSettingGatesSearchWithoutChangingChats(t *testing.T) {
 // starts on Auto rather than failing.
 func TestAnUnofferedSelectedModelReadsAsAuto(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	rows.rows[rowMapKey(&principal{ID: "alice"}, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(api.Object{"selectedModel": "retired-model"})}
-	if profile := profileOf(t, postRoute(h, "/v1/profile/get", api.Object{"key": key.base64()}, "alice")); profile["selectedModel"] != autoModelName {
+	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(api.Object{"selectedModel": "retired-model"})}
+	if profile := profileOf(t, postRoute(h, "/v1/profile/get", api.Object{"key": keyBase64(key)}, "alice")); profile["selectedModel"] != autoModelName {
 		t.Fatalf("the profile reads with model %v", profile["selectedModel"])
 	}
 	in := sendInput(key)
@@ -166,13 +167,13 @@ func TestAnUnofferedSelectedModelReadsAsAuto(t *testing.T) {
 
 func TestChoosingAPresetTakesTheSettingsTheRequestLeavesOut(t *testing.T) {
 	h, rows, key, _ := presetHarness(t)
-	rows.rows[rowMapKey(&principal{ID: "alice"}, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(presetProfile())}
+	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(presetProfile())}
 	in := sendInput(key)
 	in["presetId"] = nil
 	id := finishedRun(t, h, "/v1/threads/turn", in)[0].ThreadID
 	update := func(patch api.Object) Thread {
 		t.Helper()
-		patch["key"], patch["id"] = key.base64(), id
+		patch["key"], patch["id"] = keyBase64(key), id
 		if w := postRoute(h, "/v1/threads/update", patch, "alice"); w.Code != 200 {
 			t.Fatalf("update %v: HTTP %d %s", patch, w.Code, w.Body.String())
 		}
@@ -190,7 +191,7 @@ func TestChoosingAPresetTakesTheSettingsTheRequestLeavesOut(t *testing.T) {
 		t.Fatalf("the update's own web search setting was not taken: %s %v", chat.Model, chat.WebSearchEnabled)
 	}
 	// A model that serves only Auto is never a chat's own.
-	if w := postRoute(h, "/v1/threads/update", api.Object{"key": key.base64(), "id": id, "model": "gpt-oss-120b"}, "alice"); w.Code != 404 || !strings.Contains(w.Body.String(), "MODEL_UNAVAILABLE") {
+	if w := postRoute(h, "/v1/threads/update", api.Object{"key": keyBase64(key), "id": id, "model": "gpt-oss-120b"}, "alice"); w.Code != 404 || !strings.Contains(w.Body.String(), "MODEL_UNAVAILABLE") {
 		t.Fatalf("choosing a model behind Auto: HTTP %d %s", w.Code, w.Body.String())
 	}
 }

@@ -5,9 +5,10 @@ import (
 	"slices"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
-func (h *harness) cancelThread(ctx context.Context, p *principal, _ contentKey, in *runRequest) (any, error) {
+func (h *harness) cancelThread(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *runRequest) (any, error) {
 	key, err := requestKey(in.Key)
 	if err != nil {
 		return nil, err
@@ -28,7 +29,7 @@ func (h *harness) cancelThread(ctx context.Context, p *principal, _ contentKey, 
 }
 
 // Move the selected queued turn first, then finish the active run normally.
-func (h *harness) sendQueued(ctx context.Context, p *principal, _ contentKey, in *runRequest) (any, error) {
+func (h *harness) sendQueued(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *runRequest) (any, error) {
 	key, err := requestKey(in.Key)
 	if err != nil {
 		return nil, err
@@ -57,7 +58,7 @@ func (h *harness) sendQueued(ctx context.Context, p *principal, _ contentKey, in
 	return struct{}{}, nil
 }
 
-func (h *harness) removeQueued(ctx context.Context, p *principal, _ contentKey, in *runRequest) (any, error) {
+func (h *harness) removeQueued(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *runRequest) (any, error) {
 	key, err := requestKey(in.Key)
 	if err != nil {
 		return nil, err
@@ -84,7 +85,7 @@ func (h *harness) removeQueued(ctx context.Context, p *principal, _ contentKey, 
 
 // stopThread stops a chat being deleted: its running reply is cancelled and
 // each queued turn ends.
-func (h *harness) stopThread(p *principal, id string) {
+func (h *harness) stopThread(p *auth.Principal, id string) {
 	h.live.mu.Lock()
 	defer h.live.mu.Unlock()
 	s := h.live.threads[liveKey(p, id)]

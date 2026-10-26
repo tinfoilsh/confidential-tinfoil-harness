@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 type downstreamService struct {
@@ -19,7 +20,7 @@ type downstreamService struct {
 }
 
 func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
-	auth, err := newAuthenticator(ctx, os.Getenv("CLERK_ISSUER"), h.controlplane)
+	auth, err := auth.New(ctx, os.Getenv("CLERK_ISSUER"), h.controlplane)
 	if err != nil {
 		return err
 	}

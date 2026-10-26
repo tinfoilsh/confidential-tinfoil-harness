@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 func routerHarness(t *testing.T, router http.HandlerFunc) *harness {
@@ -410,7 +411,7 @@ func TestAnImageKeepsOneFormFromUploadToView(t *testing.T) {
 	in["attachments"] = []any{sent}
 	events := finishedRun(t, h, "/v1/threads/turn", in)
 	thread := events[0].ThreadID
-	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", thread)
+	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", thread)
 	stored := api.Obj(api.Arr(api.Obj(api.Arr(rowJSON(row)["messages"])[0])["attachments"])[0])
 	if got := fieldsOf(stored); !slices.Equal(got, []string{"encryptionKey", "fileName", "id", "kind", "mimeType", "size", "storageThreadId", "thumbnail"}) || stored["thumbnail"] != sent["thumbnail"] || !bytes.Equal(fake.blobs[api.Str(stored["id"])].data, modelCopy) {
 		t.Fatalf("the chat stored %v", stored)
@@ -418,7 +419,7 @@ func TestAnImageKeepsOneFormFromUploadToView(t *testing.T) {
 	var window struct {
 		Messages []api.Object `json:"messages"`
 	}
-	json.Unmarshal(postRoute(h, "/v1/threads/get", api.Object{"key": key.base64(), "id": thread}, "alice").Body.Bytes(), &window)
+	json.Unmarshal(postRoute(h, "/v1/threads/get", api.Object{"key": keyBase64(key), "id": thread}, "alice").Body.Bytes(), &window)
 	views := []any{api.Arr(api.Obj(api.Arr(eventOfType(events, "MESSAGES_SNAPSHOT").Messages)[0])["attachments"])[0], api.Arr(window.Messages[0]["attachments"])[0]}
 	local := localInput("", nil)
 	api.Obj(local["options"])["model"] = "auto"

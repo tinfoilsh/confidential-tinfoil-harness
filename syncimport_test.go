@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 // fakeImport is an import job of the fake sync enclave. Started, it stores
@@ -43,14 +44,14 @@ func (f *fakeSync) importStep(t *testing.T, h *harness, r *http.Request, in api.
 	case "/v1/import/upload":
 		job := f.imports[api.Str(in["upload_id"])]
 		data, err := base64.StdEncoding.DecodeString(api.Str(in["data"]))
-		if job == nil || err != nil || hashHex(data) != api.Str(in["chunk_sha256"]) || len(data) > importChunk {
+		if job == nil || err != nil || api.HashHex(data) != api.Str(in["chunk_sha256"]) || len(data) > importChunk {
 			return 400, api.Object{"code": "BAD_REQUEST"}
 		}
 		job.chunks[api.Int(in["chunk_index"])] = data
 		return 200, api.Object{"ok": true}
 	case "/v1/import/start":
 		job := f.imports[api.Str(in["job_id"])]
-		key, err := decodeBase64Key([]byte(api.Str(in["key"])))
+		key, err := auth.DecodeBase64Key([]byte(api.Str(in["key"])))
 		if job == nil || err != nil {
 			return 400, api.Object{"code": "BAD_REQUEST"}
 		}
@@ -58,12 +59,12 @@ func (f *fakeSync) importStep(t *testing.T, h *harness, r *http.Request, in api.
 		for i := 0; i < len(job.chunks); i++ {
 			archive = append(archive, job.chunks[i]...)
 		}
-		if int64(len(archive)) != job.total || hashHex(archive) != job.sha {
+		if int64(len(archive)) != job.total || api.HashHex(archive) != job.sha {
 			return 400, api.Object{"code": "BAD_REQUEST"}
 		}
 		user := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		user = strings.TrimPrefix(strings.TrimPrefix(user, "clerk-"), "sync-archive:")
-		p := &principal{ID: user}
+		p := &auth.Principal{ID: user}
 		counts, err := f.storeImport(h.storeRows.(*memoryRows), p, key, archive)
 		if err != nil {
 			t.Errorf("sync would refuse the import: %v", err)
@@ -114,14 +115,14 @@ func validTime(raw json.RawMessage) bool {
 }
 
 // mappedID is the id sync stores an imported entity under.
-func mappedID(p *principal, backup, kind, source string) string {
+func mappedID(p *auth.Principal, backup, kind, source string) string {
 	h := sha256.Sum256([]byte(fmt.Sprintf("tinfoil-restore-id-v1\x00%s\x00%s\x00%s\x00%s\x000", p.ID, backup, kind, source)))
 	s := hex.EncodeToString(h[:])
 	return s[:8] + "-" + s[8:12] + "-" + s[12:16] + "-" + s[16:20] + "-" + s[20:32]
 }
 
 // storeImport checks and stores a native cloud import as sync's job does.
-func (f *fakeSync) storeImport(rows *memoryRows, p *principal, key contentKey, archive []byte) (int, error) {
+func (f *fakeSync) storeImport(rows *memoryRows, p *auth.Principal, key auth.ContentKey, archive []byte) (int, error) {
 	zr, err := zip.NewReader(bytes.NewReader(archive), int64(len(archive)))
 	if err != nil {
 		return 0, err
@@ -180,7 +181,7 @@ func (f *fakeSync) storeImport(rows *memoryRows, p *principal, key contentKey, a
 	blobs := map[string]bool{}
 	for _, blob := range manifest.Blobs {
 		data, err := read(blob.Path)
-		if err != nil || listed[blob.Path] || len(data) != blob.SizeBytes || hashHex(data) != blob.SHA256 {
+		if err != nil || listed[blob.Path] || len(data) != blob.SizeBytes || api.HashHex(data) != blob.SHA256 {
 			return 0, errors.New("blob " + blob.Path)
 		}
 		listed[blob.Path], blobs[blob.Path] = true, true
@@ -190,7 +191,7 @@ func (f *fakeSync) storeImport(rows *memoryRows, p *principal, key contentKey, a
 	stored := 0
 	for _, entity := range manifest.Entities {
 		data, err := read(entity.Path)
-		if err != nil || listed[entity.Path] || len(data) != entity.SizeBytes || hashHex(data) != entity.SHA256 || entity.SourceID == "" || sources[entity.Kind+"\x00"+entity.SourceID] {
+		if err != nil || listed[entity.Path] || len(data) != entity.SizeBytes || api.HashHex(data) != entity.SHA256 || entity.SourceID == "" || sources[entity.Kind+"\x00"+entity.SourceID] {
 			return 0, errors.New("entity " + entity.Path)
 		}
 		listed[entity.Path], sources[entity.Kind+"\x00"+entity.SourceID] = true, true

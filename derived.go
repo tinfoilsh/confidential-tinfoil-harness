@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
@@ -88,7 +89,7 @@ func titleSource(t *Thread) string {
 	return ""
 }
 
-func (h *harness) generateTitle(ctx context.Context, r *chatRun, p *principal, titleState string, text string) {
+func (h *harness) generateTitle(ctx context.Context, r *chatRun, p *auth.Principal, titleState string, text string) {
 	if !h.serviceReady("summarizer") || titleState != "placeholder" {
 		return
 	}

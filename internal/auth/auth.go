@@ -1,4 +1,4 @@
-package main
+package auth
 
 import (
 	"bytes"
@@ -19,9 +19,9 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
-type secret string
+type Secret string
 
-func (secret) LogValue() slog.Value { return slog.StringValue("REDACTED") }
+func (Secret) LogValue() slog.Value { return slog.StringValue("REDACTED") }
 
 func bearer(header string) string {
 	const scheme = "bearer "
@@ -31,48 +31,48 @@ func bearer(header string) string {
 	return strings.TrimSpace(header[len(scheme):])
 }
 
-type principal struct {
+type Principal struct {
 	ID           string
-	JWT          secret
-	SyncToken    secret
+	JWT          Secret
+	SyncToken    Secret
 	SyncExpires  time.Time
 	Anonymous    bool
 	AnonymousID  string
-	InferenceKey secret
+	InferenceKey Secret
 	// The validation already performed while recognizing this request.
-	validatedFree *inferenceCredential
+	validatedFree *Credential
 }
 
-func (p *principal) scope() string {
+func (p *Principal) Scope() string {
 	if !p.Anonymous {
 		return "user:" + p.ID
 	}
 	return "anonymous:" + p.AnonymousID
 }
 
-type inferenceCredential struct {
-	Key     secret
+type Credential struct {
+	Key     Secret
 	Expires time.Time
 	Limit   api.RateLimit
 	// firstParty marks a Tinfoil Chat access token, which only a subscriber
 	// holds and whose conversations are screened.
-	firstParty bool
+	FirstParty bool
 }
 
-// inferenceKeyHeader carries the credential a signed-in client minted for
+// InferenceKeyHeader carries the credential a signed-in client minted for
 // inference: its chat access token, or its free key without a subscription.
 // It is read before the body, like the Clerk session beside it, which can
 // mint one.
-const inferenceKeyHeader = "X-Tinfoil-Inference-Key"
+const InferenceKeyHeader = "X-Tinfoil-Inference-Key"
 
 // Chat access tokens are minted by the control plane for the Tinfoil Chat
 // client and verified here as the enclave shims verify them.
 const (
-	chatTokenType     = "at+jwt"
-	chatTokenAudience = "https://inference.tinfoil.sh"
-	chatTokenScope    = "inference:api"
-	chatTokenClient   = "tinfoil-chat"
-	chatTokenProduct  = "chat"
+	ChatTokenType     = "at+jwt"
+	ChatTokenAudience = "https://inference.tinfoil.sh"
+	ChatTokenScope    = "inference:api"
+	ChatTokenClient   = "tinfoil-chat"
+	ChatTokenProduct  = "chat"
 )
 
 type chatTokenClaims struct {
@@ -93,29 +93,47 @@ const (
 
 var errCredentialRequired = api.Err(401, "CREDENTIAL_REQUIRED", "Chat access is missing or expired")
 
-type authenticator struct {
+// Config is what an Authenticator checks callers against.
+type Config struct {
+	// Verify reads the subject of a valid Clerk session token.
+	Verify func(context.Context, string) (string, error)
+	// ChatKeys and ChatIssuer are the control plane's chat token signing
+	// keys and issuer.
+	ChatKeys   jwt.Keyfunc
+	ChatIssuer string
+	// Client reaches the control plane at Controlplane.
+	Client       *http.Client
+	Controlplane string
+}
+
+// Configured is an Authenticator checking callers as c says.
+func Configured(c Config) *Authenticator {
+	return &Authenticator{verify: c.Verify, chatKeys: c.ChatKeys, chatIssuer: c.ChatIssuer, client: c.Client, controlplane: c.Controlplane}
+}
+
+type Authenticator struct {
 	verify       func(context.Context, string) (string, error)
 	chatKeys     jwt.Keyfunc // the control plane's chat token signing keys
 	chatIssuer   string
 	client       *http.Client
 	controlplane string
 	cachesOnce   sync.Once
-	newest       *expirable.LRU[string, inferenceCredential]
+	newest       *expirable.LRU[string, Credential]
 	valid        *expirable.LRU[string, struct{}]
 	flagsOnce    sync.Once
-	flags        *expirable.LRU[string, chatFlags]
+	flags        *expirable.LRU[string, ChatFlags]
 }
 
-func (a *authenticator) caches() {
+func (a *Authenticator) caches() {
 	a.cachesOnce.Do(func() {
-		a.newest = expirable.NewLRU[string, inferenceCredential](maxCachedCallers, nil, credentialTTL)
+		a.newest = expirable.NewLRU[string, Credential](maxCachedCallers, nil, credentialTTL)
 		a.valid = expirable.NewLRU[string, struct{}](maxCachedCallers, nil, freeKeyTTL)
 	})
 }
 
-func (a *authenticator) validKeys() *expirable.LRU[string, struct{}] { a.caches(); return a.valid }
+func (a *Authenticator) validKeys() *expirable.LRU[string, struct{}] { a.caches(); return a.valid }
 
-func newAuthenticator(ctx context.Context, issuer, cp string) (*authenticator, error) {
+func New(ctx context.Context, issuer, cp string) (*Authenticator, error) {
 	if !strings.HasPrefix(issuer, "https://") {
 		return nil, errors.New("CLERK_ISSUER must be an HTTPS issuer URL")
 	}
@@ -129,11 +147,11 @@ func newAuthenticator(ctx context.Context, issuer, cp string) (*authenticator, e
 		return nil, err
 	}
 	options := []jwt.ParserOption{jwt.WithValidMethods([]string{"RS256", "RS384", "RS512", "ES256", "ES384", "ES512"}), jwt.WithIssuer(issuer), jwt.WithExpirationRequired(), jwt.WithLeeway(30 * time.Second)}
-	a := &authenticator{client: &http.Client{
+	c := Config{Client: &http.Client{
 		Timeout:       15 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}, controlplane: cp, chatKeys: chatKeys.Keyfunc, chatIssuer: cp}
-	a.verify = func(ctx context.Context, token string) (string, error) {
+	}, Controlplane: cp, ChatKeys: chatKeys.Keyfunc, ChatIssuer: cp}
+	c.Verify = func(ctx context.Context, token string) (string, error) {
 		parsed, err := jwt.NewParser(options...).Parse(token, kf.KeyfuncCtx(ctx))
 		if err != nil || !parsed.Valid {
 			return "", errors.New("invalid session")
@@ -144,12 +162,12 @@ func newAuthenticator(ctx context.Context, issuer, cp string) (*authenticator, e
 		}
 		return sub, nil
 	}
-	return a, nil
+	return Configured(c), nil
 }
 
 // authenticate reads who a request is from: a signed-in caller's Clerk
 // session, or, where anonymous is allowed, a signed-out caller's free key.
-func (a *authenticator) authenticate(r *http.Request, anonymous bool) (*principal, error) {
+func (a *Authenticator) Authenticate(r *http.Request, anonymous bool) (*Principal, error) {
 	if a == nil {
 		return nil, api.Err(503, "UNAUTHENTICATED", "Authentication is not configured").WithAction(api.ActionStop)
 	}
@@ -160,13 +178,13 @@ func (a *authenticator) authenticate(r *http.Request, anonymous bool) (*principa
 	if anonymous && strings.HasPrefix(token, "free_") && len(token) > len("free_") && len(token) <= 256 {
 		// Possession scopes ephemeral state. The prefix is not validation:
 		// recognize checks the key with the control plane before any work.
-		return &principal{Anonymous: true, AnonymousID: hashHex([]byte(token)), InferenceKey: secret(token)}, nil
+		return &Principal{Anonymous: true, AnonymousID: api.HashHex([]byte(token)), InferenceKey: Secret(token)}, nil
 	}
 	id, err := a.verify(r.Context(), token)
 	if err != nil {
 		return nil, api.Err(401, "UNAUTHENTICATED", "The Clerk session is invalid or expired")
 	}
-	p := &principal{ID: id, JWT: secret(token), InferenceKey: secret(strings.TrimSpace(r.Header.Get(inferenceKeyHeader)))}
+	p := &Principal{ID: id, JWT: Secret(token), InferenceKey: Secret(strings.TrimSpace(r.Header.Get(InferenceKeyHeader)))}
 	// Every request carrying a chat token keeps the newest one at hand for
 	// runs that outlive theirs.
 	if p.InferenceKey != "" && !strings.HasPrefix(string(p.InferenceKey), "free_") {
@@ -177,11 +195,11 @@ func (a *authenticator) authenticate(r *http.Request, anonymous bool) (*principa
 
 // recognize refuses a caller before its body is read: a signed-out caller
 // is served only with a free key the control plane accepted, recently or now.
-func (a *authenticator) recognize(ctx context.Context, p *principal) error {
+func (a *Authenticator) Recognize(ctx context.Context, p *Principal) error {
 	if !p.Anonymous {
 		return nil
 	}
-	if _, ok := a.validKeys().Get(hashHex([]byte(p.InferenceKey))); ok {
+	if _, ok := a.validKeys().Get(api.HashHex([]byte(p.InferenceKey))); ok {
 		return nil
 	}
 	credential, err := a.freeKey(ctx, p)
@@ -194,7 +212,7 @@ func (a *authenticator) recognize(ctx context.Context, p *principal) error {
 // keyValidation asks the control plane whether a free key is valid, and
 // for the quota it has left.
 type keyValidation struct {
-	APIKey           secret `json:"api_key"`
+	APIKey           Secret `json:"api_key"`
 	IncludeRateLimit bool   `json:"include_rate_limit"`
 }
 
@@ -207,7 +225,7 @@ type validatedKey struct {
 // freeKey validates a free key, a signed-out caller's or a signed-in
 // caller's without a subscription, and reads its quota. A key validated
 // recently admits its caller without asking again.
-func (a *authenticator) freeKey(ctx context.Context, p *principal) (inferenceCredential, error) {
+func (a *Authenticator) freeKey(ctx context.Context, p *Principal) (Credential, error) {
 	if p.validatedFree != nil {
 		credential := *p.validatedFree
 		p.validatedFree = nil
@@ -215,37 +233,37 @@ func (a *authenticator) freeKey(ctx context.Context, p *principal) (inferenceCre
 	}
 	credential, err := a.validateFreeKey(ctx, p)
 	if err == nil {
-		a.validKeys().Add(hashHex([]byte(p.InferenceKey)), struct{}{})
+		a.validKeys().Add(api.HashHex([]byte(p.InferenceKey)), struct{}{})
 	}
 	return credential, err
 }
 
-func (a *authenticator) validateFreeKey(ctx context.Context, p *principal) (inferenceCredential, error) {
+func (a *Authenticator) validateFreeKey(ctx context.Context, p *Principal) (Credential, error) {
 	// Reuse the validation endpoint already used by shims on Tinfoil hosts,
 	// asking it for the key's quota. No key issuance, client IP, or expiry
 	// metadata comes from this call.
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.controlplane+"/api/shim/validate-key", bytes.NewReader(api.Raw(keyValidation{APIKey: p.InferenceKey, IncludeRateLimit: true})))
 	if err != nil {
-		return inferenceCredential{}, err
+		return Credential{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := a.client.Do(req)
 	if err != nil {
-		return inferenceCredential{}, err
+		return Credential{}, err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<10))
 	if err != nil {
-		return inferenceCredential{}, err
+		return Credential{}, err
 	}
 	// Downstream shims still check validity, model access, and quota on each
 	// call. A control plane that does not report the quota answers "OK".
 	if resp.StatusCode == http.StatusOK && string(body) == "OK" {
-		return inferenceCredential{Key: p.InferenceKey}, nil
+		return Credential{Key: p.InferenceKey}, nil
 	}
 	var validated validatedKey
 	if resp.StatusCode == http.StatusOK && json.Unmarshal(body, &validated) == nil && validated.OK {
-		credential := inferenceCredential{Key: p.InferenceKey}
+		credential := Credential{Key: p.InferenceKey}
 		if validated.RateLimit != nil {
 			credential.Limit = validated.RateLimit.Limit("free_daily")
 		}
@@ -256,34 +274,34 @@ func (a *authenticator) validateFreeKey(ctx context.Context, p *principal) (infe
 	if resp.StatusCode == http.StatusTooManyRequests && api.Str(api.Obj(detail["error"])["code"]) == "insufficient_quota" {
 		// An exhausted key may still open the session and show the quota
 		// banner. acceptTurn refuses to start work with this zero balance.
-		return inferenceCredential{Key: p.InferenceKey, Limit: api.ExhaustedLimit("free_daily")}, nil
+		return Credential{Key: p.InferenceKey, Limit: api.ExhaustedLimit("free_daily")}, nil
 	}
 	switch {
 	case resp.StatusCode/100 == 2:
-		return inferenceCredential{}, errors.New("invalid key validation response")
+		return Credential{}, errors.New("invalid key validation response")
 	case resp.StatusCode == http.StatusPaymentRequired:
-		return inferenceCredential{}, api.Err(403, "UPSTREAM_REFUSED", "This chat key is disabled").WithAction(api.ActionStop)
+		return Credential{}, api.Err(403, "UPSTREAM_REFUSED", "This chat key is disabled").WithAction(api.ActionStop)
 	case resp.StatusCode == http.StatusUnauthorized && api.Str(detail["error"]) != "":
 		// A refused caller address, not a refused key: the controlplane
 		// answers only Tinfoil hosts registered for key validation.
 		slog.Error("controlplane refused key validation from this host", "status", resp.StatusCode)
-		return inferenceCredential{}, api.Err(503, "UPSTREAM_REFUSED", "Anonymous chat is unavailable on this deployment").WithAction(api.ActionStop)
+		return Credential{}, api.Err(503, "UPSTREAM_REFUSED", "Anonymous chat is unavailable on this deployment").WithAction(api.ActionStop)
 	case resp.StatusCode == http.StatusServiceUnavailable:
 		e := api.Err(503, "UPSTREAM_REFUSED", "Key validation is temporarily unavailable")
 		e.RetryAfter = api.RetryAfter(resp.Header)
-		return inferenceCredential{}, e
+		return Credential{}, e
 	}
-	return inferenceCredential{}, api.WithRetryAfter(api.DownstreamError(resp.StatusCode, body), resp.Header)
+	return Credential{}, api.WithRetryAfter(api.DownstreamError(resp.StatusCode, body), resp.Header)
 }
 
 // inference is the credential a caller's model calls carry: a signed-out
 // caller's free key, or the chat token or free key a signed-in client minted.
-func (a *authenticator) inference(ctx context.Context, p *principal) (inferenceCredential, error) {
+func (a *Authenticator) Inference(ctx context.Context, p *Principal) (Credential, error) {
 	switch {
 	case p.InferenceKey == "" && p.Anonymous:
-		return inferenceCredential{}, api.Err(401, "UNAUTHENTICATED", "An anonymous chat key is required")
+		return Credential{}, api.Err(401, "UNAUTHENTICATED", "An anonymous chat key is required")
 	case p.InferenceKey == "":
-		return inferenceCredential{}, errCredentialRequired
+		return Credential{}, errCredentialRequired
 	case strings.HasPrefix(string(p.InferenceKey), "free_"):
 		return a.freeKey(ctx, p)
 	}
@@ -293,39 +311,39 @@ func (a *authenticator) inference(ctx context.Context, p *principal) (inferenceC
 // chatToken verifies a signed-in caller's chat access token: the control
 // plane signed it for the Tinfoil Chat client, for this caller, and it has
 // not expired.
-func (a *authenticator) chatToken(p *principal) (inferenceCredential, error) {
+func (a *Authenticator) chatToken(p *Principal) (Credential, error) {
 	var claims chatTokenClaims
-	parsed, err := jwt.NewParser(jwt.WithValidMethods([]string{"EdDSA"}), jwt.WithIssuer(a.chatIssuer), jwt.WithAudience(chatTokenAudience), jwt.WithExpirationRequired(), jwt.WithIssuedAt(), jwt.WithLeeway(30*time.Second)).
+	parsed, err := jwt.NewParser(jwt.WithValidMethods([]string{"EdDSA"}), jwt.WithIssuer(a.chatIssuer), jwt.WithAudience(ChatTokenAudience), jwt.WithExpirationRequired(), jwt.WithIssuedAt(), jwt.WithLeeway(30*time.Second)).
 		ParseWithClaims(string(p.InferenceKey), &claims, a.chatKeys)
 	if err != nil || !parsed.Valid {
-		return inferenceCredential{}, errCredentialRequired
+		return Credential{}, errCredentialRequired
 	}
 	kind, _ := parsed.Header["typ"].(string)
-	if !strings.EqualFold(kind, chatTokenType) || p.Anonymous || claims.Subject != p.ID || claims.ID == "" || claims.ClientID != chatTokenClient || claims.Product != chatTokenProduct || !slices.Contains(strings.Fields(claims.Scope), chatTokenScope) {
-		return inferenceCredential{}, errCredentialRequired
+	if !strings.EqualFold(kind, ChatTokenType) || p.Anonymous || claims.Subject != p.ID || claims.ID == "" || claims.ClientID != ChatTokenClient || claims.Product != ChatTokenProduct || !slices.Contains(strings.Fields(claims.Scope), ChatTokenScope) {
+		return Credential{}, errCredentialRequired
 	}
-	credential := inferenceCredential{Key: p.InferenceKey, Expires: claims.ExpiresAt.Time, firstParty: true}
+	credential := Credential{Key: p.InferenceKey, Expires: claims.ExpiresAt.Time, FirstParty: true}
 	a.caches()
-	if held, ok := a.newest.Get(p.scope()); !ok || credential.Expires.After(held.Expires) {
-		a.newest.Add(p.scope(), credential)
+	if held, ok := a.newest.Get(p.Scope()); !ok || credential.Expires.After(held.Expires) {
+		a.newest.Add(p.Scope(), credential)
 	}
 	return credential, nil
 }
 
 // renewed is the newest chat token the caller presented, for a run whose
 // own was refused, unless it is the refused one or has expired.
-func (a *authenticator) renewed(p *principal, refused secret) (inferenceCredential, error) {
+func (a *Authenticator) Renewed(p *Principal, refused Secret) (Credential, error) {
 	a.caches()
-	credential, ok := a.newest.Get(p.scope())
+	credential, ok := a.newest.Get(p.Scope())
 	if !ok || credential.Key == refused || !credential.Expires.After(api.Now()) {
-		return inferenceCredential{}, errCredentialRequired
+		return Credential{}, errCredentialRequired
 	}
 	return credential, nil
 }
 
-// exhausted is the quota a refusal for a spent one leaves: no request left,
+// Exhausted is the quota a refusal for a spent one leaves: no request left,
 // and a free key's quota is its daily one.
-func exhausted(p *principal, held api.RateLimit) api.RateLimit {
+func Exhausted(p *Principal, held api.RateLimit) api.RateLimit {
 	if strings.HasPrefix(string(p.InferenceKey), "free_") {
 		held.Kind = "free_daily"
 	}

@@ -26,6 +26,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
@@ -37,32 +38,32 @@ type memoryRows struct {
 	// sealed is the key each row was stored with; a row a test seeds is
 	// sealed with key. Like sync, only that key opens or overwrites a row,
 	// and any key deletes it.
-	sealed map[string]contentKey
-	key    contentKey
+	sealed map[string]auth.ContentKey
+	key    auth.ContentKey
 	calls  int
 }
 
-func (s *memoryRows) authorizeRun(_ context.Context, _ *principal, _ contentKey, id string, _ *string) (storageGrant, error) {
-	return storageGrant{Token: secret("run-for-" + id), ExpiresAt: api.Now().Add(time.Hour)}, nil
+func (s *memoryRows) authorizeRun(_ context.Context, _ *auth.Principal, _ auth.ContentKey, id string, _ *string) (storageGrant, error) {
+	return storageGrant{Token: auth.Secret("run-for-" + id), ExpiresAt: api.Now().Add(time.Hour)}, nil
 }
 
-func (s *memoryRows) authorizeStorage(_ context.Context, p *principal, _ contentKey, _, _ string) (secret, error) {
-	return secret("sync-archive:" + p.ID), nil
+func (s *memoryRows) authorizeStorage(_ context.Context, p *auth.Principal, _ auth.ContentKey, _, _ string) (auth.Secret, error) {
+	return auth.Secret("sync-archive:" + p.ID), nil
 }
 
-func randomKey() contentKey { var k contentKey; rand.Read(k[:]); return k }
+func randomKey() auth.ContentKey { var k auth.ContentKey; rand.Read(k[:]); return k }
 
-func (k contentKey) base64() string { return base64.StdEncoding.EncodeToString(k[:]) }
+func keyBase64(k auth.ContentKey) string { return base64.StdEncoding.EncodeToString(k[:]) }
 
-func rowMapKey(p *principal, scope, id string) string { return p.scope() + "/" + scope + "/" + id }
-func (s *memoryRows) opens(name string, key contentKey) bool {
+func rowMapKey(p *auth.Principal, scope, id string) string { return p.Scope() + "/" + scope + "/" + id }
+func (s *memoryRows) opens(name string, key auth.ContentKey) bool {
 	sealed, ok := s.sealed[name]
 	if !ok {
 		sealed = s.key
 	}
 	return key == sealed
 }
-func (s *memoryRows) load(_ context.Context, p *principal, key contentKey, scope, id string) (*storedRow, error) {
+func (s *memoryRows) load(_ context.Context, p *auth.Principal, key auth.ContentKey, scope, id string) (*storedRow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
@@ -77,7 +78,7 @@ func (s *memoryRows) load(_ context.Context, p *principal, key contentKey, scope
 	return row.copy(), nil
 }
 
-func (s *memoryRows) pull(ctx context.Context, p *principal, key contentKey, scope string, ids []string) ([]storedRow, map[string]error, error) {
+func (s *memoryRows) pull(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope string, ids []string) ([]storedRow, map[string]error, error) {
 	rows, failed := []storedRow{}, map[string]error{}
 	for _, id := range ids {
 		row, err := s.load(ctx, p, key, scope, id)
@@ -90,7 +91,7 @@ func (s *memoryRows) pull(ctx context.Context, p *principal, key contentKey, sco
 	return rows, failed, nil
 }
 
-func (s *memoryRows) removeRevision(_ context.Context, p *principal, _ contentKey, id, revision string) error {
+func (s *memoryRows) removeRevision(_ context.Context, p *auth.Principal, _ auth.ContentKey, id, revision string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	name := rowMapKey(p, "chat", id)
@@ -133,13 +134,13 @@ func rowProject(row storedRow) string {
 	json.Unmarshal(row.Data, &data)
 	return data.ProjectID
 }
-func (s *memoryRows) list(_ context.Context, p *principal, key contentKey, scope, cursor, project string, limit int) (rowPage, error) {
+func (s *memoryRows) list(_ context.Context, p *auth.Principal, key auth.ContentKey, scope, cursor, project string, limit int) (rowPage, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
 	page := rowPage{Rows: []storedRow{}, Unreadable: map[string]error{}}
 	for name, row := range s.rows {
-		if !strings.HasPrefix(name, p.scope()+"/"+scope+"/") || project != "" && rowProject(row) != project {
+		if !strings.HasPrefix(name, p.Scope()+"/"+scope+"/") || project != "" && rowProject(row) != project {
 			continue
 		}
 		if !s.opens(name, key) {
@@ -150,7 +151,7 @@ func (s *memoryRows) list(_ context.Context, p *principal, key contentKey, scope
 	}
 	return page, nil
 }
-func (s *memoryRows) push(_ context.Context, p *principal, key contentKey, scope string, row *storedRow, _ string) (string, error) {
+func (s *memoryRows) push(_ context.Context, p *auth.Principal, key auth.ContentKey, scope string, row *storedRow, _ string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
@@ -182,7 +183,7 @@ func (s *memoryRows) push(_ context.Context, p *principal, key contentKey, scope
 	s.rows[name], s.sealed[name] = *stored, key
 	return next, nil
 }
-func (s *memoryRows) remove(_ context.Context, p *principal, _ contentKey, scope, id string) error {
+func (s *memoryRows) remove(_ context.Context, p *auth.Principal, _ auth.ContentKey, scope, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
@@ -191,7 +192,7 @@ func (s *memoryRows) remove(_ context.Context, p *principal, _ contentKey, scope
 	delete(s.sealed, name)
 	return nil
 }
-func (s *memoryRows) ids(_ context.Context, p *principal, scope, project string) ([]string, error) {
+func (s *memoryRows) ids(_ context.Context, p *auth.Principal, scope, project string) ([]string, error) {
 	page, _ := s.list(context.Background(), p, s.key, scope, "", project, 0)
 	ids := slices.Collect(maps.Keys(page.Unreadable))
 	for _, row := range page.Rows {
@@ -200,7 +201,7 @@ func (s *memoryRows) ids(_ context.Context, p *principal, scope, project string)
 	return ids, nil
 }
 
-func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memoryRows, contentKey) {
+func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memoryRows, auth.ContentKey) {
 	t.Helper()
 	watchContract(t)
 	if upstream == nil {
@@ -224,14 +225,9 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 		io.WriteString(w, "OK")
 	}))
 	t.Cleanup(cp.Close)
-	rows := &memoryRows{rows: map[string]storedRow{}, sealed: map[string]contentKey{}}
+	rows := &memoryRows{rows: map[string]storedRow{}, sealed: map[string]auth.ContentKey{}}
 	h := &harness{gateway: server.URL, controlplane: cp.URL, cpClient: cp.Client(), storeRows: rows, services: map[string]*downstreamService{}, scratch: newScratchSpace(t.TempDir(), 1<<30)}
-	h.auth = &authenticator{verify: func(_ context.Context, s string) (string, error) {
-		if !strings.HasPrefix(s, "clerk-") {
-			return "", errors.New("bad session")
-		}
-		return strings.TrimPrefix(s, "clerk-"), nil
-	}, chatKeys: func(*jwt.Token) (any, error) { return testChatKeys().Public(), nil }, chatIssuer: testChatIssuer, client: cp.Client(), controlplane: cp.URL}
+	h.auth = testAuth(cp)
 	m := &model{name: "kimi-k3", context: 8192, client: &http.Client{Transport: &callerAuth{inner: server.Client().Transport, usageSecret: "test-usage-secret"}}}
 	h.offer.models = []*model{m}
 	h.autoModel = m
@@ -246,7 +242,7 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 		}
 	})
 
-	key := contentKey{}
+	key := auth.ContentKey{}
 	for i := range key {
 		key[i] = byte(i)
 	}
@@ -277,10 +273,10 @@ func chatTokenOf(user string) string {
 // mintChatToken signs a chat token for user, with edit changing its header
 // or claims.
 func mintChatToken(user string, edit func(header map[string]any, claims jwt.MapClaims)) string {
-	claims := jwt.MapClaims{"iss": testChatIssuer, "sub": user, "aud": chatTokenAudience, "client_id": chatTokenClient, "scope": chatTokenScope, "product": chatTokenProduct,
+	claims := jwt.MapClaims{"iss": testChatIssuer, "sub": user, "aud": auth.ChatTokenAudience, "client_id": auth.ChatTokenClient, "scope": auth.ChatTokenScope, "product": auth.ChatTokenProduct,
 		"iat": time.Now().Unix(), "exp": time.Now().Add(time.Hour).Unix(), "jti": uuid.NewString()}
 	token := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims)
-	token.Header["typ"] = chatTokenType
+	token.Header["typ"] = auth.ChatTokenType
 	if edit != nil {
 		edit(token.Header, claims)
 	}
@@ -292,8 +288,8 @@ func mintChatToken(user string, edit func(header map[string]any, claims jwt.MapC
 }
 
 // chatCredential is the credential a turn from user's client carries.
-func chatCredential(user string) inferenceCredential {
-	return inferenceCredential{Key: secret(chatTokenOf(user)), Expires: api.Now().Add(time.Hour), firstParty: true}
+func chatCredential(user string) auth.Credential {
+	return auth.Credential{Key: auth.Secret(chatTokenOf(user)), Expires: api.Now().Add(time.Hour), FirstParty: true}
 }
 
 // signIn sends a request as user, with the chat token its client minted, or
@@ -304,14 +300,14 @@ func signIn(r *http.Request, user string) {
 		return
 	}
 	r.Header.Set("Authorization", "Bearer clerk-"+user)
-	r.Header.Set(inferenceKeyHeader, chatTokenOf(user))
+	r.Header.Set(auth.InferenceKeyHeader, chatTokenOf(user))
 }
 
 // unflagged is a control plane that lists no safeguard flags and answers
 // everything else with handler.
 func unflagged(handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == safeguardFlagsPath {
+		if r.URL.Path == auth.SafeguardFlagsPath {
 			io.WriteString(w, `{"flags":[]}`)
 			return
 		}
@@ -406,8 +402,8 @@ func requestOf[T any](in api.Object) *T {
 }
 
 // sendInput is the first turn of a new chat, under an id its client chose.
-func sendInput(key contentKey) api.Object {
-	return api.Object{"key": key.base64(), "threadId": rowID(), "clientRequestId": uuid.NewString(), "content": "test message", "kind": "send", "options": api.Object{"model": "kimi-k3", "webSearch": false}}
+func sendInput(key auth.ContentKey) api.Object {
+	return api.Object{"key": keyBase64(key), "threadId": rowID(), "clientRequestId": uuid.NewString(), "content": "test message", "kind": "send", "options": api.Object{"model": "kimi-k3", "webSearch": false}}
 }
 
 // event is a frame as a test reads it: the members of every event type in
@@ -477,10 +473,10 @@ func TestManagedTurnStoresV2AndKeepsKeyOutOfEvents(t *testing.T) {
 	if events[0].Type != "RUN_STARTED" || events[len(events)-1].Type != "RUN_FINISHED" {
 		t.Fatalf("wrong lifecycle: %v", events)
 	}
-	if strings.Contains(response.Body.String(), key.base64()) {
+	if strings.Contains(response.Body.String(), keyBase64(key)) {
 		t.Fatal("secret in events")
 	}
-	row, err := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
+	row, err := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -491,14 +487,14 @@ func TestManagedTurnStoresV2AndKeepsKeyOutOfEvents(t *testing.T) {
 	if assistant := chat.Messages[1]; assistant.Content != "answer" || len(assistant.Timeline) != 2 {
 		t.Fatalf("v2 message not preserved: %+v", assistant)
 	}
-	wrong := postRoute(h, "/v1/threads/follow", api.Object{"key": key.base64(), "threadId": events[0].ThreadID, "runId": events[0].RunID}, "bob")
+	wrong := postRoute(h, "/v1/threads/follow", api.Object{"key": keyBase64(key), "threadId": events[0].ThreadID, "runId": events[0].RunID}, "bob")
 	if wrong.Code != 404 {
 		t.Fatalf("foreign user followed: %d", wrong.Code)
 	}
 }
 func TestFirstTurnUsesProjectAndPreset(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	p := &principal{ID: "alice"}
+	p := &auth.Principal{ID: "alice"}
 	rows.rows[rowMapKey(p, "project", "project-1")] = storedRow{ID: "project-1", ETag: "1", Data: api.Raw(api.Object{"name": "Research", "systemInstructions": "Use this project"})}
 	input := sendInput(key)
 	input["projectId"], input["presetId"] = "project-1", "builtin:tutor"
@@ -530,7 +526,7 @@ func TestACloudAskReadsTheChatsSettingsAndProject(t *testing.T) {
 		systems <- api.Str(api.Obj(lastRequest(r)[0])["content"])
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"side answer\"}}]}\n\ndata: [DONE]\n\n")
 	})
-	p := &principal{ID: "alice"}
+	p := &auth.Principal{ID: "alice"}
 	rows.rows[rowMapKey(p, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(api.Object{"nickname": "Sam"})}
 	rows.rows[rowMapKey(p, "project", "project-1")] = storedRow{ID: "project-1", ETag: "1", Data: api.Raw(api.Object{"name": "Research", "systemInstructions": "Cite the lab notebook"})}
 	storedThread(rows, "alice", "chat-1")
@@ -551,10 +547,10 @@ func TestACloudAskReadsTheChatsSettingsAndProject(t *testing.T) {
 func TestAProjectUpdateClearsItsColorWithNull(t *testing.T) {
 	h, _, key := testChatHarness(t, nil)
 	var created Project
-	json.Unmarshal(postRoute(h, "/v1/projects/create", api.Object{"key": key.base64(), "name": "Research", "color": "blue"}, "alice").Body.Bytes(), &created)
+	json.Unmarshal(postRoute(h, "/v1/projects/create", api.Object{"key": keyBase64(key), "name": "Research", "color": "blue"}, "alice").Body.Bytes(), &created)
 	stored := func() Project {
 		t.Helper()
-		project, err := h.loadProject(context.Background(), &principal{ID: "alice"}, key, created.ID)
+		project, err := h.loadProject(context.Background(), &auth.Principal{ID: "alice"}, key, created.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -562,7 +558,7 @@ func TestAProjectUpdateClearsItsColorWithNull(t *testing.T) {
 	}
 	update := func(patch api.Object) {
 		t.Helper()
-		patch["key"], patch["id"] = key.base64(), created.ID
+		patch["key"], patch["id"] = keyBase64(key), created.ID
 		if w := postRoute(h, "/v1/projects/update", patch, "alice"); w.Code != 200 {
 			t.Fatalf("update %v: HTTP %d %s", patch, w.Code, w.Body.String())
 		}
@@ -575,7 +571,7 @@ func TestAProjectUpdateClearsItsColorWithNull(t *testing.T) {
 	if project := stored(); project.Name != "Renamed" || project.Color != nil {
 		t.Fatalf("a null color left the project as %+v", project)
 	}
-	if w := postRoute(h, "/v1/projects/update", api.Object{"key": key.base64(), "id": created.ID, "color": 5}, "alice"); w.Code != 400 {
+	if w := postRoute(h, "/v1/projects/update", api.Object{"key": keyBase64(key), "id": created.ID, "color": 5}, "alice"); w.Code != 400 {
 		t.Fatalf("a color that is not a string: HTTP %d", w.Code)
 	}
 }
@@ -588,13 +584,13 @@ func TestNewChatsStartWithTheDefaultPromptPreset(t *testing.T) {
 	})
 	pirate := api.Object{"id": "user:pirate", "name": "Pirate", "description": "", "systemPrompt": "Answer like a pirate.", "createdAt": 1, "updatedAt": 1, "model": "kimi-k3", "webSearchEnabled": false}
 	for _, patch := range []api.Object{{"defaultPromptPresetId": 1}, {"customPromptPresets": []any{api.Object{"id": "user:x", "name": "X", "model": 3}}}, {"customPromptPresets": []any{api.Object{"id": "user:x", "name": "X", "webSearchEnabled": "no"}}}} {
-		if w := postRoute(h, "/v1/profile/update", api.Object{"key": key.base64(), "patch": patch}, "alice"); w.Code != 400 {
+		if w := postRoute(h, "/v1/profile/update", api.Object{"key": keyBase64(key), "patch": patch}, "alice"); w.Code != 400 {
 			t.Fatalf("profile accepted %v: %d", patch, w.Code)
 		}
 	}
 	update := func(patch api.Object) api.Object {
 		t.Helper()
-		w := postRoute(h, "/v1/profile/update", api.Object{"key": key.base64(), "patch": patch}, "alice")
+		w := postRoute(h, "/v1/profile/update", api.Object{"key": keyBase64(key), "patch": patch}, "alice")
 		if w.Code != 200 {
 			t.Fatalf("profile update: %d %s", w.Code, w.Body.String())
 		}
@@ -609,7 +605,7 @@ func TestNewChatsStartWithTheDefaultPromptPreset(t *testing.T) {
 	turn := func(in api.Object) (*string, string) {
 		t.Helper()
 		events := finishedRun(t, h, "/v1/threads/turn", in)
-		row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
+		row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
 		return mustRead(readThreadRow(row)).PresetID, <-systems
 	}
 	if preset, system := turn(sendInput(key)); valueOr(preset, "") != "user:pirate" || system != "Answer like a pirate." {
@@ -648,14 +644,14 @@ func windowIDs(t *testing.T, w *httptest.ResponseRecorder) []string {
 
 func TestDeletingAMessageRemovesOnlyThatMessage(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	p := &principal{ID: "alice"}
+	p := &auth.Principal{ID: "alice"}
 	// The web client stores messages without ids, so they are shown with ids from their positions.
 	rows.rows[rowMapKey(p, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: api.Raw(api.Object{"title": "Old", "messages": []any{
 		api.Object{"role": "user", "content": "one", "imageData": []any{api.Object{"base64": "aW1hZ2U=", "mimeType": "image/png"}}}, api.Object{"role": "assistant", "content": "two"}, api.Object{"role": "user", "content": "three"}, api.Object{"role": "assistant", "content": "four"},
 	}})}
 	rows.rows[rowMapKey(p, "chat", "solo")] = storedRow{ID: "solo", ETag: "1", Data: api.Raw(api.Object{"messages": []any{api.Object{"id": "only", "role": "user", "content": "hi"}}})}
 	remove := func(thread, message string) *httptest.ResponseRecorder {
-		return postRoute(h, "/v1/threads/messages/delete", api.Object{"key": key.base64(), "threadId": thread, "messageId": message}, "alice")
+		return postRoute(h, "/v1/threads/messages/delete", api.Object{"key": keyBase64(key), "threadId": thread, "messageId": message}, "alice")
 	}
 	for _, tc := range []struct {
 		thread, message string
@@ -691,7 +687,7 @@ func TestDeletingAMessageRemovesOnlyThatMessage(t *testing.T) {
 func TestADeadRunNeverLocksItsChat(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	fake := newFakeSync(t, h)
-	p := &principal{ID: "alice"}
+	p := &auth.Principal{ID: "alice"}
 	recent := api.Now().Add(time.Hour).Format(time.RFC3339Nano)
 	runs := map[string]api.Object{
 		"stale":     {"runId": "dead", "instance": instanceID, "lastEventId": 7, "expiresAt": api.Now().Add(-time.Minute).Format(time.RFC3339Nano)},
@@ -709,7 +705,7 @@ func TestADeadRunNeverLocksItsChat(t *testing.T) {
 	var list struct {
 		Threads []api.Object `json:"threads"`
 	}
-	json.Unmarshal(postRoute(h, "/v1/threads/list", api.Object{"key": key.base64()}, "alice").Body.Bytes(), &list)
+	json.Unmarshal(postRoute(h, "/v1/threads/list", api.Object{"key": keyBase64(key)}, "alice").Body.Bytes(), &list)
 	hints := map[string]any{}
 	for _, thread := range list.Threads {
 		hints[api.Str(thread["id"])] = thread["activeRun"]
@@ -718,14 +714,14 @@ func TestADeadRunNeverLocksItsChat(t *testing.T) {
 		t.Fatalf("summaries report %v", hints)
 	}
 	for _, id := range []string{"stale", "recent"} {
-		in := api.Object{"key": key.base64(), "threadId": id, "messageId": "m2"}
-		if w := postRoute(h, "/v1/threads/messages/update", api.Object{"key": key.base64(), "threadId": id, "messageId": "m2", "content": "edited"}, "alice"); w.Code != 200 {
+		in := api.Object{"key": keyBase64(key), "threadId": id, "messageId": "m2"}
+		if w := postRoute(h, "/v1/threads/messages/update", api.Object{"key": keyBase64(key), "threadId": id, "messageId": "m2", "content": "edited"}, "alice"); w.Code != 200 {
 			t.Fatalf("%s: editing a reply: HTTP %d %s", id, w.Code, w.Body.String())
 		}
 		if w := postRoute(h, "/v1/threads/fork", in, "alice"); w.Code != 200 {
 			t.Fatalf("%s: forking: HTTP %d %s", id, w.Code, w.Body.String())
 		}
-		if w := postRoute(h, "/v1/threads/transcript", api.Object{"key": key.base64(), "threadId": id}, "alice"); w.Code != 200 {
+		if w := postRoute(h, "/v1/threads/transcript", api.Object{"key": keyBase64(key), "threadId": id}, "alice"); w.Code != 200 {
 			t.Fatalf("%s: moving to the device: HTTP %d %s", id, w.Code, w.Body.String())
 		}
 		edit := continueInput(key, id)
@@ -736,7 +732,7 @@ func TestADeadRunNeverLocksItsChat(t *testing.T) {
 			t.Fatalf("%s: the turn stored %s", id, row.Data)
 		}
 		finishedRun(t, h, "/v1/threads/turn", continueInput(key, id))
-		if w := postRoute(h, "/v1/threads/delete", api.Object{"key": key.base64(), "id": id}, "alice"); w.Code != 200 {
+		if w := postRoute(h, "/v1/threads/delete", api.Object{"key": keyBase64(key), "id": id}, "alice"); w.Code != 200 {
 			t.Fatalf("%s: deleting: HTTP %d %s", id, w.Code, w.Body.String())
 		}
 		if _, err := rows.load(context.Background(), p, key, "chat", id); api.AsError(err).HTTP != 404 {
@@ -750,7 +746,7 @@ func TestADeadRunNeverLocksItsChat(t *testing.T) {
 
 func TestEditingAReplyCollapsesItsText(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	p := &principal{ID: "alice"}
+	p := &auth.Principal{ID: "alice"}
 	call := api.Object{"id": "call", "type": "tool_call", "toolCallId": "call", "name": "render_clock", "arguments": "{}"}
 	search := api.Object{"query": "weather", "status": "completed"}
 	code, widget := api.Object{"id": "x1", "toolName": "bash", "arguments": api.Object{"command": "date"}, "output": "Mon", "status": "completed"}, api.Object{"id": "w1", "name": "render_clock", "arguments": "{}"}
@@ -761,7 +757,7 @@ func TestEditingAReplyCollapsesItsText(t *testing.T) {
 		api.Object{"id": "a2", "role": "assistant", "content": "Sunny.", "thoughts": "look it up", "thinkingDuration": 3, "webSearch": search, "codeExecCalls": []any{code}, "toolCalls": []any{widget}},
 	}})}
 	update := func(message string, content any) *httptest.ResponseRecorder {
-		return postRoute(h, "/v1/threads/messages/update", api.Object{"key": key.base64(), "threadId": "chat-1", "messageId": message, "content": content}, "alice")
+		return postRoute(h, "/v1/threads/messages/update", api.Object{"key": keyBase64(key), "threadId": "chat-1", "messageId": message, "content": content}, "alice")
 	}
 	if w := update("u1", "edited question"); w.Code != 400 {
 		t.Fatalf("a question was edited in place: %d", w.Code)
@@ -804,7 +800,7 @@ func TestAnEditKeepsTheTextAndQuoteItOmits(t *testing.T) {
 		questions <- api.Str(api.Obj(messages[len(messages)-2])["content"])
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"New answer\"}}]}\n\ndata: [DONE]\n\n")
 	})
-	p := &principal{ID: "alice"}
+	p := &auth.Principal{ID: "alice"}
 	for _, tc := range []struct {
 		content, quote any // nil leaves the field out of the edit
 		stored, quoted string
@@ -840,7 +836,7 @@ func TestAnEditKeepsTheTextAndQuoteItOmits(t *testing.T) {
 	}
 }
 
-func continueTurn(key contentKey, thread, message string) api.Object {
+func continueTurn(key auth.ContentKey, thread, message string) api.Object {
 	in := sendInput(key)
 	in["threadId"], in["kind"] = thread, "continue"
 	delete(in, "content")
@@ -857,7 +853,7 @@ func poemThread(rows *memoryRows, id string, more ...any) {
 		api.Object{"id": "a1", "role": "assistant", "content": "Roses are red,", "createdAt": "2026-01-01T00:00:01Z", "isInterrupted": true, "thoughts": "rhyme",
 			"timeline": []any{api.Object{"id": "t1", "type": "thinking", "content": "rhyme"}, api.Object{"id": "c1", "type": "content", "content": "Roses are red,"}}},
 	}, more...)
-	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", id)] = storedRow{ID: id, ETag: "1", Data: api.Raw(api.Object{"title": "Poem", "titleState": "manual", "model": "kimi-k3", "createdAt": "2026-01-01T00:00:00Z", "messages": messages})}
+	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", id)] = storedRow{ID: id, ETag: "1", Data: api.Raw(api.Object{"title": "Poem", "titleState": "manual", "model": "kimi-k3", "createdAt": "2026-01-01T00:00:00Z", "messages": messages})}
 }
 
 func TestContinueExtendsTheStoredReplyItNames(t *testing.T) {
@@ -897,7 +893,7 @@ func TestContinueExtendsTheStoredReplyItNames(t *testing.T) {
 	if replies := api.Arr(api.Obj(decodeValue(events[len(events)-1].Metadata))["messages"]); len(replies) != 1 || api.Obj(replies[0])["id"] != "a1" || api.Obj(replies[0])["isInterrupted"] != false {
 		t.Fatalf("the run committed %v", replies)
 	}
-	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", "chat-1")
+	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
 	messages := mustRead(readThreadRow(row)).Messages
 	reply := messages[len(messages)-1]
 	want := []Block{{ID: "t1", Type: "thinking", Content: "rhyme"}, {ID: "c1", Type: "content", Content: "Roses are red, violets are blue."}}
@@ -975,14 +971,14 @@ func TestAContinuedReplyKeepsItsCitations(t *testing.T) {
 		io.WriteString(w, "data: "+string(api.Raw(api.Object{"choices": []api.Object{{"delta": api.Object{"content": " Also [B](https://b.test)."}}}}))+"\n\ndata: [DONE]\n\n")
 	})
 	cited := api.Object{"type": "url_citation", "url_citation": api.Object{"url": "https://a.test/1", "title": "Earlier title", "start_index": 5, "end_index": 6}}
-	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: api.Raw(api.Object{"title": "Sources", "titleState": "manual", "model": "kimi-k3", "messages": []any{
+	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: api.Raw(api.Object{"title": "Sources", "titleState": "manual", "model": "kimi-k3", "messages": []any{
 		api.Object{"id": "u1", "role": "user", "content": "Sources?"},
 		api.Object{"id": "a1", "role": "assistant", "content": "See [A](https://a.test/1).", "timeline": []any{api.Object{"id": "c1", "type": "content", "content": "See [A](https://a.test/1)."}}, "annotations": []any{cited}},
 	}})}
 	in := continueTurn(key, "chat-1", "a1")
 	api.Obj(in["options"])["webSearch"] = true
 	finishedRun(t, h, "/v1/threads/turn", in)
-	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", "chat-1")
+	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
 	reply := mustRead(readThreadRow(row)).Messages[1]
 	text := "See [A](https://a.test/1). Also [B](https://b.test)."
 	start := strings.Index(text, "[B]") + 1
@@ -1038,7 +1034,7 @@ func TestCancelCommitsPartialAndEndsQueue(t *testing.T) {
 		w.(http.Flusher).Flush()
 		<-r.Context().Done()
 	})
-	p := &principal{ID: "alice", JWT: "clerk-alice"}
+	p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
 	in := sendInput(key)
 	run, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](in))
 	if err != nil {
@@ -1056,7 +1052,7 @@ func TestCancelCommitsPartialAndEndsQueue(t *testing.T) {
 		return next
 	}
 	next, after := queue(), queue()
-	_, err = h.cancelThread(context.Background(), p, key, requestOf[runRequest](api.Object{"key": key.base64(), "threadId": run.thread.id, "runId": run.log.id}))
+	_, err = h.cancelThread(context.Background(), p, key, requestOf[runRequest](api.Object{"key": keyBase64(key), "threadId": run.thread.id, "runId": run.log.id}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1099,7 +1095,7 @@ func TestCancelCommitsPartialAndEndsQueue(t *testing.T) {
 	if m := messages[1]; m.Content != "partial" || !valueOr(m.IsInterrupted, false) {
 		t.Fatalf("partial output not kept and marked interrupted: %v", m)
 	}
-	ended := api.Object{"key": key.base64(), "threadId": run.thread.id, "queueId": next.log.id}
+	ended := api.Object{"key": keyBase64(key), "threadId": run.thread.id, "queueId": next.log.id}
 	if _, err := h.sendQueued(context.Background(), p, key, requestOf[runRequest](ended)); api.AsError(err).Code != "RUN_NOT_FOUND" {
 		t.Fatalf("sending the ended turn: %v", err)
 	}
@@ -1154,7 +1150,7 @@ func prioritySend(t *testing.T, when string) {
 		}
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n")
 	})
-	p := &principal{ID: "alice", JWT: "clerk-alice"}
+	p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
 	run, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
@@ -1190,12 +1186,12 @@ func prioritySend(t *testing.T, when string) {
 		}
 	}
 	if when == whileCommitting {
-		if _, err := h.cancelThread(context.Background(), p, key, requestOf[runRequest](api.Object{"key": key.base64(), "threadId": run.thread.id, "runId": run.log.id})); err != nil {
+		if _, err := h.cancelThread(context.Background(), p, key, requestOf[runRequest](api.Object{"key": keyBase64(key), "threadId": run.thread.id, "runId": run.log.id})); err != nil {
 			t.Fatal(err)
 		}
 		<-committing
 	}
-	if _, err := h.sendQueued(context.Background(), p, key, requestOf[runRequest](api.Object{"key": key.base64(), "threadId": run.thread.id, "queueId": second.log.id})); err != nil {
+	if _, err := h.sendQueued(context.Background(), p, key, requestOf[runRequest](api.Object{"key": keyBase64(key), "threadId": run.thread.id, "queueId": second.log.id})); err != nil {
 		t.Fatal(err)
 	}
 	release()
@@ -1214,7 +1210,7 @@ func prioritySend(t *testing.T, when string) {
 
 func TestCASReappliesPatchToTheChangedRow(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	p := &principal{ID: "alice"}
+	p := &auth.Principal{ID: "alice"}
 	rows.rows[rowMapKey(p, "chat", "existing")] = storedRow{ID: "existing", ETag: "7", Data: api.Raw(api.Object{"title": "old", "messages": []any{}})}
 	rows.conflict = func(row *storedRow) {
 		editRow(row, func(data api.Object) {
@@ -1235,14 +1231,14 @@ func TestCASReappliesPatchToTheChangedRow(t *testing.T) {
 }
 func TestSyncWireCarriesJWTProtocolAndBase64(t *testing.T) {
 	key := randomKey()
-	p := &principal{ID: "alice", JWT: "session-jwt"}
+	p := &auth.Principal{ID: "alice", JWT: "session-jwt"}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Sync-Protocol") != "3" || r.Header.Get("Authorization") != "Bearer session-jwt" {
 			t.Errorf("wrong sync auth: %v", r.Header)
 		}
 		var in api.Object
 		json.NewDecoder(r.Body).Decode(&in)
-		if in["key"] != key.base64() {
+		if in["key"] != keyBase64(key) {
 			t.Error("wrong key")
 		}
 		plaintext, err := base64.StdEncoding.DecodeString(api.Str(in["plaintext"]))
@@ -1363,7 +1359,7 @@ func serveWebsearch(t *testing.T, respond func(name string, args map[string]any)
 	return recorded
 }
 
-func searchInput(key contentKey) api.Object {
+func searchInput(key auth.ContentKey) api.Object {
 	in := sendInput(key)
 	api.Obj(in["options"])["webSearch"] = true
 	return in
@@ -1743,7 +1739,7 @@ func TestReasoningPrecedesTheAnswerItArrivesWith(t *testing.T) {
 	if !reflect.DeepEqual(order, []string{"REASONING_MESSAGE_CHUNK", "TEXT_MESSAGE_CHUNK"}) {
 		t.Fatalf("streamed %v", order)
 	}
-	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
+	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
 	timeline := mustRead(readThreadRow(row)).Messages[1].Timeline
 	if len(timeline) != 2 || timeline[0].Type != "thinking" || timeline[1].Type != "content" {
 		t.Fatalf("stored timeline %+v", timeline)
@@ -1783,7 +1779,7 @@ func TestAModelChunkOverAMebibyteIsRead(t *testing.T) {
 		io.WriteString(w, "data: "+string(api.Raw(api.Object{"choices": []api.Object{{"delta": api.Object{"content": answer}}}}))+"\n\ndata: [DONE]\n\n")
 	})
 	events := finishedRun(t, h, "/v1/threads/turn", sendInput(key))
-	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
+	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
 	if mustRead(readThreadRow(row)).Messages[1].Content != answer {
 		t.Fatal("the large chunk was not read whole")
 	}
@@ -1899,7 +1895,7 @@ func TestACompletedFirstPartyChatIsScreenedOnce(t *testing.T) {
 			drained := screenedBy(t, h)
 			in, history := sendInput(key), []safeguardMessage{{Role: "user", Content: "test message"}}
 			if kind == "ask" {
-				rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "source")] = storedRow{ID: "source", ETag: "1", Data: api.Raw(api.Object{"title": "Source", "messages": []any{
+				rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", "source")] = storedRow{ID: "source", ETag: "1", Data: api.Raw(api.Object{"title": "Source", "messages": []any{
 					api.Object{"id": "q", "role": "user", "content": "earlier question"}, api.Object{"id": "a", "role": "assistant", "content": "earlier answer"}}})}
 				in["kind"], in["threadId"], in["quote"] = "ask", "source", "what does this mean?"
 				delete(in, "content")
@@ -1963,7 +1959,7 @@ func TestAnswersAnnotateTheSourcesTheyCite(t *testing.T) {
 		io.WriteString(w, "data: "+string(api.Raw(api.Object{"choices": []api.Object{{"delta": api.Object{"content": answer}}}}))+"\n\ndata: [DONE]\n\n")
 	})
 	events := finishedRun(t, h, "/v1/threads/turn", searchInput(key))
-	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
+	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
 	cite := func(url, title, label string) any {
 		start := strings.Index(answer, "["+label+"]") + 1
 		return map[string]any{"type": "url_citation", "url_citation": map[string]any{"url": url, "title": title, "start_index": float64(start), "end_index": float64(start + len(label))}}
@@ -1977,7 +1973,7 @@ func TestAnswersAnnotateTheSourcesTheyCite(t *testing.T) {
 		t.Fatalf("the run committed annotations %v", got)
 	}
 	var stored api.Object
-	json.Unmarshal(postRoute(h, "/v1/threads/get", api.Object{"key": key.base64(), "id": events[0].ThreadID}, "alice").Body.Bytes(), &stored)
+	json.Unmarshal(postRoute(h, "/v1/threads/get", api.Object{"key": keyBase64(key), "id": events[0].ThreadID}, "alice").Body.Bytes(), &stored)
 	if got := api.Obj(api.Arr(stored["messages"])[1])["annotations"]; !reflect.DeepEqual(got, any(want)) {
 		t.Fatalf("the stored chat shows annotations %v", got)
 	}
@@ -1998,7 +1994,7 @@ func TestCutModelStreamDoesNotCompleteItsToolCall(t *testing.T) {
 			t.Fatal("a cut stream closed its truncated tool call")
 		}
 	}
-	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
+	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
 	block := mustRead(readThreadRow(row)).Messages[1].Timeline[0]
 	if block.Arguments != `{"query":"ca` || block.Complete {
 		t.Fatalf("truncated arguments stored as complete: %+v", block)
@@ -2017,4 +2013,15 @@ func TestBusySlotTellsTheClientWhenToRetry(t *testing.T) {
 	if w.Code != 503 || w.Header().Get("Retry-After") != "5" || body.Error.RetryAfter != 5 {
 		t.Fatalf("HTTP %d Retry-After %q: %s", w.Code, w.Header().Get("Retry-After"), w.Body.String())
 	}
+}
+
+// testAuth checks callers as the test harness does, against the control
+// plane cp stands in for: a Clerk session is "clerk-" and the user's name.
+func testAuth(cp *httptest.Server) *auth.Authenticator {
+	return auth.Configured(auth.Config{Verify: func(_ context.Context, s string) (string, error) {
+		if !strings.HasPrefix(s, "clerk-") {
+			return "", errors.New("bad session")
+		}
+		return strings.TrimPrefix(s, "clerk-"), nil
+	}, ChatKeys: func(*jwt.Token) (any, error) { return testChatKeys().Public(), nil }, ChatIssuer: testChatIssuer, Client: cp.Client(), Controlplane: cp.URL})
 }

@@ -14,12 +14,13 @@ import (
 
 	"github.com/tiktoken-go/tokenizer"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"golang.org/x/text/language"
 	"golang.org/x/text/language/display"
 )
 
 type request struct {
-	refreshAuth                func(context.Context) (inferenceCredential, error)
+	refreshAuth                func(context.Context) (auth.Credential, error)
 	params                     api.Object
 	system, widgetHint, policy string
 	window                     int
@@ -43,10 +44,10 @@ type request struct {
 // credential it sees: the client's secret, or the chat id, which never
 // leaves the enclaves. Signed-out callers behind one address hold the same
 // free key, so neither is the key alone.
-func cacheScope(p *principal, threadID, clientSecret string) string {
-	scope := p.scope() + "\x00client:" + clientSecret
+func cacheScope(p *auth.Principal, threadID, clientSecret string) string {
+	scope := p.Scope() + "\x00client:" + clientSecret
 	if clientSecret == "" {
-		scope = p.scope() + "\x00thread:" + threadID
+		scope = p.Scope() + "\x00thread:" + threadID
 	}
 	sum := sha256.Sum256([]byte("confidential-tinfoil-harness cache scope\x00" + scope))
 	return hex.EncodeToString(sum[:])

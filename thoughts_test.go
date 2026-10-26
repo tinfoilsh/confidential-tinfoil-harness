@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 // modelReasoning is one chunk of reasoning a model streams.
@@ -65,7 +66,7 @@ func TestAThinkingReplysReasoningIsSummarized(t *testing.T) {
 		}))
 		t.Cleanup(summarizer.Close)
 		h.services["summarizer"] = &downstreamService{URL: summarizer.URL, Client: summarizer.Client()}
-		run, err := h.acceptTurn(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
+		run, err := h.acceptTurn(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -105,7 +106,7 @@ func TestAThinkingReplysReasoningIsSummarized(t *testing.T) {
 		if len(summaries) != 1 || summaries[0].MessageID != reply.ID || summaries[0].BlockID != reply.ID+"_thinking_0" || string(summaries[0].Content) != `"Weighing options"` {
 			t.Fatalf("the run sent summaries %+v for reply %s", summaries, reply.ID)
 		}
-		if row := rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", run.thread.id)]; strings.Contains(string(row.Data), "Weighing options") {
+		if row := rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", run.thread.id)]; strings.Contains(string(row.Data), "Weighing options") {
 			t.Fatalf("the summary was stored: %s", row.Data)
 		}
 	}

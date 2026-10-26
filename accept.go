@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 // errAlreadyApplied answers a retried request whose turn its chat holds, once
@@ -18,7 +19,7 @@ const maxQueuedTurns = 32
 // quota, which stays as it was.
 var errQueueFull = api.Err(429, "QUEUE_FULL", "The turn queue is full")
 
-func (h *harness) acceptTurn(ctx context.Context, p *principal, credential inferenceCredential, key contentKey, in *turnRequest) (*chatRun, error) {
+func (h *harness) acceptTurn(ctx context.Context, p *auth.Principal, credential auth.Credential, key auth.ContentKey, in *turnRequest) (*chatRun, error) {
 	defer clear(key[:])
 	in.ClearKey()
 	nonce, digest := in.ClientRequestID, in.digest()
@@ -59,7 +60,7 @@ func (h *harness) acceptTurn(ctx context.Context, p *principal, credential infer
 			}
 		}
 		if previous.refused == nil {
-			if !previous.thread.keyless && previous.thread.keyHash != key.fingerprint() {
+			if !previous.thread.keyless && previous.thread.keyHash != key.Fingerprint() {
 				return nil, api.Err(409, "REVISION_CONFLICT", "The request nonce was already used")
 			}
 			// A run that ended meanwhile is checked against the chat as a
@@ -112,12 +113,12 @@ func quotaExhausted(limit api.RateLimit) error {
 
 // withQuota gives a refusal for an exhausted quota the caller's quota as the
 // refusal leaves it. A signed-out caller's is the one its request held.
-func (h *harness) withQuota(p *principal, held api.RateLimit, err error) error {
+func (h *harness) withQuota(p *auth.Principal, held api.RateLimit, err error) error {
 	var e *api.Error
 	if p == nil || !errors.As(err, &e) || e.Code != "QUOTA_EXHAUSTED" || e.RateLimit != nil {
 		return err
 	}
-	refused, limit := *e, exhausted(p, held)
+	refused, limit := *e, auth.Exhausted(p, held)
 	refused.RateLimit = &limit
 	return &refused
 }
@@ -137,7 +138,7 @@ func askThread(id string, source *Thread) *threadRow {
 
 // admit gives a turn its chat: it starts now if the chat has no running
 // reply, or waits in the chat's queue.
-func (h *harness) admit(ctx context.Context, p *principal, credential inferenceCredential, key contentKey, in *turnRequest, r *chatRun) error {
+func (h *harness) admit(ctx context.Context, p *auth.Principal, credential auth.Credential, key auth.ContentKey, in *turnRequest, r *chatRun) error {
 	defer clear(key[:])
 	if credential.Limit.Exhausted() {
 		return quotaExhausted(credential.Limit)
@@ -224,7 +225,7 @@ func (h *harness) admit(ctx context.Context, p *principal, credential inferenceC
 	s := h.live.threads[liveKey(p, id)]
 	// An ask's run holds its row, as a device chat's does.
 	held := local || source != nil
-	if s != nil && (s.deleted || s.local != held || !s.keyless && s.keyHash != key.fingerprint()) {
+	if s != nil && (s.deleted || s.local != held || !s.keyless && s.keyHash != key.Fingerprint()) {
 		return api.Err(404, "THREAD_NOT_FOUND", "The thread is unavailable")
 	}
 	if s != nil && s.active != nil && len(s.queue) >= maxQueuedTurns {
@@ -234,7 +235,7 @@ func (h *harness) admit(ctx context.Context, p *principal, credential inferenceC
 		return api.Err(400, "BAD_REQUEST", "A local thread requires its transcript")
 	}
 	if s == nil {
-		s = &threadSession{id: id, owner: p.scope(), keyHash: key.fingerprint(), local: held, keyless: keyless}
+		s = &threadSession{id: id, owner: p.Scope(), keyHash: key.Fingerprint(), local: held, keyless: keyless}
 		h.live.threads[liveKey(p, id)] = s
 	}
 	r.thread = s

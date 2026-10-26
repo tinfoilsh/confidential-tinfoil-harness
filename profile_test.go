@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 // oldProfile is settings an old client stored: a custom default prompt, an
@@ -45,12 +46,12 @@ func presetsByID(profile api.Object) map[string]api.Object {
 
 func TestAStoredProfileReadsUpgradedAndKeepsTheUpgradeOnceChanged(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	p := &principal{ID: "alice"}
+	p := &auth.Principal{ID: "alice"}
 	stored := oldProfile()
 	stored["updatedAt"] = "2026-01-02T03:04:05Z"
 	rows.rows[rowMapKey(p, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(stored)}
 	get := func() api.Object {
-		return profileOf(t, postRoute(h, "/v1/profile/get", api.Object{"key": key.base64()}, "alice"))
+		return profileOf(t, postRoute(h, "/v1/profile/get", api.Object{"key": keyBase64(key)}, "alice"))
 	}
 	profile := get()
 	presets := presetsByID(profile)
@@ -69,13 +70,13 @@ func TestAStoredProfileReadsUpgradedAndKeepsTheUpgradeOnceChanged(t *testing.T) 
 		t.Fatalf("a second read upgraded differently:\n%v\n%v", again, profile)
 	}
 	// A profile without a date dates its migrated prompt the same on every read.
-	rows.rows[rowMapKey(&principal{ID: "bob"}, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(oldProfile())}
-	undated := profileOf(t, postRoute(h, "/v1/profile/get", api.Object{"key": key.base64()}, "bob"))
+	rows.rows[rowMapKey(&auth.Principal{ID: "bob"}, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(oldProfile())}
+	undated := profileOf(t, postRoute(h, "/v1/profile/get", api.Object{"key": keyBase64(key)}, "bob"))
 	if created := presetsByID(undated)[migratedPromptPresetID]["createdAt"]; created != float64(0) {
 		t.Fatalf("an undated profile's migrated prompt is dated %v", created)
 	}
 	// Removing the migrated prompt stores the upgrade, so it does not return.
-	w := postRoute(h, "/v1/profile/update", api.Object{"key": key.base64(), "patch": api.Object{"customPromptPresets": []any{presets["user:kept"]}}}, "alice")
+	w := postRoute(h, "/v1/profile/update", api.Object{"key": keyBase64(key), "patch": api.Object{"customPromptPresets": []any{presets["user:kept"]}}}, "alice")
 	if presets := presetsByID(profileOf(t, w)); len(presets) != 1 {
 		t.Fatalf("the update answered with prompts %v", presets)
 	}
@@ -100,7 +101,7 @@ func TestADeviceProfileUpgradesAsAStoredOneReads(t *testing.T) {
 	if _, thinking := session.ProfileDefaults["thinkingEnabled"]; thinking || session.ProfileDefaults["piiCheckEnabled"] != true || session.ProfileDefaults["selectedModel"] != "auto" {
 		t.Fatalf("the session defaults are %v", session.ProfileDefaults)
 	}
-	if empty := profileOf(t, postRoute(h, "/v1/profile/get", api.Object{"key": key.base64()}, "alice")); !reflect.DeepEqual(empty, session.ProfileDefaults) {
+	if empty := profileOf(t, postRoute(h, "/v1/profile/get", api.Object{"key": keyBase64(key)}, "alice")); !reflect.DeepEqual(empty, session.ProfileDefaults) {
 		t.Fatalf("an empty profile reads as\n%v\nnot the session's defaults\n%v", empty, session.ProfileDefaults)
 	}
 	device := oldProfile()
@@ -143,10 +144,10 @@ func TestADeviceTurnDropsInvalidProfileFields(t *testing.T) {
 // whether a chat searches.
 func TestTheWebSearchSettingOfAnOldProfileIsKept(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	p := &principal{ID: "alice"}
+	p := &auth.Principal{ID: "alice"}
 	rows.rows[rowMapKey(p, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(api.Object{"webSearchAvailable": false, "webSearchEnabled": true})}
 	get := func(user string) api.Object {
-		return profileOf(t, postRoute(h, "/v1/profile/get", api.Object{"key": key.base64()}, user))
+		return profileOf(t, postRoute(h, "/v1/profile/get", api.Object{"key": keyBase64(key)}, user))
 	}
 	if got := get("alice"); got["webSearchAvailable"] != false || got["webSearchEnabled"] != true {
 		t.Fatalf("the old profile read as %v", got)
@@ -154,7 +155,7 @@ func TestTheWebSearchSettingOfAnOldProfileIsKept(t *testing.T) {
 	if got := get("bob"); got["webSearchAvailable"] != true {
 		t.Fatalf("an unset web search setting read as %v", got["webSearchAvailable"])
 	}
-	w := postRoute(h, "/v1/profile/update", api.Object{"key": key.base64(), "patch": api.Object{"webSearchAvailable": true}}, "alice")
+	w := postRoute(h, "/v1/profile/update", api.Object{"key": keyBase64(key), "patch": api.Object{"webSearchAvailable": true}}, "alice")
 	row, _ := rows.load(context.Background(), p, key, "profile", "profile")
 	if got := profileOf(t, w); got["webSearchAvailable"] != true || rowJSON(row)["webSearchAvailable"] != true {
 		t.Fatalf("the update answered %v and stored %v", got, rowJSON(row))

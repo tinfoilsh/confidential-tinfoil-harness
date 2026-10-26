@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 // Moving a chat between the cloud and the device keeps its id, as the web
@@ -16,7 +17,7 @@ import (
 // threadTranscript is a stored chat in the form the device keeps: every
 // attachment's content inline and no server bookkeeping. It refuses when any
 // attachment cannot be read, so moving the chat never loses content.
-func (h *harness) threadTranscript(ctx context.Context, p *principal, key contentKey, in *threadRequest) (any, error) {
+func (h *harness) threadTranscript(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *threadRequest) (any, error) {
 	h.live.mu.Lock()
 	live := h.live.threads[liveKey(p, in.ThreadID)]
 	running := live != nil && (live.active != nil || len(live.queue) > 0)
@@ -70,7 +71,7 @@ func (h *harness) threadTranscript(ctx context.Context, p *principal, key conten
 	}{deviceTranscript{Thread: row.Thread}, row.etag}, nil
 }
 
-func (h *harness) finishTransfer(ctx context.Context, p *principal, key contentKey, in *deleteThreadRequest) error {
+func (h *harness) finishTransfer(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *deleteThreadRequest) error {
 	h.live.mu.Lock()
 	name := liveKey(p, in.ID)
 	s := h.live.threads[name]
@@ -81,7 +82,7 @@ func (h *harness) finishTransfer(ctx context.Context, p *principal, key contentK
 	if h.live.threads == nil {
 		h.live.threads = map[string]*threadSession{}
 	}
-	s = &threadSession{id: in.ID, owner: p.scope(), deleted: true}
+	s = &threadSession{id: in.ID, owner: p.Scope(), deleted: true}
 	h.live.threads[name] = s
 	h.live.mu.Unlock()
 	defer func() {
@@ -97,7 +98,7 @@ func (h *harness) finishTransfer(ctx context.Context, p *principal, key contentK
 // requires; the chat itself is a create, so an existing cloud chat is never
 // overwritten.
 func (h *harness) handleThreadImport(w http.ResponseWriter, r *http.Request) {
-	p, err := h.auth.authenticate(r, false)
+	p, err := h.auth.Authenticate(r, false)
 	if err != nil {
 		api.Respond(w, nil, err)
 		return
@@ -114,7 +115,7 @@ func (h *harness) handleThreadImport(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, err)
 		return
 	}
-	key, err := decodeContentKey(in.Key)
+	key, err := auth.DecodeContentKey(in.Key)
 	in.ClearKey()
 	if err != nil {
 		api.Respond(w, nil, err)
@@ -125,7 +126,7 @@ func (h *harness) handleThreadImport(w http.ResponseWriter, r *http.Request) {
 	api.Respond(w, result, err)
 }
 
-func (h *harness) importThread(ctx context.Context, p *principal, key contentKey, in *threadImportRequest) (any, error) {
+func (h *harness) importThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *threadImportRequest) (any, error) {
 	if err := in.validate(); err != nil {
 		return nil, err
 	}

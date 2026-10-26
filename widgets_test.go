@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 func TestCanonicalizeWidgetArgumentsRecursive(t *testing.T) {
@@ -155,7 +156,7 @@ func TestEveryViewMarksWidgetArgumentsTheDeclarationRefuses(t *testing.T) {
 	cp := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer cp.Close()
 	h.controlplane, h.cpClient = cp.URL, &http.Client{Transport: &callerAuth{inner: cp.Client().Transport}}
-	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: api.Raw(statsThread())}
+	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: api.Raw(statsThread())}
 	marks := func(view string, messages any) {
 		t.Helper()
 		list := api.Arr(messages)
@@ -179,11 +180,11 @@ func TestEveryViewMarksWidgetArgumentsTheDeclarationRefuses(t *testing.T) {
 		}
 		return api.Obj(decodeValue(w.Body.Bytes()))
 	}
-	marks("the thread view", body(postRoute(h, "/v1/threads/get", api.Object{"key": key.base64(), "id": "chat-1"}, "alice"))["messages"])
+	marks("the thread view", body(postRoute(h, "/v1/threads/get", api.Object{"key": keyBase64(key), "id": "chat-1"}, "alice"))["messages"])
 	events := eventsIn(t, postRoute(h, "/v1/threads/turn", continueInput(key, "chat-1"), "alice"))
 	marks("the run's snapshot", eventOfType(events, "MESSAGES_SNAPSHOT").Messages)
-	marks("the transcript", api.Obj(body(postRoute(h, "/v1/threads/transcript", api.Object{"key": key.base64(), "threadId": "chat-1"}, "alice"))["thread"])["messages"])
-	body(postRoute(h, "/v1/threads/share", api.Object{"key": key.base64(), "threadId": "chat-1"}, "alice"))
+	marks("the transcript", api.Obj(body(postRoute(h, "/v1/threads/transcript", api.Object{"key": keyBase64(key), "threadId": "chat-1"}, "alice"))["thread"])["messages"])
+	body(postRoute(h, "/v1/threads/share", api.Object{"key": keyBase64(key), "threadId": "chat-1"}, "alice"))
 	if seals := fake.requests("/v1/share/seal"); len(seals) == 1 {
 		plaintext, _ := base64.StdEncoding.DecodeString(api.Str(seals[0]["plaintext"]))
 		marks("the share", api.Obj(decodeValue(plaintext))["messages"])
@@ -230,7 +231,7 @@ func TestARetriedLinkPreviewReadsItsPage(t *testing.T) {
 	h.services["metadata"] = &downstreamService{URL: metadata.URL, Client: metadata.Client()}
 	h.catalog.get().EnabledWidgets = []string{"render_link_preview"}
 	refused := widgetFailure(catalogWidgets("render_link_preview")["render_link_preview"], original)
-	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat")] = storedRow{ID: "chat", ETag: "1", Data: api.Raw(api.Object{"createdAt": api.Timestamp(), "title": "Links", "titleState": "manual", "model": "kimi-k3", "messages": []any{
+	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat")] = storedRow{ID: "chat", ETag: "1", Data: api.Raw(api.Object{"createdAt": api.Timestamp(), "title": "Links", "titleState": "manual", "model": "kimi-k3", "messages": []any{
 		api.Object{"id": "user", "role": "user", "content": "link the post", "createdAt": api.Timestamp()},
 		api.Object{"id": "assistant", "role": "assistant", "content": "Here it is.", "createdAt": api.Timestamp(), "timeline": []any{
 			api.Object{"type": "content", "id": "text", "content": "Here it is."},
@@ -256,7 +257,7 @@ func TestARetriedLinkPreviewReadsItsPage(t *testing.T) {
 	if shown := eventOfType(events, "TOOL_CALL_RESULT"); shown == nil || shown.ToolCallID != "call" || !reflect.DeepEqual(decodeValue(shown.Content), want) {
 		t.Fatalf("the retry showed %+v", shown)
 	}
-	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", "chat")
+	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat")
 	if call := mustRead(readThreadRow(row)).Messages[1].Timeline[1]; call.Arguments != fixed || !reflect.DeepEqual(decodeValue(call.Result), want) {
 		t.Fatalf("the retried widget was stored with arguments %s and result %s", call.Arguments, call.Result)
 	}

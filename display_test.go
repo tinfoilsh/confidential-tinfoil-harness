@@ -7,6 +7,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 // A web search or page fetch shows its query or page, its status and its
@@ -38,7 +39,7 @@ func TestSearchesShowWhatTheyFoundAsTheyRun(t *testing.T) {
 	if !reflect.DeepEqual(displays, want) {
 		t.Fatalf("the run showed %+v", displays)
 	}
-	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
+	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
 	stored := mustRead(readThreadRow(row))
 	if blocks := stored.Messages[1].Timeline; len(blocks) < 2 || !reflect.DeepEqual(blocks[0].Display, &searched) || blocks[1].Display.Status != "failed" {
 		t.Fatalf("the reply stored %+v", blocks)

@@ -4,15 +4,16 @@ import (
 	"net/http"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 func (h *harness) handleTurn(w http.ResponseWriter, r *http.Request) {
-	p, err := h.auth.authenticate(r, true)
+	p, err := h.auth.Authenticate(r, true)
 	if err != nil {
 		api.Respond(w, nil, err)
 		return
 	}
-	credential, err := h.auth.inference(r.Context(), p)
+	credential, err := h.auth.Inference(r.Context(), p)
 	if err != nil {
 		api.Respond(w, nil, h.withQuota(p, credential.Limit, err))
 		return
@@ -40,9 +41,9 @@ func (h *harness) handleTurn(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, errAnonymousCloud)
 		return
 	}
-	var key contentKey
+	var key auth.ContentKey
 	if !p.Anonymous && !in.Local || len(in.Key) != 0 {
-		key, err = decodeContentKey(in.Key)
+		key, err = auth.DecodeContentKey(in.Key)
 		if err != nil {
 			api.Respond(w, nil, err)
 			return

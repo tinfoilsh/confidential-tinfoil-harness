@@ -6,6 +6,7 @@ import (
 	"slices"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 // finishRun commits what the run produced and frames its end, then hands the
@@ -97,7 +98,7 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 		limit = held.Debited(spend)
 	}
 	if runErr != nil && api.AsError(runErr).Code == "QUOTA_EXHAUSTED" {
-		limit = exhausted(p, held)
+		limit = auth.Exhausted(p, held)
 	}
 	summary := summarize(&r.row.Thread)
 	metadata := runMetadata{Messages: committed}

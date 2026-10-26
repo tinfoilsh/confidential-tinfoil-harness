@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 // Each route decodes its JSON body into one of these. A field of the wrong
@@ -18,11 +19,11 @@ import (
 
 // A missing key is checked against the run: keyless threads accept it, and
 // every other thread compares the key's fingerprint.
-func requestKey(key []byte) (contentKey, error) {
+func requestKey(key []byte) (auth.ContentKey, error) {
 	if len(key) == 0 {
-		return contentKey{}, nil
+		return auth.ContentKey{}, nil
 	}
-	return decodeContentKey(key)
+	return auth.DecodeContentKey(key)
 }
 
 type idRequest struct {
@@ -481,7 +482,7 @@ func (a *sentAttachment) whole() bool { return a.Kind != "" }
 func (in *turnRequest) digest() string {
 	copy := *in
 	copy.Key = nil
-	return hashHex(api.Raw(copy))
+	return api.HashHex(api.Raw(copy))
 }
 
 // threadInput is what a client's copy of a thread must hold before the

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 // A flag lookup the control plane is slow to answer flags nothing rather
@@ -27,16 +28,16 @@ func TestASlowFlagLookupFlagsNothing(t *testing.T) {
 	}))
 	t.Cleanup(cp.Close)
 	t.Cleanup(func() { close(stuck) })
-	h.auth.client, h.auth.controlplane = cp.Client(), cp.URL
-	saved := flagsTimeout
-	flagsTimeout = 50 * time.Millisecond
-	t.Cleanup(func() { flagsTimeout = saved })
+	h.auth = testAuth(cp)
+	saved := auth.FlagsTimeout
+	auth.FlagsTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { auth.FlagsTimeout = saved })
 	storedThread(rows, "alice", "chat-1")
 	within(t, "listing", func() error {
 		var list struct {
 			Threads []threadSummary `json:"threads"`
 		}
-		w := postRoute(h, "/v1/threads/list", api.Object{"key": key.base64()}, "alice")
+		w := postRoute(h, "/v1/threads/list", api.Object{"key": keyBase64(key)}, "alice")
 		if json.Unmarshal(w.Body.Bytes(), &list); len(list.Threads) != 1 || list.Threads[0].ID != "chat-1" || list.Threads[0].Flagged {
 			return fmt.Errorf("HTTP %d %s", w.Code, w.Body.String())
 		}
@@ -53,14 +54,14 @@ func TestAFlaggedChatTakesNoTurns(t *testing.T) {
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n")
 	})
 	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != safeguardFlagsPath || r.Header.Get("Authorization") != "Bearer clerk-alice" {
+		if r.URL.Path != auth.SafeguardFlagsPath || r.Header.Get("Authorization") != "Bearer clerk-alice" {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
 		io.WriteString(w, `{"flags":[{"id":"f1","conversation_id":"flagged","created_at":"2026-10-01T00:00:00Z"},{"id":"f2","conversation_id":"listed","created_at":"2026-10-01T00:00:00Z"}],"in_window":2,"window_hours":720,"warn_threshold":2,"ban_threshold":3}`)
 	}))
 	t.Cleanup(cp.Close)
-	h.auth.client, h.auth.controlplane = cp.Client(), cp.URL
+	h.auth = testAuth(cp)
 	storedThread(rows, "alice", "flagged")
 	storedThread(rows, "alice", "fine")
 	// A flagged chat that takes no turn is flagged only by the control plane.
@@ -92,7 +93,7 @@ func TestAFlaggedChatTakesNoTurns(t *testing.T) {
 		Threads []threadSummary `json:"threads"`
 		Pinned  []threadSummary `json:"pinned"`
 	}
-	json.Unmarshal(postRoute(h, "/v1/threads/list", api.Object{"key": key.base64()}, "alice").Body.Bytes(), &list)
+	json.Unmarshal(postRoute(h, "/v1/threads/list", api.Object{"key": keyBase64(key)}, "alice").Body.Bytes(), &list)
 	pinned := map[string]bool{}
 	for _, summary := range list.Pinned {
 		pinned[summary.ID] = summary.Flagged
@@ -108,7 +109,7 @@ func TestAFlaggedChatTakesNoTurns(t *testing.T) {
 		t.Fatalf("the list shows %+v", list.Threads)
 	}
 	var got threadSummary
-	json.Unmarshal(postRoute(h, "/v1/threads/get", api.Object{"key": key.base64(), "id": "listed"}, "alice").Body.Bytes(), &got)
+	json.Unmarshal(postRoute(h, "/v1/threads/get", api.Object{"key": keyBase64(key), "id": "listed"}, "alice").Body.Bytes(), &got)
 	if got.ID != "listed" || !got.Flagged {
 		t.Fatalf("the chat reads as %+v", got)
 	}
@@ -132,12 +133,12 @@ func TestFlagsAreReusedOnlyForTheirCaller(t *testing.T) {
 		io.WriteString(w, `{"flags":[]}`)
 	}))
 	t.Cleanup(cp.Close)
-	h.auth.client, h.auth.controlplane = cp.Client(), cp.URL
+	h.auth = testAuth(cp)
 	storedThread(rows, "alice", "chat-1")
 	storedThread(rows, "bob", "chat-1")
 	flagged := func(user string) bool {
 		var got threadSummary
-		json.Unmarshal(postRoute(h, "/v1/threads/get", api.Object{"key": key.base64(), "id": "chat-1"}, user).Body.Bytes(), &got)
+		json.Unmarshal(postRoute(h, "/v1/threads/get", api.Object{"key": keyBase64(key), "id": "chat-1"}, user).Body.Bytes(), &got)
 		return got.Flagged
 	}
 	if seen := []bool{flagged("alice"), flagged("alice"), flagged("bob"), flagged("bob")}; !reflect.DeepEqual(seen, []bool{true, true, false, false}) {

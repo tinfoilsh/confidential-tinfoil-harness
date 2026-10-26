@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 // tripThread is a chat with an image, two questions and two replies.
@@ -43,7 +44,7 @@ func comparable(t Thread) any {
 
 func TestDeviceAndStoredChatsChangeTheSameWay(t *testing.T) {
 	h, rows, key, _ := presetHarness(t)
-	p := &principal{ID: "alice"}
+	p := &auth.Principal{ID: "alice"}
 	rows.rows[rowMapKey(p, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(presetProfile())}
 	rows.rows[rowMapKey(p, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: api.Raw(tripThread())}
 	device := tripThread()
@@ -55,7 +56,7 @@ func TestDeviceAndStoredChatsChangeTheSameWay(t *testing.T) {
 		{"/v1/threads/messages/update", api.Object{"threadId": "chat-1", "messageId": "a1", "content": "first, pack light"}},
 		{"/v1/threads/messages/delete", api.Object{"threadId": "chat-1", "messageId": "u2"}},
 	} {
-		cloud := api.Object{"key": key.base64()}
+		cloud := api.Object{"key": keyBase64(key)}
 		for field, value := range step.in {
 			cloud[field] = value
 		}
