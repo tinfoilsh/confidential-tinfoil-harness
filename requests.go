@@ -390,8 +390,7 @@ type sentAttachment struct {
 }
 
 var (
-	turnKinds       = []string{"send", "edit", "regenerate", "continue", "retryToolCall", "ask", "retry"}
-	attachmentKinds = []string{"image", "document", "audio"}
+	turnKinds = []string{"send", "edit", "regenerate", "continue", "retryToolCall", "ask", "retry"}
 )
 
 // validate refuses a turn its run could not carry out. Who may send it is

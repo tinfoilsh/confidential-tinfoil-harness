@@ -123,7 +123,7 @@ func TestManagedModelRetriesARejectedChatTokenOnce(t *testing.T) {
 }
 
 func TestSharedThreadUsesPublicTimelineAndAttachments(t *testing.T) {
-	result := api.Obj(decodeValue(api.Raw(mustRead(sharedThreadView("share-id", api.Raw(api.Object{"title": "Shared", "createdAt": float64(1700000000000), "messages": []any{
+	result := api.Obj(api.Parsed(api.Raw(mustRead(sharedThreadView("share-id", api.Raw(api.Object{"title": "Shared", "createdAt": float64(1700000000000), "messages": []any{
 		api.Object{"role": "assistant", "content": "answer", "timestamp": float64(1700000000000)},
 		api.Object{"role": "user", "content": "photo", "timestamp": float64(1700000000000), "attachments": []any{api.Object{"id": "attachment", "type": "image", "fileName": "photo.png", "mimeType": "image/png", "encryptionKey": "share-attachment-key", "thumbnailBase64": "thumbnail"}}},
 	}}))))))

@@ -323,7 +323,7 @@ func TestFollowResumesALiveRunAfterTheClientsCursor(t *testing.T) {
 	}
 	for _, lastEventID := range []string{strconv.Itoa(len(frames)), "-1", "first"} {
 		w := replayOf(h, request(lastEventID))
-		if e := api.Obj(api.Obj(decodeValue(w.Body.Bytes()))["error"]); w.Code != 400 || e["code"] != "BAD_REQUEST" || e["action"] != "stop" {
+		if e := api.Obj(api.Obj(api.Parsed(w.Body.Bytes()))["error"]); w.Code != 400 || e["code"] != "BAD_REQUEST" || e["action"] != "stop" {
 			t.Fatalf("following after %q: HTTP %d %s", lastEventID, w.Code, w.Body.String())
 		}
 	}

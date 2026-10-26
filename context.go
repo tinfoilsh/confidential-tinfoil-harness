@@ -288,7 +288,7 @@ func renderMessage(message *Message, vision bool, policy string) []json.RawMessa
 			result := "executed"
 			if block.Result != nil && !strings.HasPrefix(block.Name, "render_") {
 				// Results are replayed as the harness has always written them.
-				value := decodeValue(block.Result)
+				value := api.Parsed(block.Result)
 				if text, ok := value.(string); ok {
 					result = text
 				} else {

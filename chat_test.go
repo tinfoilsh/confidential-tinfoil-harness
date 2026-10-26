@@ -103,12 +103,6 @@ func (s *memoryRows) removeRevision(_ context.Context, p *auth.Principal, _ auth
 	return nil
 }
 
-func (row storedRow) copy() *storedRow {
-	row.Data = slices.Clone(row.Data)
-	return &row
-}
-
-// rowJSON is a stored row as JSON, to check which fields it holds.
 func rowJSON(row *storedRow) api.Object {
 	var data api.Object
 	json.Unmarshal(row.Data, &data)
@@ -599,7 +593,7 @@ func TestNewChatsStartWithTheDefaultPromptPreset(t *testing.T) {
 		return profile
 	}
 	profile := update(api.Object{"customPromptPresets": []any{pirate}, "defaultPromptPresetId": "user:pirate"})
-	if profile["defaultPromptPresetId"] != "user:pirate" || !reflect.DeepEqual(api.Arr(profile["customPromptPresets"])[0], decodeValue(api.Raw(pirate))) {
+	if profile["defaultPromptPresetId"] != "user:pirate" || !reflect.DeepEqual(api.Arr(profile["customPromptPresets"])[0], api.Parsed(api.Raw(pirate))) {
 		t.Fatalf("profile update lost the default or the preset's settings: %v", profile)
 	}
 	turn := func(in api.Object) (*string, string) {
@@ -772,13 +766,13 @@ func TestEditingAReplyCollapsesItsText(t *testing.T) {
 	if got := windowIDs(t, update("a1", "It is half past twelve.")); !reflect.DeepEqual(got, []string{"u1", "a1", "u2", "a2"}) {
 		t.Fatalf("the edit changed the conversation: %q", got)
 	}
-	want := decodeValue(api.Raw([]any{api.Object{"id": "t", "type": "thinking", "content": "check"}, api.Object{"id": "c1", "type": "content", "content": "It is half past twelve."}, call}))
+	want := api.Parsed(api.Raw([]any{api.Object{"id": "t", "type": "thinking", "content": "check"}, api.Object{"id": "c1", "type": "content", "content": "It is half past twelve."}, call}))
 	if a1 := reply(1); a1["content"] != "It is half past twelve." || !reflect.DeepEqual(a1["timeline"], want) {
 		t.Fatalf("edited reply: %v", a1)
 	}
 	// A reply stored with flat fields keeps its thinking, search, code and widgets.
 	windowIDs(t, update("a2", "Rain."))
-	want = decodeValue(api.Raw([]any{api.Object{"type": "thinking", "id": "a2-thinking", "content": "look it up", "duration": 3},
+	want = api.Parsed(api.Raw([]any{api.Object{"type": "thinking", "id": "a2-thinking", "content": "look it up", "duration": 3},
 		api.Object{"type": "tool_call", "id": "a2-search", "toolCallId": "a2-search", "name": "web_search", "arguments": `{"query":"weather"}`, "result": api.Object{"query": "weather", "results": []any{}}, "complete": true,
 			"display": api.Object{"query": "weather", "status": "completed", "sources": []any{}}},
 		api.Object{"type": "tool_call", "id": "x1", "toolCallId": "x1", "name": "bash", "arguments": `{"command":"date"}`, "result": api.Object{"output": "Mon"}, "complete": true},
@@ -787,7 +781,7 @@ func TestEditingAReplyCollapsesItsText(t *testing.T) {
 		t.Fatalf("edited legacy reply: %v", a2)
 	}
 	windowIDs(t, update("a1", ""))
-	want = decodeValue(api.Raw([]any{api.Object{"id": "t", "type": "thinking", "content": "check"}, call}))
+	want = api.Parsed(api.Raw([]any{api.Object{"id": "t", "type": "thinking", "content": "check"}, call}))
 	if a1 := reply(1); a1["content"] != "" || !reflect.DeepEqual(a1["timeline"], want) {
 		t.Fatalf("a reply edited to nothing: %v", a1)
 	}
@@ -890,7 +884,7 @@ func TestContinueExtendsTheStoredReplyItNames(t *testing.T) {
 			t.Fatalf("the continuation streamed into %q", e.MessageID)
 		}
 	}
-	if replies := api.Arr(api.Obj(decodeValue(events[len(events)-1].Metadata))["messages"]); len(replies) != 1 || api.Obj(replies[0])["id"] != "a1" || api.Obj(replies[0])["isInterrupted"] != false {
+	if replies := api.Arr(api.Obj(api.Parsed(events[len(events)-1].Metadata))["messages"]); len(replies) != 1 || api.Obj(replies[0])["id"] != "a1" || api.Obj(replies[0])["isInterrupted"] != false {
 		t.Fatalf("the run committed %v", replies)
 	}
 	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
@@ -926,7 +920,7 @@ func TestContinueExtendsLocalReplies(t *testing.T) {
 	if got := asked(<-prompts); !reflect.DeepEqual(got, []string{"user:first question", "assistant:first answer"}) {
 		t.Fatalf("a local continuation asked %q", got)
 	}
-	replies := api.Arr(api.Obj(decodeValue(events[len(events)-1].Metadata))["messages"])
+	replies := api.Arr(api.Obj(api.Parsed(events[len(events)-1].Metadata))["messages"])
 	if events[0].MessageID != "m2" || eventOfType(events, "TEXT_MESSAGE_CHUNK").MessageID != "m2" || len(replies) != 1 || api.Obj(replies[0])["id"] != "m2" || rows.calls != 0 {
 		t.Fatalf("a local continuation streamed %+v and committed %v (storage calls %d)", events, replies, rows.calls)
 	}
@@ -952,7 +946,7 @@ func TestAContinuationExtendsOnlyATrailingContentBlock(t *testing.T) {
 		assembler := newMessageAssembler()
 		assembler.seed(reply)
 		assembler.apply(tc.event, "2026-10-01T00:00:00Z")
-		if got := assembler.messages(); len(got) != 1 || !reflect.DeepEqual(decodeValue(api.Raw(got[0].Timeline)), decodeValue(api.Raw(tc.want))) || got[0].CreatedAt != "2026-01-01T00:00:00Z" {
+		if got := assembler.messages(); len(got) != 1 || !reflect.DeepEqual(api.Parsed(api.Raw(got[0].Timeline)), api.Parsed(api.Raw(tc.want))) || got[0].CreatedAt != "2026-01-01T00:00:00Z" {
 			t.Errorf("%s: continued into %+v", name, got)
 		}
 	}
@@ -982,8 +976,8 @@ func TestAContinuedReplyKeepsItsCitations(t *testing.T) {
 	reply := mustRead(readThreadRow(row)).Messages[1]
 	text := "See [A](https://a.test/1). Also [B](https://b.test)."
 	start := strings.Index(text, "[B]") + 1
-	want := decodeValue(api.Raw([]any{cited, api.Object{"type": "url_citation", "url_citation": api.Object{"url": "https://b.test", "title": "B", "start_index": start, "end_index": start + 1}}}))
-	if reply.Content != text || !reflect.DeepEqual(decodeValue(api.Raw(reply.Annotations)), want) {
+	want := api.Parsed(api.Raw([]any{cited, api.Object{"type": "url_citation", "url_citation": api.Object{"url": "https://b.test", "title": "B", "start_index": start, "end_index": start + 1}}}))
+	if reply.Content != text || !reflect.DeepEqual(api.Parsed(api.Raw(reply.Annotations)), want) {
 		t.Fatalf("continued reply %q annotated %+v", reply.Content, reply.Annotations)
 	}
 }
@@ -1020,7 +1014,7 @@ func TestChatsOutsideTheCloudAreDeviceChats(t *testing.T) {
 	}
 	in := localInput("", api.Object{})
 	events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, ""))
-	thread := api.Obj(api.Obj(decodeValue(events[len(events)-1].Metadata))["thread"])
+	thread := api.Obj(api.Obj(api.Parsed(events[len(events)-1].Metadata))["thread"])
 	if events[len(events)-1].Type != "RUN_FINISHED" || len(api.Arr(thread["messages"])) != 2 || rows.calls != 0 {
 		t.Fatalf("an anonymous chat ended with %+v after %d storage calls", events[len(events)-1], rows.calls)
 	}
@@ -1416,7 +1410,7 @@ func TestToolArgumentsAreCoercedAndRejectionsExplained(t *testing.T) {
 	if len(calls) != 1 || calls[0].args["max_results"] != float64(3) || calls[0].args["query"] != "cats" {
 		t.Fatalf("the enclave accepted %+v", calls)
 	}
-	failure := api.Str(api.Obj(decodeValue([]byte(<-rejected)))["error"])
+	failure := api.Str(api.Obj(api.Parsed([]byte(<-rejected)))["error"])
 	if !strings.Contains(failure, `Tool "web_search" rejected the arguments. Field "max_results" must be integer (received "string")`) {
 		t.Fatalf("the model read %q", failure)
 	}
@@ -1482,7 +1476,7 @@ func TestStringifiedWidgetArgumentsAreUnwrappedBeforeValidation(t *testing.T) {
 	events := widgetTurn(t, toolCallChunk(0, "w", "render_artifact_preview", `{"title":"Demo","source":"{\"type\":\"html\",\"html\":\"<p>hi</p>\"}"}`))
 	got := streamedArgs(t, events, "w")
 	want := map[string]any{"title": "Demo", "source": map[string]any{"type": "html", "html": "<p>hi</p>"}}
-	if len(got) != 1 || !reflect.DeepEqual(decodeValue([]byte(got[0])), any(want)) {
+	if len(got) != 1 || !reflect.DeepEqual(api.Parsed([]byte(got[0])), any(want)) {
 		t.Fatalf("the caller was sent %q", got)
 	}
 	for _, e := range events {
@@ -1560,7 +1554,7 @@ func toolMessage(messages []any, id string) string {
 func toolResult(events []event, id string) api.Object {
 	for _, e := range events {
 		if e.Type == "TOOL_CALL_RESULT" && e.ToolCallID == id {
-			return api.Obj(decodeValue(e.Content))
+			return api.Obj(api.Parsed(e.Content))
 		}
 	}
 	return nil
@@ -1582,7 +1576,7 @@ func TestToolSessionsCarryTheEnclaveHeaders(t *testing.T) {
 			answer := toolTurns(toolCallChunk(0, "one", "web_search", `{"query":"cats"}`)+toolCallChunk(1, "two", "web_search", `{"query":"dogs"}`), nil)
 			h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
 				body, _ := io.ReadAll(r.Body)
-				bodies <- api.Obj(decodeValue(body))
+				bodies <- api.Obj(api.Parsed(body))
 				r.Body = io.NopCloser(bytes.NewReader(body))
 				answer(w, r)
 			})
@@ -1965,11 +1959,11 @@ func TestAnswersAnnotateTheSourcesTheyCite(t *testing.T) {
 		return map[string]any{"type": "url_citation", "url_citation": map[string]any{"url": url, "title": title, "start_index": float64(start), "end_index": float64(start + len(label))}}
 	}
 	want := []any{cite("https://a.test/1/", "A", "A"), cite("https://b.test", "https://b.test", "b")}
-	if got := decodeValue(api.Raw(mustRead(readThreadRow(row)).Messages[1].Annotations)); !reflect.DeepEqual(got, any(want)) {
+	if got := api.Parsed(api.Raw(mustRead(readThreadRow(row)).Messages[1].Annotations)); !reflect.DeepEqual(got, any(want)) {
 		t.Fatalf("stored annotations %v", got)
 	}
 	// Clients receive them with the run's end and with the stored chat.
-	if got := api.Obj(api.Arr(api.Obj(decodeValue(events[len(events)-1].Metadata))["messages"])[0])["annotations"]; !reflect.DeepEqual(got, any(want)) {
+	if got := api.Obj(api.Arr(api.Obj(api.Parsed(events[len(events)-1].Metadata))["messages"])[0])["annotations"]; !reflect.DeepEqual(got, any(want)) {
 		t.Fatalf("the run committed annotations %v", got)
 	}
 	var stored api.Object

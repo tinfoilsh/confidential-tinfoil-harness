@@ -279,7 +279,7 @@ func TestDeletionsLeaveTheWorkToSync(t *testing.T) {
 			}
 			delete(request, "idempotency_key")
 		}
-		if w.Code != 200 || !reflect.DeepEqual(decodeValue(api.Raw(requests)), decodeValue(api.Raw(tc.want))) {
+		if w.Code != 200 || !reflect.DeepEqual(api.Parsed(api.Raw(requests)), api.Parsed(api.Raw(tc.want))) {
 			t.Fatalf("%s: HTTP %d %s, sync was asked\n%v\nwant\n%v", tc.path, w.Code, w.Body.String(), requests, tc.want)
 		}
 	}
@@ -358,7 +358,7 @@ func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 	}
 	readable := map[string]bool{"legacy": true, "current": true}
 	refused := func(w *httptest.ResponseRecorder) bool {
-		e := api.Obj(api.Obj(decodeValue(w.Body.Bytes()))["error"])
+		e := api.Obj(api.Obj(api.Parsed(w.Body.Bytes()))["error"])
 		return w.Code == http.StatusConflict && e["code"] == "RECORD_UNSUPPORTED" && e["action"] == "stop"
 	}
 	for format, edit := range formats {
@@ -455,7 +455,7 @@ func TestADocumentSyncCannotOpenIsNeverLeftOutUnsaid(t *testing.T) {
 		{Rows: []storedRow{doc("notes", "notes.md")}, Unreadable: map[string]error{trip + "/map": api.Err(409, "KEY_MISMATCH", "sealed to another key")}},
 	}}
 	w := postRoute(h, "/v1/projects/get", api.Object{"key": keyBase64(key), "id": trip}, "alice")
-	if e := api.Obj(api.Obj(decodeValue(w.Body.Bytes()))["error"]); w.Code != http.StatusConflict || e["code"] != "KEY_MISMATCH" || e["action"] != "unlock" {
+	if e := api.Obj(api.Obj(api.Parsed(w.Body.Bytes()))["error"]); w.Code != http.StatusConflict || e["code"] != "KEY_MISMATCH" || e["action"] != "unlock" {
 		t.Errorf("opening the project: HTTP %d %s", w.Code, w.Body)
 	}
 	w = archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "native", "key": keyBase64(key)}))

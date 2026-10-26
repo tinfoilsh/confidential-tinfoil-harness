@@ -16,19 +16,6 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
-// storedRow is a row as sync holds it: sealed JSON, opened only by the
-// store's readers.
-type storedRow struct {
-	ID, ETag string
-	Data     json.RawMessage
-	// project is the project sync files a chat or document under, apart
-	// from its sealed data; projectSet says sync reported one, even none.
-	project    *string
-	projectSet bool
-	// restore lets a create reuse the id of a chat deleted from sync, as a
-	// chat moved to the device and back does.
-	restore bool
-}
 type rowPage struct {
 	Rows []storedRow
 	Next string

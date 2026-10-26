@@ -718,7 +718,7 @@ func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 	defer clear(data)
 	if documentRequest(descriptor, data) {
 		// A stored document keeps its extracted content, not the uploaded file.
-		content := descriptor.content()
+		content := attachmentContent(descriptor)
 		if content.empty() {
 			if content, err = decodeDocument(data); err != nil {
 				api.Respond(w, nil, err)

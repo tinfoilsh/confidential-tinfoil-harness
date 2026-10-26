@@ -126,15 +126,3 @@ func extractFirstJSONObject(s string) (string, bool) {
 	}
 	return "", false
 }
-
-// historyArgs is what a replayed tool call carries: one call whose arguments
-// do not parse would otherwise fail every later request that repeats it.
-func historyArgs(s string) string {
-	if json.Valid([]byte(s)) {
-		return s
-	}
-	if repaired, ok := sanitizeToolCallArgumentsJSON([]byte(s)); ok && json.Valid(repaired) {
-		return string(repaired)
-	}
-	return "{}"
-}

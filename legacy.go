@@ -3,9 +3,7 @@ package main
 import (
 	"bytes"
 	"cmp"
-	"encoding/base64"
 	"encoding/json"
-	"net/http"
 	"regexp"
 	"slices"
 	"strconv"
@@ -440,7 +438,7 @@ func (m *legacyMessage) timeline(message Message) []Block {
 		case "code_exec":
 			for i, c := range block.Calls {
 				args := c.arguments()
-				call(block.StartedAt, block.EndedAt, cmp.Or(c.ID, blockID+"-"+strconv.Itoa(i)), c.ToolName, args, normalizeToolResult(toolCall{name: c.ToolName, args: args}, c.Output), "")
+				call(block.StartedAt, block.EndedAt, cmp.Or(c.ID, blockID+"-"+strconv.Itoa(i)), c.ToolName, args, normalizeToolResult(c.ToolName, args, c.Output), "")
 			}
 		default:
 			block.ID = blockID
@@ -674,86 +672,4 @@ func readProjectDocument(row *storedRow, projectID string) (ProjectDocument, err
 	}
 	doc.ID, doc.ProjectID = strings.TrimPrefix(row.ID, projectID+"/"), projectID
 	return doc, nil
-}
-
-// handleUpgrade reads chats the previous web client kept on a device, or in
-// an export, into the thread format, in order. It stores nothing. A batch
-// holding a chat it cannot read is refused whole, so its client can tell
-// which chat that is.
-func (h *harness) handleUpgrade(w http.ResponseWriter, r *http.Request) {
-	// A signed-out tab upgrades the old chats it holds once its free key is
-	// accepted.
-	if _, err := h.caller(r, true); err != nil {
-		api.Respond(w, nil, err)
-		return
-	}
-	body, err := api.ReadBody(w, r, maxTurnBody)
-	defer clear(body)
-	if err != nil {
-		api.Respond(w, nil, err)
-		return
-	}
-	var in upgradeRequest
-	if err := api.DecodeBody(body, &in); err != nil || in.Threads == nil {
-		api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "threads must be an array"))
-		return
-	}
-	threads := make([]Thread, 0, len(*in.Threads))
-	for _, item := range *in.Threads {
-		if !api.IsObject(item) {
-			api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "Each thread must be an object"))
-			return
-		}
-		var named idRequest
-		json.Unmarshal(item, &named)
-		if err := named.validate(); err != nil {
-			api.Respond(w, nil, err)
-			return
-		}
-		if err := validateLocalThread(item); err != nil {
-			api.Respond(w, nil, err)
-			return
-		}
-		// The thread is one its client can send back with a turn.
-		thread, err := readDeviceThread(named.ID, item)
-		if err != nil {
-			api.Respond(w, nil, err)
-			return
-		}
-		modelCopies(&thread)
-		thread.checkWidgets()
-		thread.RecordVersion = recordVersion
-		threads = append(threads, thread)
-	}
-	api.Respond(w, struct {
-		Threads []Thread `json:"threads"`
-	}{threads}, nil)
-}
-
-// modelCopies gives each image of an upgraded chat the copy and thumbnail an
-// upload makes in place of its original, which its client keeps from the old
-// chat.
-func modelCopies(t *Thread) {
-	t.eachAttachment(func(a *Attachment) error {
-		if a.isImage() && a.Base64 != "" {
-			modelImageCopy(a)
-		}
-		return nil
-	})
-}
-
-// modelImageCopy gives an image the copy and thumbnail an upload makes in
-// place of its original. An image that does not decode keeps no bytes, since
-// no model reads it.
-func modelImageCopy(a *Attachment) {
-	original, err := base64.StdEncoding.DecodeString(a.Base64)
-	a.Base64 = ""
-	if err != nil {
-		return
-	}
-	resized, thumb, err := resizeImage(original)
-	clear(original)
-	if err == nil {
-		a.Base64, a.Thumbnail = base64.StdEncoding.EncodeToString(resized), base64.StdEncoding.EncodeToString(thumb)
-	}
 }

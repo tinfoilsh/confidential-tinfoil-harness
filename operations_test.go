@@ -39,7 +39,7 @@ func deviceOperation(t *testing.T, h *harness, path string, thread api.Object, i
 func comparable(t Thread) any {
 	device := deviceThread(&t)
 	device.UpdatedAt = ""
-	return decodeValue(api.Raw(device))
+	return api.Parsed(api.Raw(device))
 }
 
 func TestDeviceAndStoredChatsChangeTheSameWay(t *testing.T) {
@@ -86,7 +86,7 @@ func TestDeviceAndStoredChatsChangeTheSameWay(t *testing.T) {
 		t.Fatalf("the device fork is %v", fork)
 	}
 	// Signing in again would not let a signed-out caller have one.
-	if w := postRoute(h, "/v1/threads/update", api.Object{"id": "chat-1", "title": "x"}, ""); w.Code != 401 || api.Obj(api.Obj(decodeValue(w.Body.Bytes()))["error"])["action"] != "stop" {
+	if w := postRoute(h, "/v1/threads/update", api.Object{"id": "chat-1", "title": "x"}, ""); w.Code != 401 || api.Obj(api.Obj(api.Parsed(w.Body.Bytes()))["error"])["action"] != "stop" {
 		t.Fatalf("a signed-out caller changed a stored chat, or was told to sign in again: HTTP %d %s", w.Code, w.Body)
 	}
 	if w := postRoute(h, "/v1/threads/update", api.Object{"id": "chat-1", "local": true, "thread": tripThread(), "pinned": true}, ""); w.Code != 400 {

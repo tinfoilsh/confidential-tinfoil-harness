@@ -481,11 +481,11 @@ func TestALocalChatIsSharedFromItsTranscript(t *testing.T) {
 		}},
 		api.Object{"role": "assistant", "content": "a photo", "timestamp": 1767225602000, "timeline": []any{api.Object{"id": "b1", "type": "content", "content": "a photo"}}, "modelDisplayName": "Kimi K3", "annotations": citations},
 	}}
-	if len(seals) != 1 || !reflect.DeepEqual(decodeValue(plaintext), decodeValue(api.Raw(want))) {
+	if len(seals) != 1 || !reflect.DeepEqual(api.Parsed(plaintext), api.Parsed(api.Raw(want))) {
 		t.Fatalf("sealed %d payloads, the last %s", len(seals), plaintext)
 	}
 	// The opened share lists the reply's citations as its sources.
-	if opened := mustRead(sharedThreadView("0000000000005_local", plaintext)).Messages[1].Annotations; !reflect.DeepEqual(decodeValue(api.Raw(opened)), decodeValue(api.Raw(citations))) {
+	if opened := mustRead(sharedThreadView("0000000000005_local", plaintext)).Messages[1].Annotations; !reflect.DeepEqual(api.Parsed(api.Raw(opened)), api.Parsed(api.Raw(citations))) {
 		t.Fatalf("the opened share cites %s", api.Raw(opened))
 	}
 	if len(uploads) != 1 {

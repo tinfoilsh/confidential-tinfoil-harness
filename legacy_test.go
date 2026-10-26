@@ -68,7 +68,7 @@ func TestOldFailedSearchesAndPageReadsReadAsFailed(t *testing.T) {
 			api.Object{"id": "c1", "type": "content", "content": "Blocked."},
 		}},
 	} {
-		if got := upgradedReply(t, tc.reply); !reflect.DeepEqual(got, decodeValue(api.Raw(tc.want))) {
+		if got := upgradedReply(t, tc.reply); !reflect.DeepEqual(got, api.Parsed(api.Raw(tc.want))) {
 			t.Errorf("%s: read as\n%s\nwant\n%s", tc.name, api.Raw(got), api.Raw(tc.want))
 		}
 	}
@@ -119,7 +119,7 @@ func TestOldFlatFilesReadAsOneAttachmentEach(t *testing.T) {
 		}},
 	} {
 		tc.question["role"], tc.question["content"], tc.question["timestamp"] = "user", "Read these", "2026-03-01T10:00:01.000Z"
-		if got := upgradedMessage(t, []any{tc.question}, 0)["attachments"]; !reflect.DeepEqual(got, decodeValue(api.Raw(tc.want))) {
+		if got := upgradedMessage(t, []any{tc.question}, 0)["attachments"]; !reflect.DeepEqual(got, api.Parsed(api.Raw(tc.want))) {
 			t.Errorf("%s: read as\n%s\nwant\n%s", tc.name, api.Raw(got), api.Raw(tc.want))
 		}
 	}

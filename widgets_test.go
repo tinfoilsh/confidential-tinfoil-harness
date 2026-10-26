@@ -71,7 +71,7 @@ func TestWidgetSchemaViolationIsReportedToTheModel(t *testing.T) {
 	call := toolCall{id: "c1", name: "render_artifact_preview", args: `{"title":"Demo","source":"<p>hi</p>"}`}
 	for attempt := 1; attempt <= maxWidgetRetries+1; attempt++ {
 		model, shown := invokeWidget(t, set, call)
-		if len(shown) != 1 || api.Obj(decodeValue([]byte(shown[0])))["status"] != "error" {
+		if len(shown) != 1 || api.Obj(api.Parsed([]byte(shown[0])))["status"] != "error" {
 			t.Fatalf("attempt %d: the caller was sent %q", attempt, shown)
 		}
 		if attempt > maxWidgetRetries {
@@ -80,7 +80,7 @@ func TestWidgetSchemaViolationIsReportedToTheModel(t *testing.T) {
 			}
 			continue
 		}
-		payload := api.Obj(decodeValue([]byte(model)))
+		payload := api.Obj(api.Parsed([]byte(model)))
 		message := api.Str(payload["error"])
 		if payload["status"] != "error" || !strings.HasPrefix(message, "The arguments for render_artifact_preview did not match the tool's parameter schema and the component was not displayed: ") ||
 			!strings.Contains(message, "source") || strings.Contains(message, "validating root") || !strings.HasSuffix(message, "Call render_artifact_preview again with corrected arguments that match the schema exactly.") {
@@ -124,7 +124,7 @@ func TestCallersCopyReadsRepairedArguments(t *testing.T) {
 		{"web_fetch", `{"urls":["https://a.test"]} Now fetching...`, `{"results":[{"url":"https://a.test","status":"failed","error":"timeout"}]}`,
 			`{"failed":[{"error":"timeout","url":"https://a.test"}],"pages":[],"text":"","title":"Fetched page","url":"https://a.test"}`},
 	} {
-		if got := string(api.Raw(normalizeToolResult(toolCall{id: "c1", name: tc.name, args: tc.args}, tc.content))); got != tc.want {
+		if got := string(api.Raw(normalizeToolResult(tc.name, tc.args, tc.content))); got != tc.want {
 			t.Errorf("%s with arguments %q was shown as %s, want %s", tc.name, tc.args, got, tc.want)
 		}
 	}
@@ -178,7 +178,7 @@ func TestEveryViewMarksWidgetArgumentsTheDeclarationRefuses(t *testing.T) {
 		if w.Code != 200 {
 			t.Fatalf("HTTP %d %s", w.Code, w.Body.String())
 		}
-		return api.Obj(decodeValue(w.Body.Bytes()))
+		return api.Obj(api.Parsed(w.Body.Bytes()))
 	}
 	marks("the thread view", body(postRoute(h, "/v1/threads/get", api.Object{"key": keyBase64(key), "id": "chat-1"}, "alice"))["messages"])
 	events := eventsIn(t, postRoute(h, "/v1/threads/turn", continueInput(key, "chat-1"), "alice"))
@@ -187,7 +187,7 @@ func TestEveryViewMarksWidgetArgumentsTheDeclarationRefuses(t *testing.T) {
 	body(postRoute(h, "/v1/threads/share", api.Object{"key": keyBase64(key), "threadId": "chat-1"}, "alice"))
 	if seals := fake.requests("/v1/share/seal"); len(seals) == 1 {
 		plaintext, _ := base64.StdEncoding.DecodeString(api.Str(seals[0]["plaintext"]))
-		marks("the share", api.Obj(decodeValue(plaintext))["messages"])
+		marks("the share", api.Obj(api.Parsed(plaintext))["messages"])
 	} else {
 		t.Fatalf("%d shares were sealed", len(seals))
 	}
@@ -253,12 +253,12 @@ func TestARetriedLinkPreviewReadsItsPage(t *testing.T) {
 	default:
 		t.Fatal("the retry read no page")
 	}
-	want := decodeValue(api.Raw(api.Object{"url": "https://example.com/post", "title": "The Post", "description": "About it", "siteName": "Example", "image": "https://example.com/i.png"}))
-	if shown := eventOfType(events, "TOOL_CALL_RESULT"); shown == nil || shown.ToolCallID != "call" || !reflect.DeepEqual(decodeValue(shown.Content), want) {
+	want := api.Parsed(api.Raw(api.Object{"url": "https://example.com/post", "title": "The Post", "description": "About it", "siteName": "Example", "image": "https://example.com/i.png"}))
+	if shown := eventOfType(events, "TOOL_CALL_RESULT"); shown == nil || shown.ToolCallID != "call" || !reflect.DeepEqual(api.Parsed(shown.Content), want) {
 		t.Fatalf("the retry showed %+v", shown)
 	}
 	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat")
-	if call := mustRead(readThreadRow(row)).Messages[1].Timeline[1]; call.Arguments != fixed || !reflect.DeepEqual(decodeValue(call.Result), want) {
+	if call := mustRead(readThreadRow(row)).Messages[1].Timeline[1]; call.Arguments != fixed || !reflect.DeepEqual(api.Parsed(call.Result), want) {
 		t.Fatalf("the retried widget was stored with arguments %s and result %s", call.Arguments, call.Result)
 	}
 }

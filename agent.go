@@ -19,15 +19,13 @@ import (
 const (
 	maxTurns = 16
 	// A tool result is bounded twice: what the model reads back, what the caller sees.
-	maxToolOutput  = 30000
-	maxShownOutput = 1 << 20
-	maxSSEEvent    = 1 << 22
+	maxToolOutput = 30000
+	maxSSEEvent   = 1 << 22
 	// maxToolCalls bounds the calls one model turn may open.
 	maxToolCalls = 128
 
 	finalAnswerInstruction = "You have reached the maximum number of tool iterations. Do not call any more tools. Provide the best answer you can."
 	continueInstruction    = "Continue your previous response exactly where it left off. Do not repeat, summarize, or restate anything you already wrote, and do not add any preamble."
-	toolError              = `{"error":"tool_error"}`
 )
 
 func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model) error {
@@ -118,7 +116,7 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 			out.mu.Unlock()
 			if reasoning != "" {
 				// Echoed in the field the enclave streamed it in, since vLLM versions disagree on it.
-				value := api.Obj(decodeValue(reply))
+				value := api.Obj(api.Parsed(reply))
 				value[field] = reasoning
 				reply = api.Raw(value)
 			}
@@ -211,7 +209,7 @@ func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) (mess
 		failure, _ := json.Marshal(map[string]string{"error": err.Error()})
 		read, meta, shown = string(failure), nil, json.RawMessage(toolError)
 	} else {
-		shown = normalizeToolResult(call, content)
+		shown = normalizeToolResult(call.name, call.args, content)
 	}
 	out.emit(toolCallResult{MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: api.Raw(shown), Metadata: meta, Display: searchDisplay(call.name, call.args, api.Raw(shown))})
 	return answered(call.id, clip(read, maxToolOutput))

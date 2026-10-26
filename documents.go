@@ -27,7 +27,7 @@ type documentBlob struct {
 }
 
 // content is the extracted content an attachment holds inline.
-func (a *Attachment) content() documentBlob {
+func attachmentContent(a *Attachment) documentBlob {
 	return documentBlob{TextContent: a.TextContent, Pages: a.Pages}
 }
 

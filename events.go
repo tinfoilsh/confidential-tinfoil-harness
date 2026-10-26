@@ -17,11 +17,6 @@ type runStarted struct {
 	MessageID string `json:"messageId,omitempty"` // the reply a continuation streams into
 }
 
-// instanceID names this process, which alone holds its live runs. Clients
-// send it back with requests about a run, so that a deployment of several
-// can route them here.
-var instanceID = token()
-
 type messagesSnapshot struct {
 	Messages []messageView `json:"messages"`
 	HasOlder bool          `json:"hasOlder"`

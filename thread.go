@@ -316,3 +316,6 @@ func valueOr[T any](p *T, fallback T) T {
 	}
 	return *p
 }
+
+// attachmentKinds are the kinds of attachment a message carries.
+var attachmentKinds = []string{"image", "document", "audio"}

@@ -68,7 +68,7 @@ func TestSearchRefreshesResultsAfterACompletedRebuild(t *testing.T) {
 					}
 					return syncTestResponse(http.StatusOK, api.Object{"results": results, "needs_reindex": indexing})
 				case reindexPath:
-					if want := decodeValue(api.Raw(api.Object{"keys": []api.Object{{"key": keyBase64(key)}}})); !reflect.DeepEqual(decodeValue(api.Raw(in)), want) {
+					if want := api.Parsed(api.Raw(api.Object{"keys": []api.Object{{"key": keyBase64(key)}}})); !reflect.DeepEqual(api.Parsed(api.Raw(in)), want) {
 						t.Errorf("rebuild payload: %v, want %v", in, want)
 					}
 					return syncTestResponse(http.StatusOK, tc.job)

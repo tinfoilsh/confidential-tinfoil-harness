@@ -321,7 +321,7 @@ func TestNativeBackupRoundTrips(t *testing.T) {
 	if !ok || len(chat.Messages) != 2 || !chat.Pinned || chat.Model != "kimi-k3" || chat.TitleState != "manual" {
 		t.Fatalf("cloud chat: %+v", chats)
 	}
-	if !reflect.DeepEqual(decodeValue(api.Raw(chat.Messages[1].Timeline)), decodeValue(api.Raw(mustRead(readThread("chat-1", api.Raw(cloudChat))).Messages[1].Timeline))) || len(chat.Messages[1].Annotations) != 1 {
+	if !reflect.DeepEqual(api.Parsed(api.Raw(chat.Messages[1].Timeline)), api.Parsed(api.Raw(mustRead(readThread("chat-1", api.Raw(cloudChat))).Messages[1].Timeline))) || len(chat.Messages[1].Annotations) != 1 {
 		t.Fatalf("the reply changed: %s", api.Raw(chat.Messages[1]))
 	}
 	attachments := chat.Messages[0].Attachments

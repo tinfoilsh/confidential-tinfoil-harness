@@ -59,7 +59,7 @@ func TestDocumentsConvertThroughTheRouter(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			fields := api.Obj(decodeValue(api.Raw(descriptor)))
+			fields := api.Obj(api.Parsed(api.Raw(descriptor)))
 			text, hasText := fields["textContent"]
 			pages, hasPages := fields["pages"]
 			if hasText != (tc.text != nil) || text != tc.text || hasPages != (tc.pages > 0) || len(api.Arr(pages)) != tc.pages {

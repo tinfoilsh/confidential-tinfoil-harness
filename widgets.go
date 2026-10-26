@@ -2,7 +2,6 @@ package main
 
 import (
 	"cmp"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -200,27 +199,17 @@ func normalizeSchema(value any) {
 		}
 	}
 }
-func (h *harness) widgetResult(ctx context.Context, call toolCall) (any, error) {
-	if call.name != "render_link_preview" {
-		return "[rendered for the user]", nil
-	}
-	var args api.Object
-	if json.Unmarshal([]byte(call.args), &args) != nil {
-		return nil, api.Err(400, "BAD_REQUEST", "Invalid widget arguments")
-	}
-	return h.linkDetails(ctx, api.Str(args["url"]))
-}
 
 // normalizeToolResult is the caller's copy of a tool result. Its text shares
 // one budget, spent after parsing so that a large result still parses.
-func normalizeToolResult(call toolCall, content string) any {
+func normalizeToolResult(name, arguments, content string) any {
 	var result any
 	if json.Unmarshal([]byte(content), &result) != nil {
 		result = api.Object{"output": content}
 	}
 	value := api.Obj(result)
-	args := api.Obj(decodeValue([]byte(historyArgs(call.args))))
-	if strings.HasPrefix(call.name, "render_") {
+	args := api.Obj(api.Parsed([]byte(historyArgs(arguments))))
+	if strings.HasPrefix(name, "render_") {
 		return result
 	}
 	budget := maxShownOutput
@@ -231,7 +220,7 @@ func normalizeToolResult(call toolCall, content string) any {
 		budget -= min(budget, len(s))
 		return s
 	}
-	switch call.name {
+	switch name {
 	case "web_search":
 		rows, seen := []api.Object{}, map[string]bool{}
 		for _, r := range api.Arr(value["results"]) {
@@ -320,49 +309,6 @@ func piiReport(result api.Object) api.Object {
 	return api.Object{"masked": api.Bool(result["pii_masked"], false), "redacted_query": api.Str(result["redacted_query"]), "redactions": redactions}
 }
 
-func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *model) error {
-	var declaration widget
-	for _, w := range widgetCatalog() {
-		if w.Name == r.retryTarget.block.Name {
-			declaration = w
-			break
-		}
-	}
-	conversation, err := budgetConversation(req, false, nil)
-	if err != nil {
-		return err
-	}
-	conversation = append(conversation, api.Raw(api.Object{"role": "user", "content": "Regenerate the arguments for the " + declaration.Name + " widget. Preserve the user's intent and return only JSON matching its schema."}))
-	payload := api.Object{"model": req.model, "messages": conversation, "user_cache_secret": req.cacheScope, "response_format": api.Object{"type": "json_schema", "json_schema": api.Object{"name": "widget_arguments", "strict": true, "schema": declaration.Schema}}}
-	for k, v := range req.params {
-		payload[k] = v
-	}
-	usage := usageForRun(r)
-	usage.BillCustomerRequest = true
-	content, err := h.completion(context.WithValue(ctx, usageContextKey{}, usage), m, payload)
-	if err != nil {
-		return err
-	}
-	content = widgetArguments(strings.TrimSpace(content))
-	var value any
-	if json.Unmarshal([]byte(content), &value) != nil || declaration.schema.Validate(value) != nil {
-		return api.Err(502, "UPSTREAM_REFUSED", "The replacement widget arguments do not match the schema")
-	}
-	id := r.input.ToolCallID
-	r.out.callStart(id, declaration.Name, r.retryTarget.parentID)
-	r.out.callArgs(id, content)
-	r.out.callEnd(id)
-	// The widget's result is the one a call with these arguments returns.
-	result, err := h.widgetResult(ctx, toolCall{id: id, name: declaration.Name, args: content})
-	if err != nil {
-		result = api.Object{"error": api.AsError(err).Message}
-	}
-	r.replacement = replacedWidget{arguments: content, result: api.Raw(result)}
-	r.out.emit(toolCallResult{MessageID: "msg_" + token(), ToolCallID: id, Role: "tool", Content: r.replacement.result})
-	return nil
-}
-
-// replacedWidget is what a retry gives its widget call.
 type replacedWidget struct {
 	arguments string
 	result    json.RawMessage
@@ -389,4 +335,23 @@ func replaceWidget(t *Thread, messageID, callID, expected string, replacement re
 		}
 	}
 	return api.Err(409, "REVISION_CONFLICT", "The widget was removed during its retry")
+}
+
+const (
+	// maxShownOutput bounds a tool result as the caller sees it.
+	maxShownOutput = 1 << 20
+	// toolError is the result of a tool call that failed.
+	toolError = `{"error":"tool_error"}`
+)
+
+// historyArgs is what a replayed tool call carries: one call whose arguments
+// do not parse would otherwise fail every later request that repeats it.
+func historyArgs(s string) string {
+	if json.Valid([]byte(s)) {
+		return s
+	}
+	if repaired, ok := sanitizeToolCallArgumentsJSON([]byte(s)); ok && json.Valid(repaired) {
+		return string(repaired)
+	}
+	return "{}"
 }

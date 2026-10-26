@@ -86,7 +86,7 @@ func TestLocalTurnUsesClientTranscriptWithoutStorage(t *testing.T) {
 	if len(ids) != 3 || ids[0] != "m1" || ids[1] != "m2" || ids[2] == "" {
 		t.Fatalf("snapshot does not keep the client's message ids: %q", ids)
 	}
-	finished := api.Obj(decodeValue(events[len(events)-1].Metadata))
+	finished := api.Obj(api.Parsed(events[len(events)-1].Metadata))
 	replies := api.Arr(finished["messages"])
 	if len(replies) != 1 || api.Obj(replies[0])["model"] != "kimi-k3" || api.Obj(replies[0])["modelDisplayName"] != "Kimi K3" || api.Obj(replies[0])["isError"] != false || api.Str(api.Obj(replies[0])["id"]) == "" {
 		t.Fatalf("finish does not describe the committed reply: %v", finished)
@@ -244,7 +244,7 @@ func endedThread(t *testing.T, h *harness, in api.Object, terminal string) api.O
 	if last.Type != terminal {
 		t.Fatalf("the run ended with %+v", last)
 	}
-	return api.Obj(api.Obj(decodeValue(last.Metadata))["thread"])
+	return api.Obj(api.Obj(api.Parsed(last.Metadata))["thread"])
 }
 
 // A device chat's run ends with the whole thread its client stores, which
@@ -374,7 +374,7 @@ func TestOldDeviceChatsUpgradeIntoThreads(t *testing.T) {
 			}},
 		},
 	}
-	if !reflect.DeepEqual(threads[0], decodeValue(api.Raw(want))) {
+	if !reflect.DeepEqual(threads[0], api.Parsed(api.Raw(want))) {
 		t.Fatalf("upgraded\n%s\nwant\n%s", api.Raw(threads[0]), api.Raw(want))
 	}
 	if rows.calls != 0 {

@@ -79,8 +79,8 @@ func titleSource(t *Thread) string {
 		if text == "" {
 			for i := range m.Attachments {
 				// A document whose blob is gone must not name the chat.
-				if a := &m.Attachments[i]; documentText(a.content()) != unavailableDocument(a) {
-					text += documentText(a.content()) + " "
+				if a := &m.Attachments[i]; documentText(attachmentContent(a)) != unavailableDocument(a) {
+					text += documentText(attachmentContent(a)) + " "
 				}
 			}
 		}

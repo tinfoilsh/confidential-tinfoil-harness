@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
@@ -191,3 +192,18 @@ func (a *messageAssembler) messages() []Message {
 	}
 	return out
 }
+
+func millis(value string) int64 {
+	if t, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return t.UnixMilli()
+	}
+	return 0
+}
+
+// chatURL is where a share link opens.
+const chatURL = "https://chat.tinfoil.sh"
+
+// A signed-in client can also share a chat it keeps itself by sending the
+// transcript, with no content key. As from the web client, that share holds
+// image thumbnails and document text, so the transcript may omit image bytes.
+// No attachment is uploaded for it: sync holds no chat to keep one under.

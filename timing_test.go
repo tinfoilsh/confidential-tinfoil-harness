@@ -37,7 +37,7 @@ func TestAReplyRecordsWhenItsStepsRan(t *testing.T) {
 		{ID: "r_thinking_3", Type: "thinking", Content: "Next step", StartedAt: start + 7000, EndedAt: start + 8250, Duration: 1.25},
 	}
 	got := assembler.messages()
-	if len(got) != 1 || !reflect.DeepEqual(decodeValue(api.Raw(got[0].Timeline)), decodeValue(api.Raw(want))) {
+	if len(got) != 1 || !reflect.DeepEqual(api.Parsed(api.Raw(got[0].Timeline)), api.Parsed(api.Raw(want))) {
 		t.Fatalf("timeline %s, want %s", api.Raw(got), api.Raw(want))
 	}
 }
