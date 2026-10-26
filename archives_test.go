@@ -845,6 +845,28 @@ func heldScratch(t *testing.T, h *harness, n int64) *scratchLease {
 	return held
 }
 
+// A process that ends mid-archive leaves its spool file; the next one
+// removes it as it measures the directory, and nothing else in there.
+func TestStartupRemovesTheSpoolFilesAPreviousProcessLeft(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TMPDIR", dir)
+	left, other := filepath.Join(dir, "harness-archive-123"), filepath.Join(dir, "other")
+	for _, name := range []string{left, other} {
+		if err := os.WriteFile(name, []byte("bytes"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if scratch, err := measuredScratch(); err != nil || scratch.dir != dir {
+		t.Fatalf("measured %v: %v", scratch, err)
+	}
+	if _, err := os.Stat(left); !os.IsNotExist(err) {
+		t.Fatalf("the spool file is still there: %v", err)
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Fatalf("the other file was removed: %v", err)
+	}
+}
+
 // A request whose body stops arriving holds only the space its bytes take,
 // and only until it has sent nothing for a while, while one whose body
 // keeps arriving, however slowly, is served.
@@ -969,7 +991,7 @@ func rawResponse(t *testing.T, conn net.Conn) (*http.Response, string) {
 func waitForSpooled(t *testing.T, dir string, count int) {
 	t.Helper()
 	for start := time.Now(); ; time.Sleep(time.Millisecond) {
-		spooled, _ := filepath.Glob(filepath.Join(dir, "harness-archive-*"))
+		spooled, _ := filepath.Glob(filepath.Join(dir, scratchPattern))
 		written := 0
 		for _, name := range spooled {
 			if info, err := os.Stat(name); err == nil && info.Size() > 0 {
