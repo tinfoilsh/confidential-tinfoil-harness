@@ -93,12 +93,30 @@ const (
 
 var errCredentialRequired = api.Err(401, "CREDENTIAL_REQUIRED", "Chat access is missing or expired")
 
-type Authenticator struct {
-	Verify       func(context.Context, string) (string, error)
-	ChatKeys     jwt.Keyfunc // the control plane's chat token signing keys
-	ChatIssuer   string
+// Config is what an Authenticator checks callers against.
+type Config struct {
+	// Verify reads the subject of a valid Clerk session token.
+	Verify func(context.Context, string) (string, error)
+	// ChatKeys and ChatIssuer are the control plane's chat token signing
+	// keys and issuer.
+	ChatKeys   jwt.Keyfunc
+	ChatIssuer string
+	// Client reaches the control plane at Controlplane.
 	Client       *http.Client
 	Controlplane string
+}
+
+// Configured is an Authenticator checking callers as c says.
+func Configured(c Config) *Authenticator {
+	return &Authenticator{verify: c.Verify, chatKeys: c.ChatKeys, chatIssuer: c.ChatIssuer, client: c.Client, controlplane: c.Controlplane}
+}
+
+type Authenticator struct {
+	verify       func(context.Context, string) (string, error)
+	chatKeys     jwt.Keyfunc // the control plane's chat token signing keys
+	chatIssuer   string
+	client       *http.Client
+	controlplane string
 	cachesOnce   sync.Once
 	newest       *expirable.LRU[string, Credential]
 	valid        *expirable.LRU[string, struct{}]
@@ -129,11 +147,11 @@ func New(ctx context.Context, issuer, cp string) (*Authenticator, error) {
 		return nil, err
 	}
 	options := []jwt.ParserOption{jwt.WithValidMethods([]string{"RS256", "RS384", "RS512", "ES256", "ES384", "ES512"}), jwt.WithIssuer(issuer), jwt.WithExpirationRequired(), jwt.WithLeeway(30 * time.Second)}
-	a := &Authenticator{Client: &http.Client{
+	c := Config{Client: &http.Client{
 		Timeout:       15 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}, Controlplane: cp, ChatKeys: chatKeys.Keyfunc, ChatIssuer: cp}
-	a.Verify = func(ctx context.Context, token string) (string, error) {
+	c.Verify = func(ctx context.Context, token string) (string, error) {
 		parsed, err := jwt.NewParser(options...).Parse(token, kf.KeyfuncCtx(ctx))
 		if err != nil || !parsed.Valid {
 			return "", errors.New("invalid session")
@@ -144,7 +162,7 @@ func New(ctx context.Context, issuer, cp string) (*Authenticator, error) {
 		}
 		return sub, nil
 	}
-	return a, nil
+	return Configured(c), nil
 }
 
 // authenticate reads who a request is from: a signed-in caller's Clerk
@@ -162,7 +180,7 @@ func (a *Authenticator) Authenticate(r *http.Request, anonymous bool) (*Principa
 		// recognize checks the key with the control plane before any work.
 		return &Principal{Anonymous: true, AnonymousID: api.HashHex([]byte(token)), InferenceKey: Secret(token)}, nil
 	}
-	id, err := a.Verify(r.Context(), token)
+	id, err := a.verify(r.Context(), token)
 	if err != nil {
 		return nil, api.Err(401, "UNAUTHENTICATED", "The Clerk session is invalid or expired")
 	}
@@ -224,12 +242,12 @@ func (a *Authenticator) validateFreeKey(ctx context.Context, p *Principal) (Cred
 	// Reuse the validation endpoint already used by shims on Tinfoil hosts,
 	// asking it for the key's quota. No key issuance, client IP, or expiry
 	// metadata comes from this call.
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.Controlplane+"/api/shim/validate-key", bytes.NewReader(api.Raw(keyValidation{APIKey: p.InferenceKey, IncludeRateLimit: true})))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.controlplane+"/api/shim/validate-key", bytes.NewReader(api.Raw(keyValidation{APIKey: p.InferenceKey, IncludeRateLimit: true})))
 	if err != nil {
 		return Credential{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := a.Client.Do(req)
+	resp, err := a.client.Do(req)
 	if err != nil {
 		return Credential{}, err
 	}
@@ -295,8 +313,8 @@ func (a *Authenticator) Inference(ctx context.Context, p *Principal) (Credential
 // not expired.
 func (a *Authenticator) chatToken(p *Principal) (Credential, error) {
 	var claims chatTokenClaims
-	parsed, err := jwt.NewParser(jwt.WithValidMethods([]string{"EdDSA"}), jwt.WithIssuer(a.ChatIssuer), jwt.WithAudience(ChatTokenAudience), jwt.WithExpirationRequired(), jwt.WithIssuedAt(), jwt.WithLeeway(30*time.Second)).
-		ParseWithClaims(string(p.InferenceKey), &claims, a.ChatKeys)
+	parsed, err := jwt.NewParser(jwt.WithValidMethods([]string{"EdDSA"}), jwt.WithIssuer(a.chatIssuer), jwt.WithAudience(ChatTokenAudience), jwt.WithExpirationRequired(), jwt.WithIssuedAt(), jwt.WithLeeway(30*time.Second)).
+		ParseWithClaims(string(p.InferenceKey), &claims, a.chatKeys)
 	if err != nil || !parsed.Valid {
 		return Credential{}, errCredentialRequired
 	}

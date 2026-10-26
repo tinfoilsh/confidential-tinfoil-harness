@@ -227,12 +227,7 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 	t.Cleanup(cp.Close)
 	rows := &memoryRows{rows: map[string]storedRow{}, sealed: map[string]auth.ContentKey{}}
 	h := &harness{gateway: server.URL, controlplane: cp.URL, cpClient: cp.Client(), storeRows: rows, services: map[string]*downstreamService{}, scratch: newScratchSpace(t.TempDir(), 1<<30)}
-	h.auth = &auth.Authenticator{Verify: func(_ context.Context, s string) (string, error) {
-		if !strings.HasPrefix(s, "clerk-") {
-			return "", errors.New("bad session")
-		}
-		return strings.TrimPrefix(s, "clerk-"), nil
-	}, ChatKeys: func(*jwt.Token) (any, error) { return testChatKeys().Public(), nil }, ChatIssuer: testChatIssuer, Client: cp.Client(), Controlplane: cp.URL}
+	h.auth = testAuth(cp)
 	m := &model{name: "kimi-k3", context: 8192, client: &http.Client{Transport: &callerAuth{inner: server.Client().Transport, usageSecret: "test-usage-secret"}}}
 	h.offer.models = []*model{m}
 	h.autoModel = m
@@ -2018,4 +2013,15 @@ func TestBusySlotTellsTheClientWhenToRetry(t *testing.T) {
 	if w.Code != 503 || w.Header().Get("Retry-After") != "5" || body.Error.RetryAfter != 5 {
 		t.Fatalf("HTTP %d Retry-After %q: %s", w.Code, w.Header().Get("Retry-After"), w.Body.String())
 	}
+}
+
+// testAuth checks callers as the test harness does, against the control
+// plane cp stands in for: a Clerk session is "clerk-" and the user's name.
+func testAuth(cp *httptest.Server) *auth.Authenticator {
+	return auth.Configured(auth.Config{Verify: func(_ context.Context, s string) (string, error) {
+		if !strings.HasPrefix(s, "clerk-") {
+			return "", errors.New("bad session")
+		}
+		return strings.TrimPrefix(s, "clerk-"), nil
+	}, ChatKeys: func(*jwt.Token) (any, error) { return testChatKeys().Public(), nil }, ChatIssuer: testChatIssuer, Client: cp.Client(), Controlplane: cp.URL})
 }

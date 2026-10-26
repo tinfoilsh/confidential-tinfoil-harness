@@ -42,9 +42,9 @@ func TestAnonymousInferenceValidatesTheClientKey(t *testing.T) {
 		io.WriteString(w, "OK")
 	}))
 	defer cp.Close()
-	a := &auth.Authenticator{Client: cp.Client(), Controlplane: cp.URL, Verify: func(context.Context, string) (string, error) {
+	a := auth.Configured(auth.Config{Client: cp.Client(), Controlplane: cp.URL, Verify: func(context.Context, string) (string, error) {
 		return "", errors.New("invalid Clerk session")
-	}}
+	}})
 	r := httptest.NewRequest(http.MethodPost, "/v1/session", nil)
 	r.Header.Set("Authorization", "Bearer free_client-key")
 	p, err := a.Authenticate(r, true)
@@ -79,7 +79,7 @@ func TestSessionReadsFreeQuotaOncePerRequest(t *testing.T) {
 		json.NewEncoder(w).Encode(api.Object{"ok": true, "rate_limit": api.Object{"max_requests": 10, "remaining": 10 - calls.Add(1)}})
 	}))
 	defer cp.Close()
-	h.auth.Client, h.auth.Controlplane = cp.Client(), cp.URL
+	h.auth = testAuth(cp)
 	for _, remaining := range []int{9, 8} {
 		w := postRoute(h, "/v1/session", api.Object{}, "")
 		var session struct {
@@ -157,7 +157,7 @@ func TestAnonymousKeyValidationRefusesWorkBeforeAllocatingThreads(t *testing.T) 
 				io.WriteString(w, tc.body)
 			}))
 			defer cp.Close()
-			h.auth.Client, h.auth.Controlplane = cp.Client(), cp.URL
+			h.auth = testAuth(cp)
 			response := postRoute(h, "/v1/threads/turn", localInput("", api.Object{}), "")
 			var refused struct {
 				Error api.Error `json:"error"`
@@ -391,7 +391,7 @@ func TestASignedOutCallersQuotaComesFromItsKey(t *testing.T) {
 	}))
 	defer cp.Close()
 	for _, harness := range []*harness{h, router} {
-		harness.auth.Client, harness.auth.Controlplane = cp.Client(), cp.URL
+		harness.auth = testAuth(cp)
 	}
 	var session struct {
 		RateLimit json.RawMessage `json:"rateLimit"`

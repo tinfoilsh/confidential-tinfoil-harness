@@ -63,12 +63,12 @@ func (a *Authenticator) recentFlags() *expirable.LRU[string, ChatFlags] {
 }
 
 func (a *Authenticator) readFlags(ctx context.Context, p *Principal) (ChatFlags, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.Controlplane+SafeguardFlagsPath, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.controlplane+SafeguardFlagsPath, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+string(p.JWT))
-	resp, err := a.Client.Do(req)
+	resp, err := a.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
