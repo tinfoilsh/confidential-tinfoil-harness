@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
@@ -112,7 +113,7 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *auth.Principal
 		t.WebSearchEnabled = domain.ValueOr(profile.WebSearchEnabled, t.WebSearchEnabled)
 		c.ApplyPreset(t, &profile, preset)
 	}
-	attachments, err := turnAttachments(turn.Attachments, t)
+	attachments, err := attach.OfTurn(turn.Attachments, t)
 	if err != nil {
 		return nil, err
 	}
@@ -126,17 +127,17 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *auth.Principal
 	// chat. An ask's stored source has attachments in sync; a keyless thread
 	// carries its own. Image descriptions are stored, image bytes are not.
 	if !s.local {
-		if err := h.attachments.placeAttachments(ctx, p, s.id, t); err != nil {
+		if err := h.attachments.PlaceAttachments(ctx, p, s.id, t); err != nil {
 			return nil, err
 		}
 	}
-	if err := h.attachments.hydrateContext(ctx, p, t, s.keyless); err != nil {
+	if err := h.attachments.HydrateContext(ctx, p, t, s.keyless); err != nil {
 		return nil, err
 	}
 	// Offloaded documents are read back for the prompt alone.
 	working := t.Clone()
 	if !s.keyless {
-		if err := h.attachments.hydrateDocuments(ctx, p, &working); err != nil {
+		if err := h.attachments.HydrateDocuments(ctx, p, &working); err != nil {
 			return nil, err
 		}
 	}
@@ -166,7 +167,7 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *auth.Principal
 	t.ContextUsage = requestContextUsage(request)
 	t.ActiveRun, t.LastRequestID, t.LastRequestKind = activeRun(r.log.id), r.nonce, turn.Kind
 	if !s.local {
-		stripInlineAttachments(t)
+		attach.StripInlineAttachments(t)
 	}
 	return plan, nil
 }

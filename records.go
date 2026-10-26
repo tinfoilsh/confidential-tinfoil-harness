@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
@@ -33,7 +34,7 @@ func (h *harness) apiRoutes() []routeSpec {
 		{"/v1/import/status", false, false, decoded(h.importStatus)},
 		{"/v1/threads/delete-all", false, true, decoded(h.deleteAllThreads)},
 		{"/v1/projects/delete-all", false, true, h.deleteAllProjects},
-		{"/v1/metadata/favicon", true, false, decoded(h.attachments.favicon)}, {"/v1/metadata/link", true, false, decoded(h.attachments.linkPreview)},
+		{"/v1/metadata/favicon", true, false, decoded(h.attachments.Favicon)}, {"/v1/metadata/link", true, false, decoded(h.attachments.LinkPreview)},
 	}
 	for _, pair := range [][2]string{{"current", "/v1/key/current"}, {"register", "/v1/key/register"}, {"add-bundle", "/v1/key/add-bundle"}, {"remove-bundle", "/v1/key/remove-bundle"}, {"migrate-all", "/v1/blobs/migrate-all"}} {
 		routes = append(routes, routeSpec{"/v1/keys/" + pair[0], false, false, func(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in json.RawMessage) (any, error) {
@@ -78,7 +79,7 @@ func (h *harness) session(ctx context.Context, p *auth.Principal, _ auth.Content
 		DefaultModel:    domain.AutoModelName,
 		Widgets:         widgets,
 		ProfileDefaults: domain.DefaultProfile(),
-		Composer:        composer(),
+		Composer:        attach.Composer(),
 		Presets:         presets,
 		Features:        map[string]bool{"webSearch": webSearch.client != nil, "transcription": h.models.ServiceReady("router"), "speech": h.models.ServiceReady("router")},
 	}, nil

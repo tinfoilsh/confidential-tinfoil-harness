@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
@@ -46,7 +47,7 @@ func TestSpeechStreamsTheRoutersAudio(t *testing.T) {
 		if response.Code != 200 || response.Header().Get("Content-Type") != "audio/pcm" || response.Header().Get("Cache-Control") != "no-store" || !bytes.Equal(response.Body.Bytes(), pcm) {
 			t.Fatalf("HTTP %d %q: %x", response.Code, response.Header().Get("Content-Type"), response.Body.Bytes())
 		}
-		want := api.Object{"path": "/v1/audio/speech", "auth": tc.auth, "body": map[string]any{"model": "qwen3-tts", "voice": speechVoice, "instructions": speechInstructions, "input": "Hello there.", "response_format": "pcm", "stream_format": "audio"}}
+		want := api.Object{"path": "/v1/audio/speech", "auth": tc.auth, "body": map[string]any{"model": "qwen3-tts", "voice": attach.SpeechVoice, "instructions": attach.SpeechInstructions, "input": "Hello there.", "response_format": "pcm", "stream_format": "audio"}}
 		if !reflect.DeepEqual(got.Load(), want) {
 			t.Fatalf("router got %v, want %v", got.Load(), want)
 		}
@@ -71,7 +72,7 @@ func TestSpeechRefusesWhatTheClientWouldNotSend(t *testing.T) {
 		in   api.Object
 		want int
 	}{
-		{api.Object{"text": strings.Repeat("a", maxSpeechText+1)}, 413},
+		{api.Object{"text": strings.Repeat("a", attach.MaxSpeechText+1)}, 413},
 		{api.Object{"text": " \n "}, 400},
 		{api.Object{}, 400},
 		{api.Object{"text": 42}, 400},

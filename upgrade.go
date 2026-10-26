@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
@@ -52,7 +53,7 @@ func (h *harness) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 			api.Respond(w, nil, err)
 			return
 		}
-		modelCopies(&thread)
+		attach.ModelCopies(&thread)
 		thread.CheckWidgets()
 		thread.RecordVersion = domain.RecordVersion
 		threads = append(threads, thread)

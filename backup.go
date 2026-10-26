@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
@@ -33,7 +34,7 @@ const (
 	maxArchiveEntries      = 50_000
 	maxArchiveExpansion    = 2 << 30
 	maxArchiveJSONEntry    = 256 << 20
-	maxArchiveImage        = maxUploadBytes
+	maxArchiveImage        = attach.MaxUploadBytes
 	maxBackupManifestBytes = 32 << 20
 )
 

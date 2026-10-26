@@ -1,4 +1,4 @@
-package main
+package attach
 
 import (
 	"bytes"
@@ -19,21 +19,21 @@ import (
 // any blob a chat stops referencing, so every attachment a row names must be
 // stored under that row's chat. Every client reads and writes this format.
 
-// documentBlob is a document's extracted content, as its blob holds it.
-type documentBlob struct {
+// DocumentBlob is a document's extracted content, as its blob holds it.
+type DocumentBlob struct {
 	Pages       []domain.DocumentPage `json:"pages,omitempty"`
 	TextContent string                `json:"textContent,omitempty"`
 }
 
 // content is the extracted content an attachment holds inline.
-func attachmentContent(a *domain.Attachment) documentBlob {
-	return documentBlob{TextContent: a.TextContent, Pages: a.Pages}
+func Content(a *domain.Attachment) DocumentBlob {
+	return DocumentBlob{TextContent: a.TextContent, Pages: a.Pages}
 }
 
-func (d documentBlob) empty() bool { return d.TextContent == "" && len(d.Pages) == 0 }
+func (d DocumentBlob) empty() bool { return d.TextContent == "" && len(d.Pages) == 0 }
 
 func encodeDocument(a *domain.Attachment) ([]byte, error) {
-	payload := documentBlob{TextContent: a.TextContent}
+	payload := DocumentBlob{TextContent: a.TextContent}
 	for _, page := range a.Pages {
 		image := page.Image
 		if strings.HasPrefix(image, "data:") {
@@ -47,20 +47,20 @@ func encodeDocument(a *domain.Attachment) ([]byte, error) {
 	return api.Raw(payload), nil
 }
 
-func decodeDocument(data []byte) (documentBlob, error) {
+func DecodeDocument(data []byte) (DocumentBlob, error) {
 	if trimmed := bytes.TrimSpace(data); len(trimmed) > 0 && trimmed[0] == '{' {
 		var payload struct {
 			TextContent *string                `json:"textContent"`
 			Pages       *[]domain.DocumentPage `json:"pages"`
 		}
 		if json.Unmarshal(trimmed, &payload) == nil && (payload.TextContent != nil || payload.Pages != nil) {
-			return documentBlob{TextContent: domain.ValueOr(payload.TextContent, ""), Pages: domain.ValueOr(payload.Pages, []domain.DocumentPage{})}, nil
+			return DocumentBlob{TextContent: domain.ValueOr(payload.TextContent, ""), Pages: domain.ValueOr(payload.Pages, []domain.DocumentPage{})}, nil
 		}
 	}
-	return documentBlob{}, api.Err(422, "ATTACHMENT_UNSUPPORTED", "The stored document cannot be read")
+	return DocumentBlob{}, api.Err(422, "ATTACHMENT_UNSUPPORTED", "The stored document cannot be read")
 }
 
-func documentText(content documentBlob) string {
+func DocumentText(content DocumentBlob) string {
 	if content.TextContent != "" {
 		return content.TextContent
 	}
@@ -73,19 +73,19 @@ func documentText(content documentBlob) string {
 	return strings.Join(parts, "\n\n")
 }
 
-func unreachable(err error) bool {
+func Unreachable(err error) bool {
 	e := api.AsError(err)
 	return e.HTTP == 404 || e.Status == 400 || e.Status == 404 || e.Code == "ATTACHMENT_UNSUPPORTED"
 }
 
-// placeAttachments stores every attachment of a thread under the thread, in
+// PlaceAttachments stores every attachment of a thread under the thread, in
 // the protocol 3 format, before the thread is pushed. It keeps the content
 // inline in the given copy, which is the one a prompt is built from.
-func (at *attachments) placeAttachments(ctx context.Context, p *auth.Principal, threadID string, t *domain.Thread) error {
+func (at *Service) PlaceAttachments(ctx context.Context, p *auth.Principal, threadID string, t *domain.Thread) error {
 	return t.EachAttachment(func(a *domain.Attachment) error { return at.placeAttachment(ctx, p, threadID, a) })
 }
 
-func (at *attachments) placeAttachment(ctx context.Context, p *auth.Principal, threadID string, a *domain.Attachment) error {
+func (at *Service) placeAttachment(ctx context.Context, p *auth.Principal, threadID string, a *domain.Attachment) error {
 	keyed := a.StorageKey() != ""
 	elsewhere := !domain.EnclaveAttachmentID.MatchString(a.ID) || cmp.Or(a.StorageThreadID, threadID) != threadID
 	var data []byte
@@ -105,16 +105,16 @@ func (at *attachments) placeAttachment(ctx context.Context, p *auth.Principal, t
 		}
 		data = decoded
 	case keyed && elsewhere:
-		stored, err := at.attachmentBytes(ctx, p, a, false)
+		stored, err := at.Bytes(ctx, p, a, false)
 		if err == nil && !a.IsImage() {
-			var content documentBlob
-			content, err = decodeDocument(stored)
+			var content DocumentBlob
+			content, err = DecodeDocument(stored)
 			clear(stored)
 			if err == nil {
 				stored, err = encodeDocument(&domain.Attachment{TextContent: content.TextContent, Pages: content.Pages})
 			}
 		}
-		if unreachable(err) {
+		if Unreachable(err) {
 			// Sync rejects a push naming an id that is not an enclave id, so
 			// such a reference is retired now. Any other unavailable one fails
 			// the push as missing, and RepairAttachments then retires it.
@@ -131,7 +131,7 @@ func (at *attachments) placeAttachment(ctx context.Context, p *auth.Principal, t
 		return nil
 	}
 	defer clear(data)
-	storedID, key, err := at.store.PutAttachment(ctx, p, threadID, a.ID, data)
+	storedID, key, err := at.Store.PutAttachment(ctx, p, threadID, a.ID, data)
 	if err != nil {
 		return err
 	}
@@ -139,40 +139,40 @@ func (at *attachments) placeAttachment(ctx context.Context, p *auth.Principal, t
 	return nil
 }
 
-func unavailableDocument(a *domain.Attachment) string {
+func UnavailableDocument(a *domain.Attachment) string {
 	return "[The document " + cmp.Or(a.FileName, "attachment") + " is no longer available.]"
 }
 
-// hydrateDocuments reads offloaded documents into a working copy of a thread.
+// HydrateDocuments reads offloaded documents into a working copy of a thread.
 // A document whose blob is gone is described as unavailable rather than
 // failing every later turn in its chat.
-func (at *attachments) hydrateDocuments(ctx context.Context, p *auth.Principal, t *domain.Thread) error {
+func (at *Service) HydrateDocuments(ctx context.Context, p *auth.Principal, t *domain.Thread) error {
 	return t.EachAttachment(func(a *domain.Attachment) error {
 		if a.IsImage() || a.HasContent() {
 			return nil
 		}
 		if a.StorageKey() == "" {
-			a.TextContent = unavailableDocument(a)
+			a.TextContent = UnavailableDocument(a)
 			return nil
 		}
-		if err := at.inflateDocument(ctx, p, a); err != nil {
-			if !unreachable(err) {
+		if err := at.InflateDocument(ctx, p, a); err != nil {
+			if !Unreachable(err) {
 				return err
 			}
-			a.TextContent = unavailableDocument(a)
+			a.TextContent = UnavailableDocument(a)
 		}
 		return nil
 	})
 }
 
-// inflateDocument reads a document's content from its blob into it.
-func (at *attachments) inflateDocument(ctx context.Context, p *auth.Principal, a *domain.Attachment) error {
-	data, err := at.attachmentBytes(ctx, p, a, false)
+// InflateDocument reads a document's content from its blob into it.
+func (at *Service) InflateDocument(ctx context.Context, p *auth.Principal, a *domain.Attachment) error {
+	data, err := at.Bytes(ctx, p, a, false)
 	if err != nil {
 		return err
 	}
 	defer clear(data)
-	content, err := decodeDocument(data)
+	content, err := DecodeDocument(data)
 	if err != nil {
 		return err
 	}
@@ -184,7 +184,7 @@ func (at *attachments) inflateDocument(ctx context.Context, p *auth.Principal, a
 // not hold under the row's chat: a row the web or iOS app wrote before sync
 // checked references may point at blobs filed under another chat or deleted
 // since.
-func (at *attachments) RepairAttachments(ctx context.Context, p *auth.Principal, t *domain.Thread, missing []string) error {
+func (at *Service) RepairAttachments(ctx context.Context, p *auth.Principal, t *domain.Thread, missing []string) error {
 	return t.EachAttachment(func(a *domain.Attachment) error {
 		if !slices.Contains(missing, a.ID) {
 			return nil
@@ -206,10 +206,10 @@ func retireAttachment(a *domain.Attachment) {
 	a.EncryptionKey, a.Key, a.StorageThreadID = "", "", ""
 }
 
-// stripInlineAttachments keeps only metadata and keys in a thread that is
+// StripInlineAttachments keeps only metadata and keys in a thread that is
 // about to be stored. Content stays inline only for attachments without a
 // blob.
-func stripInlineAttachments(t *domain.Thread) {
+func StripInlineAttachments(t *domain.Thread) {
 	t.EachAttachment(func(a *domain.Attachment) error {
 		a.InferenceMimeType = ""
 		if a.StorageKey() == "" {

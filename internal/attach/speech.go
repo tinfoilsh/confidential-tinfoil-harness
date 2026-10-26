@@ -1,4 +1,4 @@
-package main
+package attach
 
 import (
 	"bytes"
@@ -21,8 +21,8 @@ import (
 // stream back in order as one response.
 const (
 	speechModel        = "qwen3-tts"
-	speechVoice        = "aiden"
-	speechInstructions = "Read in a calm, natural conversational voice with a steady pace, consistent pitch range, and restrained expression. Use natural sentence pauses and maintain an even narration style."
+	SpeechVoice        = "aiden"
+	SpeechInstructions = "Read in a calm, natural conversational voice with a steady pace, consistent pitch range, and restrained expression. Use natural sentence pauses and maintain an even narration style."
 	speechMediaType    = "audio/pcm"
 	maxSpeechBytes     = 120 * 24000 * 2 // two minutes of audio, more than any piece takes
 	speechTimeout      = 2 * time.Minute // for each piece
@@ -30,13 +30,13 @@ const (
 	speechReadSize     = 32 << 10
 )
 
-func (at *attachments) handleSpeech(w http.ResponseWriter, r *http.Request) {
-	p, err := at.auth.Authenticate(r, true)
+func (at *Service) HandleSpeech(w http.ResponseWriter, r *http.Request) {
+	p, err := at.Auth.Authenticate(r, true)
 	if err != nil {
 		api.Respond(w, nil, err)
 		return
 	}
-	credential, err := at.auth.Inference(r.Context(), p)
+	credential, err := at.Auth.Inference(r.Context(), p)
 	if err != nil {
 		api.Respond(w, nil, auth.WithQuota(p, credential.Limit, err))
 		return
@@ -68,7 +68,7 @@ func (at *attachments) handleSpeech(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "There is nothing to read aloud"))
 		return
 	}
-	router := at.models.Services["router"]
+	router := at.Models.Services["router"]
 	if router == nil {
 		api.Respond(w, nil, api.Err(503, "TOOL_UNAVAILABLE", "Speech is unavailable"))
 		return
@@ -81,7 +81,7 @@ func (at *attachments) handleSpeech(w http.ResponseWriter, r *http.Request) {
 
 // speechText is what a request reads aloud: a message's markdown, or text
 // a client selected, as it is spoken.
-func (at *attachments) speechText(ctx context.Context, p *auth.Principal, in *speechRequest) (string, error) {
+func (at *Service) speechText(ctx context.Context, p *auth.Principal, in *speechRequest) (string, error) {
 	source := domain.ValueOr(in.Text, "")
 	if in.MessageID != "" {
 		var thread domain.Thread
@@ -99,7 +99,7 @@ func (at *attachments) speechText(ctx context.Context, p *auth.Principal, in *sp
 				return "", err
 			}
 			defer clear(key[:])
-			row, err := at.store.LoadThread(ctx, p, key, in.ThreadID)
+			row, err := at.Store.LoadThread(ctx, p, key, in.ThreadID)
 			clear(key[:])
 			if err != nil {
 				return "", err
@@ -112,7 +112,7 @@ func (at *attachments) speechText(ctx context.Context, p *auth.Principal, in *sp
 		}
 		source = thread.Messages[index].Content
 	}
-	if utf8.RuneCountInString(source) > maxSpeechText {
+	if utf8.RuneCountInString(source) > MaxSpeechText {
 		return "", api.Err(413, "PAYLOAD_TOO_LARGE", "The text is too long to read aloud")
 	}
 	return speakableText(source), nil
@@ -220,7 +220,7 @@ func synthesize(ctx context.Context, router *inference.Service, text string, out
 	}()
 	ctx, cancel := context.WithTimeout(ctx, speechTimeout)
 	defer cancel()
-	speech := api.Raw(api.Object{"model": speechModel, "voice": speechVoice, "instructions": speechInstructions, "input": text, "response_format": "pcm", "stream_format": "audio"})
+	speech := api.Raw(api.Object{"model": speechModel, "voice": SpeechVoice, "instructions": SpeechInstructions, "input": text, "response_format": "pcm", "stream_format": "audio"})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, router.URL+"/v1/audio/speech", bytes.NewReader(speech))
 	if err != nil {
 		return

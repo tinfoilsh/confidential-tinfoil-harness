@@ -24,6 +24,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/importer"
@@ -148,7 +149,7 @@ func readImportForm(r *http.Request, lease *scratchLease, authorize func(importO
 		if err == io.EOF {
 			break
 		}
-		if err != nil || count >= maxFormParts {
+		if err != nil || count >= attach.MaxFormParts {
 			return nil, options, formError(err)
 		}
 		switch part.FormName() {
@@ -201,9 +202,9 @@ func formError(err error) error {
 }
 
 func decodeFormField(part *multipart.Part, v any) error {
-	b, err := api.ReadWipeable(io.LimitReader(part, maxFormField+1))
+	b, err := api.ReadWipeable(io.LimitReader(part, attach.MaxFormField+1))
 	defer clear(b)
-	if err != nil || len(b) > maxFormField {
+	if err != nil || len(b) > attach.MaxFormField {
 		return api.Err(400, "BAD_REQUEST", "Multipart field is too large")
 	}
 	if !api.IsObject(b) {
@@ -592,7 +593,7 @@ func withOriginals(t *domain.Thread) *importThread {
 			attachment := importAttachment{Attachment: a}
 			if a.IsImage() {
 				attachment.OriginalBase64 = a.Base64
-				modelImageCopy(&attachment.Attachment)
+				attach.ModelImageCopy(&attachment.Attachment)
 			}
 			message.Attachments = append(message.Attachments, attachment)
 		}

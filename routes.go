@@ -64,14 +64,14 @@ func (h *harness) handlers() map[string]http.HandlerFunc {
 		"POST /v1/threads/import":            h.handleThreadImport,
 		"POST /v1/threads/follow":            h.handleFollow,
 		"POST /v1/threads/upgrade":           h.handleUpgrade,
-		"POST /v1/speech":                    h.attachments.handleSpeech,
-		"POST /v1/attachments/upload":        boundedHandler(uploadSlots, h.attachments.handleUpload),
-		"POST /v1/projects/documents/upload": boundedHandler(uploadSlots, h.attachments.handleUpload),
-		"POST /v1/transcriptions":            boundedHandler(uploadSlots, h.attachments.handleUpload),
+		"POST /v1/speech":                    h.attachments.HandleSpeech,
+		"POST /v1/attachments/upload":        boundedHandler(uploadSlots, h.attachments.HandleUpload),
+		"POST /v1/projects/documents/upload": boundedHandler(uploadSlots, h.attachments.HandleUpload),
+		"POST /v1/transcriptions":            boundedHandler(uploadSlots, h.attachments.HandleUpload),
 		"POST /v1/import":                    h.handleImport,
 		"POST /v1/export":                    h.handleExport,
-		"POST /v1/attachments/get":           h.attachments.handleAttachmentGet,
-		"POST /v1/attachments/get-public":    h.attachments.handleAttachmentGet,
+		"POST /v1/attachments/get":           h.attachments.HandleAttachmentGet,
+		"POST /v1/attachments/get-public":    h.attachments.HandleAttachmentGet,
 	}
 	add := func(pattern string, handler http.HandlerFunc) {
 		if handlers[pattern] != nil {

@@ -22,6 +22,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
@@ -368,7 +369,7 @@ func TestDocumentDownloadReturnsExtractedText(t *testing.T) {
 	if w.Code != 200 || w.Body.String() != "page one" {
 		t.Fatalf("download was not the extracted text: %d %q", w.Code, w.Body.String())
 	}
-	if w.Header().Get("Content-Type") != opaqueContentType || w.Header().Get("Content-Disposition") != "" {
+	if w.Header().Get("Content-Type") != attach.OpaqueContentType || w.Header().Get("Content-Disposition") != "" {
 		t.Fatalf("download headers disclose attachment metadata: %v", w.Header())
 	}
 	// Headers travel outside the sealed body.

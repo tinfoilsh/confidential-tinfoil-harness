@@ -2,6 +2,7 @@ package main
 
 import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
@@ -27,7 +28,7 @@ type sessionView struct {
 	DefaultModel    string                `json:"defaultModel"`
 	Widgets         []string              `json:"widgets"`
 	ProfileDefaults domain.Profile        `json:"profileDefaults"`
-	Composer        composerView          `json:"composer"`
+	Composer        attach.ComposerView   `json:"composer"`
 	Presets         []domain.Preset       `json:"presets"`
 	Features        map[string]bool       `json:"features"`
 }

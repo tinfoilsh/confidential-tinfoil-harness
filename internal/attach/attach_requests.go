@@ -1,4 +1,4 @@
-package main
+package attach
 
 import (
 	"slices"
@@ -8,12 +8,12 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
-// pageRequest names a page whose details the metadata service reads.
-type pageRequest struct {
+// PageRequest names a page whose details the metadata service reads.
+type PageRequest struct {
 	URL string `json:"url"`
 }
 
-func (in *pageRequest) Validate() error {
+func (in *PageRequest) Validate() error {
 	if strings.TrimSpace(in.URL) == "" {
 		return api.Err(400, "BAD_REQUEST", "A page URL is required")
 	}
@@ -72,9 +72,9 @@ func (in *attachmentRequest) Validate() error {
 	return nil
 }
 
-// sentAttachment is an upload's descriptor as a turn sends it back, or the
+// Sent is an upload's descriptor as a turn sends it back, or the
 // id alone of an attachment the thread already holds.
-type sentAttachment struct {
+type Sent struct {
 	ID          string                `json:"id"`
 	Kind        string                `json:"kind,omitempty"`
 	FileName    string                `json:"fileName,omitempty"`
@@ -87,7 +87,7 @@ type sentAttachment struct {
 	Base64      string                `json:"base64,omitempty"`
 }
 
-func (a *sentAttachment) Validate() error {
+func (a *Sent) Validate() error {
 	if err := api.RequireID("id", a.ID); err != nil {
 		return err
 	}
@@ -102,4 +102,4 @@ func (a *sentAttachment) Validate() error {
 
 // whole reports whether the turn sends the attachment's descriptor rather
 // than naming one its thread holds.
-func (a *sentAttachment) whole() bool { return a.Kind != "" }
+func (a *Sent) whole() bool { return a.Kind != "" }

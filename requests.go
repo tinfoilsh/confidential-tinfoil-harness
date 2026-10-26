@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
@@ -254,7 +255,7 @@ type turnRequest struct {
 	Quote           *string              `json:"quote,omitempty"`
 	MessageID       string               `json:"messageId,omitempty"`
 	ToolCallID      string               `json:"toolCallId,omitempty"`
-	Attachments     []sentAttachment     `json:"attachments,omitzero"`
+	Attachments     []attach.Sent        `json:"attachments,omitzero"`
 	Widgets         []string             `json:"widgets,omitzero"`
 	Options         turnOptions          `json:"options"`
 }
@@ -335,9 +336,9 @@ func (in *turnRequest) validateContent() error {
 		if err := in.Attachments[i].Validate(); err != nil {
 			return err
 		}
-		pixels += in.Attachments[i].resizePixels()
+		pixels += in.Attachments[i].ResizePixels()
 	}
-	if pixels > maxTurnResizePixels {
+	if pixels > attach.MaxTurnResizePixels {
 		return api.Err(413, "ATTACHMENT_TOO_LARGE", "The turn's images hold more pixels than one turn can resize")
 	}
 	if in.Kind == "send" && strings.TrimSpace(domain.ValueOr(in.Content, "")) == "" && strings.TrimSpace(domain.ValueOr(in.Quote, "")) == "" && len(in.Attachments) == 0 {

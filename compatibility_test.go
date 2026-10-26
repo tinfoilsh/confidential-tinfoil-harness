@@ -20,6 +20,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
@@ -32,7 +33,7 @@ func TestImagePreprocessingBoundsAndTransparency(t *testing.T) {
 	if err := png.Encode(&source, img); err != nil {
 		t.Fatal(err)
 	}
-	resized, thumb, err := resizeImage(source.Bytes())
+	resized, thumb, err := attach.ResizeImage(source.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,14 +51,14 @@ func TestImagePreprocessingBoundsAndTransparency(t *testing.T) {
 	binary.BigEndian.PutUint32(oversized[16:20], 10000)
 	binary.BigEndian.PutUint32(oversized[20:24], 10000)
 	binary.BigEndian.PutUint32(oversized[29:33], crc32.ChecksumIEEE(oversized[12:29]))
-	if _, _, err := resizeImage(oversized); err == nil || api.AsError(err).Code != "ATTACHMENT_UNSUPPORTED" || !strings.Contains(api.AsError(err).Message, "pixel limit") {
+	if _, _, err := attach.ResizeImage(oversized); err == nil || api.AsError(err).Code != "ATTACHMENT_UNSUPPORTED" || !strings.Contains(api.AsError(err).Message, "pixel limit") {
 		t.Fatal("pixel limit was not checked before decoding", err)
 	}
 	source.Reset()
 	if err := png.Encode(&source, image.NewRGBA(image.Rect(0, 0, 2000, 2))); err != nil {
 		t.Fatal(err)
 	}
-	resized, thumb, err = resizeImage(source.Bytes())
+	resized, thumb, err = attach.ResizeImage(source.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}

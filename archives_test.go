@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
@@ -345,7 +346,7 @@ func TestNativeBackupRoundTrips(t *testing.T) {
 // what no restore would take, an image or a whole backup that is larger.
 func TestBackupsHoldWhatRestoresTake(t *testing.T) {
 	h, _, _ := testChatHarness(t, nil)
-	largest := append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, imageUploads.MaxBytes-8)...)
+	largest := append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, attach.ImageUploads.MaxBytes-8)...)
 	device := api.Object{"id": "local-chat", "title": "Large photo", "messages": []any{api.Object{"id": "m", "role": "user", "content": "Look", "attachments": []any{api.Object{"id": "att_large", "kind": "image", "fileName": "large.png"}}}}}
 	w := archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "native"}), threadPart(device), formPart{name: "file", filename: "att_large", data: largest})
 	if w.Code != 200 {
@@ -710,7 +711,7 @@ func TestConversationsExportMatchesTheWebApp(t *testing.T) {
 		for j := range stored.Messages[i].Attachments {
 			a := &stored.Messages[i].Attachments[j]
 			a.EncryptionKey = "key-" + a.ID
-			fake.blobs[a.ID] = fakeBlob{chat: stored.ID, key: a.EncryptionKey, data: decodedOr(a.Base64, api.Raw(documentBlob{TextContent: a.TextContent}))}
+			fake.blobs[a.ID] = fakeBlob{chat: stored.ID, key: a.EncryptionKey, data: decodedOr(a.Base64, api.Raw(attach.DocumentBlob{TextContent: a.TextContent}))}
 			a.Base64, a.TextContent = "", ""
 		}
 	}
