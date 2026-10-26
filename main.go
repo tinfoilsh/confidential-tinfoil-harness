@@ -13,10 +13,10 @@ import (
 	"time"
 	_ "time/tzdata"
 
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/archives"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
@@ -24,12 +24,11 @@ import (
 type harness struct {
 	controlplane string
 	auth         *auth.Authenticator
-	safeguards   *submitter // nil unless SAFEGUARDS_URL names the sidecar
-	live         liveRuns
 	store        *store.Store
 	models       *inference.Models
 	attachments  *attach.Service
 	archives     *archives.Service
+	engine       *engine.Engine
 }
 
 // listenAddr is the shim's upstream port in tinfoil-config.yml, which also
@@ -50,7 +49,7 @@ func main() {
 
 	ctx, shutdown := context.WithCancel(context.Background())
 	defer shutdown()
-	attestWebSearch(ctx, usageSecret)
+	engine.AttestWebSearch(ctx, usageSecret)
 	scratch, err := archives.MeasuredScratch()
 	if err != nil {
 		slog.Error("prepare the temporary directory", "error", err)
@@ -58,7 +57,6 @@ func main() {
 	}
 	h := &harness{models: &inference.Models{Gateway: gw, Controlplane: controlplane},
 		controlplane: controlplane,
-		safeguards:   newSubmitter(os.Getenv("SAFEGUARDS_URL")),
 		store:        &store.Store{}}
 
 	if err := h.bootChat(ctx, usageSecret); err != nil {
@@ -67,6 +65,7 @@ func main() {
 	}
 	h.attachments = &attach.Service{Auth: h.auth, Controlplane: h.controlplane, Models: h.models, Store: h.store}
 	h.store.Repair = h.attachments
+	h.engine = &engine.Engine{Safeguards: engine.NewSubmitter(os.Getenv("SAFEGUARDS_URL")), Store: h.store, Models: h.models, Attachments: h.attachments, Auth: h.auth}
 	h.archives = &archives.Service{Scratch: scratch, CPClient: &http.Client{Transport: &auth.CallerTransport{Inner: http.DefaultTransport}}, Store: h.store, Attachments: h.attachments, Auth: h.auth, Controlplane: h.controlplane}
 
 	srv := &http.Server{Addr: listenAddr, Handler: h.routes(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: time.Minute}
@@ -76,39 +75,17 @@ func main() {
 	go func() {
 		<-stop
 		defer close(stopped)
-		h.stopRuns()
+		h.engine.Stop()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		srv.Shutdown(ctx)
-		h.waitRuns(ctx)
+		h.engine.Wait(ctx)
 	}()
 
-	slog.Info("listening", "addr", listenAddr, "gateway", gw, "models", inference.Served(h.models.Offer.Get()), "safeguards", h.safeguards != nil)
+	slog.Info("listening", "addr", listenAddr, "gateway", gw, "models", inference.Served(h.models.Offer.Get()), "safeguards", h.engine.Safeguards != nil)
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		slog.Error("serve", "error", err)
 		os.Exit(1)
 	}
 	<-stopped
 }
-
-// Web search is opt-in per run, so an enclave that is not configured or does
-// not verify is skipped, not fatal.
-func attestWebSearch(ctx context.Context, usageSecret string) {
-	webSearch.enclave = os.Getenv("TINFOIL_TOOLS_ENCLAVE")
-	if webSearch.enclave == "" {
-		slog.Warn("no web search enclave is configured")
-		return
-	}
-	client, err := inference.Attest(ctx, webSearch.enclave, webSearch.repo, usageSecret)
-	if err != nil {
-		slog.Warn("tool enclave did not verify", "enclave", webSearch.enclave, "error", err)
-		return
-	}
-	webSearch.client = client
-	slog.Info("tool enclave verified", "enclave", webSearch.enclave)
-}
-
-// instanceID names this process, which alone holds its live runs. Clients
-// send it back with requests about a run, so that a deployment of several
-// can route them here.
-var instanceID = api.Token()

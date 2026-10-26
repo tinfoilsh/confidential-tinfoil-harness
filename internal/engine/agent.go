@@ -1,4 +1,4 @@
-package main
+package engine
 
 import (
 	"bufio"
@@ -20,18 +20,18 @@ import (
 )
 
 const (
-	maxTurns = 16
+	MaxTurns = 16
 	// A tool result is bounded twice: what the model reads back, what the caller sees.
-	maxToolOutput = 30000
+	MaxToolOutput = 30000
 	maxSSEEvent   = 1 << 22
 	// maxToolCalls bounds the calls one model turn may open.
 	maxToolCalls = 128
 
-	finalAnswerInstruction = "You have reached the maximum number of tool iterations. Do not call any more tools. Provide the best answer you can."
-	continueInstruction    = "Continue your previous response exactly where it left off. Do not repeat, summarize, or restate anything you already wrote, and do not add any preamble."
+	FinalAnswerInstruction = "You have reached the maximum number of tool iterations. Do not call any more tools. Provide the best answer you can."
+	ContinueInstruction    = "Continue your previous response exactly where it left off. Do not repeat, summarize, or restate anything you already wrote, and do not add any preamble."
 )
 
-func (h *harness) loop(ctx context.Context, out *stream, req *request, m *inference.Model) error {
+func (eng *Engine) loop(ctx context.Context, out *Stream, req *Request, m *inference.Model) error {
 	apiKey := auth.CallerKey(ctx)
 	inRun := usagereporting.Context{
 		ContextID:     req.runID,
@@ -50,17 +50,17 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *infere
 		return fmt.Errorf("tools: %w", err)
 	}
 	defer set.close()
-	set.widgets = map[string]domain.Widget{}
+	set.Widgets = map[string]domain.Widget{}
 	for _, w := range req.widgets {
-		set.widgets[w.Name] = w
+		set.Widgets[w.Name] = w
 	}
-	set.local = h.widgetResult
+	set.Local = eng.widgetResult
 
 	defs, err := offer(set, req.rendered)
 	if err != nil {
 		return fmt.Errorf("tools: %w", err)
 	}
-	conversation, err := budgetConversation(req, set.search != nil, defs)
+	conversation, err := BudgetConversation(req, set.search != nil, defs)
 	if err != nil {
 		return err
 	}
@@ -68,9 +68,9 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *infere
 	for turn := 1; ; turn++ {
 		// Past the cap the model answers from what it has, with no tools to call.
 		tools := defs
-		if turn > maxTurns {
+		if turn > MaxTurns {
 			tools = nil
-			conversation = append(conversation, api.Raw(api.Object{"role": "system", "content": finalAnswerInstruction}))
+			conversation = append(conversation, api.Raw(api.Object{"role": "system", "content": FinalAnswerInstruction}))
 		}
 		conversation, err = trimToolHistory(req, conversation, tools)
 		if err != nil {
@@ -84,7 +84,7 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *infere
 		if turn == 1 {
 			turnCtx = first
 		}
-		calls, answer, err := h.turn(turnCtx, out, m, payload, set.widgets)
+		calls, answer, err := eng.turn(turnCtx, out, m, payload, set.Widgets)
 		if err != nil && req.refreshAuth != nil && !refreshed && api.AsError(err).HTTP == http.StatusUnauthorized {
 			// A 401 rejected this model request before processing. Replay its
 			// exact body once, retaining the run ID and request billing flag.
@@ -101,7 +101,7 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *infere
 				billing.APIKeyHash = inRun.APIKeyHash
 				turnCtx = auth.WithUsage(ctx, billing)
 			}
-			calls, answer, err = h.turn(turnCtx, out, m, payload, set.widgets)
+			calls, answer, err = eng.turn(turnCtx, out, m, payload, set.Widgets)
 		}
 		if err != nil {
 			return err
@@ -109,8 +109,8 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *infere
 		if len(calls) == 0 {
 			return nil
 		}
-		if turn > maxTurns {
-			return api.Err(502, "MAX_TURNS", fmt.Sprintf("The model called tools for %d turns without answering", maxTurns))
+		if turn > MaxTurns {
+			return api.Err(502, "MAX_TURNS", fmt.Sprintf("The model called tools for %d turns without answering", MaxTurns))
 		}
 		reply := requested(answer, calls)
 		if req.policy == "all" || req.policy == "tool-call-only" {
@@ -129,7 +129,7 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *infere
 	}
 }
 
-func body(req *request, conversation []json.RawMessage, defs json.RawMessage) ([]byte, error) {
+func body(req *Request, conversation []json.RawMessage, defs json.RawMessage) ([]byte, error) {
 	payload := map[string]any{
 		"model":  req.model,
 		"stream": true,
@@ -148,7 +148,7 @@ func body(req *request, conversation []json.RawMessage, defs json.RawMessage) ([
 }
 
 // Search tools come first, so a caller's turns keep hitting the prompt cache.
-func offer(set *toolset, rendered []json.RawMessage) (json.RawMessage, error) {
+func offer(set *Toolset, rendered []json.RawMessage) (json.RawMessage, error) {
 	var defs []json.RawMessage
 	if set.search != nil {
 		defs = append(defs, set.search.defs...)
@@ -160,50 +160,50 @@ func offer(set *toolset, rendered []json.RawMessage) (json.RawMessage, error) {
 	return json.Marshal(defs)
 }
 
-func execute(ctx context.Context, out *stream, set *toolset, calls []toolCall) []json.RawMessage {
+func execute(ctx context.Context, out *Stream, set *Toolset, calls []ToolCall) []json.RawMessage {
 	messages := make([]json.RawMessage, len(calls))
 	var wg sync.WaitGroup
 	for i, call := range calls {
-		wg.Go(func() { messages[i] = invoke(ctx, out, set, call) })
+		wg.Go(func() { messages[i] = Invoke(ctx, out, set, call) })
 	}
 	wg.Wait()
 	return messages
 }
 
-func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) (message json.RawMessage) {
+func Invoke(ctx context.Context, out *Stream, set *Toolset, call ToolCall) (message json.RawMessage) {
 	// One tool goroutine's panic is that call's failure, read by the model like
 	// any other. Nothing is emitted from here: a frame is what may have panicked.
 	defer func() {
-		if err := api.Rescued("tool "+call.name, recover()); err != nil {
+		if err := api.Rescued("tool "+call.Name, recover()); err != nil {
 			failure, _ := json.Marshal(map[string]string{"error": err.Error()})
-			message = answered(call.id, string(failure))
+			message = answered(call.ID, string(failure))
 		}
 	}()
 	// A widget is drawn by the caller from TOOL_CALL_ARGS; the model just needs a result.
-	if !set.searches(call.name) {
-		w, ok := set.widgets[call.name]
+	if !set.searches(call.Name) {
+		w, ok := set.Widgets[call.Name]
 		if !ok {
-			return answered(call.id, `{"error":"unknown tool"}`)
+			return answered(call.ID, `{"error":"unknown tool"}`)
 		}
 		// The caller never reports back, so only the model can be told the widget was not drawn.
-		if failure := domain.WidgetFailure(w, call.args); failure != nil {
-			out.emit(domain.ToolCallResult{MessageID: "msg_" + api.Token(), ToolCallID: call.id, Role: "tool", Content: failure})
-			if !set.retry(call.name) {
-				return answered(call.id, `{"status":"executed"}`)
+		if failure := domain.WidgetFailure(w, call.Args); failure != nil {
+			out.emit(domain.ToolCallResult{MessageID: "msg_" + api.Token(), ToolCallID: call.ID, Role: "tool", Content: failure})
+			if !set.retry(call.Name) {
+				return answered(call.ID, `{"status":"executed"}`)
 			}
-			return answered(call.id, string(failure))
+			return answered(call.ID, string(failure))
 		}
-		content, err := set.local(ctx, call)
+		content, err := set.Local(ctx, call)
 		if err != nil {
 			content = api.Object{"error": api.AsError(err).Message}
 		}
-		out.emit(domain.ToolCallResult{MessageID: "msg_" + api.Token(), ToolCallID: call.id, Role: "tool", Content: api.Raw(content)})
-		return answered(call.id, "[rendered for the user]")
+		out.emit(domain.ToolCallResult{MessageID: "msg_" + api.Token(), ToolCallID: call.ID, Role: "tool", Content: api.Raw(content)})
+		return answered(call.ID, "[rendered for the user]")
 	}
 	out.activity(call)
-	content, meta, err := set.call(ctx, call.name, call.id, json.RawMessage(call.args))
+	content, meta, err := set.call(ctx, call.Name, call.ID, json.RawMessage(call.Args))
 	// The model reads search results as cited text, the caller as data.
-	read, sources := modelCopy(call.name, content)
+	read, sources := modelCopy(call.Name, content)
 	out.cite(sources)
 	var shown any
 	if err != nil {
@@ -212,10 +212,10 @@ func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) (mess
 		failure, _ := json.Marshal(map[string]string{"error": err.Error()})
 		read, meta, shown = string(failure), nil, json.RawMessage(domain.ToolError)
 	} else {
-		shown = domain.NormalizeToolResult(call.name, call.args, content)
+		shown = domain.NormalizeToolResult(call.Name, call.Args, content)
 	}
-	out.emit(domain.ToolCallResult{MessageID: "msg_" + api.Token(), ToolCallID: call.id, Role: "tool", Content: api.Raw(shown), Metadata: meta, Display: domain.SearchDisplay(call.name, call.args, api.Raw(shown))})
-	return answered(call.id, clip(read, maxToolOutput))
+	out.emit(domain.ToolCallResult{MessageID: "msg_" + api.Token(), ToolCallID: call.ID, Role: "tool", Content: api.Raw(shown), Metadata: meta, Display: domain.SearchDisplay(call.Name, call.Args, api.Raw(shown))})
+	return answered(call.ID, clip(read, MaxToolOutput))
 }
 
 func clip(out string, limit int) string {
@@ -228,10 +228,10 @@ func clip(out string, limit int) string {
 	return out
 }
 
-func (h *harness) turn(ctx context.Context, out *stream, m *inference.Model, payload []byte, widgets map[string]domain.Widget) ([]toolCall, string, error) {
+func (eng *Engine) turn(ctx context.Context, out *Stream, m *inference.Model, payload []byte, widgets map[string]domain.Widget) ([]ToolCall, string, error) {
 	endpoint := m.Endpoint
 	if endpoint == "" {
-		endpoint = h.models.Gateway + "/v1/chat/completions"
+		endpoint = eng.Models.Gateway + "/v1/chat/completions"
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
@@ -253,7 +253,7 @@ func (h *harness) turn(ctx context.Context, out *stream, m *inference.Model, pay
 	out.mu.Lock()
 	out.modelAccepted = true
 	out.mu.Unlock()
-	var calls []toolCall
+	var calls []ToolCall
 	ended := false
 	var answer, reasoningText strings.Builder
 	reasoningField := "reasoning_content"
@@ -352,24 +352,24 @@ func (h *harness) turn(ctx context.Context, out *stream, m *inference.Model, pay
 		c := &calls[i]
 		shown := c.open && !c.held
 		if !c.open {
-			out.callStart(c.id, c.name, parent(message, &answer))
+			out.callStart(c.ID, c.Name, parent(message, &answer))
 		}
 		if c.held {
-			c.args = domain.WidgetArguments(c.args)
+			c.Args = domain.WidgetArguments(c.Args)
 		}
 		// The enclave reads absent arguments as none; the caller should too.
-		if c.args == "" {
-			out.callArgs(c.id, "{}")
+		if c.Args == "" {
+			out.callArgs(c.ID, "{}")
 		} else if !shown {
-			out.callArgs(c.id, c.args)
+			out.callArgs(c.ID, c.Args)
 		}
-		out.callEnd(c.id)
+		out.callEnd(c.ID)
 	}
 	return calls, answer.String(), nil
 }
 
-type toolCall struct {
-	id, name, args string
+type ToolCall struct {
+	ID, Name, Args string
 	open           bool
 	held           bool // a widget: its arguments reach the caller whole, once repaired
 }
@@ -392,34 +392,34 @@ func parent(message string, answer *strings.Builder) string {
 }
 
 // Arguments that arrive before the name are sent once the call opens.
-func announce(out *stream, message string, calls []toolCall, delta toolCallDelta, widgets map[string]domain.Widget) []toolCall {
+func announce(out *Stream, message string, calls []ToolCall, delta toolCallDelta, widgets map[string]domain.Widget) []ToolCall {
 	for len(calls) <= delta.Index {
-		calls = append(calls, toolCall{id: "call_" + api.Token()})
+		calls = append(calls, ToolCall{ID: "call_" + api.Token()})
 	}
 	call := &calls[delta.Index]
 	if delta.ID != "" {
-		call.id = delta.ID
+		call.ID = delta.ID
 	}
-	call.name += delta.Function.Name
-	call.args += delta.Function.Arguments
-	if !call.open && call.name != "" {
-		_, call.held = widgets[call.name]
+	call.Name += delta.Function.Name
+	call.Args += delta.Function.Arguments
+	if !call.open && call.Name != "" {
+		_, call.held = widgets[call.Name]
 		call.open = true
-		out.callStart(call.id, call.name, message)
-		if !call.held && call.args != "" {
-			out.callArgs(call.id, call.args)
+		out.callStart(call.ID, call.Name, message)
+		if !call.held && call.Args != "" {
+			out.callArgs(call.ID, call.Args)
 		}
 	} else if call.open && !call.held && delta.Function.Arguments != "" {
-		out.callArgs(call.id, delta.Function.Arguments)
+		out.callArgs(call.ID, delta.Function.Arguments)
 	}
 	return calls
 }
 
-func requested(answer string, calls []toolCall) json.RawMessage {
+func requested(answer string, calls []ToolCall) json.RawMessage {
 	made := make([]toolCallJSON, len(calls))
 	for i, call := range calls {
-		made[i].ID, made[i].Type = call.id, "function"
-		made[i].Function.Name, made[i].Function.Arguments = call.name, domain.HistoryArgs(call.args)
+		made[i].ID, made[i].Type = call.ID, "function"
+		made[i].Function.Name, made[i].Function.Arguments = call.Name, domain.HistoryArgs(call.Args)
 	}
 	message, _ := json.Marshal(outMessage{Role: "assistant", Content: quote(answer), ToolCalls: made})
 	return message

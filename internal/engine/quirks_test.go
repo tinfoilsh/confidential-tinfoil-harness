@@ -1,4 +1,4 @@
-package main
+package engine
 
 import (
 	"encoding/json"
@@ -102,7 +102,7 @@ func TestHistoryArgs(t *testing.T) {
 }
 
 func TestContinuationReplaysRepairedArguments(t *testing.T) {
-	got := string(requested("", []toolCall{{id: "c1", name: "render_clock"}, {id: "c2", name: "web_search", args: `{"query":"cats"} Now searching...`}}))
+	got := string(requested("", []ToolCall{{ID: "c1", Name: "render_clock"}, {ID: "c2", Name: "web_search", Args: `{"query":"cats"} Now searching...`}}))
 	if want := `{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"render_clock","arguments":"{}"}},{"id":"c2","type":"function","function":{"name":"web_search","arguments":"{\"query\":\"cats\"}"}}]}`; got != want {
 		t.Fatalf("the continuation carried %s", got)
 	}
@@ -118,7 +118,7 @@ func TestStoredToolCallsReplayWithRepairedArguments(t *testing.T) {
 	var assistant struct {
 		ToolCalls []toolCallJSON `json:"tool_calls"`
 	}
-	json.Unmarshal(renderMessage(message, false, "none")[0], &assistant)
+	json.Unmarshal(RenderMessage(message, false, "none")[0], &assistant)
 	var got []string
 	for _, call := range assistant.ToolCalls {
 		got = append(got, call.Function.Arguments)

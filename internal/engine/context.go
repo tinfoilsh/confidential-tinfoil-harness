@@ -1,4 +1,4 @@
-package main
+package engine
 
 import (
 	"cmp"
@@ -21,12 +21,12 @@ import (
 	"golang.org/x/text/language/display"
 )
 
-type request struct {
+type Request struct {
 	refreshAuth                func(context.Context) (auth.Credential, error)
 	params                     api.Object
-	system, widgetHint, policy string
+	System, widgetHint, policy string
 	window                     int
-	groups                     [][]json.RawMessage
+	Groups                     [][]json.RawMessage
 	costs                      []int // each group's tokens, counted once a turn
 	reminder                   json.RawMessage
 	threadID                   string
@@ -183,24 +183,24 @@ func timeReminder(now time.Time, zone string) (string, error) {
 	return "<system-reminder>Current time: " + englishTime(now.In(loc), zone) + " (" + zone + ")</system-reminder>", nil
 }
 
-func (h *harness) buildRequest(thread *domain.Thread, profile *domain.Profile, project *domain.Project, documents []domain.ProjectDocument, in *turnRequest, runID string) (*request, *inference.Model, error) {
-	c := h.models.Catalog.Get()
+func (eng *Engine) BuildRequest(thread *domain.Thread, profile *domain.Profile, project *domain.Project, documents []domain.ProjectDocument, in *TurnRequest, runID string) (*Request, *inference.Model, error) {
+	c := eng.Models.Catalog.Get()
 	options := in.Options
 	name := cmp.Or(thread.Model, "auto")
-	req := &request{threadID: thread.ID, runID: runID, model: name}
+	req := &Request{threadID: thread.ID, runID: runID, model: name}
 	req.conversation = req.threadID
 	if in.Kind == "ask" {
 		req.conversation = in.ThreadID
 	}
 	def, display, policy, window := c.Definition(name), "Auto", "none", 0
 	var picked *inference.Model
-	for _, m := range h.models.Offer.Get() {
+	for _, m := range eng.Models.Offer.Get() {
 		if m.Name == name {
 			picked = m
 		}
 	}
 	if name == "auto" {
-		picked = h.models.Auto
+		picked = eng.Models.Auto
 		for _, candidate := range c.Models {
 			limit := api.Int(candidate["budgetWindow"])
 			if window == 0 || limit < window {
@@ -243,11 +243,11 @@ func (h *harness) buildRequest(thread *domain.Thread, profile *domain.Profile, p
 	// As the web client does, the continue instruction shares the reminder's
 	// turn: some chat templates refuse two user messages in a row.
 	if in.Kind == "continue" {
-		reminder += "\n\n" + continueInstruction
+		reminder += "\n\n" + ContinueInstruction
 	}
-	req.system = systemPrompt(c, thread, profile, project, documents, display, zone, options.Locale)
+	req.System = systemPrompt(c, thread, profile, project, documents, display, zone, options.Locale)
 	if in.Kind == "ask" {
-		req.system += "\n\n" + askInstruction
+		req.System += "\n\n" + askInstruction
 	}
 	req.window, req.policy = window, policy
 	req.piiCheck = domain.ValueOr(options.PIICheck, domain.ValueOr(profile.PIICheckEnabled, true))
@@ -266,13 +266,13 @@ func (h *harness) buildRequest(thread *domain.Thread, profile *domain.Profile, p
 	}
 	vision := c.Vision(name)
 	for i := range thread.Messages {
-		req.groups = append(req.groups, renderMessage(&thread.Messages[i], vision, policy))
+		req.Groups = append(req.Groups, RenderMessage(&thread.Messages[i], vision, policy))
 	}
 	req.reminder = api.Raw(api.Object{"role": "user", "content": reminder})
 	return req, picked, nil
 }
 
-func renderMessage(message *domain.Message, vision bool, policy string) []json.RawMessage {
+func RenderMessage(message *domain.Message, vision bool, policy string) []json.RawMessage {
 	if message.Role == "user" {
 		return []json.RawMessage{api.Raw(api.Object{"role": "user", "content": userContent(message, vision)})}
 	}
@@ -385,10 +385,10 @@ func messageTokens(message json.RawMessage) int {
 }
 
 // groupCosts counts each history group's tokens the first time a turn asks.
-func (req *request) groupCosts() []int {
+func (req *Request) groupCosts() []int {
 	if req.costs == nil {
-		req.costs = make([]int, len(req.groups))
-		for i, group := range req.groups {
+		req.costs = make([]int, len(req.Groups))
+		for i, group := range req.Groups {
 			for _, message := range group {
 				req.costs[i] += messageTokens(message)
 			}
@@ -397,8 +397,8 @@ func (req *request) groupCosts() []int {
 	return req.costs
 }
 
-func budgetConversation(req *request, searching bool, definitions json.RawMessage) ([]json.RawMessage, error) {
-	system := req.system
+func BudgetConversation(req *Request, searching bool, definitions json.RawMessage) ([]json.RawMessage, error) {
+	system := req.System
 	if searching {
 		system += "\n\n" + searchInstructions
 	}
@@ -409,11 +409,11 @@ func budgetConversation(req *request, searching bool, definitions json.RawMessag
 	if budget < 0 {
 		return nil, api.Err(413, "CONTEXT_TOO_LARGE", "The system and tools exceed the context window")
 	}
-	start, costs := len(req.groups), req.groupCosts()
-	for i := len(req.groups) - 1; i >= 0; i-- {
+	start, costs := len(req.Groups), req.groupCosts()
+	for i := len(req.Groups) - 1; i >= 0; i-- {
 		cost := costs[i]
 		if cost > budget {
-			if i == len(req.groups)-1 {
+			if i == len(req.Groups)-1 {
 				return nil, api.Err(413, "CONTEXT_TOO_LARGE", "The latest message exceeds the context window")
 			}
 			break
@@ -422,8 +422,8 @@ func budgetConversation(req *request, searching bool, definitions json.RawMessag
 		start = i
 	}
 	// A history window starts with a user message; tool result groups stay intact.
-	for start < len(req.groups) {
-		if len(req.groups[start]) > 0 && strings.Contains(string(req.groups[start][0]), `"role":"user"`) {
+	for start < len(req.Groups) {
+		if len(req.Groups[start]) > 0 && strings.Contains(string(req.Groups[start][0]), `"role":"user"`) {
 			break
 		}
 		start++
@@ -432,7 +432,7 @@ func budgetConversation(req *request, searching bool, definitions json.RawMessag
 	if strings.TrimSpace(system) != "" {
 		conversation = append(conversation, api.Raw(api.Object{"role": "system", "content": system}))
 	}
-	for _, group := range req.groups[start:] {
+	for _, group := range req.Groups[start:] {
 		conversation = append(conversation, group...)
 	}
 	return append(conversation, req.reminder), nil
@@ -449,7 +449,7 @@ func role(message json.RawMessage) string {
 
 // Trim only complete older user turns as tool output grows. The current user
 // request and its entire tool exchange stay together, including the reminder.
-func trimToolHistory(req *request, messages []json.RawMessage, defs json.RawMessage) ([]json.RawMessage, error) {
+func trimToolHistory(req *Request, messages []json.RawMessage, defs json.RawMessage) ([]json.RawMessage, error) {
 	cost := tokenCount(string(defs))
 	for _, message := range messages {
 		cost += messageTokens(message)
@@ -502,14 +502,14 @@ func englishTime(now time.Time, zone string) string {
 	return now.Format("Monday, January 2, 2006 at 03:04 PM ") + name
 }
 
-func preflightBudget(request *request) error {
-	_, err := budgetConversation(request, request.webSearch, api.Raw(request.rendered))
+func preflightBudget(request *Request) error {
+	_, err := BudgetConversation(request, request.webSearch, api.Raw(request.rendered))
 	return err
 }
 
 // Report the full requested history so the UI can show when older turns are omitted.
-func requestContextUsage(req *request) *domain.ContextUsage {
-	system := req.system + "\n\n" + req.widgetHint
+func requestContextUsage(req *Request) *domain.ContextUsage {
+	system := req.System + "\n\n" + req.widgetHint
 	if req.webSearch {
 		system += "\n\n" + searchInstructions
 	}

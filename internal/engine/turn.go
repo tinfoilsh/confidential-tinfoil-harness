@@ -1,4 +1,4 @@
-package main
+package engine
 
 import (
 	"net/http"
@@ -8,13 +8,13 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
-func (h *harness) handleTurn(w http.ResponseWriter, r *http.Request) {
-	p, err := h.auth.Authenticate(r, true)
+func (eng *Engine) HandleTurn(w http.ResponseWriter, r *http.Request) {
+	p, err := eng.Auth.Authenticate(r, true)
 	if err != nil {
 		api.Respond(w, nil, err)
 		return
 	}
-	credential, err := h.auth.Inference(r.Context(), p)
+	credential, err := eng.Auth.Inference(r.Context(), p)
 	if err != nil {
 		api.Respond(w, nil, auth.WithQuota(p, credential.Limit, err))
 		return
@@ -25,7 +25,7 @@ func (h *harness) handleTurn(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, err)
 		return
 	}
-	in := &turnRequest{}
+	in := &TurnRequest{}
 	defer in.ClearKey()
 	if err := api.DecodeBody(body, in); err != nil {
 		api.Respond(w, nil, err)
@@ -56,12 +56,12 @@ func (h *harness) handleTurn(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, err)
 		return
 	}
-	accepted, err := h.acceptTurn(r.Context(), p, credential, key, in)
+	accepted, err := eng.AcceptTurn(r.Context(), p, credential, key, in)
 	clear(key[:])
 	if err != nil {
 		api.Respond(w, nil, auth.WithQuota(p, api.RateLimit{}, err))
 		return
 	}
-	defer accepted.log.log.detach()
-	follow(w, r, accepted.log, 0)
+	defer accepted.Log.Frames.Detach()
+	Follow(w, r, accepted.Log, 0)
 }

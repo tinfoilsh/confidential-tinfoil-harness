@@ -10,6 +10,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
 )
 
 func TestARetryRepeatsWhatTheChatLeftUnfinished(t *testing.T) {
@@ -38,7 +39,7 @@ func TestARetryRepeatsWhatTheChatLeftUnfinished(t *testing.T) {
 		delete(in, "content")
 		finishedRun(t, h, "/v1/threads/turn", in)
 		prompt := <-prompts
-		continued := strings.HasSuffix(api.Str(api.Obj(prompt[len(prompt)-1])["content"]), continueInstruction)
+		continued := strings.HasSuffix(api.Str(api.Obj(prompt[len(prompt)-1])["content"]), engine.ContinueInstruction)
 		chat := storedChat(t, rows, key, "chat-1")
 		reply := chat.Messages[len(chat.Messages)-1]
 		if continued != (tc.kind == "continue") || len(chat.Messages) != tc.messages || reply.Content != tc.reply || (reply.ID == "a1") != (tc.kind == "continue") || chat.LastRequestKind != tc.kind {

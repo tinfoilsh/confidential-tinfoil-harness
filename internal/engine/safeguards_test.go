@@ -1,4 +1,4 @@
-package main
+package engine
 
 import (
 	"encoding/json"
@@ -22,9 +22,9 @@ var chatToken = auth.Credential{Key: "chat-token", FirstParty: true}
 
 func TestSubmitter_DeliversCompletedConversation(t *testing.T) {
 	var mu sync.Mutex
-	var got []submission
+	var got []Submission
 	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var sub submission
+		var sub Submission
 		if r.URL.Path != "/ingest" || json.NewDecoder(r.Body).Decode(&sub) != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			return
@@ -35,8 +35,8 @@ func TestSubmitter_DeliversCompletedConversation(t *testing.T) {
 		w.WriteHeader(http.StatusAccepted)
 	}))
 	defer sidecar.Close()
-	s := newSubmitter(sidecar.URL + "/")
-	s.submit("tok", "chat-1", []safeguardMessage{{Role: "user", Content: "hi"}, {Role: "assistant", Content: "hello"}})
+	s := NewSubmitter(sidecar.URL + "/")
+	s.submit("tok", "chat-1", []SafeguardMessage{{Role: "user", Content: "hi"}, {Role: "assistant", Content: "hello"}})
 	mu.Lock()
 	defer mu.Unlock()
 	if len(got) != 1 || got[0].Credential != "tok" || got[0].ConversationID != "chat-1" || len(got[0].Messages) != 2 {
@@ -48,19 +48,19 @@ func TestSubmitter_TrimsOversizedHistory(t *testing.T) {
 	big := strings.Repeat("x", maxSubmissionBytes)
 	for _, tc := range []struct {
 		name     string
-		messages []safeguardMessage
+		messages []SafeguardMessage
 		kept     int
 	}{
-		{"older turns", []safeguardMessage{{Role: "user", Content: big}, {Role: "assistant", Content: big}, {Role: "user", Content: "latest"}, {Role: "assistant", Content: "reply"}}, 2},
-		{"escaped reply", []safeguardMessage{{Role: "user", Content: "question"}, {Role: "assistant", Content: strings.Repeat("<\x00", maxSubmissionBytes/2)}}, 1},
-		{"multibyte reply", []safeguardMessage{{Role: "assistant", Content: strings.Repeat("é", maxSubmissionBytes)}}, 1},
+		{"older turns", []SafeguardMessage{{Role: "user", Content: big}, {Role: "assistant", Content: big}, {Role: "user", Content: "latest"}, {Role: "assistant", Content: "reply"}}, 2},
+		{"escaped reply", []SafeguardMessage{{Role: "user", Content: "question"}, {Role: "assistant", Content: strings.Repeat("<\x00", maxSubmissionBytes/2)}}, 1},
+		{"multibyte reply", []SafeguardMessage{{Role: "assistant", Content: strings.Repeat("é", maxSubmissionBytes)}}, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := encodeSubmission("token", "chat", tc.messages)
 			if len(body) > maxSubmissionBytes {
 				t.Fatalf("body is %d bytes, want at most %d", len(body), maxSubmissionBytes)
 			}
-			var got submission
+			var got Submission
 			if err := json.Unmarshal(body, &got); err != nil || len(got.Messages) != tc.kept {
 				t.Fatalf("kept %d messages, want %d (%v)", len(got.Messages), tc.kept, err)
 			}
@@ -83,17 +83,17 @@ func TestSubmitter_TrimsOversizedHistory(t *testing.T) {
 }
 
 func TestScreeningIsThePromptAndHistoryWithoutToolResults(t *testing.T) {
-	h := &harness{safeguards: &submitter{}}
-	req := &request{system: "be helpful", conversation: "chat-1", groups: [][]json.RawMessage{
+	h := &Engine{Safeguards: &Submitter{}}
+	req := &Request{System: "be helpful", conversation: "chat-1", Groups: [][]json.RawMessage{
 		{api.Raw(api.Object{"role": "user", "content": []any{api.Object{"type": "text", "text": "look"}, api.Object{"type": "image_url", "image_url": api.Object{"url": "data:..."}}}})},
 		{api.Raw(api.Object{"role": "assistant", "content": "", "reasoning_content": "hidden", "tool_calls": []any{api.Object{"id": "c1"}}}), api.Raw(api.Object{"role": "tool", "tool_call_id": "c1", "content": "42"})},
 		{api.Raw(api.Object{"role": "user", "content": "thanks"})},
 	}}
-	want := &screening{conversation: "chat-1", messages: []safeguardMessage{{Role: "system", Content: "be helpful"}, {Role: "user", Content: "look\n[image_url]"}, {Role: "assistant", Content: ""}, {Role: "user", Content: "thanks"}}}
+	want := &screening{conversation: "chat-1", messages: []SafeguardMessage{{Role: "system", Content: "be helpful"}, {Role: "user", Content: "look\n[image_url]"}, {Role: "assistant", Content: ""}, {Role: "user", Content: "thanks"}}}
 	if got := h.screening(req); !reflect.DeepEqual(got, want) {
 		t.Fatalf("captured %+v\nwant %+v", got, want)
 	}
-	if (&harness{}).screening(req) != nil {
+	if (&Engine{}).screening(req) != nil {
 		t.Fatal("a conversation was captured with no sidecar configured")
 	}
 }
@@ -101,20 +101,20 @@ func TestScreeningIsThePromptAndHistoryWithoutToolResults(t *testing.T) {
 func TestOnlyCompletedFirstPartyChatsAreScreened(t *testing.T) {
 	reply := []domain.Message{{Content: "hello"}}
 	for name, tc := range map[string]struct {
-		change func(*chatRun)
+		change func(*Run)
 		reply  []domain.Message
 		err    error
 		want   bool
 	}{
-		"completed":    {func(*chatRun) {}, reply, nil, true},
-		"failed":       {func(*chatRun) {}, reply, errors.New("model failed"), false},
-		"cancelled":    {func(r *chatRun) { r.cancelled = true }, reply, nil, false},
-		"deleted":      {func(r *chatRun) { r.thread.deleted = true }, reply, nil, false},
-		"widget retry": {func(r *chatRun) { r.retryTarget = &retryTarget{block: domain.Block{Name: "render_chart"}} }, reply, nil, false},
-		"anonymous":    {func(r *chatRun) { r.principal.Anonymous = true }, reply, nil, false},
-		"api key":      {func(r *chatRun) { r.credential.FirstParty = false }, reply, nil, false},
-		"not captured": {func(r *chatRun) { r.screening = nil }, reply, nil, false},
-		"no reply":     {func(*chatRun) {}, []domain.Message{{Content: ""}}, nil, false},
+		"completed":    {func(*Run) {}, reply, nil, true},
+		"failed":       {func(*Run) {}, reply, errors.New("model failed"), false},
+		"cancelled":    {func(r *Run) { r.cancelled = true }, reply, nil, false},
+		"deleted":      {func(r *Run) { r.Thread.deleted = true }, reply, nil, false},
+		"widget retry": {func(r *Run) { r.retryTarget = &retryTarget{block: domain.Block{Name: "render_chart"}} }, reply, nil, false},
+		"anonymous":    {func(r *Run) { r.Principal.Anonymous = true }, reply, nil, false},
+		"api key":      {func(r *Run) { r.credential.FirstParty = false }, reply, nil, false},
+		"not captured": {func(r *Run) { r.screening = nil }, reply, nil, false},
+		"no reply":     {func(*Run) {}, []domain.Message{{Content: ""}}, nil, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var submissions atomic.Int32
@@ -123,9 +123,9 @@ func TestOnlyCompletedFirstPartyChatsAreScreened(t *testing.T) {
 				w.WriteHeader(http.StatusAccepted)
 			}))
 			defer sidecar.Close()
-			h := &harness{safeguards: newSubmitter(sidecar.URL)}
-			r := &chatRun{thread: &threadSession{id: "chat-1"}, turn: &turnRequest{Kind: "send"}, principal: &auth.Principal{ID: "alice"}, credential: chatToken,
-				screening: &screening{conversation: "chat-1", messages: []safeguardMessage{{Role: "user", Content: "hi"}}}}
+			h := &Engine{Safeguards: NewSubmitter(sidecar.URL)}
+			r := &Run{Thread: &threadSession{ID: "chat-1"}, turn: &TurnRequest{Kind: "send"}, Principal: &auth.Principal{ID: "alice"}, credential: chatToken,
+				screening: &screening{conversation: "chat-1", messages: []SafeguardMessage{{Role: "user", Content: "hi"}}}}
 			tc.change(r)
 			h.screen(r, tc.reply, tc.err)
 			if submitted := submissions.Load() == 1; submitted != tc.want {

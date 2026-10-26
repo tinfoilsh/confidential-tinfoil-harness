@@ -12,6 +12,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
 
@@ -21,10 +22,10 @@ func (h *harness) apiRoutes() []routeSpec {
 		{"/v1/changes", false, false, h.changes},
 		{"/v1/threads/list", false, true, decoded(h.listThreads)}, {"/v1/threads/get", false, true, decoded(h.getThread)},
 		{"/v1/threads/delete", false, true, decoded(h.deleteThread)},
-		{"/v1/threads/search", false, true, decoded(h.searchThreads)}, {"/v1/threads/cancel", true, false, decoded(h.cancelThread)},
-		{"/v1/threads/queue/send", true, false, decoded(h.sendQueued)}, {"/v1/threads/queue/remove", true, false, decoded(h.removeQueued)}, {"/v1/threads/share", false, false, decoded(h.archives.ShareThread)},
+		{"/v1/threads/search", false, true, decoded(h.searchThreads)}, {"/v1/threads/cancel", true, false, decoded(h.engine.CancelThread)},
+		{"/v1/threads/queue/send", true, false, decoded(h.engine.SendQueued)}, {"/v1/threads/queue/remove", true, false, decoded(h.engine.RemoveQueued)}, {"/v1/threads/share", false, false, decoded(h.archives.ShareThread)},
 		{"/v1/threads/share/revoke", false, false, decoded(h.archives.RevokeShare)}, {"/v1/threads/share/status", false, false, decoded(h.archives.ShareStatus)},
-		{"/v1/threads/transcript", false, true, decoded(h.threadTranscript)},
+		{"/v1/threads/transcript", false, true, decoded(h.engine.ThreadTranscript)},
 		{"/v1/profile/get", false, true, h.getProfile}, {"/v1/profile/update", false, true, decoded(h.updateProfile)}, {"/v1/profile/upgrade", true, false, decoded(h.upgradeDeviceProfile)},
 		{"/v1/profile/merge", false, true, decoded(h.mergeDeviceProfile)},
 		{"/v1/projects/list", false, true, decoded(h.listProjects)}, {"/v1/projects/get", false, true, decoded(h.getProject)},
@@ -81,7 +82,7 @@ func (h *harness) session(ctx context.Context, p *auth.Principal, _ auth.Content
 		ProfileDefaults: domain.DefaultProfile(),
 		Composer:        attach.Composer(),
 		Presets:         presets,
-		Features:        map[string]bool{"webSearch": webSearch.client != nil, "transcription": h.models.ServiceReady("router"), "speech": h.models.ServiceReady("router")},
+		Features:        map[string]bool{"webSearch": engine.WebSearchReady(), "transcription": h.models.ServiceReady("router"), "speech": h.models.ServiceReady("router")},
 	}, nil
 }
 
@@ -210,7 +211,7 @@ func (h *harness) changeThread(ctx context.Context, p *auth.Principal, key auth.
 // or the one a device chat's client sends.
 func (h *harness) sourceProfile(ctx context.Context, p *auth.Principal, key auth.ContentKey, source domain.ThreadSource) (domain.Profile, error) {
 	if !source.Local {
-		return h.profile(ctx, p, key)
+		return h.store.Profile(ctx, p, key)
 	}
 	return *domain.LocalProfile(source.Profile), nil
 }
@@ -223,12 +224,12 @@ func deviceReply(row *domain.ThreadRow) any {
 	}{domain.DeviceThread(&row.Thread)}
 }
 
-func (h *harness) deleteThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *deleteThreadRequest) (any, error) {
+func (h *harness) deleteThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *api.DeleteRequest) (any, error) {
 	var err error
 	if in.Revision != "" {
-		err = h.finishTransfer(ctx, p, key, in)
+		err = h.engine.FinishTransfer(ctx, p, key, in)
 	} else {
-		h.stopThread(p, in.ID)
+		h.engine.StopThread(p, in.ID)
 		err = h.store.RemoveRow(ctx, p, key, "chat", in.ID)
 	}
 	if err != nil {
@@ -353,7 +354,7 @@ func (h *harness) deleteAllThreads(ctx context.Context, p *auth.Principal, key a
 		return nil, err
 	}
 	for _, id := range ids {
-		if _, err := h.deleteThread(ctx, p, key, &deleteThreadRequest{IDRequest: api.IDRequest{ID: id}}); err != nil {
+		if _, err := h.deleteThread(ctx, p, key, &api.DeleteRequest{IDRequest: api.IDRequest{ID: id}}); err != nil {
 			return nil, err
 		}
 	}
@@ -363,15 +364,6 @@ func (h *harness) deleteAllThreads(ctx context.Context, p *auth.Principal, key a
 // deletedCount answers a bulk deletion.
 type deletedCount struct {
 	Deleted int `json:"deleted"`
-}
-
-// profile is a user's settings as a prompt reads them.
-func (h *harness) profile(ctx context.Context, p *auth.Principal, key auth.ContentKey) (domain.Profile, error) {
-	stored, err := h.store.LoadProfile(ctx, p, key)
-	if err != nil || stored == nil {
-		return domain.Profile{}, err
-	}
-	return stored.Profile, nil
 }
 
 // viewProfile is a stored profile as its client reads it.

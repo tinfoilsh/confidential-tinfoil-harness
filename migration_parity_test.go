@@ -20,6 +20,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
 
@@ -288,22 +289,20 @@ func TestAQueuedTurnRefreshesStorageAccessBeforeStarting(t *testing.T) {
 	h.store.Rows = grants
 	p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
 	in := sendInput(key)
-	first, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](in))
+	first, err := h.engine.AcceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[engine.TurnRequest](in))
 	if err != nil {
 		t.Fatal(err)
 	}
-	awaitFrame(t, first.log, "TEXT_MESSAGE_CHUNK")
+	awaitFrame(t, first.Log, "TEXT_MESSAGE_CHUNK")
 	next := sendInput(key)
 	next["threadId"], next["content"] = in["threadId"], "Queued question"
-	queued, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](next))
+	queued, err := h.engine.AcceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[engine.TurnRequest](next))
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.live.mu.Lock()
-	queued.principal.SyncExpires = api.Now()
-	h.live.mu.Unlock()
+	h.engine.Live.Locked(func() { queued.Principal.SyncExpires = api.Now() })
 	release()
-	<-queued.finished
+	<-queued.Finished
 	row, err := rows.Load(context.Background(), p, key, "chat", api.Str(in["threadId"]))
 	if err != nil || len(mustRead(domain.ReadThreadRow(row)).Messages) != 4 || mustRead(domain.ReadThreadRow(row)).Messages[2].Content != "Queued question" || mustRead(domain.ReadThreadRow(row)).Messages[3].Content == "" || grants.grants.Load() != 3 {
 		t.Fatalf("queued reply did not renew and save: %v, grants=%d, row=%+v", err, grants.grants.Load(), row)

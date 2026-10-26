@@ -1,4 +1,4 @@
-package main
+package engine
 
 import (
 	"bytes"
@@ -27,32 +27,32 @@ const (
 	jsonEscapeGrowth = 6
 )
 
-type safeguardMessage struct {
+type SafeguardMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
 
-type submission struct {
+type Submission struct {
 	Credential     string             `json:"credential"`
 	ConversationID string             `json:"conversation_id,omitempty"`
-	Messages       []safeguardMessage `json:"messages"`
+	Messages       []SafeguardMessage `json:"messages"`
 }
 
-// submitter delivers a conversation from the run that produced it, after the
+// Submitter delivers a conversation from the run that produced it, after the
 // run's terminal frame, so the reply is already delivered. The run waits up
 // to safeguardsTimeout for the delivery before it releases what it holds,
 // and a failed delivery never fails it.
-type submitter struct {
+type Submitter struct {
 	endpoint string
 	client   *http.Client
 }
 
-// newSubmitter is nil without a sidecar; a nil submitter does nothing.
-func newSubmitter(baseURL string) *submitter {
+// NewSubmitter is nil without a sidecar; a nil submitter does nothing.
+func NewSubmitter(baseURL string) *Submitter {
 	if baseURL == "" {
 		return nil
 	}
-	return &submitter{
+	return &Submitter{
 		endpoint: strings.TrimRight(baseURL, "/") + "/ingest",
 		client:   &http.Client{Timeout: safeguardsTimeout},
 	}
@@ -60,7 +60,7 @@ func newSubmitter(baseURL string) *submitter {
 
 // submit delivers a conversation that ends in an assistant reply; without one
 // there is nothing to judge.
-func (s *submitter) submit(credential, conversationID string, messages []safeguardMessage) {
+func (s *Submitter) submit(credential, conversationID string, messages []SafeguardMessage) {
 	if s == nil || len(messages) == 0 || messages[len(messages)-1].Role != "assistant" || messages[len(messages)-1].Content == "" {
 		return
 	}
@@ -69,8 +69,8 @@ func (s *submitter) submit(credential, conversationID string, messages []safegua
 
 // encodeSubmission keeps the newest messages that fit the sidecar's cap, and
 // cuts the newest from the front when it alone does not fit.
-func encodeSubmission(credential, conversationID string, messages []safeguardMessage) []byte {
-	envelope, _ := json.Marshal(submission{Credential: credential, ConversationID: conversationID, Messages: []safeguardMessage{}})
+func encodeSubmission(credential, conversationID string, messages []SafeguardMessage) []byte {
+	envelope, _ := json.Marshal(Submission{Credential: credential, ConversationID: conversationID, Messages: []SafeguardMessage{}})
 	room, start := maxSubmissionBytes-len(envelope), len(messages)
 	for ; start > 0; start-- {
 		encoded, _ := json.Marshal(messages[start-1])
@@ -82,16 +82,16 @@ func encodeSubmission(credential, conversationID string, messages []safeguardMes
 	kept := messages[start:]
 	if len(kept) == 0 {
 		last := messages[len(messages)-1]
-		empty, _ := json.Marshal(safeguardMessage{Role: last.Role})
+		empty, _ := json.Marshal(SafeguardMessage{Role: last.Role})
 		keep := min(len(last.Content), max(0, room-len(empty))/jsonEscapeGrowth)
 		last.Content = strings.ToValidUTF8(last.Content[len(last.Content)-keep:], "")
-		kept = []safeguardMessage{last}
+		kept = []SafeguardMessage{last}
 	}
-	body, _ := json.Marshal(submission{Credential: credential, ConversationID: conversationID, Messages: kept})
+	body, _ := json.Marshal(Submission{Credential: credential, ConversationID: conversationID, Messages: kept})
 	return body
 }
 
-func (s *submitter) deliver(body []byte) {
+func (s *Submitter) deliver(body []byte) {
 	defer func() { api.Rescued("safeguards submission", recover()) }()
 	req, err := http.NewRequest(http.MethodPost, s.endpoint, bytes.NewReader(body))
 	if err != nil {
@@ -142,28 +142,28 @@ func flattenContent(content any) string {
 // screening is what a run submits for classification once it completes.
 type screening struct {
 	conversation string
-	messages     []safeguardMessage
+	messages     []SafeguardMessage
 }
 
 // screening captures the prompt and history a run was asked, without tool
 // results. Turns through auto are screened here too: the router is not told
 // their chat, so the control plane ignores the router's report of them.
-func (h *harness) screening(req *request) *screening {
-	if h.safeguards == nil {
+func (eng *Engine) screening(req *Request) *screening {
+	if eng.Safeguards == nil {
 		return nil
 	}
-	var messages []safeguardMessage
-	if req.system != "" {
-		messages = append(messages, safeguardMessage{Role: "system", Content: req.system})
+	var messages []SafeguardMessage
+	if req.System != "" {
+		messages = append(messages, SafeguardMessage{Role: "system", Content: req.System})
 	}
-	for _, group := range req.groups {
+	for _, group := range req.Groups {
 		for _, encoded := range group {
 			var message struct {
 				Role    string `json:"role"`
 				Content any    `json:"content"`
 			}
 			if json.Unmarshal(encoded, &message) == nil && message.Role != "" && message.Role != "tool" {
-				messages = append(messages, safeguardMessage{Role: message.Role, Content: flattenContent(message.Content)})
+				messages = append(messages, SafeguardMessage{Role: message.Role, Content: flattenContent(message.Content)})
 			}
 		}
 	}
@@ -172,11 +172,11 @@ func (h *harness) screening(req *request) *screening {
 
 // screen submits a run that completed with a reply, under a first-party chat
 // credential, for classification.
-func (h *harness) screen(r *chatRun, reply []domain.Message, runErr error) {
-	h.live.mu.Lock()
-	deleted := r.thread.deleted
-	h.live.mu.Unlock()
-	if r.screening == nil || runErr != nil || r.cancelled || deleted || r.retryTarget != nil || r.principal.Anonymous || !r.credential.FirstParty {
+func (eng *Engine) screen(r *Run, reply []domain.Message, runErr error) {
+	eng.Live.mu.Lock()
+	deleted := r.Thread.deleted
+	eng.Live.mu.Unlock()
+	if r.screening == nil || runErr != nil || r.cancelled || deleted || r.retryTarget != nil || r.Principal.Anonymous || !r.credential.FirstParty {
 		return
 	}
 	var text []string
@@ -190,5 +190,5 @@ func (h *harness) screen(r *chatRun, reply []domain.Message, runErr error) {
 	if r.turn.Kind == "continue" && len(history) > 0 && history[len(history)-1].Role == "assistant" {
 		history = history[:len(history)-1]
 	}
-	h.safeguards.submit(string(r.credential.Key), r.screening.conversation, append(history, safeguardMessage{Role: "assistant", Content: strings.Join(text, "\n")}))
+	eng.Safeguards.submit(string(r.credential.Key), r.screening.conversation, append(history, SafeguardMessage{Role: "assistant", Content: strings.Join(text, "\n")}))
 }

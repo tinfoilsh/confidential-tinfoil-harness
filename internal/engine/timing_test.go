@@ -1,4 +1,4 @@
-package main
+package engine
 
 import (
 	"context"
@@ -44,7 +44,7 @@ func TestAReplyRecordsWhenItsStepsRan(t *testing.T) {
 }
 
 func TestOldRepliesKeepWhenTheirStepsRan(t *testing.T) {
-	thread := mustRead(domain.ReadThread("chat", api.Raw(api.Object{"title": "Trip", "messages": []any{
+	thread, err := domain.ReadThread("chat", api.Raw(api.Object{"title": "Trip", "messages": []any{
 		api.Object{"id": "u", "role": "user", "content": "plan"},
 		api.Object{"id": "a", "role": "assistant", "content": "Go", "timeline": []any{
 			api.Object{"type": "thinking", "id": "t", "content": "Plan", "isThinking": false, "duration": 2.5, "startedAt": 1000, "endedAt": 3500},
@@ -56,7 +56,10 @@ func TestOldRepliesKeepWhenTheirStepsRan(t *testing.T) {
 			api.Object{"type": "content", "id": "c", "content": "Go"},
 		}},
 		api.Object{"id": "b", "role": "assistant", "content": "Sure", "thoughts": "Think", "thinkingDuration": 1.25},
-	}})))
+	}}))
+	if err != nil {
+		t.Fatal(err)
+	}
 	type step struct {
 		ID                           string
 		StartedAt, EndedAt, Duration float64
@@ -75,7 +78,7 @@ func TestOldRepliesKeepWhenTheirStepsRan(t *testing.T) {
 
 func TestALateReasoningTailIsNotSummarized(t *testing.T) {
 	assembler := domain.NewMessageAssembler()
-	summaries := &thoughtSummaries{out: &stream{}, assembler: assembler, summarize: func(ctx context.Context, _ string) (string, error) { return "", ctx.Err() }}
+	summaries := &thoughtSummaries{out: &Stream{}, assembler: assembler, summarize: func(ctx context.Context, _ string) (string, error) { return "", ctx.Err() }}
 	for _, e := range []domain.Event{
 		domain.ReasoningChunk{MessageID: "r-reasoning", Delta: "plan"},
 		domain.TextChunk{MessageID: "r", Delta: strings.Repeat("answer ", minSummaryWords)},
