@@ -65,3 +65,6 @@ func FirstString(values ...any) string {
 	}
 	return ""
 }
+
+// Parsed is the JSON value b holds, or nil.
+func Parsed(b []byte) any { var value any; json.Unmarshal(b, &value); return value }

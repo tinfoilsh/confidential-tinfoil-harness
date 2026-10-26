@@ -1,4 +1,4 @@
-package main
+package domain
 
 import (
 	"cmp"
@@ -6,9 +6,9 @@ import (
 	"slices"
 )
 
-// recordVersion is the format of the rows and device records this harness
+// RecordVersion is the format of the rows and device records this harness
 // writes. A change to what they hold changes it.
-const recordVersion = 1
+const RecordVersion = 1
 
 // Thread is a chat in the thread format: what the harness stores in sync,
 // what a device keeps, and what a device chat's run returns.
@@ -86,19 +86,19 @@ type ToolDisplay struct {
 	Query   string          `json:"query,omitempty"`
 	URL     string          `json:"url,omitempty"`
 	Status  string          `json:"status"`
-	Sources []displaySource `json:"sources"`
+	Sources []DisplaySource `json:"sources"`
 }
 
-type displaySource struct {
+type DisplaySource struct {
 	URL     string `json:"url"`
 	Title   string `json:"title"`
 	Snippet string `json:"snippet,omitempty"`
 }
 
-// searchDisplay is what a web search or page fetch shows, read from its
+// SearchDisplay is what a web search or page fetch shows, read from its
 // arguments and the result its client was sent: a call without a result is
 // running, and one whose result is an error failed. Other calls show none.
-func searchDisplay(name, args string, result json.RawMessage) *ToolDisplay {
+func SearchDisplay(name, args string, result json.RawMessage) *ToolDisplay {
 	if name != "web_search" && name != "web_fetch" {
 		return nil
 	}
@@ -107,16 +107,16 @@ func searchDisplay(name, args string, result json.RawMessage) *ToolDisplay {
 		URL   string   `json:"url"`
 		URLs  []string `json:"urls"`
 	}
-	readLenient([]byte(historyArgs(args)), &arguments)
+	readLenient([]byte(HistoryArgs(args)), &arguments)
 	var shown struct {
 		Query   string          `json:"query"`
 		URL     string          `json:"url"`
 		Error   json.RawMessage `json:"error"`
-		Results []displaySource `json:"results"`
-		Pages   []displaySource `json:"pages"`
+		Results []DisplaySource `json:"results"`
+		Pages   []DisplaySource `json:"pages"`
 	}
 	readLenient(result, &shown)
-	display := &ToolDisplay{Status: "completed", Sources: []displaySource{}}
+	display := &ToolDisplay{Status: "completed", Sources: []DisplaySource{}}
 	switch {
 	case len(result) == 0 || string(result) == "null":
 		display.Status = "running"
@@ -133,7 +133,7 @@ func searchDisplay(name, args string, result json.RawMessage) *ToolDisplay {
 		display.URL = arguments.URLs[0]
 	}
 	for _, page := range shown.Pages {
-		display.Sources = append(display.Sources, displaySource{URL: page.URL, Title: page.Title})
+		display.Sources = append(display.Sources, DisplaySource{URL: page.URL, Title: page.Title})
 	}
 	return display
 }
@@ -163,7 +163,7 @@ type Attachment struct {
 
 	// inferenceMimeType is the type of the copy a model reads, set while a
 	// turn's prompt is built.
-	inferenceMimeType string
+	InferenceMimeType string `json:"-"`
 }
 
 // DocumentPage is a converted document page. Its fields are in the order
@@ -203,25 +203,25 @@ type ContextUsage struct {
 	Percentage  float64 `json:"percentage"`
 }
 
-// messageUsage is what a reply cost.
-type messageUsage struct {
+// MessageUsage is what a reply cost.
+type MessageUsage struct {
 	PromptTokens     int64 `json:"promptTokens"`
 	CompletionTokens int64 `json:"completionTokens"`
 }
 
-// threadRow is a stored chat and the revision a write must match; a chat
+// ThreadRow is a stored chat and the revision a write must match; a chat
 // not yet stored has none.
-type threadRow struct {
+type ThreadRow struct {
 	Thread
-	etag string
+	ETag string `json:"-"`
 	// restore lets a create reuse the id of a chat deleted from sync, as a
 	// chat moved to the device and back does.
-	restore bool
+	Restore bool `json:"-"`
 }
 
-// clone copies a thread deeply enough to change it apart from the original.
+// Clone copies a thread deeply enough to change it apart from the original.
 // Raw tool output is never changed in place, so copies share it.
-func (t *Thread) clone() Thread {
+func (t *Thread) Clone() Thread {
 	copy := *t
 	copy.Messages = make([]Message, len(t.Messages))
 	for i := range t.Messages {
@@ -260,12 +260,12 @@ func clonedSlice[T any](s []T) []T {
 	return append(make([]T, 0, len(s)), s...)
 }
 
-func (t *Thread) messageIndex(id string) int {
+func (t *Thread) MessageIndex(id string) int {
 	return slices.IndexFunc(t.Messages, func(m Message) bool { return m.ID == id })
 }
 
-// attachment finds an attachment of the thread by id.
-func (t *Thread) attachment(id string) *Attachment {
+// FindAttachment finds an attachment of the thread by id.
+func (t *Thread) FindAttachment(id string) *Attachment {
 	for i := range t.Messages {
 		for j := range t.Messages[i].Attachments {
 			if t.Messages[i].Attachments[j].ID == id {
@@ -276,8 +276,8 @@ func (t *Thread) attachment(id string) *Attachment {
 	return nil
 }
 
-// eachAttachment visits every attachment of the thread in place.
-func (t *Thread) eachAttachment(visit func(*Attachment) error) error {
+// EachAttachment visits every attachment of the thread in place.
+func (t *Thread) EachAttachment(visit func(*Attachment) error) error {
 	for i := range t.Messages {
 		for j := range t.Messages[i].Attachments {
 			if err := visit(&t.Messages[i].Attachments[j]); err != nil {
@@ -288,31 +288,34 @@ func (t *Thread) eachAttachment(visit func(*Attachment) error) error {
 	return nil
 }
 
-// callID is the id a tool call block answers to.
-func (b *Block) callID() string {
+// CallID is the id a tool call block answers to.
+func (b *Block) CallID() string {
 	if b.ToolCallID != "" {
 		return b.ToolCallID
 	}
 	return b.ID
 }
 
-func (a *Attachment) isImage() bool { return a.Kind == "image" }
+func (a *Attachment) IsImage() bool { return a.Kind == "image" }
 
-// storageKey opens the attachment's blob: a sync key, or a control plane
+// StorageKey opens the attachment's blob: a sync key, or a control plane
 // key from before sync.
-func (a *Attachment) storageKey() string {
+func (a *Attachment) StorageKey() string {
 	if a.EncryptionKey != "" {
 		return a.EncryptionKey
 	}
 	return a.Key
 }
 
-func (a *Attachment) hasContent() bool { return a.TextContent != "" || len(a.Pages) > 0 }
+func (a *Attachment) HasContent() bool { return a.TextContent != "" || len(a.Pages) > 0 }
 
-// valueOr is what p points at, or fallback when p is nil.
-func valueOr[T any](p *T, fallback T) T {
+// ValueOr is what p points at, or fallback when p is nil.
+func ValueOr[T any](p *T, fallback T) T {
 	if p == nil {
 		return fallback
 	}
 	return *p
 }
+
+// AttachmentKinds are the kinds of attachment a message carries.
+var AttachmentKinds = []string{"image", "document", "audio"}

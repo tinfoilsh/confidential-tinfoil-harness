@@ -20,6 +20,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 func TestSpeechStreamsTheRoutersAudio(t *testing.T) {
@@ -162,7 +163,7 @@ func TestAMessageIsReadAloudInOrderWithoutItsCode(t *testing.T) {
 		fmt.Fprintf(&long, "Sentence %d walks through the plan in enough detail to fill a piece. ", i)
 	}
 	thread := api.Object{"title": "Trip", "messages": []any{api.Object{"id": "q", "role": "user", "content": "Plan it"}, api.Object{"id": "short", "role": "assistant", "content": reply}, api.Object{"id": "long", "role": "assistant", "content": long.String()}}}
-	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: api.Raw(thread)}
+	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat-1")] = domain.StoredRow{ID: "chat-1", ETag: "1", Data: api.Raw(thread)}
 	read := func(in api.Object, user string) (string, []string) {
 		t.Helper()
 		mu.Lock()

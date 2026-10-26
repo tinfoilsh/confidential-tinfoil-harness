@@ -308,3 +308,8 @@ func token() string {
 	rand.Read(raw[:])
 	return hex.EncodeToString(raw[:])
 }
+
+// instanceID names this process, which alone holds its live runs. Clients
+// send it back with requests about a run, so that a deployment of several
+// can route them here.
+var instanceID = token()

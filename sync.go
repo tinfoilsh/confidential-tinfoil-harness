@@ -14,23 +14,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
-// storedRow is a row as sync holds it: sealed JSON, opened only by the
-// store's readers.
-type storedRow struct {
-	ID, ETag string
-	Data     json.RawMessage
-	// project is the project sync files a chat or document under, apart
-	// from its sealed data; projectSet says sync reported one, even none.
-	project    *string
-	projectSet bool
-	// restore lets a create reuse the id of a chat deleted from sync, as a
-	// chat moved to the device and back does.
-	restore bool
-}
 type rowPage struct {
-	Rows []storedRow
+	Rows []domain.StoredRow
 	Next string
 	// Rows sync holds but cannot open, such as one sealed to a retired key,
 	// and why. A page lists them rather than failing, so one row cannot hide
@@ -40,10 +28,10 @@ type rowPage struct {
 type rowStore interface {
 	authorizeRun(context.Context, *auth.Principal, auth.ContentKey, string, *string) (storageGrant, error)
 	authorizeStorage(context.Context, *auth.Principal, auth.ContentKey, string, string) (auth.Secret, error)
-	load(context.Context, *auth.Principal, auth.ContentKey, string, string) (*storedRow, error)
-	pull(context.Context, *auth.Principal, auth.ContentKey, string, []string) ([]storedRow, map[string]error, error)
+	load(context.Context, *auth.Principal, auth.ContentKey, string, string) (*domain.StoredRow, error)
+	pull(context.Context, *auth.Principal, auth.ContentKey, string, []string) ([]domain.StoredRow, map[string]error, error)
 	list(context.Context, *auth.Principal, auth.ContentKey, string, string, string, int) (rowPage, error)
-	push(context.Context, *auth.Principal, auth.ContentKey, string, *storedRow, string) (string, error)
+	push(context.Context, *auth.Principal, auth.ContentKey, string, *domain.StoredRow, string) (string, error)
 	// remove deletes a row whatever its revision; a missing row is gone.
 	remove(context.Context, *auth.Principal, auth.ContentKey, string, string) error
 	removeRevision(context.Context, *auth.Principal, auth.ContentKey, string, string) error
@@ -161,8 +149,8 @@ type pullItem struct {
 // running. A later request may fetch it.
 var errRowNotFetched = api.Err(502, "UPSTREAM_REFUSED", "The sync service could not fetch the data in time")
 
-func (s *syncClient) pull(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope string, ids []string) ([]storedRow, map[string]error, error) {
-	rows, failed := []storedRow{}, map[string]error{}
+func (s *syncClient) pull(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope string, ids []string) ([]domain.StoredRow, map[string]error, error) {
+	rows, failed := []domain.StoredRow{}, map[string]error{}
 	for start := 0; start < len(ids); start += pullBatch {
 		if err := s.pullBatch(ctx, p, key, scope, ids[start:min(len(ids), start+pullBatch)], true, &rows, failed); err != nil {
 			return nil, nil, err
@@ -171,7 +159,7 @@ func (s *syncClient) pull(ctx context.Context, p *auth.Principal, key auth.Conte
 	return rows, failed, nil
 }
 
-func (s *syncClient) pullBatch(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope string, ids []string, retry bool, rows *[]storedRow, failed map[string]error) error {
+func (s *syncClient) pullBatch(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope string, ids []string, retry bool, rows *[]domain.StoredRow, failed map[string]error) error {
 	var result struct {
 		Items []pullItem `json:"items"`
 	}
@@ -204,14 +192,14 @@ func (s *syncClient) pullBatch(ctx context.Context, p *auth.Principal, key auth.
 			failed[item.ID] = errors.New("invalid sync row")
 			continue
 		}
-		*rows = append(*rows, storedRow{ID: item.ID, ETag: item.ETag, Data: plain, project: item.ProjectID, projectSet: item.ProjectSet})
+		*rows = append(*rows, domain.StoredRow{ID: item.ID, ETag: item.ETag, Data: plain, Project: item.ProjectID, ProjectSet: item.ProjectSet})
 	}
 	if len(again) > 0 {
 		return s.pullBatch(ctx, p, key, scope, again, false, rows, failed)
 	}
 	return nil
 }
-func (s *syncClient) load(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, id string) (*storedRow, error) {
+func (s *syncClient) load(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, id string) (*domain.StoredRow, error) {
 	rows, failed, err := s.pull(ctx, p, key, scope, []string{id})
 	if err != nil {
 		return nil, err
@@ -280,22 +268,22 @@ func (s *syncClient) list(ctx context.Context, p *auth.Principal, key auth.Conte
 	if err != nil {
 		return rowPage{}, err
 	}
-	page := rowPage{Rows: []storedRow{}, Next: next}
+	page := rowPage{Rows: []domain.StoredRow{}, Next: next}
 	if len(ids) != 0 {
 		page.Rows, page.Unreadable, err = s.pull(ctx, p, key, scope, ids)
 	}
 	return page, err
 }
-func (s *syncClient) push(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope string, row *storedRow, nonce string) (string, error) {
+func (s *syncClient) push(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope string, row *domain.StoredRow, nonce string) (string, error) {
 	var match any
 	if row.ETag != "" {
 		match = row.ETag
 	}
 	metadata := api.Object{}
 	if scope == "chat" || scope == "project_document" {
-		metadata["projectId"] = row.project
+		metadata["projectId"] = row.Project
 	}
-	if scope == "chat" && row.restore {
+	if scope == "chat" && row.Restore {
 		metadata["restoreDeleted"] = true
 	}
 	if scope == "profile" {

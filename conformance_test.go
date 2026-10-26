@@ -18,6 +18,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 // Runs recorded as fixtures in protocol/fixtures, which every client replays
@@ -93,9 +94,9 @@ func TestRunsShowTheChatTheHarnessKeeps(t *testing.T) {
 			w := postRoute(h, "/v1/threads/turn", in, "alice")
 			frames := framesOf(t, w.Body.Bytes())
 			events := eventsIn(t, w)
-			var kept Thread
+			var kept domain.Thread
 			if tc.local {
-				var metadata runMetadata
+				var metadata domain.RunMetadata
 				if json.Unmarshal(events[len(events)-1].Metadata, &metadata) != nil || metadata.Thread == nil {
 					t.Fatalf("the device run returned no chat: %s", w.Body)
 				}
@@ -105,7 +106,7 @@ func TestRunsShowTheChatTheHarnessKeeps(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				kept = mustRead(readThreadRow(row)).Thread
+				kept = mustRead(domain.ReadThreadRow(row)).Thread
 			}
 			if last := events[len(events)-1].Type; last != map[bool]string{true: "RUN_ERROR", false: "RUN_FINISHED"}[tc.name == "refused"] {
 				t.Fatalf("the run ended with %s", last)
@@ -145,13 +146,13 @@ func framesOf(t *testing.T, stream []byte) []fixtureFrame {
 
 // conformance records a run's frames, and the chat as the harness keeps it
 // after them, as the named fixture.
-func conformance(t *testing.T, name, description string, frames []fixtureFrame, thread *Thread) {
+func conformance(t *testing.T, name, description string, frames []fixtureFrame, thread *domain.Thread) {
 	t.Helper()
 	recorded := runFixture{Description: description, Expected: fixtureChat{Title: thread.Title, TitleState: thread.TitleState, Status: "idle"}}
 	for _, frame := range frames {
 		recorded.Frames = append(recorded.Frames, stableFrame(frame))
 	}
-	for _, message := range window(&threadRow{Thread: *thread}, "", maxMessageWindow).Messages {
+	for _, message := range domain.Window(&domain.ThreadRow{Thread: *thread}, "", domain.MaxMessageWindow).Messages {
 		recorded.Expected.Messages = append(recorded.Expected.Messages, projectedMessage(message))
 	}
 	var last struct {
@@ -182,10 +183,10 @@ func conformance(t *testing.T, name, description string, frames []fixtureFrame, 
 
 // projectedMessage is a message with the members a client's reducer must
 // build: a question's text, and a reply's timeline steps.
-func projectedMessage(m messageView) api.Object {
+func projectedMessage(m domain.MessageView) api.Object {
 	out := api.Object{"id": m.ID, "role": m.Role}
 	if m.Role == "user" {
-		out["content"] = valueOr(m.Content, "")
+		out["content"] = domain.ValueOr(m.Content, "")
 	}
 	timeline := []api.Object{}
 	for _, block := range m.Timeline {

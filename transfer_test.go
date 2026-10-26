@@ -11,6 +11,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 func TestTranscriptInlinesAttachmentsAndDetachesKeys(t *testing.T) {
@@ -84,7 +85,7 @@ func TestTranscriptWaitsForALiveReply(t *testing.T) {
 	<-run.finished
 	w = postRoute(h, "/v1/threads/transcript", in, "alice")
 	var out struct {
-		Thread Thread `json:"thread"`
+		Thread domain.Thread `json:"thread"`
 	}
 	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &out) != nil || len(out.Thread.Messages) != 2 || out.Thread.Messages[1].Content == "" {
 		t.Fatalf("finished reply not transferred: %d %s", w.Code, w.Body.String())
@@ -120,7 +121,7 @@ func TestTransferDeletionPreservesRepliesStartedAfterTheCopy(t *testing.T) {
 		t.Fatalf("stale transfer: %d %s", w.Code, w.Body.String())
 	}
 	row, err := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", id)
-	if err != nil || len(mustRead(readThreadRow(row)).Messages) != 4 || mustRead(readThreadRow(row)).Messages[3].Content == "" {
+	if err != nil || len(mustRead(domain.ReadThreadRow(row)).Messages) != 4 || mustRead(domain.ReadThreadRow(row)).Messages[3].Content == "" {
 		t.Fatalf("reply lost: %v %+v", err, row)
 	}
 	deletion["revision"] = row.ETag
@@ -137,11 +138,11 @@ func TestFavoriteReturnsWithAChatMovedBackToTheCloud(t *testing.T) {
 	const id = "0000000000005_favorite"
 	storedThread(rows, "alice", id)
 	profileKey := "user:alice/profile/profile"
-	rows.rows[profileKey] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(api.Object{"pinnedChatIds": []string{id}})}
+	rows.rows[profileKey] = domain.StoredRow{ID: "profile", ETag: "1", Data: api.Raw(api.Object{"pinnedChatIds": []string{id}})}
 	copy := postRoute(h, "/v1/threads/transcript", api.Object{"key": keyBase64(key), "threadId": id}, "alice")
 	var copied struct {
-		Thread   Thread `json:"thread"`
-		Revision string `json:"revision"`
+		Thread   domain.Thread `json:"thread"`
+		Revision string        `json:"revision"`
 	}
 	if copy.Code != 200 || json.Unmarshal(copy.Body.Bytes(), &copied) != nil || !copied.Thread.Pinned {
 		t.Fatalf("favorite copy: %d %s", copy.Code, copy.Body.String())
@@ -149,7 +150,7 @@ func TestFavoriteReturnsWithAChatMovedBackToTheCloud(t *testing.T) {
 	if w := postRoute(h, "/v1/threads/delete", api.Object{"key": keyBase64(key), "id": id, "revision": copied.Revision}, "alice"); w.Code != 200 {
 		t.Fatalf("transfer: %s", w.Body.String())
 	}
-	if len(mustRead(readProfile(rows.rows[profileKey].Data)).PinnedChatIDs) != 0 {
+	if len(mustRead(domain.ReadProfile(rows.rows[profileKey].Data)).PinnedChatIDs) != 0 {
 		t.Fatal("device chat left in the cloud favorites index")
 	}
 	if w := postRoute(h, "/v1/threads/import", api.Object{"key": keyBase64(key), "threadId": id, "thread": copied.Thread}, "alice"); w.Code != 200 {
@@ -157,7 +158,7 @@ func TestFavoriteReturnsWithAChatMovedBackToTheCloud(t *testing.T) {
 	}
 	w := postRoute(h, "/v1/threads/list", api.Object{"key": keyBase64(key)}, "alice")
 	var page struct {
-		Pinned []threadSummary `json:"pinned"`
+		Pinned []domain.ThreadSummary `json:"pinned"`
 	}
 	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Pinned) != 1 || page.Pinned[0].ID != id || !page.Pinned[0].Pinned {
 		t.Fatalf("favorite not restored: %s", w.Body.String())
@@ -188,7 +189,7 @@ func TestImportStoresTheDeviceChatUnderItsID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	attachments := mustRead(readThreadRow(row)).Messages[0].Attachments
+	attachments := mustRead(domain.ReadThreadRow(row)).Messages[0].Attachments
 	for _, a := range attachments {
 		if !enclaveAttachmentID.MatchString(a.ID) || a.StorageThreadID != "0000000000005_device" || a.Base64 != "" || a.TextContent != "" {
 			t.Fatalf("attachment not stored under the chat: %+v", a)
@@ -239,7 +240,7 @@ func TestImportMayReuseADeletedChatID(t *testing.T) {
 	if metadata["restoreDeleted"] != true {
 		t.Fatalf("metadata: %v", metadata)
 	}
-	row := &storedRow{ID: "chat-1", Data: api.Raw(api.Object{"messages": []any{}})}
+	row := &domain.StoredRow{ID: "chat-1", Data: api.Raw(api.Object{"messages": []any{}})}
 	client.push(context.Background(), &auth.Principal{ID: "alice", JWT: "jwt"}, key, "chat", row, "nonce")
 	if _, ok := metadata["restoreDeleted"]; ok {
 		t.Fatal("an ordinary push asked to restore a deleted chat")

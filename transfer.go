@@ -8,6 +8,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 // Moving a chat between the cloud and the device keeps its id, as the web
@@ -29,16 +30,16 @@ func (h *harness) threadTranscript(ctx context.Context, p *auth.Principal, key a
 	if err != nil {
 		return nil, err
 	}
-	if err := h.applyPins(ctx, p, key, []*threadRow{row}); err != nil {
+	if err := h.applyPins(ctx, p, key, []*domain.ThreadRow{row}); err != nil {
 		return nil, err
 	}
 	missing := 0
-	err = row.eachAttachment(func(a *Attachment) error {
-		if a.storageKey() == "" {
+	err = row.EachAttachment(func(a *domain.Attachment) error {
+		if a.StorageKey() == "" {
 			return nil
 		}
 		data, err := h.attachmentBytes(ctx, p, a, false)
-		if err == nil && a.isImage() {
+		if err == nil && a.IsImage() {
 			a.Base64 = base64.StdEncoding.EncodeToString(data)
 		} else if err == nil {
 			var content documentBlob
@@ -63,12 +64,12 @@ func (h *harness) threadTranscript(ctx context.Context, p *auth.Principal, key a
 	if missing > 0 {
 		return nil, api.Err(409, "ATTACHMENTS_UNAVAILABLE", strconv.Itoa(missing)+" attachments in this chat could not be read")
 	}
-	row.checkWidgets()
-	row.RecordVersion = recordVersion
+	row.CheckWidgets()
+	row.RecordVersion = domain.RecordVersion
 	return struct {
-		Thread   deviceTranscript `json:"thread"`
-		Revision string           `json:"revision"`
-	}{deviceTranscript{Thread: row.Thread}, row.etag}, nil
+		Thread   domain.DeviceTranscript `json:"thread"`
+		Revision string                  `json:"revision"`
+	}{domain.DeviceTranscript{Thread: row.Thread}, row.ETag}, nil
 }
 
 func (h *harness) finishTransfer(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *deleteThreadRequest) error {
@@ -103,7 +104,7 @@ func (h *harness) handleThreadImport(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, err)
 		return
 	}
-	body, err := api.ReadBody(w, r, maxTurnBody)
+	body, err := api.ReadBody(w, r, domain.MaxTurnBody)
 	defer clear(body)
 	if err != nil {
 		api.Respond(w, nil, err)
@@ -131,11 +132,11 @@ func (h *harness) importThread(ctx context.Context, p *auth.Principal, key auth.
 		return nil, err
 	}
 	id := in.ThreadID
-	thread, err := readDeviceThread(id, in.Thread)
+	thread, err := domain.ReadDeviceThread(id, in.Thread)
 	if err != nil {
 		return nil, err
 	}
-	row := &threadRow{Thread: thread, restore: true}
+	row := &domain.ThreadRow{Thread: thread, Restore: true}
 	if err := h.placeAttachments(ctx, p, id, &row.Thread); err != nil {
 		return nil, err
 	}
@@ -151,5 +152,5 @@ func (h *harness) importThread(ctx context.Context, p *auth.Principal, key auth.
 			return nil, err
 		}
 	}
-	return summarize(&row.Thread), nil
+	return domain.Summarize(&row.Thread), nil
 }

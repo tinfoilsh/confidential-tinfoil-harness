@@ -19,6 +19,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 func TestResponseLanguageUsesTheDeviceUnlessTheProfileChoosesOne(t *testing.T) {
@@ -55,7 +56,7 @@ func TestMergingDeviceSettingsPreservesBothPromptLibraries(t *testing.T) {
 		t.Fatalf("first cloud settings: %v", first)
 	}
 	remote := api.Object{"nickname": "Cloud Sam", "themeMode": "dark", "customPromptPresets": []any{api.Object{"id": "user:same", "name": "Editor", "systemPrompt": "Cloud editing rules"}}}
-	rows.rows[rowMapKey(p, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(remote)}
+	rows.rows[rowMapKey(p, "profile", "profile")] = domain.StoredRow{ID: "profile", ETag: "1", Data: api.Raw(remote)}
 	merged := profileOf(t, postRoute(h, "/v1/profile/merge", api.Object{"key": keyBase64(key), "profile": local, "changedFields": []string{"nickname"}}, "alice"))
 	presets := presetsByID(merged)
 	if merged["themeMode"] != "dark" || merged["nickname"] != "Sam" || len(presets) != 3 || presets["user:same"]["systemPrompt"] != "Cloud editing rules" || presets[api.Str(merged["defaultPromptPresetId"])]["systemPrompt"] != "Local editing rules" {
@@ -75,10 +76,10 @@ func TestMergingDeviceSettingsPreservesBothPromptLibraries(t *testing.T) {
 		t.Fatalf("clearing the device default was lost: %v", cleared["defaultPromptPresetId"])
 	}
 	stored, _ := rows.load(context.Background(), p, key, "profile", "profile")
-	if mustRead(readProfile(stored.Data)).DefaultPromptPresetID != nil {
+	if mustRead(domain.ReadProfile(stored.Data)).DefaultPromptPresetID != nil {
 		t.Fatal("the cleared default was not stored")
 	}
-	if len(mustRead(readProfile(stored.Data)).CustomPromptPresets) != 3 {
+	if len(mustRead(domain.ReadProfile(stored.Data)).CustomPromptPresets) != 3 {
 		t.Fatal("merge was not stored")
 	}
 }
@@ -125,13 +126,13 @@ func TestAProjectImageBecomesContextForItsChats(t *testing.T) {
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"Three rooms\"}}]}\n\ndata: [DONE]\n\n")
 	})
 	h.offer.models[0].vision = true
-	rows.rows["user:alice/project/plan"] = storedRow{ID: "plan", ETag: "1", Data: api.Raw(Project{ID: "plan", Name: "House"})}
+	rows.rows["user:alice/project/plan"] = domain.StoredRow{ID: "plan", ETag: "1", Data: api.Raw(domain.Project{ID: "plan", Name: "House"})}
 	var encodedImage bytes.Buffer
 	if err := png.Encode(&encodedImage, image.NewRGBA(image.Rect(0, 0, 20, 10))); err != nil {
 		t.Fatal(err)
 	}
 	w := uploadRoute(h, "/v1/projects/documents/upload", "plan.png", encodedImage.Bytes(), map[string]string{"key": keyBase64(key), "projectId": "plan"}, "alice")
-	var document ProjectDocument
+	var document domain.ProjectDocument
 	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &document) != nil || document.Content != "A red plan with three labeled rooms." {
 		t.Fatalf("project image: %d %s", w.Code, w.Body.String())
 	}
@@ -180,7 +181,7 @@ func TestACloudRunUsesItsStorageCredentialForTheFinalSave(t *testing.T) {
 			json.NewEncoder(w).Encode(api.Object{"items": items})
 		case "/v1/sync/push":
 			plain, _ := base64.StdEncoding.DecodeString(api.Str(in["plaintext"]))
-			etag, err := rows.push(r.Context(), p, key, api.Str(in["scope"]), &storedRow{ID: api.Str(in["id"]), ETag: api.Str(in["if_match"]), Data: plain}, "write")
+			etag, err := rows.push(r.Context(), p, key, api.Str(in["scope"]), &domain.StoredRow{ID: api.Str(in["id"]), ETag: api.Str(in["if_match"]), Data: plain}, "write")
 			if err != nil {
 				w.WriteHeader(409)
 				return
@@ -196,7 +197,7 @@ func TestACloudRunUsesItsStorageCredentialForTheFinalSave(t *testing.T) {
 	in := sendInput(key)
 	events := finishedRun(t, h, "/v1/threads/turn", in)
 	row, err := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", api.Str(in["threadId"]))
-	if err != nil || grantCalls.Load() != 1 || eventOfType(events, "RUN_FINISHED") == nil || len(mustRead(readThreadRow(row)).Messages) != 2 || mustRead(readThreadRow(row)).Messages[1].Content != "hello" {
+	if err != nil || grantCalls.Load() != 1 || eventOfType(events, "RUN_FINISHED") == nil || len(mustRead(domain.ReadThreadRow(row)).Messages) != 2 || mustRead(domain.ReadThreadRow(row)).Messages[1].Content != "hello" {
 		t.Fatalf("reply was not stored with the run credential: %v", err)
 	}
 }
@@ -260,9 +261,9 @@ func TestRemoteChangesReadOnlyStorageMetadata(t *testing.T) {
 
 func TestRenamingAChatPreservesItsConversationActivity(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	rows.rows["user:alice/chat/activity"] = storedRow{ID: "activity", ETag: "1", Data: api.Raw(Thread{ID: "activity", CreatedAt: "2026-01-01T00:00:00Z", Messages: []Message{{ID: "latest", Role: "user", CreatedAt: "2026-03-01T00:00:00Z", Content: "Latest"}, {ID: "older", Role: "assistant", CreatedAt: "2026-02-01T00:00:00Z", Content: "Older"}}})}
+	rows.rows["user:alice/chat/activity"] = domain.StoredRow{ID: "activity", ETag: "1", Data: api.Raw(domain.Thread{ID: "activity", CreatedAt: "2026-01-01T00:00:00Z", Messages: []domain.Message{{ID: "latest", Role: "user", CreatedAt: "2026-03-01T00:00:00Z", Content: "Latest"}, {ID: "older", Role: "assistant", CreatedAt: "2026-02-01T00:00:00Z", Content: "Older"}}})}
 	w := postRoute(h, "/v1/threads/update", api.Object{"id": "activity", "key": keyBase64(key), "title": "Renamed"}, "alice")
-	var summary threadSummary
+	var summary domain.ThreadSummary
 	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &summary) != nil || summary.Title != "Renamed" || summary.ActivityAt != "2026-03-01T00:00:00Z" || summary.UpdatedAt == nil || *summary.UpdatedAt == summary.ActivityAt {
 		t.Fatalf("rename activity: %d %s", w.Code, w.Body.String())
 	}
@@ -303,7 +304,7 @@ func TestAQueuedTurnRefreshesStorageAccessBeforeStarting(t *testing.T) {
 	release()
 	<-queued.finished
 	row, err := rows.load(context.Background(), p, key, "chat", api.Str(in["threadId"]))
-	if err != nil || len(mustRead(readThreadRow(row)).Messages) != 4 || mustRead(readThreadRow(row)).Messages[2].Content != "Queued question" || mustRead(readThreadRow(row)).Messages[3].Content == "" || grants.grants.Load() != 3 {
+	if err != nil || len(mustRead(domain.ReadThreadRow(row)).Messages) != 4 || mustRead(domain.ReadThreadRow(row)).Messages[2].Content != "Queued question" || mustRead(domain.ReadThreadRow(row)).Messages[3].Content == "" || grants.grants.Load() != 3 {
 		t.Fatalf("queued reply did not renew and save: %v, grants=%d, row=%+v", err, grants.grants.Load(), row)
 	}
 }

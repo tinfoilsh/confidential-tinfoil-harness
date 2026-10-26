@@ -19,6 +19,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 // fakeImport is an import job of the fake sync enclave. Started, it stores
@@ -211,7 +212,7 @@ func (f *fakeSync) storeImport(rows *memoryRows, p *auth.Principal, key auth.Con
 				return 0, fmt.Errorf("project %s: %v", entity.SourceID, err)
 			}
 			projects[entity.SourceID] = id
-			row := &storedRow{ID: id, Data: api.Raw(api.Object{"id": id, "name": project.Name, "description": project.Description, "systemInstructions": project.SystemInstructions, "color": project.Color, "memory": project.Memory, "_restore": marker})}
+			row := &domain.StoredRow{ID: id, Data: api.Raw(api.Object{"id": id, "name": project.Name, "description": project.Description, "systemInstructions": project.SystemInstructions, "color": project.Color, "memory": project.Memory, "_restore": marker})}
 			if _, err := rows.push(context.Background(), p, key, "project", row, ""); err != nil {
 				return 0, err
 			}
@@ -227,7 +228,7 @@ func (f *fakeSync) storeImport(rows *memoryRows, p *auth.Principal, key auth.Con
 			if err := strictJSON(data, &doc); err != nil || !ok || !hasKeys(data, "filename", "contentType", "sourceSizeBytes", "sizeBytes", "content") || doc.Filename == "" || doc.ContentType == "" {
 				return 0, fmt.Errorf("document %s: %v", entity.SourceID, err)
 			}
-			row := &storedRow{ID: project + "/" + id, Data: api.Raw(api.Object{"id": id, "projectId": project, "filename": doc.Filename, "contentType": doc.ContentType, "sourceSizeBytes": doc.SourceSizeBytes, "sizeBytes": doc.SizeBytes, "content": doc.Content, "_restore": marker}), project: &project, projectSet: true}
+			row := &domain.StoredRow{ID: project + "/" + id, Data: api.Raw(api.Object{"id": id, "projectId": project, "filename": doc.Filename, "contentType": doc.ContentType, "sourceSizeBytes": doc.SourceSizeBytes, "sizeBytes": doc.SizeBytes, "content": doc.Content, "_restore": marker}), Project: &project, ProjectSet: true}
 			if _, err := rows.push(context.Background(), p, key, "project_document", row, ""); err != nil {
 				return 0, err
 			}
@@ -237,13 +238,13 @@ func (f *fakeSync) storeImport(rows *memoryRows, p *auth.Principal, key auth.Con
 				return 0, fmt.Errorf("chat %s: %v", entity.SourceID, err)
 			}
 			chat["_restore"] = api.Raw(marker)
-			row := &storedRow{ID: id, projectSet: true}
+			row := &domain.StoredRow{ID: id, ProjectSet: true}
 			if project := entity.ProjectSourceID; project != "" {
 				mapped, ok := projects[project]
 				if !ok {
 					return 0, errors.New("chat references an unknown project")
 				}
-				row.project, chat["projectId"] = &mapped, api.Raw(mapped)
+				row.Project, chat["projectId"] = &mapped, api.Raw(mapped)
 			} else {
 				delete(chat, "projectId")
 			}

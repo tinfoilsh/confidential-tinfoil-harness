@@ -1,4 +1,4 @@
-package main
+package domain
 
 import (
 	"encoding/json"
@@ -9,8 +9,8 @@ import (
 
 // What the API returns of a thread and its parts.
 
-// threadSummary is a chat as its list shows it.
-type threadSummary struct {
+// ThreadSummary is a chat as its list shows it.
+type ThreadSummary struct {
 	ID               string        `json:"id"`
 	Title            string        `json:"title"`
 	TitleState       string        `json:"titleState"`
@@ -27,8 +27,8 @@ type threadSummary struct {
 	Flagged          bool          `json:"flagged,omitempty"`
 }
 
-func summarize(t *Thread) threadSummary {
-	s := threadSummary{ID: t.ID, Title: t.Title, TitleState: t.TitleState, CreatedAt: present(t.CreatedAt), UpdatedAt: present(t.UpdatedAt), ProjectID: t.ProjectID, Model: t.Model,
+func Summarize(t *Thread) ThreadSummary {
+	s := ThreadSummary{ID: t.ID, Title: t.Title, TitleState: t.TitleState, CreatedAt: Present(t.CreatedAt), UpdatedAt: Present(t.UpdatedAt), ProjectID: t.ProjectID, Model: t.Model,
 		WebSearchEnabled: t.WebSearchEnabled, Pinned: t.Pinned, ContextUsage: t.ContextUsage, MessageCount: max(0, len(t.Messages)-t.HiddenCount), Flagged: t.Flagged}
 	s.ActivityAt = t.activityAt()
 	// The hint lapses with the run's deadline. One naming no instance was
@@ -55,31 +55,31 @@ func (t *Thread) activityAt() string {
 	return latest.Format(time.RFC3339Nano)
 }
 
-// present is a text field a view shows as null when it is empty.
-func present(s string) *string {
+// Present is a text field a view shows as null when it is empty.
+func Present(s string) *string {
 	if s == "" {
 		return nil
 	}
 	return &s
 }
 
-// threadWindow is a chat shown from its latest messages back.
-type threadWindow struct {
-	threadSummary
+// ThreadWindow is a chat shown from its latest messages back.
+type ThreadWindow struct {
+	ThreadSummary
 	Revision string        `json:"revision"`
 	PresetID *string       `json:"presetId"`
-	Messages []messageView `json:"messages"`
+	Messages []MessageView `json:"messages"`
 	HasOlder bool          `json:"hasOlder"`
 }
 
 // A chat is shown in windows of its latest messages.
 const (
-	messageWindow    = 50
-	maxMessageWindow = 200
+	MessageWindow    = 50
+	MaxMessageWindow = 200
 )
 
-// window shows the messages before the one named, or the latest.
-func window(row *threadRow, before string, limit int) threadWindow {
+// Window shows the messages before the one named, or the latest.
+func Window(row *ThreadRow, before string, limit int) ThreadWindow {
 	t := &row.Thread
 	all := t.Messages[min(len(t.Messages), t.HiddenCount):]
 	end := len(all)
@@ -91,20 +91,20 @@ func window(row *threadRow, before string, limit int) threadWindow {
 			}
 		}
 	}
-	if limit <= 0 || limit > maxMessageWindow {
-		limit = messageWindow
+	if limit <= 0 || limit > MaxMessageWindow {
+		limit = MessageWindow
 	}
 	start := max(0, end-limit)
-	messages := []messageView{}
+	messages := []MessageView{}
 	for i := range all[start:end] {
-		messages = append(messages, viewMessage(&all[start+i]))
+		messages = append(messages, ViewMessage(&all[start+i]))
 	}
-	return threadWindow{threadSummary: summarize(t), Revision: row.etag, PresetID: t.PresetID, Messages: messages, HasOlder: start > 0}
+	return ThreadWindow{ThreadSummary: Summarize(t), Revision: row.ETag, PresetID: t.PresetID, Messages: messages, HasOlder: start > 0}
 }
 
-// messageView is a message as a client shows it: a question's text or a
+// MessageView is a message as a client shows it: a question's text or a
 // reply's timeline, and its attachments without their content.
-type messageView struct {
+type MessageView struct {
 	ID               string          `json:"id"`
 	Role             string          `json:"role"`
 	CreatedAt        string          `json:"createdAt"`
@@ -120,11 +120,11 @@ type messageView struct {
 	Attachments      []Attachment    `json:"attachments,omitempty"`
 }
 
-func viewMessage(m *Message) messageView {
-	view := messageView{ID: m.ID, Role: m.Role, CreatedAt: m.CreatedAt, Quote: m.Quote, Model: m.Model, ModelDisplayName: m.ModelDisplayName,
+func ViewMessage(m *Message) MessageView {
+	view := MessageView{ID: m.ID, Role: m.Role, CreatedAt: m.CreatedAt, Quote: m.Quote, Model: m.Model, ModelDisplayName: m.ModelDisplayName,
 		IsError: m.IsError, IsInterrupted: m.IsInterrupted, Usage: m.Usage, Annotations: m.Annotations}
 	if m.Role == "assistant" {
-		view.Timeline = checkedWidgets(m.Timeline)
+		view.Timeline = CheckedWidgets(m.Timeline)
 		if view.Timeline == nil {
 			view.Timeline = []Block{}
 		}
@@ -132,21 +132,21 @@ func viewMessage(m *Message) messageView {
 		view.Content = &m.Content
 	}
 	for i := range m.Attachments {
-		view.Attachments = append(view.Attachments, viewAttachment(&m.Attachments[i]))
+		view.Attachments = append(view.Attachments, ViewAttachment(&m.Attachments[i]))
 	}
 	return view
 }
 
-// viewAttachment is an attachment as a client lists it: its metadata,
+// ViewAttachment is an attachment as a client lists it: its metadata,
 // thumbnail and any text it holds inline, without its blob's key or its
 // bytes. A text-only model reads an image through its description.
-func viewAttachment(a *Attachment) Attachment {
+func ViewAttachment(a *Attachment) Attachment {
 	return Attachment{ID: a.ID, Kind: a.Kind, FileName: a.FileName, MimeType: a.MimeType, Size: a.Size, Thumbnail: a.Thumbnail, TextContent: a.TextContent, Description: a.Description}
 }
 
-// deviceTranscript is a stored chat as its device keeps it, without the
+// DeviceTranscript is a stored chat as its device keeps it, without the
 // fields the harness owns.
-type deviceTranscript struct {
+type DeviceTranscript struct {
 	Thread
 	ActiveRun    *ActiveRun    `json:"activeRun,omitempty"`
 	ProjectID    *string       `json:"projectId,omitempty"`
@@ -154,17 +154,17 @@ type deviceTranscript struct {
 	HiddenCount  int           `json:"harnessHiddenCount,omitempty"`
 }
 
-// sharePayload is what a share link opens, sealed under its key: each
+// SharePayload is what a share link opens, sealed under its key: each
 // attachment's thumbnail or text, and the key of its blob, which sync keeps
 // for the share.
-type sharePayload struct {
+type SharePayload struct {
 	V         int            `json:"v"`
 	Title     string         `json:"title"`
-	Messages  []shareMessage `json:"messages"`
+	Messages  []ShareMessage `json:"messages"`
 	CreatedAt int64          `json:"createdAt"`
 }
 
-type shareMessage struct {
+type ShareMessage struct {
 	Role             string       `json:"role"`
 	Content          string       `json:"content"`
 	Timestamp        int64        `json:"timestamp"`
@@ -176,43 +176,43 @@ type shareMessage struct {
 	Attachments      []Attachment `json:"attachments,omitempty"`
 }
 
-// sharedThread is an opened share, whose attachments name the key that
+// SharedThread is an opened share, whose attachments name the key that
 // reads each blob.
-type sharedThread struct {
+type SharedThread struct {
 	Title     string          `json:"title"`
 	CreatedAt *string         `json:"createdAt"`
-	Messages  []sharedMessage `json:"messages"`
+	Messages  []SharedMessage `json:"messages"`
 }
 
-type sharedMessage struct {
-	messageView
-	Attachments []sharedAttachment `json:"attachments,omitempty"`
+type SharedMessage struct {
+	MessageView
+	Attachments []SharedAttachment `json:"attachments,omitempty"`
 }
 
-type sharedAttachment struct {
+type SharedAttachment struct {
 	Attachment
 	AttKey *string `json:"attKey"`
 }
 
-// statePatch is one change a run makes to its client's state.
-type statePatch struct {
+// StatePatch is one change a run makes to its client's state.
+type StatePatch struct {
 	Op    string `json:"op"`
 	Path  string `json:"path"`
 	Value any    `json:"value"`
 }
 
-// runMetadata is what a run's last event reports.
-type runMetadata struct {
-	Messages  []committedReply `json:"messages,omitzero"`
+// RunMetadata is what a run's last event reports.
+type RunMetadata struct {
+	Messages  []CommittedReply `json:"messages,omitzero"`
 	Thread    *Thread          `json:"thread,omitempty"`
 	Usage     *api.Usage       `json:"usage,omitempty"`
 	RateLimit *api.RateLimit   `json:"rateLimit,omitempty"`
 	Cancelled *bool            `json:"cancelled,omitempty"`
 }
 
-// committedReply is what a run commits to a reply beyond its streamed
+// CommittedReply is what a run commits to a reply beyond its streamed
 // content, so a client that stores the thread itself stores the same.
-type committedReply struct {
+type CommittedReply struct {
 	ID               string          `json:"id"`
 	Model            string          `json:"model,omitempty"`
 	ModelDisplayName string          `json:"modelDisplayName,omitempty"`
@@ -222,17 +222,17 @@ type committedReply struct {
 	Annotations      []Annotation    `json:"annotations,omitempty"`
 }
 
-// queueItem is a turn waiting behind its chat's running reply.
-type queueItem struct {
+// QueueItem is a turn waiting behind its chat's running reply.
+type QueueItem struct {
 	QueueID     string             `json:"queueId"`
 	Kind        string             `json:"kind"`
 	Content     *string            `json:"content"`
 	Quote       *string            `json:"quote"`
-	Attachments []queuedAttachment `json:"attachments"`
+	Attachments []QueuedAttachment `json:"attachments"`
 	CreatedAt   string             `json:"createdAt"`
 }
 
-type queuedAttachment struct {
+type QueuedAttachment struct {
 	ID        string  `json:"id,omitempty"`
 	Kind      string  `json:"kind,omitempty"`
 	FileName  string  `json:"fileName,omitempty"`
@@ -241,48 +241,9 @@ type queuedAttachment struct {
 	Thumbnail *string `json:"thumbnail,omitempty"`
 }
 
-// stateSnapshot is a run's chat, its queue, and the caller's quota.
-type stateSnapshot struct {
-	Thread    threadSummary `json:"thread"`
-	Queue     []queueItem   `json:"queue"`
+// StateSnapshot is a run's chat, its queue, and the caller's quota.
+type StateSnapshot struct {
+	Thread    ThreadSummary `json:"thread"`
+	Queue     []QueueItem   `json:"queue"`
 	RateLimit api.RateLimit `json:"rateLimit"`
-}
-
-// The version of protocol/openapi.yaml this harness speaks, and the oldest
-// whose clients it still serves.
-const (
-	protocolVersion        = 1
-	minimumProtocolVersion = 1
-)
-
-type protocolView struct {
-	Version int `json:"version"`
-	Minimum int `json:"minimum"`
-}
-
-// sessionView is what a client opens the app with.
-type sessionView struct {
-	Protocol        protocolView    `json:"protocol"`
-	User            sessionUser     `json:"user"`
-	RateLimit       api.RateLimit   `json:"rateLimit"`
-	Models          []sessionModel  `json:"models"`
-	Auto            autoView        `json:"auto"`
-	DefaultModel    string          `json:"defaultModel"`
-	Widgets         []string        `json:"widgets"`
-	ProfileDefaults Profile         `json:"profileDefaults"`
-	Composer        composerView    `json:"composer"`
-	Presets         []preset        `json:"presets"`
-	Features        map[string]bool `json:"features"`
-}
-
-type sessionUser struct {
-	ID        string `json:"id"`
-	Anonymous bool   `json:"anonymous"`
-}
-
-// autoView is how hard Auto works: its default level, and each level's
-// labels.
-type autoView struct {
-	Default string              `json:"default"`
-	Levels  []intelligenceLevel `json:"levels"`
 }

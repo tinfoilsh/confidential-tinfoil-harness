@@ -13,11 +13,12 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 func TestCanonicalizeWidgetArgumentsRecursive(t *testing.T) {
 	var parsed map[string]any
-	json.Unmarshal([]byte(canonicalizeWidgetArguments(`{"outer":"{\"inner\":\"[1,2,3]\"}"}`)), &parsed)
+	json.Unmarshal([]byte(domain.CanonicalizeWidgetArguments(`{"outer":"{\"inner\":\"[1,2,3]\"}"}`)), &parsed)
 	outer, _ := parsed["outer"].(map[string]any)
 	if inner, _ := outer["inner"].([]any); len(inner) != 3 {
 		t.Fatalf("expected inner array of length 3, got %v", parsed)
@@ -26,15 +27,15 @@ func TestCanonicalizeWidgetArgumentsRecursive(t *testing.T) {
 
 func TestCanonicalizeWidgetArgumentsPreservesLargeNumbers(t *testing.T) {
 	const large = "9007199254740993"
-	got := canonicalizeWidgetArguments(`{"id":` + large + `,"nested":"{\"id\":` + large + `}"}`)
+	got := domain.CanonicalizeWidgetArguments(`{"id":` + large + `,"nested":"{\"id\":` + large + `}"}`)
 	if !strings.Contains(got, `"id":`+large) || !strings.Contains(got, `"nested":{"id":`+large+`}`) {
 		t.Fatalf("numbers were not preserved: %s", got)
 	}
 }
 
-func catalogWidgets(names ...string) map[string]widget {
-	widgets := map[string]widget{}
-	for _, w := range widgetCatalog() {
+func catalogWidgets(names ...string) map[string]domain.Widget {
+	widgets := map[string]domain.Widget{}
+	for _, w := range domain.WidgetCatalog() {
 		for _, name := range names {
 			if w.Name == name {
 				widgets[name] = w
@@ -50,8 +51,8 @@ func invokeWidget(t *testing.T, set *toolset, call toolCall) (string, []string) 
 	t.Helper()
 	out := &stream{run: newRun("00")}
 	var results []string
-	out.observe = func(e runEvent, _ string) {
-		if result, ok := e.(toolCallResult); ok {
+	out.observe = func(e domain.Event, _ string) {
+		if result, ok := e.(domain.ToolCallResult); ok {
 			results = append(results, string(result.Content))
 		}
 	}
@@ -69,18 +70,18 @@ func widgetToolset() *toolset {
 func TestWidgetSchemaViolationIsReportedToTheModel(t *testing.T) {
 	set := widgetToolset()
 	call := toolCall{id: "c1", name: "render_artifact_preview", args: `{"title":"Demo","source":"<p>hi</p>"}`}
-	for attempt := 1; attempt <= maxWidgetRetries+1; attempt++ {
+	for attempt := 1; attempt <= domain.MaxWidgetRetries+1; attempt++ {
 		model, shown := invokeWidget(t, set, call)
-		if len(shown) != 1 || api.Obj(decodeValue([]byte(shown[0])))["status"] != "error" {
+		if len(shown) != 1 || api.Obj(api.Parsed([]byte(shown[0])))["status"] != "error" {
 			t.Fatalf("attempt %d: the caller was sent %q", attempt, shown)
 		}
-		if attempt > maxWidgetRetries {
+		if attempt > domain.MaxWidgetRetries {
 			if model != `{"status":"executed"}` {
-				t.Fatalf("retries were not capped at %d: %s", maxWidgetRetries, model)
+				t.Fatalf("retries were not capped at %d: %s", domain.MaxWidgetRetries, model)
 			}
 			continue
 		}
-		payload := api.Obj(decodeValue([]byte(model)))
+		payload := api.Obj(api.Parsed([]byte(model)))
 		message := api.Str(payload["error"])
 		if payload["status"] != "error" || !strings.HasPrefix(message, "The arguments for render_artifact_preview did not match the tool's parameter schema and the component was not displayed: ") ||
 			!strings.Contains(message, "source") || strings.Contains(message, "validating root") || !strings.HasSuffix(message, "Call render_artifact_preview again with corrected arguments that match the schema exactly.") {
@@ -113,7 +114,7 @@ func TestWidgetRetriesAreCountedPerNameWithinRun(t *testing.T) {
 		}
 	}
 	wg.Wait()
-	if told["render_artifact_preview"] != maxWidgetRetries || told["render_stat_cards"] != maxWidgetRetries {
+	if told["render_artifact_preview"] != domain.MaxWidgetRetries || told["render_stat_cards"] != domain.MaxWidgetRetries {
 		t.Fatalf("the model was told %v", told)
 	}
 }
@@ -124,7 +125,7 @@ func TestCallersCopyReadsRepairedArguments(t *testing.T) {
 		{"web_fetch", `{"urls":["https://a.test"]} Now fetching...`, `{"results":[{"url":"https://a.test","status":"failed","error":"timeout"}]}`,
 			`{"failed":[{"error":"timeout","url":"https://a.test"}],"pages":[],"text":"","title":"Fetched page","url":"https://a.test"}`},
 	} {
-		if got := string(api.Raw(normalizeToolResult(toolCall{id: "c1", name: tc.name, args: tc.args}, tc.content))); got != tc.want {
+		if got := string(api.Raw(domain.NormalizeToolResult(tc.name, tc.args, tc.content))); got != tc.want {
 			t.Errorf("%s with arguments %q was shown as %s, want %s", tc.name, tc.args, got, tc.want)
 		}
 	}
@@ -156,7 +157,7 @@ func TestEveryViewMarksWidgetArgumentsTheDeclarationRefuses(t *testing.T) {
 	cp := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer cp.Close()
 	h.controlplane, h.cpClient = cp.URL, &http.Client{Transport: &callerAuth{inner: cp.Client().Transport}}
-	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: api.Raw(statsThread())}
+	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat-1")] = domain.StoredRow{ID: "chat-1", ETag: "1", Data: api.Raw(statsThread())}
 	marks := func(view string, messages any) {
 		t.Helper()
 		list := api.Arr(messages)
@@ -178,7 +179,7 @@ func TestEveryViewMarksWidgetArgumentsTheDeclarationRefuses(t *testing.T) {
 		if w.Code != 200 {
 			t.Fatalf("HTTP %d %s", w.Code, w.Body.String())
 		}
-		return api.Obj(decodeValue(w.Body.Bytes()))
+		return api.Obj(api.Parsed(w.Body.Bytes()))
 	}
 	marks("the thread view", body(postRoute(h, "/v1/threads/get", api.Object{"key": keyBase64(key), "id": "chat-1"}, "alice"))["messages"])
 	events := eventsIn(t, postRoute(h, "/v1/threads/turn", continueInput(key, "chat-1"), "alice"))
@@ -187,7 +188,7 @@ func TestEveryViewMarksWidgetArgumentsTheDeclarationRefuses(t *testing.T) {
 	body(postRoute(h, "/v1/threads/share", api.Object{"key": keyBase64(key), "threadId": "chat-1"}, "alice"))
 	if seals := fake.requests("/v1/share/seal"); len(seals) == 1 {
 		plaintext, _ := base64.StdEncoding.DecodeString(api.Str(seals[0]["plaintext"]))
-		marks("the share", api.Obj(decodeValue(plaintext))["messages"])
+		marks("the share", api.Obj(api.Parsed(plaintext))["messages"])
 	} else {
 		t.Fatalf("%d shares were sealed", len(seals))
 	}
@@ -230,8 +231,8 @@ func TestARetriedLinkPreviewReadsItsPage(t *testing.T) {
 	defer metadata.Close()
 	h.services["metadata"] = &downstreamService{URL: metadata.URL, Client: metadata.Client()}
 	h.catalog.get().EnabledWidgets = []string{"render_link_preview"}
-	refused := widgetFailure(catalogWidgets("render_link_preview")["render_link_preview"], original)
-	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat")] = storedRow{ID: "chat", ETag: "1", Data: api.Raw(api.Object{"createdAt": api.Timestamp(), "title": "Links", "titleState": "manual", "model": "kimi-k3", "messages": []any{
+	refused := domain.WidgetFailure(catalogWidgets("render_link_preview")["render_link_preview"], original)
+	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat")] = domain.StoredRow{ID: "chat", ETag: "1", Data: api.Raw(api.Object{"createdAt": api.Timestamp(), "title": "Links", "titleState": "manual", "model": "kimi-k3", "messages": []any{
 		api.Object{"id": "user", "role": "user", "content": "link the post", "createdAt": api.Timestamp()},
 		api.Object{"id": "assistant", "role": "assistant", "content": "Here it is.", "createdAt": api.Timestamp(), "timeline": []any{
 			api.Object{"type": "content", "id": "text", "content": "Here it is."},
@@ -253,12 +254,12 @@ func TestARetriedLinkPreviewReadsItsPage(t *testing.T) {
 	default:
 		t.Fatal("the retry read no page")
 	}
-	want := decodeValue(api.Raw(api.Object{"url": "https://example.com/post", "title": "The Post", "description": "About it", "siteName": "Example", "image": "https://example.com/i.png"}))
-	if shown := eventOfType(events, "TOOL_CALL_RESULT"); shown == nil || shown.ToolCallID != "call" || !reflect.DeepEqual(decodeValue(shown.Content), want) {
+	want := api.Parsed(api.Raw(api.Object{"url": "https://example.com/post", "title": "The Post", "description": "About it", "siteName": "Example", "image": "https://example.com/i.png"}))
+	if shown := eventOfType(events, "TOOL_CALL_RESULT"); shown == nil || shown.ToolCallID != "call" || !reflect.DeepEqual(api.Parsed(shown.Content), want) {
 		t.Fatalf("the retry showed %+v", shown)
 	}
 	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat")
-	if call := mustRead(readThreadRow(row)).Messages[1].Timeline[1]; call.Arguments != fixed || !reflect.DeepEqual(decodeValue(call.Result), want) {
+	if call := mustRead(domain.ReadThreadRow(row)).Messages[1].Timeline[1]; call.Arguments != fixed || !reflect.DeepEqual(api.Parsed(call.Result), want) {
 		t.Fatalf("the retried widget was stored with arguments %s and result %s", call.Arguments, call.Result)
 	}
 }

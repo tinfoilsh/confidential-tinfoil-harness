@@ -8,42 +8,43 @@ import (
 	"testing"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 func TestAReplyRecordsWhenItsStepsRan(t *testing.T) {
 	at := func(offset string) string { return "2026-10-01T00:00:" + offset + "Z" }
 	const start = 1790812800000.0
-	assembler := newMessageAssembler()
+	assembler := domain.NewMessageAssembler()
 	for _, e := range []struct {
-		event runEvent
+		event domain.Event
 		at    string
 	}{
-		{reasoningChunk{MessageID: "r-reasoning", Delta: "Plan"}, at("00")},
-		{reasoningChunk{MessageID: "r-reasoning", Delta: "ning"}, at("02.5")},
-		{textChunk{MessageID: "r", Delta: "Answer"}, at("03")},
-		{reasoningChunk{MessageID: "r-reasoning", Delta: " late"}, at("03.2")},
-		{textChunk{MessageID: "r", Delta: " done"}, at("03.4")},
-		{toolCallStart{ToolCallID: "s", ToolCallName: "web_search", ParentMessageID: "r"}, at("04")},
-		{toolCallResult{ToolCallID: "s", Content: api.Raw(api.Object{"results": []any{}})}, at("06")},
-		{reasoningChunk{MessageID: "r-reasoning", Delta: "Next"}, at("07")},
-		{reasoningChunk{MessageID: "r-reasoning", Delta: " step"}, at("08.25")},
+		{domain.ReasoningChunk{MessageID: "r-reasoning", Delta: "Plan"}, at("00")},
+		{domain.ReasoningChunk{MessageID: "r-reasoning", Delta: "ning"}, at("02.5")},
+		{domain.TextChunk{MessageID: "r", Delta: "Answer"}, at("03")},
+		{domain.ReasoningChunk{MessageID: "r-reasoning", Delta: " late"}, at("03.2")},
+		{domain.TextChunk{MessageID: "r", Delta: " done"}, at("03.4")},
+		{domain.ToolCallStart{ToolCallID: "s", ToolCallName: "web_search", ParentMessageID: "r"}, at("04")},
+		{domain.ToolCallResult{ToolCallID: "s", Content: api.Raw(api.Object{"results": []any{}})}, at("06")},
+		{domain.ReasoningChunk{MessageID: "r-reasoning", Delta: "Next"}, at("07")},
+		{domain.ReasoningChunk{MessageID: "r-reasoning", Delta: " step"}, at("08.25")},
 	} {
-		assembler.apply(e.event, e.at)
+		assembler.Apply(e.event, e.at)
 	}
-	want := []Block{
+	want := []domain.Block{
 		{ID: "r_thinking_0", Type: "thinking", Content: "Planning late", StartedAt: start, EndedAt: start + 2500, Duration: 2.5},
 		{ID: "r_content_1", Type: "content", Content: "Answer done"},
 		{ID: "s", Type: "tool_call", ToolCallID: "s", Name: "web_search", Progress: []json.RawMessage{}, Result: api.Raw(api.Object{"results": []any{}}), StartedAt: start + 4000, EndedAt: start + 6000},
 		{ID: "r_thinking_3", Type: "thinking", Content: "Next step", StartedAt: start + 7000, EndedAt: start + 8250, Duration: 1.25},
 	}
-	got := assembler.messages()
-	if len(got) != 1 || !reflect.DeepEqual(decodeValue(api.Raw(got[0].Timeline)), decodeValue(api.Raw(want))) {
+	got := assembler.Messages()
+	if len(got) != 1 || !reflect.DeepEqual(api.Parsed(api.Raw(got[0].Timeline)), api.Parsed(api.Raw(want))) {
 		t.Fatalf("timeline %s, want %s", api.Raw(got), api.Raw(want))
 	}
 }
 
 func TestOldRepliesKeepWhenTheirStepsRan(t *testing.T) {
-	thread := mustRead(readThread("chat", api.Raw(api.Object{"title": "Trip", "messages": []any{
+	thread := mustRead(domain.ReadThread("chat", api.Raw(api.Object{"title": "Trip", "messages": []any{
 		api.Object{"id": "u", "role": "user", "content": "plan"},
 		api.Object{"id": "a", "role": "assistant", "content": "Go", "timeline": []any{
 			api.Object{"type": "thinking", "id": "t", "content": "Plan", "isThinking": false, "duration": 2.5, "startedAt": 1000, "endedAt": 3500},
@@ -73,14 +74,14 @@ func TestOldRepliesKeepWhenTheirStepsRan(t *testing.T) {
 }
 
 func TestALateReasoningTailIsNotSummarized(t *testing.T) {
-	assembler := newMessageAssembler()
+	assembler := domain.NewMessageAssembler()
 	summaries := &thoughtSummaries{out: &stream{}, assembler: assembler, summarize: func(ctx context.Context, _ string) (string, error) { return "", ctx.Err() }}
-	for _, e := range []runEvent{
-		reasoningChunk{MessageID: "r-reasoning", Delta: "plan"},
-		textChunk{MessageID: "r", Delta: strings.Repeat("answer ", minSummaryWords)},
-		reasoningChunk{MessageID: "r-reasoning", Delta: " tail"},
+	for _, e := range []domain.Event{
+		domain.ReasoningChunk{MessageID: "r-reasoning", Delta: "plan"},
+		domain.TextChunk{MessageID: "r", Delta: strings.Repeat("answer ", minSummaryWords)},
+		domain.ReasoningChunk{MessageID: "r-reasoning", Delta: " tail"},
 	} {
-		assembler.apply(e, "")
+		assembler.Apply(e, "")
 		summaries.follow(e)
 	}
 	if summaries.block != "" || summaries.trace != "" || summaries.inFlight {

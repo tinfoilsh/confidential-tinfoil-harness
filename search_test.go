@@ -10,6 +10,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 func TestSearchRefreshesResultsAfterACompletedRebuild(t *testing.T) {
@@ -36,9 +37,9 @@ func TestSearchRefreshesResultsAfterACompletedRebuild(t *testing.T) {
 			h, rows, key := testChatHarness(t, nil)
 			created := "2026-10-22T12:00:00Z"
 			for _, id := range []string{"partial", "indexed"} {
-				rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", id)] = storedRow{ID: id, ETag: "1", Data: api.Raw(Thread{
+				rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", id)] = domain.StoredRow{ID: id, ETag: "1", Data: api.Raw(domain.Thread{
 					ID: id, Title: id + " conversation", TitleState: "manual", CreatedAt: created, UpdatedAt: created, Model: "gpt-oss-120b",
-					Messages: []Message{{ID: id + "-message", Role: "user", Content: "Find this conversation", CreatedAt: created}},
+					Messages: []domain.Message{{ID: id + "-message", Role: "user", Content: "Find this conversation", CreatedAt: created}},
 				})}
 			}
 			var paths []string
@@ -68,7 +69,7 @@ func TestSearchRefreshesResultsAfterACompletedRebuild(t *testing.T) {
 					}
 					return syncTestResponse(http.StatusOK, api.Object{"results": results, "needs_reindex": indexing})
 				case reindexPath:
-					if want := decodeValue(api.Raw(api.Object{"keys": []api.Object{{"key": keyBase64(key)}}})); !reflect.DeepEqual(decodeValue(api.Raw(in)), want) {
+					if want := api.Parsed(api.Raw(api.Object{"keys": []api.Object{{"key": keyBase64(key)}}})); !reflect.DeepEqual(api.Parsed(api.Raw(in)), want) {
 						t.Errorf("rebuild payload: %v, want %v", in, want)
 					}
 					return syncTestResponse(http.StatusOK, tc.job)
@@ -82,13 +83,13 @@ func TestSearchRefreshesResultsAfterACompletedRebuild(t *testing.T) {
 				t.Fatalf("search: HTTP %d: %s", w.Code, w.Body.String())
 			}
 			var got struct {
-				Results  []threadSummary `json:"results"`
-				Indexing bool            `json:"indexing"`
+				Results  []domain.ThreadSummary `json:"results"`
+				Indexing bool                   `json:"indexing"`
 			}
 			if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 				t.Fatal(err)
 			}
-			want := []threadSummary{{ID: tc.wantID, Title: tc.wantID + " conversation", TitleState: "manual", CreatedAt: &created, UpdatedAt: &created, ActivityAt: created, Model: "gpt-oss-120b", MessageCount: 1}}
+			want := []domain.ThreadSummary{{ID: tc.wantID, Title: tc.wantID + " conversation", TitleState: "manual", CreatedAt: &created, UpdatedAt: &created, ActivityAt: created, Model: "gpt-oss-120b", MessageCount: 1}}
 			if !reflect.DeepEqual(got.Results, want) || got.Indexing != tc.wantIndexing {
 				t.Errorf("search returned %s, want results %s with indexing=%v", w.Body.String(), api.Raw(want), tc.wantIndexing)
 			}
@@ -185,9 +186,9 @@ func TestSearchCountsTheChatsItCannotOpen(t *testing.T) {
 					case "broken":
 						items = append(items, api.Object{"id": id, "ok": false, "code": "BAD_REQUEST"})
 					case "later":
-						items = append(items, api.Object{"id": id, "ok": true, "etag": "1", "plaintext": stored(id, recordVersion+1)})
+						items = append(items, api.Object{"id": id, "ok": true, "etag": "1", "plaintext": stored(id, domain.RecordVersion+1)})
 					default:
-						items = append(items, api.Object{"id": id, "ok": true, "etag": "1", "plaintext": stored(id, recordVersion)})
+						items = append(items, api.Object{"id": id, "ok": true, "etag": "1", "plaintext": stored(id, domain.RecordVersion)})
 					}
 				}
 				// Sync answers in an order of its own.
@@ -197,9 +198,9 @@ func TestSearchCountsTheChatsItCannotOpen(t *testing.T) {
 			h.storeRows = h.syncAPI
 			w := postRoute(h, "/v1/threads/search", api.Object{"key": keyBase64(key), "query": "needle"}, "alice")
 			var got struct {
-				Results    []threadSummary `json:"results"`
-				Unreadable int             `json:"unreadable"`
-				Error      api.Object      `json:"error"`
+				Results    []domain.ThreadSummary `json:"results"`
+				Unreadable int                    `json:"unreadable"`
+				Error      api.Object             `json:"error"`
 			}
 			json.Unmarshal(w.Body.Bytes(), &got)
 			found := []string{}

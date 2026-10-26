@@ -25,6 +25,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/importer"
 )
 
@@ -429,27 +430,27 @@ func (j *importRun) conversation(c *importer.Conversation, read func(string) ([]
 // conversationThread is an export's conversation in the thread format.
 // Its message ids derive from the conversation, so the cloud and the
 // device get the same thread.
-func (j *importRun) conversationThread(c *importer.Conversation, read func(string) ([]byte, error)) Thread {
+func (j *importRun) conversationThread(c *importer.Conversation, read func(string) ([]byte, error)) domain.Thread {
 	var first time.Time
 	if len(c.Messages) > 0 {
 		first = c.Messages[0].CreatedAt
 	}
 	created := firstTime(c.CreatedAt, c.UpdatedAt, first, api.Now())
-	t := Thread{Title: cmp.Or(strings.TrimSpace(c.Title), "Imported Chat"), TitleState: "generated", CreatedAt: isoString(created), UpdatedAt: isoString(firstTime(c.UpdatedAt, created)),
-		Model: autoModelName, WebSearchEnabled: true, Messages: []Message{}}
+	t := domain.Thread{Title: cmp.Or(strings.TrimSpace(c.Title), "Imported Chat"), TitleState: "generated", CreatedAt: isoString(created), UpdatedAt: isoString(firstTime(c.UpdatedAt, created)),
+		Model: domain.AutoModelName, WebSearchEnabled: true, Messages: []domain.Message{}}
 	for i, m := range c.Messages {
 		id := uuid.NewSHA1(importNamespace, []byte(c.Key+"\x00"+strconv.Itoa(i))).String()
-		message := Message{ID: id, Role: m.Role, CreatedAt: isoString(firstTime(m.CreatedAt, created)), Content: m.Content}
+		message := domain.Message{ID: id, Role: m.Role, CreatedAt: isoString(firstTime(m.CreatedAt, created)), Content: m.Content}
 		if m.Role == "assistant" {
 			if m.Thoughts != "" {
-				message.Timeline = append(message.Timeline, Block{ID: id + "-thinking", Type: "thinking", Content: m.Thoughts})
+				message.Timeline = append(message.Timeline, domain.Block{ID: id + "-thinking", Type: "thinking", Content: m.Thoughts})
 			}
 			if m.Content != "" {
-				message.Timeline = append(message.Timeline, Block{ID: id + "-content", Type: "content", Content: m.Content})
+				message.Timeline = append(message.Timeline, domain.Block{ID: id + "-content", Type: "content", Content: m.Content})
 			}
 		}
 		for k, a := range m.Attachments {
-			attachment := Attachment{ID: cmp.Or(a.ID, id+"-attachment-"+strconv.Itoa(k)), Kind: "document", FileName: a.FileName, MimeType: a.MimeType, TextContent: a.TextContent}
+			attachment := domain.Attachment{ID: cmp.Or(a.ID, id+"-attachment-"+strconv.Itoa(k)), Kind: "document", FileName: a.FileName, MimeType: a.MimeType, TextContent: a.TextContent}
 			if a.Size > 0 {
 				attachment.Size = new(a.Size)
 			}
@@ -506,11 +507,11 @@ func (j *importRun) project(project *importer.Project) error {
 // prepare leaves out of an imported chat what no client may keep: run
 // state, server keys, messages of other roles, and attachments without
 // their content. It counts what it leaves out.
-func (j *importRun) prepare(t *Thread) error {
+func (j *importRun) prepare(t *domain.Thread) error {
 	t.ActiveRun, t.ContextUsage, t.HiddenCount, t.Flagged = nil, nil, 0, false
 	t.LastRequestID, t.LastRequestKind = "", ""
 	if _, err := time.Parse(time.RFC3339Nano, t.CreatedAt); err != nil {
-		t.CreatedAt = cmp.Or(isoTime(t.UpdatedAt), api.Timestamp())
+		t.CreatedAt = cmp.Or(domain.ISOTime(t.UpdatedAt), api.Timestamp())
 	}
 	if _, err := time.Parse(time.RFC3339Nano, t.UpdatedAt); err != nil {
 		t.UpdatedAt = t.CreatedAt
@@ -523,14 +524,14 @@ func (j *importRun) prepare(t *Thread) error {
 		if _, err := time.Parse(time.RFC3339Nano, m.CreatedAt); err != nil {
 			m.CreatedAt = t.CreatedAt
 		}
-		var attachments []Attachment
+		var attachments []domain.Attachment
 		for _, a := range m.Attachments {
 			a.EncryptionKey, a.Key, a.StorageThreadID = "", "", ""
 			a.FileName = cmp.Or(a.FileName, "attachment")
 			switch {
-			case a.isImage() && a.Base64 == "":
+			case a.IsImage() && a.Base64 == "":
 				j.warnings.imagesLeftOut++
-			case !a.isImage() && !a.hasContent():
+			case !a.IsImage() && !a.HasContent():
 				j.warnings.documentsLeftOut++
 			default:
 				attachments = append(attachments, a)
@@ -551,7 +552,7 @@ func (j *importRun) prepare(t *Thread) error {
 
 // toDevice streams a chat back to its client under an id derived from the
 // account, the source and the chat, so importing it again names it the same.
-func (j *importRun) toDevice(sourceID string, t *Thread) error {
+func (j *importRun) toDevice(sourceID string, t *domain.Thread) error {
 	if err := j.prepare(t); err != nil {
 		return err
 	}
@@ -559,7 +560,7 @@ func (j *importRun) toDevice(sourceID string, t *Thread) error {
 		j.warnings.projectLinksDropped++
 	}
 	created, _ := time.Parse(time.RFC3339Nano, t.CreatedAt)
-	t.ID = fmt.Sprintf("%013d_%s", max(0, maxReverseMillis-created.UnixMilli()), uuid.NewSHA1(importNamespace, []byte(j.p.Scope()+"\x00"+j.source+"\x00"+sourceID)))
+	t.ID = fmt.Sprintf("%013d_%s", max(0, domain.MaxReverseMillis-created.UnixMilli()), uuid.NewSHA1(importNamespace, []byte(j.p.Scope()+"\x00"+j.source+"\x00"+sourceID)))
 	t.ProjectID, t.Pinned = nil, false
 	return j.out.thread(withOriginals(t))
 }
@@ -568,28 +569,28 @@ func (j *importRun) toDevice(sourceID string, t *Thread) error {
 // copy and thumbnail an upload makes, with the archive's original beside it
 // for its client to keep apart from the thread.
 type importThread struct {
-	Thread
+	domain.Thread
 	Messages []importMessage `json:"messages"`
 }
 
 type importMessage struct {
-	Message
+	domain.Message
 	Attachments []importAttachment `json:"attachments,omitzero"`
 }
 
 type importAttachment struct {
-	Attachment
+	domain.Attachment
 	OriginalBase64 string `json:"originalBase64,omitempty"`
 }
 
-func withOriginals(t *Thread) *importThread {
+func withOriginals(t *domain.Thread) *importThread {
 	line := &importThread{Thread: *t, Messages: make([]importMessage, len(t.Messages))}
-	line.RecordVersion = recordVersion
+	line.RecordVersion = domain.RecordVersion
 	for i, m := range t.Messages {
 		message := importMessage{Message: m}
 		for _, a := range m.Attachments {
 			attachment := importAttachment{Attachment: a}
-			if a.isImage() {
+			if a.IsImage() {
 				attachment.OriginalBase64 = a.Base64
 				modelImageCopy(&attachment.Attachment)
 			}
@@ -600,7 +601,7 @@ func withOriginals(t *Thread) *importThread {
 	return line
 }
 
-func (j *importRun) toCloud(sourceID, projectSourceID string, t *Thread) error {
+func (j *importRun) toCloud(sourceID, projectSourceID string, t *domain.Thread) error {
 	if err := j.prepare(t); err != nil {
 		return err
 	}
@@ -764,19 +765,19 @@ type cloudDocument struct {
 // cloudChat is a thread with the fields sync's import reads: each message's
 // time, each attachment's type, and the blob that holds an image.
 type cloudChat struct {
-	Thread
+	domain.Thread
 	Messages    []cloudMessage `json:"messages"`
 	IsLocalOnly bool           `json:"isLocalOnly"`
 }
 
 type cloudMessage struct {
-	Message
+	domain.Message
 	Timestamp   string            `json:"timestamp"`
 	Attachments []cloudAttachment `json:"attachments,omitzero"`
 }
 
 type cloudAttachment struct {
-	Attachment
+	domain.Attachment
 	Type        string `json:"type"`
 	ArchivePath string `json:"archivePath,omitempty"`
 }
@@ -804,14 +805,14 @@ func (c *cloudArchive) entity(kind, sourceID, projectSourceID string, payload an
 }
 
 // chat writes a prepared thread, its images as blobs.
-func (c *cloudArchive) chat(sourceID, projectSourceID string, t *Thread) error {
+func (c *cloudArchive) chat(sourceID, projectSourceID string, t *domain.Thread) error {
 	payload := cloudChat{Thread: *t, Messages: make([]cloudMessage, 0, len(t.Messages))}
 	payload.ProjectID = nil
 	for _, m := range t.Messages {
 		message := cloudMessage{Message: m, Timestamp: m.CreatedAt}
 		for _, a := range m.Attachments {
 			attachment := cloudAttachment{Attachment: a, Type: "document"}
-			if a.isImage() {
+			if a.IsImage() {
 				data, err := base64.StdEncoding.DecodeString(a.Base64)
 				if err != nil {
 					return api.Err(400, "IMPORT_INVALID", "An image is not valid base64")

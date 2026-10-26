@@ -11,6 +11,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 func TestInvalidKeyEncodingNamesTheKey(t *testing.T) {
@@ -76,7 +77,7 @@ func TestRunDropsKeyBeforeScreening(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	thread := mustRead(readThreadRow(row))
+	thread := mustRead(domain.ReadThreadRow(row))
 	if len(thread.Messages) != 2 || thread.Messages[1].Content != "hello" || thread.ActiveRun != nil {
 		t.Fatal("the reply was not committed before the key was dropped")
 	}

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -93,7 +92,6 @@ func (h *harness) serviceReady(role string) bool {
 	service := h.services[role]
 	return service != nil && service.Client != nil
 }
-func decodeValue(b []byte) any { var value any; json.Unmarshal(b, &value); return value }
 func (h *harness) serviceCall(ctx context.Context, role, path string, in, out any) error {
 	s := h.services[role]
 	if s == nil {

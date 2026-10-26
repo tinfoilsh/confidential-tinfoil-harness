@@ -18,29 +18,16 @@ import (
 	"github.com/google/uuid"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
-func millis(value string) int64 {
-	if t, err := time.Parse(time.RFC3339Nano, value); err == nil {
-		return t.UnixMilli()
-	}
-	return 0
-}
-
-// chatURL is where a share link opens.
-const chatURL = "https://chat.tinfoil.sh"
-
-// A signed-in client can also share a chat it keeps itself by sending the
-// transcript, with no content key. As from the web client, that share holds
-// image thumbnails and document text, so the transcript may omit image bytes.
-// No attachment is uploaded for it: sync holds no chat to keep one under.
 func (h *harness) shareThread(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *shareRequest) (any, error) {
 	defer in.ClearKey()
 	id := in.ThreadID
-	var t Thread
+	var t domain.Thread
 	if in.Local {
 		var err error
-		if t, err = readDeviceThread(id, in.Thread); err != nil {
+		if t, err = domain.ReadDeviceThread(id, in.Thread); err != nil {
 			return nil, err
 		}
 	} else {
@@ -57,11 +44,11 @@ func (h *harness) shareThread(ctx context.Context, p *auth.Principal, _ auth.Con
 		}
 		t = row.Thread
 	}
-	payload := sharePayload{V: 1, Title: t.Title, Messages: []shareMessage{}, CreatedAt: millis(t.CreatedAt)}
+	payload := domain.SharePayload{V: 1, Title: t.Title, Messages: []domain.ShareMessage{}, CreatedAt: domain.Millis(t.CreatedAt)}
 	for _, m := range t.Messages {
-		shared := shareMessage{Role: m.Role, Content: m.Content, Timestamp: millis(m.CreatedAt), Timeline: checkedWidgets(m.Timeline), ModelDisplayName: m.ModelDisplayName, IsError: m.IsError, Quote: m.Quote, Annotations: m.Annotations}
+		shared := domain.ShareMessage{Role: m.Role, Content: m.Content, Timestamp: domain.Millis(m.CreatedAt), Timeline: domain.CheckedWidgets(m.Timeline), ModelDisplayName: m.ModelDisplayName, IsError: m.IsError, Quote: m.Quote, Annotations: m.Annotations}
 		for _, a := range m.Attachments {
-			view := viewAttachment(&a)
+			view := domain.ViewAttachment(&a)
 			view.EncryptionKey = a.EncryptionKey
 			shared.Attachments = append(shared.Attachments, view)
 		}
@@ -78,7 +65,7 @@ func (h *harness) shareThread(ctx context.Context, p *auth.Principal, _ auth.Con
 	}
 	return struct {
 		URL string `json:"url"`
-	}{chatURL + "/share/" + url.PathEscape(id) + "#v2:" + shareKey}, nil
+	}{domain.ChatURL + "/share/" + url.PathEscape(id) + "#v2:" + shareKey}, nil
 }
 
 // The share endpoints authenticate the owner's Clerk session.
@@ -132,17 +119,17 @@ func (h *harness) shareStatus(ctx context.Context, p *auth.Principal, _ auth.Con
 }
 
 // sharedThreadView is an opened share's payload, read like any old chat.
-func sharedThreadView(id string, payload []byte) (sharedThread, error) {
-	t, err := readThread(id, payload)
+func sharedThreadView(id string, payload []byte) (domain.SharedThread, error) {
+	t, err := domain.ReadThread(id, payload)
 	if err != nil {
-		return sharedThread{}, err
+		return domain.SharedThread{}, err
 	}
-	shared := sharedThread{Title: t.Title, CreatedAt: present(t.CreatedAt), Messages: []sharedMessage{}}
+	shared := domain.SharedThread{Title: t.Title, CreatedAt: domain.Present(t.CreatedAt), Messages: []domain.SharedMessage{}}
 	for i := range t.Messages {
 		m := &t.Messages[i]
-		view := sharedMessage{messageView: viewMessage(m)}
-		for j, a := range view.messageView.Attachments {
-			view.Attachments = append(view.Attachments, sharedAttachment{Attachment: a, AttKey: present(m.Attachments[j].EncryptionKey)})
+		view := domain.SharedMessage{MessageView: domain.ViewMessage(m)}
+		for j, a := range view.MessageView.Attachments {
+			view.Attachments = append(view.Attachments, domain.SharedAttachment{Attachment: a, AttKey: domain.Present(m.Attachments[j].EncryptionKey)})
 		}
 		shared.Messages = append(shared.Messages, view)
 	}
@@ -315,11 +302,11 @@ func readExportForm(r *http.Request, lease *scratchLease, authorize func(exportO
 			if !hasOptions {
 				return nil, api.Err(400, "BAD_REQUEST", "options must precede the chats")
 			}
-			data, err := io.ReadAll(io.LimitReader(part, maxTurnBody+1))
+			data, err := io.ReadAll(io.LimitReader(part, domain.MaxTurnBody+1))
 			if err != nil {
 				return nil, formError(err)
 			}
-			if len(data) > maxTurnBody {
+			if len(data) > domain.MaxTurnBody {
 				return nil, api.Err(413, "PAYLOAD_TOO_LARGE", "A chat exceeds the size limit")
 			}
 			if !api.IsObject(data) {
@@ -386,19 +373,19 @@ func (f *exportForm) read(part spooledPart) ([]byte, error) {
 }
 
 // thread reads one of the request's device chats.
-func (f *exportForm) thread(i int) (Thread, error) {
+func (f *exportForm) thread(i int) (domain.Thread, error) {
 	data, err := f.read(f.threads[i])
 	if err != nil {
-		return Thread{}, err
+		return domain.Thread{}, err
 	}
 	var named idRequest
 	json.Unmarshal(data, &named)
-	return readDeviceThread(named.ID, data)
+	return domain.ReadDeviceThread(named.ID, data)
 }
 
 // deviceImage is a device chat image's bytes: the original its client
 // sent, or the copy the chat holds.
-func (f *exportForm) deviceImage(a *Attachment) ([]byte, error) {
+func (f *exportForm) deviceImage(a *domain.Attachment) ([]byte, error) {
 	if part, ok := f.originals[a.ID]; ok {
 		return f.read(part)
 	}
@@ -413,12 +400,12 @@ func (f *exportForm) deviceImage(a *Attachment) ([]byte, error) {
 }
 
 // noDocument is a device chat's document, which holds whatever content it has.
-func noDocument(*Attachment) error { return errAttachmentMissing }
+func noDocument(*domain.Attachment) error { return errAttachmentMissing }
 
 // cloudImage is a stored image's bytes; one sync no longer holds is missing.
-func (h *harness) cloudImage(ctx context.Context, p *auth.Principal) func(*Attachment) ([]byte, error) {
-	return func(a *Attachment) ([]byte, error) {
-		if a.Base64 == "" && a.storageKey() == "" {
+func (h *harness) cloudImage(ctx context.Context, p *auth.Principal) func(*domain.Attachment) ([]byte, error) {
+	return func(a *domain.Attachment) ([]byte, error) {
+		if a.Base64 == "" && a.StorageKey() == "" {
 			return nil, errAttachmentMissing
 		}
 		data, err := h.attachmentBytes(ctx, p, a, false)
@@ -429,8 +416,8 @@ func (h *harness) cloudImage(ctx context.Context, p *auth.Principal) func(*Attac
 	}
 }
 
-func (h *harness) cloudDocument(ctx context.Context, p *auth.Principal) func(*Attachment) error {
-	return func(a *Attachment) error {
+func (h *harness) cloudDocument(ctx context.Context, p *auth.Principal) func(*domain.Attachment) error {
+	return func(a *domain.Attachment) error {
 		err := h.inflateDocument(ctx, p, a)
 		if unreachable(err) {
 			return errAttachmentMissing
@@ -480,8 +467,8 @@ func (h *harness) writeBackup(ctx context.Context, p *auth.Principal, key *auth.
 	cloudChats := map[string]bool{}
 	if key != nil {
 		projects := map[string]bool{}
-		err := h.eachRowOrUnreadable(ctx, p, *key, "project", "", func(row *storedRow) error {
-			project, err := readProject(row)
+		err := h.eachRowOrUnreadable(ctx, p, *key, "project", "", func(row *domain.StoredRow) error {
+			project, err := domain.ReadProject(row)
 			if err != nil {
 				b.omit(backupOmission{Kind: "project", SourceID: row.ID, Category: "invalid", Reason: "row_unreadable"})
 				return nil
@@ -499,7 +486,7 @@ func (h *harness) writeBackup(ctx context.Context, p *auth.Principal, key *auth.
 				return err
 			}
 			for _, doc := range docs {
-				entry := backupDocument{ID: doc.ID, ProjectID: project.ID, Filename: doc.Filename, ContentType: doc.ContentType, SizeBytes: doc.SizeBytes, ExtractedText: doc.Content, CreatedAt: looseTime(doc.CreatedAt), UpdatedAt: looseTime(doc.UpdatedAt)}
+				entry := backupDocument{ID: doc.ID, ProjectID: project.ID, Filename: doc.Filename, ContentType: doc.ContentType, SizeBytes: doc.SizeBytes, ExtractedText: doc.Content, CreatedAt: domain.LooseTime(doc.CreatedAt), UpdatedAt: domain.LooseTime(doc.UpdatedAt)}
 				if err := b.addJSON("project_documents", backupDocumentPath(project.ID, doc.ID), entry); err != nil {
 					return err
 				}
@@ -513,15 +500,15 @@ func (h *harness) writeBackup(ctx context.Context, p *auth.Principal, key *auth.
 		if err != nil {
 			return err
 		}
-		err = h.eachRowOrUnreadable(ctx, p, *key, "chat", "", func(row *storedRow) error {
-			read, err := readThreadRow(row)
+		err = h.eachRowOrUnreadable(ctx, p, *key, "chat", "", func(row *domain.StoredRow) error {
+			read, err := domain.ReadThreadRow(row)
 			if err != nil {
 				b.omit(backupOmission{Kind: "cloud_chat", SourceID: row.ID, Category: "invalid", Reason: "row_unreadable"})
 				return nil
 			}
 			t := read.Thread
 			cloudChats[t.ID] = true
-			if project := valueOr(t.ProjectID, ""); project != "" {
+			if project := domain.ValueOr(t.ProjectID, ""); project != "" {
 				if projects[project] {
 					rel.ProjectChats = append(rel.ProjectChats, projectChatLink{project, t.ID})
 				} else {
@@ -560,7 +547,7 @@ func (h *harness) writeBackup(ctx context.Context, p *auth.Principal, key *auth.
 
 // backupChat writes a chat with each of its images beside it. An image or
 // document whose content cannot be read is left out and listed as omitted.
-func backupChat(b *backupWriter, rel *backupRelationships, kind string, t *Thread, image func(*Attachment) ([]byte, error), document func(*Attachment) error) error {
+func backupChat(b *backupWriter, rel *backupRelationships, kind string, t *domain.Thread, image func(*domain.Attachment) ([]byte, error), document func(*domain.Attachment) error) error {
 	entry := backupThread{Thread: *t, Messages: make([]backupMessage, 0, len(t.Messages))}
 	entry.ActiveRun, entry.LastRequestID, entry.LastRequestKind, entry.Flagged, entry.HiddenCount, entry.RecordVersion = nil, "", "", false, 0, 0
 	omit := func(id string) {
@@ -582,7 +569,7 @@ func backupChat(b *backupWriter, rel *backupRelationships, kind string, t *Threa
 		message := backupMessage{Message: m}
 		for j, a := range m.Attachments {
 			id := fmt.Sprintf("%s/%d/%d", t.ID, i, j)
-			if !a.isImage() && !a.hasContent() && a.storageKey() != "" {
+			if !a.IsImage() && !a.HasContent() && a.StorageKey() != "" {
 				if err := document(&a); missing(err) {
 					omit(id)
 					continue
@@ -592,7 +579,7 @@ func backupChat(b *backupWriter, rel *backupRelationships, kind string, t *Threa
 			}
 			attachment := backupAttachment{Attachment: a}
 			attachment.Base64, attachment.EncryptionKey, attachment.Key, attachment.StorageThreadID, attachment.Attachment.Pages = "", "", "", "", nil
-			if a.isImage() {
+			if a.IsImage() {
 				data, err := image(&a)
 				if missing(err) {
 					omit(id)
@@ -719,10 +706,10 @@ func (h *harness) writeConversations(ctx context.Context, p *auth.Principal, key
 		}
 	}
 	if key != nil {
-		err := h.eachRow(ctx, p, *key, "chat", "", func(row *storedRow) error {
+		err := h.eachRow(ctx, p, *key, "chat", "", func(row *domain.StoredRow) error {
 			// A chat this harness cannot read is left out, as one sync cannot
 			// open is.
-			read, err := readThreadRow(row)
+			read, err := domain.ReadThreadRow(row)
 			if err != nil {
 				return nil
 			}
@@ -730,7 +717,7 @@ func (h *harness) writeConversations(ctx context.Context, p *auth.Principal, key
 			if device[t.ID] {
 				return nil
 			}
-			return e.chat(&t, valueOr(t.ProjectID, ""), h.cloudImage(ctx, p), h.cloudDocument(ctx, p))
+			return e.chat(&t, domain.ValueOr(t.ProjectID, ""), h.cloudImage(ctx, p), h.cloudDocument(ctx, p))
 		})
 		if err != nil {
 			return err
@@ -775,7 +762,7 @@ func indentedJSON(v any, prefix string) ([]byte, error) {
 	return bytes.TrimSuffix(b.Bytes(), []byte("\n")), nil
 }
 
-func (e *conversationsExport) chat(t *Thread, projectID string, image func(*Attachment) ([]byte, error), document func(*Attachment) error) error {
+func (e *conversationsExport) chat(t *domain.Thread, projectID string, image func(*domain.Attachment) ([]byte, error), document func(*domain.Attachment) error) error {
 	c := exportConversation{UUID: t.ID, Name: t.Title, CreatedAt: exportTime(t.CreatedAt, t.UpdatedAt), UpdatedAt: exportTime(t.UpdatedAt, t.CreatedAt), ProjectID: projectID, ChatMessages: []exportMessage{}}
 	for index, m := range t.Messages {
 		sender := "assistant"
@@ -814,9 +801,9 @@ func (e *conversationsExport) chat(t *Thread, projectID string, image func(*Atta
 	return err
 }
 
-func (e *conversationsExport) attachment(a Attachment, image func(*Attachment) ([]byte, error), document func(*Attachment) error) (exportAttachment, error) {
-	if !a.isImage() {
-		if !a.hasContent() {
+func (e *conversationsExport) attachment(a domain.Attachment, image func(*domain.Attachment) ([]byte, error), document func(*domain.Attachment) error) (exportAttachment, error) {
+	if !a.IsImage() {
+		if !a.HasContent() {
 			if err := document(&a); missing(err) {
 				e.manifest.Warnings = append(e.manifest.Warnings, "Could not fetch document "+a.ID)
 			} else if err != nil {
@@ -893,7 +880,7 @@ func cleanFilename(name string) string {
 }
 
 // exportDocumentText is a document's text, or its pages' when it has none.
-func exportDocumentText(text string, pages []DocumentPage) string {
+func exportDocumentText(text string, pages []domain.DocumentPage) string {
 	if strings.TrimSpace(text) != "" {
 		return text
 	}
@@ -911,7 +898,7 @@ func exportDocumentText(text string, pages []DocumentPage) string {
 }
 
 // timelineText joins the text of a reply's blocks of one type.
-func timelineText(timeline []Block, kind string) string {
+func timelineText(timeline []domain.Block, kind string) string {
 	var b strings.Builder
 	for _, block := range timeline {
 		if block.Type == kind {
@@ -954,13 +941,13 @@ type claudeDocument struct {
 func (h *harness) claudeProjects(ctx context.Context, p *auth.Principal, key auth.ContentKey) ([]claudeProject, error) {
 	projects := []claudeProject{}
 	total := 0
-	err := h.eachRow(ctx, p, key, "project", "", func(row *storedRow) error {
+	err := h.eachRow(ctx, p, key, "project", "", func(row *domain.StoredRow) error {
 		// A document this harness cannot read is left out, as a chat is.
 		docs, err := h.projectDocuments(ctx, p, key, row.ID, func(string, error) error { return nil })
 		if err != nil {
 			return err
 		}
-		project, err := readProject(row)
+		project, err := domain.ReadProject(row)
 		if err != nil {
 			return nil
 		}

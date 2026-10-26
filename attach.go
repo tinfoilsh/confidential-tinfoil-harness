@@ -27,6 +27,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	_ "golang.org/x/image/bmp"
 	"golang.org/x/image/draw"
 	_ "golang.org/x/image/tiff"
@@ -264,7 +265,7 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/v1/attachments/upload" {
 		descriptor.ID = "att_" + token()
 		api.Respond(w, struct {
-			Attachment Attachment `json:"attachment"`
+			Attachment domain.Attachment `json:"attachment"`
 		}{descriptor}, nil)
 		return
 	}
@@ -278,7 +279,7 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 			api.Respond(w, nil, err)
 			return
 		}
-		if descriptor.isImage() {
+		if descriptor.IsImage() {
 			descriptor.TextContent, err = h.describeImage(ctx, descriptor.Base64)
 			if err != nil {
 				api.Respond(w, nil, h.withQuota(p, cred.Limit, err))
@@ -289,7 +290,7 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 			api.Respond(w, nil, api.Err(415, "ATTACHMENT_UNSUPPORTED", "Project documents require extracted text"))
 			return
 		}
-		doc, err := h.createProjectDocument(ctx, p, key, ProjectDocument{ID: rowID(), ProjectID: projectID, Filename: filename, ContentType: descriptor.MimeType, SizeBytes: len(file), Content: descriptor.TextContent})
+		doc, err := h.createProjectDocument(ctx, p, key, domain.ProjectDocument{ID: domain.RowID(), ProjectID: projectID, Filename: filename, ContentType: descriptor.MimeType, SizeBytes: len(file), Content: descriptor.TextContent})
 		api.Respond(w, doc, err)
 		return
 	}
@@ -325,19 +326,19 @@ func (d *sentAttachment) fitsUpload() error {
 // stored is the form of an attachment a turn sends whole that its chat
 // stores: an upload's descriptor, and an image's bytes no larger than the
 // copy an upload makes for models.
-func (d *sentAttachment) stored() (Attachment, error) {
-	a := Attachment{ID: d.ID, Kind: d.Kind, FileName: d.FileName, MimeType: d.MimeType, Size: d.Size, Thumbnail: valueOr(d.Thumbnail, ""), TextContent: d.TextContent, Description: d.Description, Pages: d.Pages, Base64: d.Base64}
-	if !a.isImage() {
+func (d *sentAttachment) stored() (domain.Attachment, error) {
+	a := domain.Attachment{ID: d.ID, Kind: d.Kind, FileName: d.FileName, MimeType: d.MimeType, Size: d.Size, Thumbnail: domain.ValueOr(d.Thumbnail, ""), TextContent: d.TextContent, Description: d.Description, Pages: d.Pages, Base64: d.Base64}
+	if !a.IsImage() {
 		return a, nil
 	}
 	data, err := base64.StdEncoding.DecodeString(a.Base64)
 	if err != nil {
-		return Attachment{}, api.Err(415, "ATTACHMENT_UNSUPPORTED", "The image could not be decoded")
+		return domain.Attachment{}, api.Err(415, "ATTACHMENT_UNSUPPORTED", "The image could not be decoded")
 	}
 	defer clear(data)
 	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil {
-		return Attachment{}, api.Err(415, "ATTACHMENT_UNSUPPORTED", "The image could not be decoded")
+		return domain.Attachment{}, api.Err(415, "ATTACHMENT_UNSUPPORTED", "The image could not be decoded")
 	}
 	// An image within the bounds, as the copy an upload makes is, is kept.
 	if max(cfg.Width, cfg.Height) <= modelImageSide {
@@ -345,7 +346,7 @@ func (d *sentAttachment) stored() (Attachment, error) {
 	}
 	resized, thumb, err := resizeImage(data)
 	if err != nil {
-		return Attachment{}, err
+		return domain.Attachment{}, err
 	}
 	a.Base64, a.Thumbnail = base64.StdEncoding.EncodeToString(resized), base64.StdEncoding.EncodeToString(thumb)
 	return a, nil
@@ -364,29 +365,29 @@ func (d *sentAttachment) resizePixels() int64 {
 	return int64(cfg.Width) * int64(cfg.Height)
 }
 
-func (h *harness) preprocess(ctx context.Context, filename string, data []byte) (Attachment, error) {
+func (h *harness) preprocess(ctx context.Context, filename string, data []byte) (domain.Attachment, error) {
 	ext := strings.ToLower(filepath.Ext(filename))
 	group := attachmentGroup(filename)
 	if group == nil && sniffsAsText(data) {
 		group = &textUploads
 	}
 	if group == nil {
-		return Attachment{}, errUnsupportedType
+		return domain.Attachment{}, errUnsupportedType
 	}
-	descriptor := Attachment{Kind: group.kind, FileName: filename, MimeType: http.DetectContentType(data), Size: new(int64(len(data)))}
+	descriptor := domain.Attachment{Kind: group.kind, FileName: filename, MimeType: http.DetectContentType(data), Size: new(int64(len(data)))}
 	if len(data) > group.MaxBytes {
-		return Attachment{}, api.Err(413, "ATTACHMENT_TOO_LARGE", "The file exceeds the size limit for its type")
+		return domain.Attachment{}, api.Err(413, "ATTACHMENT_TOO_LARGE", "The file exceeds the size limit for its type")
 	}
 	switch group {
 	case &textUploads:
 		if bytes.ContainsRune(data, 0) {
-			return Attachment{}, api.Err(415, "ATTACHMENT_UNSUPPORTED", "Text uploads must contain UTF-8 text")
+			return domain.Attachment{}, api.Err(415, "ATTACHMENT_UNSUPPORTED", "Text uploads must contain UTF-8 text")
 		}
 		// As the web client read text, what is not UTF-8 reads as U+FFFD,
 		// which can make the text longer than the file.
 		descriptor.TextContent = strings.ToValidUTF8(string(data), string(utf8.RuneError))
 		if len(descriptor.TextContent) > group.maxContent() {
-			return Attachment{}, api.Err(413, "ATTACHMENT_TOO_LARGE", "The file exceeds the size limit for its type")
+			return domain.Attachment{}, api.Err(413, "ATTACHMENT_TOO_LARGE", "The file exceeds the size limit for its type")
 		}
 		if m := mime.TypeByExtension(ext); m != "" {
 			descriptor.MimeType = m
@@ -394,21 +395,21 @@ func (h *harness) preprocess(ctx context.Context, filename string, data []byte) 
 	case &imageUploads:
 		resized, thumb, err := resizeImage(data)
 		if err != nil {
-			return Attachment{}, err
+			return domain.Attachment{}, err
 		}
 		descriptor.Base64, descriptor.Thumbnail = base64.StdEncoding.EncodeToString(resized), base64.StdEncoding.EncodeToString(thumb)
 	case &documentUploads:
 		if ext == ".pdf" && !bytes.HasPrefix(data, []byte("%PDF-")) || ext != ".pdf" && !bytes.HasPrefix(data, []byte("PK\x03\x04")) {
-			return Attachment{}, api.Err(415, "ATTACHMENT_UNSUPPORTED", "The file contents do not match the document type")
+			return domain.Attachment{}, api.Err(415, "ATTACHMENT_UNSUPPORTED", "The file contents do not match the document type")
 		}
 		result, err := h.convert(ctx, filename, data)
 		if err != nil {
-			return Attachment{}, err
+			return domain.Attachment{}, err
 		}
 		// The converter answers with the document, or with it nested.
 		type conversion struct {
-			Markdown string         `json:"md_content"`
-			Pages    []DocumentPage `json:"pages"`
+			Markdown string                `json:"md_content"`
+			Pages    []domain.DocumentPage `json:"pages"`
 		}
 		var converted struct {
 			conversion
@@ -416,7 +417,7 @@ func (h *harness) preprocess(ctx context.Context, filename string, data []byte) 
 		}
 		var mistyped *json.UnmarshalTypeError
 		if err := json.Unmarshal(result, &converted); err != nil && !errors.As(err, &mistyped) {
-			return Attachment{}, api.Err(502, "UPSTREAM_REFUSED", "Invalid document response")
+			return domain.Attachment{}, api.Err(502, "UPSTREAM_REFUSED", "Invalid document response")
 		}
 		document := converted.conversion
 		if converted.Document != nil {
@@ -429,7 +430,7 @@ func (h *harness) preprocess(ctx context.Context, filename string, data []byte) 
 	case &audioUploads:
 		text, err := h.transcribe(ctx, filename, data)
 		if err != nil {
-			return Attachment{}, err
+			return domain.Attachment{}, err
 		}
 		descriptor.TextContent = text
 	}
@@ -577,20 +578,20 @@ func (h *harness) transcribe(ctx context.Context, filename string, data []byte) 
 }
 
 // attachment finds an attachment of the named thread for its client to download.
-func (h *harness) attachment(ctx context.Context, p *auth.Principal, key auth.ContentKey, id, threadID string) (*Attachment, []byte, error) {
+func (h *harness) attachment(ctx context.Context, p *auth.Principal, key auth.ContentKey, id, threadID string) (*domain.Attachment, []byte, error) {
 	if p.Anonymous {
 		return nil, nil, api.Err(404, "THREAD_NOT_FOUND", "The attachment was not found")
 	}
 	if key == (auth.ContentKey{}) {
 		return nil, nil, api.Err(401, "KEY_REQUIRED", "A content key is required")
 	}
-	var descriptor *Attachment
+	var descriptor *domain.Attachment
 	if threadID != "" {
 		row, err := h.loadThread(ctx, p, key, threadID)
 		if err != nil {
 			return nil, nil, err
 		}
-		descriptor = row.attachment(id)
+		descriptor = row.FindAttachment(id)
 	}
 	if descriptor == nil {
 		return nil, nil, api.Err(404, "THREAD_NOT_FOUND", "The attachment was not found")
@@ -599,11 +600,11 @@ func (h *harness) attachment(ctx context.Context, p *auth.Principal, key auth.Co
 	return descriptor, b, err
 }
 
-func (h *harness) attachmentBytes(ctx context.Context, p *auth.Principal, a *Attachment, public bool) ([]byte, error) {
+func (h *harness) attachmentBytes(ctx context.Context, p *auth.Principal, a *domain.Attachment, public bool) ([]byte, error) {
 	if a.Base64 != "" {
 		return base64.StdEncoding.DecodeString(a.Base64)
 	}
-	data, err := h.getAttachment(ctx, p, a.ID, a.storageKey(), public)
+	data, err := h.getAttachment(ctx, p, a.ID, a.StorageKey(), public)
 	// Sync moves an image that only has a legacy key into its own storage
 	// under the same id and key, after which the control plane refuses it.
 	if err != nil && api.AsError(err).HTTP == http.StatusNotFound && !public && a.EncryptionKey == "" && a.Key != "" {
@@ -686,7 +687,7 @@ func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, err)
 		return
 	}
-	var descriptor *Attachment
+	var descriptor *domain.Attachment
 	var data []byte
 	if public {
 		encodedKey := []byte(in.AttKey)
@@ -698,7 +699,7 @@ func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// A share's client names the attachment and the key its link carries.
-		descriptor = &Attachment{ID: in.ID, EncryptionKey: in.AttKey, Kind: cmp.Or(in.Kind, in.Type), FileName: in.FileName, MimeType: in.MimeType, TextContent: in.TextContent, Pages: in.Pages}
+		descriptor = &domain.Attachment{ID: in.ID, EncryptionKey: in.AttKey, Kind: cmp.Or(in.Kind, in.Type), FileName: in.FileName, MimeType: in.MimeType, TextContent: in.TextContent, Pages: in.Pages}
 		data, err = h.attachmentBytes(r.Context(), &auth.Principal{Anonymous: true}, descriptor, true)
 	} else {
 		key, keyErr := requestKey(in.Key)
@@ -718,7 +719,7 @@ func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 	defer clear(data)
 	if documentRequest(descriptor, data) {
 		// A stored document keeps its extracted content, not the uploaded file.
-		content := descriptor.content()
+		content := attachmentContent(descriptor)
 		if content.empty() {
 			if content, err = decodeDocument(data); err != nil {
 				api.Respond(w, nil, err)
@@ -738,7 +739,7 @@ func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 
 // A shared chat's client may not say what an attachment is. A document blob is
 // JSON, and no supported image format starts with a brace.
-func documentRequest(a *Attachment, data []byte) bool {
+func documentRequest(a *domain.Attachment, data []byte) bool {
 	switch a.Kind {
 	case "image":
 		return false
@@ -751,8 +752,8 @@ func documentRequest(a *Attachment, data []byte) bool {
 
 // turnAttachments resolves the attachments a turn names: an upload sent
 // whole, or by id one the thread already holds, as an edit sends it.
-func turnAttachments(in *turnRequest, t *Thread) ([]Attachment, error) {
-	result := []Attachment{}
+func turnAttachments(in *turnRequest, t *domain.Thread) ([]domain.Attachment, error) {
+	result := []domain.Attachment{}
 	for i := range in.Attachments {
 		sent := &in.Attachments[i]
 		if sent.whole() {
@@ -763,7 +764,7 @@ func turnAttachments(in *turnRequest, t *Thread) ([]Attachment, error) {
 			result = append(result, stored)
 			continue
 		}
-		held := t.attachment(sent.ID)
+		held := t.FindAttachment(sent.ID)
 		if held == nil {
 			return nil, api.Err(404, "THREAD_NOT_FOUND", "The attachment was not found")
 		}
@@ -774,14 +775,14 @@ func turnAttachments(in *turnRequest, t *Thread) ([]Attachment, error) {
 
 // A local transcript may omit older images' bytes to stay small. The model
 // then reads such an image through its description, or not at all.
-func (h *harness) hydrateContext(ctx context.Context, p *auth.Principal, t *Thread, keyless bool) error {
-	vision := h.catalog.get().vision(t.Model)
-	return t.eachAttachment(func(a *Attachment) error {
-		if !a.isImage() || !vision && a.Description != "" {
+func (h *harness) hydrateContext(ctx context.Context, p *auth.Principal, t *domain.Thread, keyless bool) error {
+	vision := h.catalog.get().Vision(t.Model)
+	return t.EachAttachment(func(a *domain.Attachment) error {
+		if !a.IsImage() || !vision && a.Description != "" {
 			return nil
 		}
 		// Without its bytes, only its thumbnail was kept.
-		if a.Base64 == "" && (keyless || a.storageKey() == "") {
+		if a.Base64 == "" && (keyless || a.StorageKey() == "") {
 			return nil
 		}
 		data, err := h.attachmentBytes(ctx, p, a, false)
@@ -799,7 +800,7 @@ func (h *harness) hydrateContext(ctx context.Context, p *auth.Principal, t *Thre
 		encoded := base64.StdEncoding.EncodeToString(resized)
 		clear(resized)
 		if vision {
-			a.Base64, a.inferenceMimeType = encoded, "image/jpeg"
+			a.Base64, a.InferenceMimeType = encoded, "image/jpeg"
 			return nil
 		}
 		response, err := h.describeImage(ctx, encoded)
