@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
@@ -57,7 +58,7 @@ func TestDocumentsConvertThroughTheRouter(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			reply.Store(tc.reply)
-			descriptor, err := h.preprocess(ctx, "report.pdf", []byte("%PDF-1.7 report"))
+			descriptor, err := h.attachments.Preprocess(ctx, "report.pdf", []byte("%PDF-1.7 report"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -84,9 +85,9 @@ func TestDocumentConversionWaitsOutCapacityRejections(t *testing.T) {
 		{"conversion failure", "1", `{"error":{"message":"Could not extract content from the document. Try exporting it again or uploading a text version.","type":"server_error","param":null,"code":"document_extraction_failed"}}`, 502, 1, "UPSTREAM_REFUSED", "document_extraction_failed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			deadline := conversionDeadline
-			conversionDeadline = 10 * time.Second
-			t.Cleanup(func() { conversionDeadline = deadline })
+			deadline := attach.ConversionDeadline
+			attach.ConversionDeadline = 10 * time.Second
+			t.Cleanup(func() { attach.ConversionDeadline = deadline })
 			var calls atomic.Int32
 			h := routerHarness(t, func(w http.ResponseWriter, r *http.Request) {
 				if calls.Add(1) > 1 {
@@ -132,7 +133,7 @@ func TestDocumentConversionStopsWaitingWithItsCaller(t *testing.T) {
 	defer cancel()
 	time.AfterFunc(100*time.Millisecond, cancel)
 	began := time.Now()
-	_, err := h.convert(ctx, "report.pdf", []byte("%PDF-1.7 report"))
+	_, err := h.attachments.Convert(ctx, "report.pdf", []byte("%PDF-1.7 report"))
 	if api.AsError(err).Code != "RATE_LIMITED" || calls.Load() != 1 || time.Since(began) < 100*time.Millisecond || time.Since(began) > 2*time.Second {
 		t.Fatalf("waited %v after its caller left: calls=%d err=%v", time.Since(began), calls.Load(), err)
 	}
@@ -158,21 +159,21 @@ func TestRecordingsTranscribeThroughTheRouter(t *testing.T) {
 func TestTheComposerOffersWhatUploadsAccept(t *testing.T) {
 	h := routerHarness(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) })
 	// Small limits stand in for the real ones, which take tens of MiB to reach.
-	for i, g := range attachmentGroups {
+	for i, g := range attach.AttachmentGroups {
 		saved := g.MaxBytes
 		g.MaxBytes = 16 * (i + 1)
 		t.Cleanup(func() { g.MaxBytes = saved })
 	}
 	var session struct {
 		Composer struct {
-			Attachments, ProjectDocuments []uploadGroup
+			Attachments, ProjectDocuments []attach.UploadGroup
 			PasteAsFileChars              int
 			DictationMaxSeconds           int
 		} `json:"composer"`
 	}
 	json.Unmarshal(postRoute(h, "/v1/session", api.Object{}, "").Body.Bytes(), &session)
 	offered := session.Composer
-	limitOf := func(groups []uploadGroup, ext string) int {
+	limitOf := func(groups []attach.UploadGroup, ext string) int {
 		for _, g := range groups {
 			if slices.Contains(g.Accept, ext) {
 				return g.MaxBytes
@@ -201,7 +202,7 @@ func TestTheComposerOffersWhatUploadsAccept(t *testing.T) {
 	if refusal("file.exe", 1).Message != unknownType {
 		t.Fatal("an unknown file type was not refused as one")
 	}
-	for _, groups := range [][]uploadGroup{offered.Attachments, offered.ProjectDocuments} {
+	for _, groups := range [][]attach.UploadGroup{offered.Attachments, offered.ProjectDocuments} {
 		for _, g := range groups {
 			for _, ext := range g.Accept {
 				if e := refusal("file"+ext, g.MaxBytes); e.Code == "ATTACHMENT_TOO_LARGE" || e.Message == unknownType {
@@ -246,10 +247,10 @@ func TestFilesThatReadAsTextAreTakenAsText(t *testing.T) {
 	}
 	// Text that replacement characters make longer than the limit is refused
 	// at upload rather than by the turn that sends it.
-	saved := textUploads.MaxBytes
-	textUploads.MaxBytes = 8
+	saved := attach.TextUploads.MaxBytes
+	attach.TextUploads.MaxBytes = 8
 	w := uploadRoute(h, "/v1/attachments/upload", "notes.txt", []byte("\xffa\xffa\xffa"), nil, "alice")
-	textUploads.MaxBytes = saved
+	attach.TextUploads.MaxBytes = saved
 	if w.Code != http.StatusRequestEntityTooLarge || !strings.Contains(w.Body.String(), "ATTACHMENT_TOO_LARGE") {
 		t.Errorf("text longer than its limit once read: HTTP %d %s", w.Code, w.Body.String())
 	}
@@ -303,7 +304,7 @@ func TestATurnsUploadIsHeldToWhatUploadsMake(t *testing.T) {
 		t.Fatalf("an image within the bounds was changed: %+v", stored[1])
 	}
 	// Small limits stand in for the real ones, which take tens of MiB to reach.
-	for _, g := range []*uploadGroup{&textUploads, &imageUploads} {
+	for _, g := range []*attach.UploadGroup{&attach.TextUploads, &attach.ImageUploads} {
 		saved := g.MaxBytes
 		g.MaxBytes = 64
 		t.Cleanup(func() { g.MaxBytes = saved })
@@ -338,7 +339,7 @@ func TestATurnsUploadIsHeldToWhatUploadsMake(t *testing.T) {
 	if len(held) != 1 || held[0].FileName != "notes.txt" {
 		t.Fatalf("the chat holds %+v", held)
 	}
-	if content, err := decodeDocument(fake.blobs[held[0].ID].data); err != nil || content.TextContent != strings.Repeat("x", 64) {
+	if content, err := attach.DecodeDocument(fake.blobs[held[0].ID].data); err != nil || content.TextContent != strings.Repeat("x", 64) {
 		t.Fatalf("the stored document holds %+v: %v", content, err)
 	}
 }
@@ -364,8 +365,8 @@ func TestATurnResizesNoMorePixelsThanOneImageHolds(t *testing.T) {
 		height, status int
 		code           string
 	}{
-		{maxTurnResizePixels / 2 / width, 415, "ATTACHMENT_UNSUPPORTED"},
-		{maxTurnResizePixels/2/width + 1, 413, "ATTACHMENT_TOO_LARGE"},
+		{attach.MaxTurnResizePixels / 2 / width, 415, "ATTACHMENT_UNSUPPORTED"},
+		{attach.MaxTurnResizePixels/2/width + 1, 413, "ATTACHMENT_TOO_LARGE"},
 	} {
 		encoded := base64.StdEncoding.EncodeToString(declaredPNG(width, tc.height))
 		in := sendInput(key)

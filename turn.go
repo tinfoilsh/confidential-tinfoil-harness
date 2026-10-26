@@ -16,7 +16,7 @@ func (h *harness) handleTurn(w http.ResponseWriter, r *http.Request) {
 	}
 	credential, err := h.auth.Inference(r.Context(), p)
 	if err != nil {
-		api.Respond(w, nil, h.withQuota(p, credential.Limit, err))
+		api.Respond(w, nil, auth.WithQuota(p, credential.Limit, err))
 		return
 	}
 	body, err := api.ReadBody(w, r, domain.MaxTurnBody)
@@ -34,12 +34,12 @@ func (h *harness) handleTurn(w http.ResponseWriter, r *http.Request) {
 	if in.Options.Locale == "" {
 		in.Options.Locale = r.Header.Get("Accept-Language")
 	}
-	if err := in.validate(); err != nil {
+	if err := in.Validate(); err != nil {
 		api.Respond(w, nil, err)
 		return
 	}
 	if p.Anonymous && !in.Local {
-		api.Respond(w, nil, errAnonymousCloud)
+		api.Respond(w, nil, auth.ErrAnonymousCloud)
 		return
 	}
 	var key auth.ContentKey
@@ -59,7 +59,7 @@ func (h *harness) handleTurn(w http.ResponseWriter, r *http.Request) {
 	accepted, err := h.acceptTurn(r.Context(), p, credential, key, in)
 	clear(key[:])
 	if err != nil {
-		api.Respond(w, nil, h.withQuota(p, api.RateLimit{}, err))
+		api.Respond(w, nil, auth.WithQuota(p, api.RateLimit{}, err))
 		return
 	}
 	defer accepted.log.log.detach()

@@ -1,4 +1,4 @@
-package main
+package attach
 
 import (
 	"encoding/base64"
@@ -6,28 +6,28 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
-// modelCopies gives each image of an upgraded chat the copy and thumbnail an
+// ModelCopies gives each image of an upgraded chat the copy and thumbnail an
 // upload makes in place of its original, which its client keeps from the old
 // chat.
-func modelCopies(t *domain.Thread) {
+func ModelCopies(t *domain.Thread) {
 	t.EachAttachment(func(a *domain.Attachment) error {
 		if a.IsImage() && a.Base64 != "" {
-			modelImageCopy(a)
+			ModelImageCopy(a)
 		}
 		return nil
 	})
 }
 
-// modelImageCopy gives an image the copy and thumbnail an upload makes in
+// ModelImageCopy gives an image the copy and thumbnail an upload makes in
 // place of its original. An image that does not decode keeps no bytes, since
 // no model reads it.
-func modelImageCopy(a *domain.Attachment) {
+func ModelImageCopy(a *domain.Attachment) {
 	original, err := base64.StdEncoding.DecodeString(a.Base64)
 	a.Base64 = ""
 	if err != nil {
 		return
 	}
-	resized, thumb, err := resizeImage(original)
+	resized, thumb, err := ResizeImage(original)
 	clear(original)
 	if err == nil {
 		a.Base64, a.Thumbnail = base64.StdEncoding.EncodeToString(resized), base64.StdEncoding.EncodeToString(thumb)

@@ -17,6 +17,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
@@ -316,10 +317,10 @@ func readExportForm(r *http.Request, lease *scratchLease, authorize func(exportO
 			}
 			var named idRequest
 			json.Unmarshal(data, &named)
-			if err := named.validate(); err != nil {
+			if err := named.Validate(); err != nil {
 				return nil, err
 			}
-			if err := validateLocalThread(data); err != nil {
+			if err := domain.ValidateLocalThread(data); err != nil {
 				return nil, err
 			}
 			if ids[named.ID] {
@@ -342,11 +343,11 @@ func readExportForm(r *http.Request, lease *scratchLease, authorize func(exportO
 			if _, ok := form.originals[id]; ok {
 				return nil, api.Err(400, "BAD_REQUEST", "Each file is sent once")
 			}
-			spooled, err := form.spoolPart(io.LimitReader(part, int64(imageUploads.MaxBytes)+1))
+			spooled, err := form.spoolPart(io.LimitReader(part, int64(attach.ImageUploads.MaxBytes)+1))
 			if err != nil {
 				return nil, err
 			}
-			if spooled.size > int64(imageUploads.MaxBytes) {
+			if spooled.size > int64(attach.ImageUploads.MaxBytes) {
 				return nil, api.Err(413, "ATTACHMENT_TOO_LARGE", "A file exceeds the size limit")
 			}
 			form.originals[id] = spooled
@@ -410,8 +411,8 @@ func (h *harness) cloudImage(ctx context.Context, p *auth.Principal) func(*domai
 		if a.Base64 == "" && a.StorageKey() == "" {
 			return nil, errAttachmentMissing
 		}
-		data, err := h.attachmentBytes(ctx, p, a, false)
-		if unreachable(err) {
+		data, err := h.attachments.Bytes(ctx, p, a, false)
+		if attach.Unreachable(err) {
 			return nil, errAttachmentMissing
 		}
 		return data, err
@@ -420,8 +421,8 @@ func (h *harness) cloudImage(ctx context.Context, p *auth.Principal) func(*domai
 
 func (h *harness) cloudDocument(ctx context.Context, p *auth.Principal) func(*domain.Attachment) error {
 	return func(a *domain.Attachment) error {
-		err := h.inflateDocument(ctx, p, a)
-		if unreachable(err) {
+		err := h.attachments.InflateDocument(ctx, p, a)
+		if attach.Unreachable(err) {
 			return errAttachmentMissing
 		}
 		return err

@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
@@ -21,8 +22,8 @@ func titleSource(t *domain.Thread) string {
 		if text == "" {
 			for i := range m.Attachments {
 				// A document whose blob is gone must not name the chat.
-				if a := &m.Attachments[i]; documentText(attachmentContent(a)) != unavailableDocument(a) {
-					text += documentText(attachmentContent(a)) + " "
+				if a := &m.Attachments[i]; attach.DocumentText(attach.Content(a)) != attach.UnavailableDocument(a) {
+					text += attach.DocumentText(attach.Content(a)) + " "
 				}
 			}
 		}

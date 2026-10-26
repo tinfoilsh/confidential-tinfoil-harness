@@ -5,11 +5,12 @@ import (
 	"strconv"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 // handleFollow re-attaches a client to a run that is live on this instance.
 func (h *harness) handleFollow(w http.ResponseWriter, r *http.Request) {
-	p, err := h.caller(r, true)
+	p, err := h.auth.Caller(r, true)
 	if err != nil {
 		api.Respond(w, nil, err)
 		return
@@ -26,7 +27,7 @@ func (h *harness) handleFollow(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, err)
 		return
 	}
-	key, err := requestKey(in.Key)
+	key, err := auth.RequestKey(in.Key)
 	in.ClearKey()
 	if err != nil {
 		api.Respond(w, nil, err)

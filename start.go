@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
@@ -112,7 +113,7 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *auth.Principal
 		t.WebSearchEnabled = domain.ValueOr(profile.WebSearchEnabled, t.WebSearchEnabled)
 		c.ApplyPreset(t, &profile, preset)
 	}
-	attachments, err := turnAttachments(turn, t)
+	attachments, err := attach.OfTurn(turn.Attachments, t)
 	if err != nil {
 		return nil, err
 	}
@@ -126,17 +127,17 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *auth.Principal
 	// chat. An ask's stored source has attachments in sync; a keyless thread
 	// carries its own. Image descriptions are stored, image bytes are not.
 	if !s.local {
-		if err := h.placeAttachments(ctx, p, s.id, t); err != nil {
+		if err := h.attachments.PlaceAttachments(ctx, p, s.id, t); err != nil {
 			return nil, err
 		}
 	}
-	if err := h.hydrateContext(ctx, p, t, s.keyless); err != nil {
+	if err := h.attachments.HydrateContext(ctx, p, t, s.keyless); err != nil {
 		return nil, err
 	}
 	// Offloaded documents are read back for the prompt alone.
 	working := t.Clone()
 	if !s.keyless {
-		if err := h.hydrateDocuments(ctx, p, &working); err != nil {
+		if err := h.attachments.HydrateDocuments(ctx, p, &working); err != nil {
 			return nil, err
 		}
 	}
@@ -166,7 +167,7 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *auth.Principal
 	t.ContextUsage = requestContextUsage(request)
 	t.ActiveRun, t.LastRequestID, t.LastRequestKind = activeRun(r.log.id), r.nonce, turn.Kind
 	if !s.local {
-		stripInlineAttachments(t)
+		attach.StripInlineAttachments(t)
 	}
 	return plan, nil
 }
@@ -353,7 +354,7 @@ func (h *harness) endUnstarted(r *chatRun, err error) *chatRun {
 	h.live.mu.Lock()
 	next := h.advance(r, true)
 	h.live.mu.Unlock()
-	e := api.AsError(h.withQuota(r.principal, r.credential.Limit, err))
+	e := api.AsError(auth.WithQuota(r.principal, r.credential.Limit, err))
 	limit := domain.ValueOr(e.RateLimit, r.credential.Limit)
 	r.out.emit(domain.FailedRun(r.thread.id, r.log.id, e, &domain.RunMetadata{RateLimit: &limit}))
 	r.log.log.close(errDone)

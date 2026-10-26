@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
@@ -33,7 +34,7 @@ func (h *harness) apiRoutes() []routeSpec {
 		{"/v1/import/status", false, false, decoded(h.importStatus)},
 		{"/v1/threads/delete-all", false, true, decoded(h.deleteAllThreads)},
 		{"/v1/projects/delete-all", false, true, h.deleteAllProjects},
-		{"/v1/metadata/favicon", true, false, decoded(h.favicon)}, {"/v1/metadata/link", true, false, decoded(h.linkPreview)},
+		{"/v1/metadata/favicon", true, false, decoded(h.attachments.Favicon)}, {"/v1/metadata/link", true, false, decoded(h.attachments.LinkPreview)},
 	}
 	for _, pair := range [][2]string{{"current", "/v1/key/current"}, {"register", "/v1/key/register"}, {"add-bundle", "/v1/key/add-bundle"}, {"remove-bundle", "/v1/key/remove-bundle"}, {"migrate-all", "/v1/blobs/migrate-all"}} {
 		routes = append(routes, routeSpec{"/v1/keys/" + pair[0], false, false, func(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in json.RawMessage) (any, error) {
@@ -78,7 +79,7 @@ func (h *harness) session(ctx context.Context, p *auth.Principal, _ auth.Content
 		DefaultModel:    domain.AutoModelName,
 		Widgets:         widgets,
 		ProfileDefaults: domain.DefaultProfile(),
-		Composer:        composer(),
+		Composer:        attach.Composer(),
 		Presets:         presets,
 		Features:        map[string]bool{"webSearch": webSearch.client != nil, "transcription": h.models.ServiceReady("router"), "speech": h.models.ServiceReady("router")},
 	}, nil
@@ -134,11 +135,11 @@ func (h *harness) updateThread(ctx context.Context, p *auth.Principal, key auth.
 	var profile domain.Profile
 	if in.PresetID.Value != nil {
 		var err error
-		if profile, err = h.sourceProfile(ctx, p, key, in.threadSource); err != nil {
+		if profile, err = h.sourceProfile(ctx, p, key, in.ThreadSource); err != nil {
 			return nil, err
 		}
 	}
-	row, err := h.changeThread(ctx, p, key, in.threadSource, in.ID, func(t *domain.Thread) error {
+	row, err := h.changeThread(ctx, p, key, in.ThreadSource, in.ID, func(t *domain.Thread) error {
 		in.apply(t, h.models.Catalog.Get(), &profile)
 		t.Pinned = domain.ValueOr(in.Pinned, t.Pinned)
 		if in.ProjectID.Set {
@@ -189,7 +190,7 @@ func (h *harness) pinnedThreads(ctx context.Context, p *auth.Principal, key auth
 
 // changeThread applies change to a chat: a stored one as read now, saved
 // once changed, or the device chat its client sent.
-func (h *harness) changeThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, source threadSource, id string, change func(*domain.Thread) error) (*domain.ThreadRow, error) {
+func (h *harness) changeThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, source domain.ThreadSource, id string, change func(*domain.Thread) error) (*domain.ThreadRow, error) {
 	if !source.Local {
 		return h.store.MutateThread(ctx, p, key, id, change)
 	}
@@ -207,7 +208,7 @@ func (h *harness) changeThread(ctx context.Context, p *auth.Principal, key auth.
 
 // sourceProfile is the settings a chat's prompt reads: the stored profile,
 // or the one a device chat's client sends.
-func (h *harness) sourceProfile(ctx context.Context, p *auth.Principal, key auth.ContentKey, source threadSource) (domain.Profile, error) {
+func (h *harness) sourceProfile(ctx context.Context, p *auth.Principal, key auth.ContentKey, source domain.ThreadSource) (domain.Profile, error) {
 	if !source.Local {
 		return h.profile(ctx, p, key)
 	}
@@ -328,7 +329,7 @@ func (h *harness) updateMessage(ctx context.Context, p *auth.Principal, key auth
 	})
 }
 func (h *harness) changeMessages(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *messageRequest, change func(*domain.Thread, int) error) (any, error) {
-	row, err := h.changeThread(ctx, p, key, in.threadSource, in.ThreadID, func(t *domain.Thread) error {
+	row, err := h.changeThread(ctx, p, key, in.ThreadSource, in.ThreadID, func(t *domain.Thread) error {
 		index := t.MessageIndex(in.MessageID)
 		if index < 0 {
 			return api.Err(404, "THREAD_NOT_FOUND", "The message was not found")

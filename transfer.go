@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
@@ -38,17 +39,17 @@ func (h *harness) threadTranscript(ctx context.Context, p *auth.Principal, key a
 		if a.StorageKey() == "" {
 			return nil
 		}
-		data, err := h.attachmentBytes(ctx, p, a, false)
+		data, err := h.attachments.Bytes(ctx, p, a, false)
 		if err == nil && a.IsImage() {
 			a.Base64 = base64.StdEncoding.EncodeToString(data)
 		} else if err == nil {
-			var content documentBlob
-			if content, err = decodeDocument(data); err == nil {
+			var content attach.DocumentBlob
+			if content, err = attach.DecodeDocument(data); err == nil {
 				a.TextContent, a.Pages = content.TextContent, content.Pages
 			}
 		}
 		clear(data)
-		if unreachable(err) {
+		if attach.Unreachable(err) {
 			missing++
 			return nil
 		}
@@ -128,7 +129,7 @@ func (h *harness) handleThreadImport(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *harness) importThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *threadImportRequest) (any, error) {
-	if err := in.validate(); err != nil {
+	if err := in.Validate(); err != nil {
 		return nil, err
 	}
 	id := in.ThreadID
@@ -137,10 +138,10 @@ func (h *harness) importThread(ctx context.Context, p *auth.Principal, key auth.
 		return nil, err
 	}
 	row := &domain.ThreadRow{Thread: thread, Restore: true}
-	if err := h.placeAttachments(ctx, p, id, &row.Thread); err != nil {
+	if err := h.attachments.PlaceAttachments(ctx, p, id, &row.Thread); err != nil {
 		return nil, err
 	}
-	stripInlineAttachments(&row.Thread)
+	attach.StripInlineAttachments(&row.Thread)
 	if err := h.store.SaveThread(ctx, p, key, row); err != nil {
 		if api.AsError(err).Code == "REVISION_CONFLICT" {
 			return nil, api.Err(409, "THREAD_EXISTS", "This chat is already in the cloud")

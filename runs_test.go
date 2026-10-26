@@ -160,7 +160,7 @@ func TestAChatDeletedAsItsTurnStartsStaysDeleted(t *testing.T) {
 		t.Cleanup(cp.Close)
 		release := sync.OnceFunc(func() { close(answer) })
 		t.Cleanup(release)
-		h.auth = testAuth(cp)
+		h.useAuth(testAuth(cp))
 		in := sendInput(key)
 		refused := make(chan *httptest.ResponseRecorder, 1)
 		go func() { refused <- postRoute(h, "/v1/threads/turn", in, "alice") }()

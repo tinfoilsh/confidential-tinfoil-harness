@@ -13,7 +13,7 @@ import (
 type jsonEndpoint func(context.Context, *auth.Principal, auth.ContentKey, json.RawMessage) (any, error)
 
 // validated is a request that checks itself once decoded.
-type validated interface{ validate() error }
+type validated interface{ Validate() error }
 
 // decoded is a route whose handler takes its request decoded and checked.
 func decoded[T any](handle func(context.Context, *auth.Principal, auth.ContentKey, *T) (any, error)) jsonEndpoint {
@@ -27,7 +27,7 @@ func decoded[T any](handle func(context.Context, *auth.Principal, auth.ContentKe
 			return nil, err
 		}
 		if check, ok := any(in).(validated); ok {
-			if err := check.validate(); err != nil {
+			if err := check.Validate(); err != nil {
 				return nil, err
 			}
 		}
@@ -64,14 +64,14 @@ func (h *harness) handlers() map[string]http.HandlerFunc {
 		"POST /v1/threads/import":            h.handleThreadImport,
 		"POST /v1/threads/follow":            h.handleFollow,
 		"POST /v1/threads/upgrade":           h.handleUpgrade,
-		"POST /v1/speech":                    h.handleSpeech,
-		"POST /v1/attachments/upload":        boundedHandler(uploadSlots, h.handleUpload),
-		"POST /v1/projects/documents/upload": boundedHandler(uploadSlots, h.handleUpload),
-		"POST /v1/transcriptions":            boundedHandler(uploadSlots, h.handleUpload),
+		"POST /v1/speech":                    h.attachments.HandleSpeech,
+		"POST /v1/attachments/upload":        boundedHandler(uploadSlots, h.attachments.HandleUpload),
+		"POST /v1/projects/documents/upload": boundedHandler(uploadSlots, h.attachments.HandleUpload),
+		"POST /v1/transcriptions":            boundedHandler(uploadSlots, h.attachments.HandleUpload),
 		"POST /v1/import":                    h.handleImport,
 		"POST /v1/export":                    h.handleExport,
-		"POST /v1/attachments/get":           h.handleAttachmentGet,
-		"POST /v1/attachments/get-public":    h.handleAttachmentGet,
+		"POST /v1/attachments/get":           h.attachments.HandleAttachmentGet,
+		"POST /v1/attachments/get-public":    h.attachments.HandleAttachmentGet,
 	}
 	add := func(pattern string, handler http.HandlerFunc) {
 		if handlers[pattern] != nil {
@@ -92,7 +92,7 @@ func (h *harness) handlers() map[string]http.HandlerFunc {
 // the caller.
 func (h *harness) jsonRoute(spec routeSpec) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		p, err := h.caller(r, spec.public)
+		p, err := h.auth.Caller(r, spec.public)
 		if err != nil {
 			api.Respond(w, nil, err)
 			return
@@ -120,17 +120,8 @@ func (h *harness) jsonRoute(spec routeSpec) http.HandlerFunc {
 			defer clear(key[:])
 		}
 		result, err := spec.handler(r.Context(), p, key, body)
-		api.Respond(w, result, h.withQuota(p, api.RateLimit{}, err))
+		api.Respond(w, result, auth.WithQuota(p, api.RateLimit{}, err))
 	}
-}
-
-// caller is who a request is from, recognized before its body is read.
-func (h *harness) caller(r *http.Request, anonymous bool) (*auth.Principal, error) {
-	p, err := h.auth.Authenticate(r, anonymous)
-	if err != nil {
-		return nil, err
-	}
-	return p, h.auth.Recognize(r.Context(), p)
 }
 
 // threadOperation serves a route that changes a stored chat, named by id
@@ -138,7 +129,7 @@ func (h *harness) caller(r *http.Request, anonymous bool) (*auth.Principal, erro
 // sends it, and which needs no account.
 func (h *harness) threadOperation(handler jsonEndpoint) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		p, err := h.caller(r, true)
+		p, err := h.auth.Caller(r, true)
 		if err != nil {
 			api.Respond(w, nil, err)
 			return
@@ -161,7 +152,7 @@ func (h *harness) threadOperation(handler jsonEndpoint) http.HandlerFunc {
 		var key auth.ContentKey
 		if !target.Local {
 			if p.Anonymous {
-				api.Respond(w, nil, errAnonymousCloud)
+				api.Respond(w, nil, auth.ErrAnonymousCloud)
 				return
 			}
 			if key, err = auth.DecodeContentKey(target.Key); err != nil {
@@ -172,12 +163,9 @@ func (h *harness) threadOperation(handler jsonEndpoint) http.HandlerFunc {
 		}
 		target.ClearKey()
 		result, err := handler(r.Context(), p, key, body)
-		api.Respond(w, result, h.withQuota(p, api.RateLimit{}, err))
+		api.Respond(w, result, auth.WithQuota(p, api.RateLimit{}, err))
 	}
 }
-
-// errAnonymousCloud refuses a signed-out caller a stored chat.
-var errAnonymousCloud = api.Err(401, "UNAUTHENTICATED", "Anonymous chats are kept on the device").WithAction(api.ActionStop)
 
 var uploadSlots = make(chan struct{}, 4)
 

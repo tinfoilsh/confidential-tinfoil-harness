@@ -1,4 +1,4 @@
-package main
+package attach
 
 import (
 	"regexp"
@@ -22,7 +22,7 @@ import (
 const (
 	speechTargetCharacters = 300
 	maxSpeechCharacters    = 600
-	maxSpeechText          = 100000
+	MaxSpeechText          = 100000
 )
 
 var markdown = goldmark.New(goldmark.WithExtensions(extension.GFM, extension.Footnote),
