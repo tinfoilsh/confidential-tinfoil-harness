@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 func TestAReplyRecordsWhenItsStepsRan(t *testing.T) {
@@ -22,7 +24,7 @@ func TestAReplyRecordsWhenItsStepsRan(t *testing.T) {
 		{reasoningChunk{MessageID: "r-reasoning", Delta: " late"}, at("03.2")},
 		{textChunk{MessageID: "r", Delta: " done"}, at("03.4")},
 		{toolCallStart{ToolCallID: "s", ToolCallName: "web_search", ParentMessageID: "r"}, at("04")},
-		{toolCallResult{ToolCallID: "s", Content: raw(object{"results": []any{}})}, at("06")},
+		{toolCallResult{ToolCallID: "s", Content: api.Raw(api.Object{"results": []any{}})}, at("06")},
 		{reasoningChunk{MessageID: "r-reasoning", Delta: "Next"}, at("07")},
 		{reasoningChunk{MessageID: "r-reasoning", Delta: " step"}, at("08.25")},
 	} {
@@ -31,28 +33,28 @@ func TestAReplyRecordsWhenItsStepsRan(t *testing.T) {
 	want := []Block{
 		{ID: "r_thinking_0", Type: "thinking", Content: "Planning late", StartedAt: start, EndedAt: start + 2500, Duration: 2.5},
 		{ID: "r_content_1", Type: "content", Content: "Answer done"},
-		{ID: "s", Type: "tool_call", ToolCallID: "s", Name: "web_search", Progress: []json.RawMessage{}, Result: raw(object{"results": []any{}}), StartedAt: start + 4000, EndedAt: start + 6000},
+		{ID: "s", Type: "tool_call", ToolCallID: "s", Name: "web_search", Progress: []json.RawMessage{}, Result: api.Raw(api.Object{"results": []any{}}), StartedAt: start + 4000, EndedAt: start + 6000},
 		{ID: "r_thinking_3", Type: "thinking", Content: "Next step", StartedAt: start + 7000, EndedAt: start + 8250, Duration: 1.25},
 	}
 	got := assembler.messages()
-	if len(got) != 1 || !reflect.DeepEqual(decodeValue(raw(got[0].Timeline)), decodeValue(raw(want))) {
-		t.Fatalf("timeline %s, want %s", raw(got), raw(want))
+	if len(got) != 1 || !reflect.DeepEqual(decodeValue(api.Raw(got[0].Timeline)), decodeValue(api.Raw(want))) {
+		t.Fatalf("timeline %s, want %s", api.Raw(got), api.Raw(want))
 	}
 }
 
 func TestOldRepliesKeepWhenTheirStepsRan(t *testing.T) {
-	thread := mustRead(readThread("chat", raw(object{"title": "Trip", "messages": []any{
-		object{"id": "u", "role": "user", "content": "plan"},
-		object{"id": "a", "role": "assistant", "content": "Go", "timeline": []any{
-			object{"type": "thinking", "id": "t", "content": "Plan", "isThinking": false, "duration": 2.5, "startedAt": 1000, "endedAt": 3500},
-			object{"type": "web_search", "id": "w", "state": object{"query": "trip", "sources": []any{}}, "startedAt": 4000, "endedAt": 9000},
-			object{"type": "url_fetches", "id": "f", "startedAt": 9000, "endedAt": 15000, "fetches": []any{
-				object{"id": "f1", "url": "https://a.test", "startedAt": 9000.5, "endedAt": 12000.25},
-				object{"id": "f2", "url": "https://b.test"},
+	thread := mustRead(readThread("chat", api.Raw(api.Object{"title": "Trip", "messages": []any{
+		api.Object{"id": "u", "role": "user", "content": "plan"},
+		api.Object{"id": "a", "role": "assistant", "content": "Go", "timeline": []any{
+			api.Object{"type": "thinking", "id": "t", "content": "Plan", "isThinking": false, "duration": 2.5, "startedAt": 1000, "endedAt": 3500},
+			api.Object{"type": "web_search", "id": "w", "state": api.Object{"query": "trip", "sources": []any{}}, "startedAt": 4000, "endedAt": 9000},
+			api.Object{"type": "url_fetches", "id": "f", "startedAt": 9000, "endedAt": 15000, "fetches": []any{
+				api.Object{"id": "f1", "url": "https://a.test", "startedAt": 9000.5, "endedAt": 12000.25},
+				api.Object{"id": "f2", "url": "https://b.test"},
 			}},
-			object{"type": "content", "id": "c", "content": "Go"},
+			api.Object{"type": "content", "id": "c", "content": "Go"},
 		}},
-		object{"id": "b", "role": "assistant", "content": "Sure", "thoughts": "Think", "thinkingDuration": 1.25},
+		api.Object{"id": "b", "role": "assistant", "content": "Sure", "thoughts": "Think", "thinkingDuration": 1.25},
 	}})))
 	type step struct {
 		ID                           string

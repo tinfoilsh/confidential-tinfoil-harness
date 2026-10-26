@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 // apply runs under stream.mu, so tool goroutines and model deltas use one order.
@@ -48,7 +50,7 @@ func (a *messageAssembler) message(id string) *Message {
 	if m := a.byID[id]; m != nil {
 		return m
 	}
-	m := &Message{ID: id, Role: "assistant", CreatedAt: timestamp(), Timeline: []Block{}}
+	m := &Message{ID: id, Role: "assistant", CreatedAt: api.Timestamp(), Timeline: []Block{}}
 	a.byID[id] = m
 	a.ordered = append(a.ordered, m)
 	return m
@@ -139,7 +141,7 @@ func (a *messageAssembler) apply(e runEvent, at string) {
 			for _, op := range e.Patch {
 				if op.Path == "/output/-" {
 					b := call.block()
-					b.Progress = append(b.Progress, raw(op.Value))
+					b.Progress = append(b.Progress, api.Raw(op.Value))
 				}
 			}
 		}

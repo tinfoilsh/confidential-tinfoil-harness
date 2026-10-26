@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 // Profile is a user's settings: what the clients show and a prompt reads.
@@ -114,11 +115,11 @@ func (p *Profile) validate() error {
 
 // dropInvalid clears each field whose value a client may not set, and
 // reports the first.
-func (p *Profile) dropInvalid() *apiError {
-	var first *apiError
+func (p *Profile) dropInvalid() *api.Error {
+	var first *api.Error
 	refuse := func(message string) {
 		if first == nil {
-			first = apiErr(400, "BAD_REQUEST", message)
+			first = api.Err(400, "BAD_REQUEST", message)
 		}
 	}
 	for _, choice := range []struct {
@@ -187,7 +188,7 @@ func mergeDeviceProfile(remote, local Profile, changed []string) Profile {
 			if reflect.DeepEqual(kept, incoming) {
 				continue
 			}
-			preset.ID = "user:" + uuid.NewSHA1(uuid.NameSpaceURL, raw(incoming)).String()
+			preset.ID = "user:" + uuid.NewSHA1(uuid.NameSpaceURL, api.Raw(incoming)).String()
 			preset.Name += " (from this device)"
 			remapped[incoming.ID] = preset.ID
 			if slices.ContainsFunc(presets, func(p CustomPreset) bool { return p.ID == preset.ID }) {
@@ -237,7 +238,7 @@ func (p *Profile) preset(id string) *CustomPreset {
 func localProfile(data []byte) *Profile {
 	var profile Profile
 	readLenient(data, &profile)
-	upgradeProfile(&profile, nowUTC())
+	upgradeProfile(&profile, api.Now())
 	profile.dropInvalid()
 	return &profile
 }

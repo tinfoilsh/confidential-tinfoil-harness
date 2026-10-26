@@ -9,6 +9,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 // Search and fetch results as the model reads them, ported from the model
@@ -23,7 +25,7 @@ type citationSource struct{ url, title string }
 // modelCopy is a search or fetch result as cited text, with the pages it
 // showed; other output is read as it is.
 func modelCopy(name, content string) (string, []citationSource) {
-	var value object
+	var value api.Object
 	if json.Unmarshal([]byte(content), &value) != nil || len(value) == 0 {
 		return content, nil
 	}
@@ -32,13 +34,13 @@ func modelCopy(name, content string) (string, []citationSource) {
 	switch name {
 	case "web_search":
 		formatted = formatSearchOutput(value["results"])
-		for _, item := range arr(value["results"]) {
-			sources = append(sources, citationSource{strings.TrimSpace(str(obj(item)["url"])), strings.TrimSpace(str(obj(item)["title"]))})
+		for _, item := range api.Arr(value["results"]) {
+			sources = append(sources, citationSource{strings.TrimSpace(api.Str(api.Obj(item)["url"])), strings.TrimSpace(api.Str(api.Obj(item)["title"]))})
 		}
 	case "web_fetch":
 		formatted = cmp.Or(formatFetchOutput(value["pages"]), formatFetchFailures(value["results"]))
-		for _, item := range arr(value["pages"]) {
-			sources = append(sources, citationSource{strings.TrimSpace(str(obj(item)["url"])), "Fetched page"})
+		for _, item := range api.Arr(value["pages"]) {
+			sources = append(sources, citationSource{strings.TrimSpace(api.Str(api.Obj(item)["url"])), "Fetched page"})
 		}
 	}
 	return cmp.Or(formatted, content), sources
@@ -126,14 +128,14 @@ func formatSearchOutput(raw any) string {
 		if !ok {
 			continue
 		}
-		fmt.Fprintf(&out, "Source: %s\n", cmp.Or(strings.TrimSpace(str(result["title"])), "Search result"))
-		if url := strings.TrimSpace(str(result["url"])); url != "" {
+		fmt.Fprintf(&out, "Source: %s\n", cmp.Or(strings.TrimSpace(api.Str(result["title"])), "Search result"))
+		if url := strings.TrimSpace(api.Str(result["url"])); url != "" {
 			fmt.Fprintf(&out, "URL: %s\n", url)
 		}
-		if published := strings.TrimSpace(str(result["published_date"])); published != "" {
+		if published := strings.TrimSpace(api.Str(result["published_date"])); published != "" {
 			fmt.Fprintf(&out, "Published: %s\n", published)
 		}
-		if content := strings.TrimSpace(str(result["content"])); content != "" {
+		if content := strings.TrimSpace(api.Str(result["content"])); content != "" {
 			out.WriteString(content + "\n")
 		}
 		out.WriteString("\n")
@@ -144,16 +146,16 @@ func formatSearchOutput(raw any) string {
 // formatFetchOutput is empty when nothing was fetched.
 func formatFetchOutput(raw any) string {
 	var out strings.Builder
-	for _, item := range arr(raw) {
+	for _, item := range api.Arr(raw) {
 		page, ok := item.(map[string]any)
 		if !ok {
 			continue
 		}
 		out.WriteString("Source: Fetched page\n")
-		if url := strings.TrimSpace(str(page["url"])); url != "" {
+		if url := strings.TrimSpace(api.Str(page["url"])); url != "" {
 			fmt.Fprintf(&out, "URL: %s\n", url)
 		}
-		if content := strings.TrimSpace(str(page["content"])); content != "" {
+		if content := strings.TrimSpace(api.Str(page["content"])); content != "" {
 			out.WriteString(content + "\n")
 		}
 		out.WriteString("\n")
@@ -163,12 +165,12 @@ func formatFetchOutput(raw any) string {
 
 func formatFetchFailures(raw any) string {
 	var lines []string
-	for _, item := range arr(raw) {
+	for _, item := range api.Arr(raw) {
 		result, ok := item.(map[string]any)
-		if !ok || strings.TrimSpace(str(result["status"])) == "completed" {
+		if !ok || strings.TrimSpace(api.Str(result["status"])) == "completed" {
 			continue
 		}
-		url, failure := strings.TrimSpace(str(result["url"])), strings.TrimSpace(str(result["error"]))
+		url, failure := strings.TrimSpace(api.Str(result["url"])), strings.TrimSpace(api.Str(result["error"]))
 		switch {
 		case url != "" && failure != "":
 			lines = append(lines, fmt.Sprintf("Fetch failed for %s: %s", url, failure))

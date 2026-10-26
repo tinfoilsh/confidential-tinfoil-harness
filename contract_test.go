@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/google/jsonschema-go/jsonschema"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -611,7 +612,7 @@ func TestTheSessionSpeaksThePublishedVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := postRoute(h, "/v1/session", object{}, "alice")
+	w := postRoute(h, "/v1/session", api.Object{}, "alice")
 	var session struct {
 		Protocol protocolView `json:"protocol"`
 	}
@@ -636,11 +637,11 @@ func TestEveryErrorCodeHasAnAction(t *testing.T) {
 		actions[action.(string)] = true
 	}
 	for code := range codes {
-		if errorActions[code] == "" {
+		if api.Actions[code] == "" {
 			t.Errorf("%s has no action", code)
 		}
 	}
-	for code, action := range errorActions {
+	for code, action := range api.Actions {
 		if !codes[code] || !actions[action] {
 			t.Errorf("%s: %s is not in the protocol", code, action)
 		}

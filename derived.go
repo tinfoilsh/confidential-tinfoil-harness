@@ -8,12 +8,13 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
 type usageSinkKey struct{}
 
-func (h *harness) completion(ctx context.Context, m *model, payload object) (string, error) {
+func (h *harness) completion(ctx context.Context, m *model, payload api.Object) (string, error) {
 	endpoint := m.endpoint
 	if endpoint == "" {
 		endpoint = h.gateway + "/v1/chat/completions"
@@ -24,7 +25,7 @@ func (h *harness) completion(ctx context.Context, m *model, payload object) (str
 	if _, scoped := payload["user_cache_secret"]; !scoped {
 		payload["user_cache_secret"] = token()
 	}
-	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(raw(payload)))
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(api.Raw(payload)))
 	if err != nil {
 		return "", err
 	}
@@ -36,7 +37,7 @@ func (h *harness) completion(ctx context.Context, m *model, payload object) (str
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-		return "", withRetryAfter(downstreamError(resp.StatusCode, b), resp.Header)
+		return "", api.WithRetryAfter(api.DownstreamError(resp.StatusCode, b), resp.Header)
 	}
 	if sink, ok := ctx.Value(usageSinkKey{}).(*stream); ok {
 		if usage, ok := ctx.Value(usageContextKey{}).(usagereporting.Context); ok && usage.BillCustomerRequest {
@@ -57,7 +58,7 @@ func (h *harness) completion(ctx context.Context, m *model, payload object) (str
 		return "", err
 	}
 	if len(result.Choices) == 0 {
-		return "", apiErr(502, "UPSTREAM_REFUSED", "The completion is empty")
+		return "", api.Err(502, "UPSTREAM_REFUSED", "The completion is empty")
 	}
 	if sink, ok := ctx.Value(usageSinkKey{}).(*stream); ok && len(result.Usage) > 0 {
 		sink.meter(result.Usage)
@@ -99,7 +100,7 @@ func (h *harness) generateTitle(ctx context.Context, r *chatRun, p *principal, t
 	var result struct {
 		Summary string `json:"summary"`
 	}
-	if err := h.serviceCall(ctx, "summarizer", "/summarize", object{"content": text, "style": "title_summary"}, &result); err != nil {
+	if err := h.serviceCall(ctx, "summarizer", "/summarize", api.Object{"content": text, "style": "title_summary"}, &result); err != nil {
 		return
 	}
 	title := strings.Trim(strings.TrimSpace(result.Summary), "\"'")

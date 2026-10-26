@@ -3,22 +3,24 @@ package main
 import (
 	"context"
 	"errors"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 // errAlreadyApplied answers a retried request whose turn its chat holds, once
 // the run it started is no longer live.
-var errAlreadyApplied = apiErr(409, "ALREADY_APPLIED", "This request was already applied; reload the chat")
+var errAlreadyApplied = api.Err(409, "ALREADY_APPLIED", "This request was already applied; reload the chat")
 
 // maxQueuedTurns bounds the turns one chat holds behind its running reply.
 const maxQueuedTurns = 32
 
 // errQueueFull refuses a turn past a full queue. It is not the caller's
 // quota, which stays as it was.
-var errQueueFull = apiErr(429, "QUEUE_FULL", "The turn queue is full")
+var errQueueFull = api.Err(429, "QUEUE_FULL", "The turn queue is full")
 
 func (h *harness) acceptTurn(ctx context.Context, p *principal, credential inferenceCredential, key contentKey, in *turnRequest) (*chatRun, error) {
 	defer clear(key[:])
-	in.clearKey()
+	in.ClearKey()
 	nonce, digest := in.ClientRequestID, in.digest()
 	var r *chatRun
 	for r == nil {
@@ -44,7 +46,7 @@ func (h *harness) acceptTurn(ctx context.Context, p *principal, credential infer
 		}
 		// A retried request follows the run it started.
 		if previous.digest != digest {
-			return nil, apiErr(409, "REVISION_CONFLICT", "The request nonce was already used")
+			return nil, api.Err(409, "REVISION_CONFLICT", "The request nonce was already used")
 		}
 		// A run already accepted is followed even by a caller that has left.
 		select {
@@ -58,7 +60,7 @@ func (h *harness) acceptTurn(ctx context.Context, p *principal, credential infer
 		}
 		if previous.refused == nil {
 			if !previous.thread.keyless && previous.thread.keyHash != key.fingerprint() {
-				return nil, apiErr(409, "REVISION_CONFLICT", "The request nonce was already used")
+				return nil, api.Err(409, "REVISION_CONFLICT", "The request nonce was already used")
 			}
 			// A run that ended meanwhile is checked against the chat as a
 			// new request is.
@@ -101,8 +103,8 @@ func (h *harness) acceptTurn(ctx context.Context, p *principal, credential infer
 	return r, nil
 }
 
-func quotaExhausted(limit rateLimit) error {
-	e := apiErr(429, "QUOTA_EXHAUSTED", "The daily quota is exhausted")
+func quotaExhausted(limit api.RateLimit) error {
+	e := api.Err(429, "QUOTA_EXHAUSTED", "The daily quota is exhausted")
 	e.Kind, _ = limit.Kind.(string)
 	e.ResetsAt, e.RateLimit = limit.ResetsAt, &limit
 	return e
@@ -110,8 +112,8 @@ func quotaExhausted(limit rateLimit) error {
 
 // withQuota gives a refusal for an exhausted quota the caller's quota as the
 // refusal leaves it. A signed-out caller's is the one its request held.
-func (h *harness) withQuota(p *principal, held rateLimit, err error) error {
-	var e *apiError
+func (h *harness) withQuota(p *principal, held api.RateLimit, err error) error {
+	var e *api.Error
 	if p == nil || !errors.As(err, &e) || e.Code != "QUOTA_EXHAUSTED" || e.RateLimit != nil {
 		return err
 	}
@@ -122,7 +124,7 @@ func (h *harness) withQuota(p *principal, held rateLimit, err error) error {
 
 // newThread is a chat's first form, filed under a project and preset.
 func newThread(id string, projectID, presetID *string) Thread {
-	return Thread{ID: id, Title: "New Chat", TitleState: "placeholder", CreatedAt: timestamp(), UpdatedAt: timestamp(), Model: "auto", ProjectID: projectID, PresetID: presetID, WebSearchEnabled: true, Messages: []Message{}}
+	return Thread{ID: id, Title: "New Chat", TitleState: "placeholder", CreatedAt: api.Timestamp(), UpdatedAt: api.Timestamp(), Model: "auto", ProjectID: projectID, PresetID: presetID, WebSearchEnabled: true, Messages: []Message{}}
 }
 
 // askThread is an ask's thread: it starts from the conversation it asks
@@ -137,7 +139,7 @@ func askThread(id string, source *Thread) *threadRow {
 // reply, or waits in the chat's queue.
 func (h *harness) admit(ctx context.Context, p *principal, credential inferenceCredential, key contentKey, in *turnRequest, r *chatRun) error {
 	defer clear(key[:])
-	if credential.Limit.exhausted() {
+	if credential.Limit.Exhausted() {
 		return quotaExhausted(credential.Limit)
 	}
 	id, local := in.ThreadID, in.Local
@@ -170,7 +172,7 @@ func (h *harness) admit(ctx context.Context, p *principal, credential inferenceC
 	}
 	// A stored chat's project is read as its first turn starts.
 	if project := valueOr(in.ProjectID, ""); source == nil && project != "" {
-		if err := requireID("projectId", project); err != nil {
+		if err := api.RequireID("projectId", project); err != nil {
 			return err
 		}
 	}
@@ -208,7 +210,7 @@ func (h *harness) admit(ctx context.Context, p *principal, credential inferenceC
 	r.log = newRun(token())
 	r.log.stop = stop
 	// The user message a turn adds is named by the client's request.
-	r.stopped, r.input, r.received, r.principal, r.key, r.messageID, r.credential, r.assembler = stopped, &clean, timestamp(), p, key, r.nonce, credential, newMessageAssembler()
+	r.stopped, r.input, r.received, r.principal, r.key, r.messageID, r.credential, r.assembler = stopped, &clean, api.Timestamp(), p, key, r.nonce, credential, newMessageAssembler()
 	if keyless {
 		clear(r.key[:])
 	}
@@ -223,13 +225,13 @@ func (h *harness) admit(ctx context.Context, p *principal, credential inferenceC
 	// An ask's run holds its row, as a device chat's does.
 	held := local || source != nil
 	if s != nil && (s.deleted || s.local != held || !s.keyless && s.keyHash != key.fingerprint()) {
-		return apiErr(404, "THREAD_NOT_FOUND", "The thread is unavailable")
+		return api.Err(404, "THREAD_NOT_FOUND", "The thread is unavailable")
 	}
 	if s != nil && s.active != nil && len(s.queue) >= maxQueuedTurns {
 		return errQueueFull
 	}
 	if (s == nil || s.active == nil) && local && source == nil && seed == nil {
-		return apiErr(400, "BAD_REQUEST", "A local thread requires its transcript")
+		return api.Err(400, "BAD_REQUEST", "A local thread requires its transcript")
 	}
 	if s == nil {
 		s = &threadSession{id: id, owner: p.scope(), keyHash: key.fingerprint(), local: held, keyless: keyless}

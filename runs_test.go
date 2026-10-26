@@ -14,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 // The harness holds a chat only while its reply runs: there is no limit on
@@ -69,7 +71,7 @@ func TestAQueuedTurnThatCannotStartDoesNotStallTheQueue(t *testing.T) {
 	broken := continueInput(key, first.thread.id)
 	broken["kind"], broken["messageId"] = "edit", "no-such-message"
 	queue := []*chatRun{}
-	for _, in := range []object{broken, continueInput(key, first.thread.id)} {
+	for _, in := range []api.Object{broken, continueInput(key, first.thread.id)} {
 		run, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](in))
 		if err != nil || !run.queued {
 			t.Fatalf("turn not queued: %v", err)
@@ -104,7 +106,7 @@ func TestAFullQueueIsNotAnExhaustedQuota(t *testing.T) {
 		}
 	}
 	_, err = h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](continueInput(key, first.thread.id)))
-	if e := asAPIError(err); e.HTTP != 429 || e.Code != "QUEUE_FULL" {
+	if e := api.AsError(err); e.HTTP != 429 || e.Code != "QUEUE_FULL" {
 		t.Fatalf("a turn past a full queue was refused with %v", err)
 	}
 }
@@ -124,13 +126,13 @@ func TestDeletingAChatEndsItsQueuedTurns(t *testing.T) {
 	if err != nil || !queued.queued {
 		t.Fatalf("turn not queued: %v", err)
 	}
-	if w := postRoute(h, "/v1/threads/delete", object{"key": key.base64(), "id": first.thread.id}, "alice"); w.Code != 200 {
+	if w := postRoute(h, "/v1/threads/delete", api.Object{"key": key.base64(), "id": first.thread.id}, "alice"); w.Code != 200 {
 		t.Fatalf("delete: HTTP %d %s", w.Code, w.Body.String())
 	}
 	awaitFrame(t, queued.log, "RUN_FINISHED")
 	awaitFrame(t, first.log, "RUN_FINISHED")
 	<-first.finished
-	if _, err := rows.load(context.Background(), p, key, "chat", first.thread.id); asAPIError(err).HTTP != 404 {
+	if _, err := rows.load(context.Background(), p, key, "chat", first.thread.id); api.AsError(err).HTTP != 404 {
 		t.Fatalf("the deleted chat came back: %v", err)
 	}
 	if threads, runs, requests := liveCount(h); threads+runs+requests != 0 {
@@ -161,14 +163,14 @@ func TestAChatDeletedAsItsTurnStartsStaysDeleted(t *testing.T) {
 		refused := make(chan *httptest.ResponseRecorder, 1)
 		go func() { refused <- postRoute(h, "/v1/threads/turn", in, "alice") }()
 		<-asked
-		if w := postRoute(h, "/v1/threads/delete", object{"key": key.base64(), "id": in["threadId"]}, "alice"); w.Code != 200 {
+		if w := postRoute(h, "/v1/threads/delete", api.Object{"key": key.base64(), "id": in["threadId"]}, "alice"); w.Code != 200 {
 			t.Fatalf("delete: HTTP %d %s", w.Code, w.Body.String())
 		}
 		release()
 		if w := <-refused; w.Code != 404 {
 			t.Fatalf("a turn on a deleted chat: HTTP %d %s", w.Code, w.Body.String())
 		}
-		if _, err := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", str(in["threadId"])); asAPIError(err).HTTP != 404 {
+		if _, err := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", api.Str(in["threadId"])); api.AsError(err).HTTP != 404 {
 			t.Fatalf("the deleted chat came back: %v", err)
 		}
 	})
@@ -176,7 +178,7 @@ func TestAChatDeletedAsItsTurnStartsStaysDeleted(t *testing.T) {
 		h, rows, key := testChatHarness(t, nil)
 		id := rowID()
 		name := rowMapKey(&principal{ID: "alice"}, "chat", id)
-		rows.rows[name] = storedRow{ID: id, ETag: "1", Data: raw(object{"title": "Old", "messages": []any{}})}
+		rows.rows[name] = storedRow{ID: id, ETag: "1", Data: api.Raw(api.Object{"title": "Old", "messages": []any{}})}
 		// Sync removes the chat for another instance just before the
 		// turn's write, which then conflicts.
 		rows.refuse = func(*storedRow) error {
@@ -188,7 +190,7 @@ func TestAChatDeletedAsItsTurnStartsStaysDeleted(t *testing.T) {
 		if w := postRoute(h, "/v1/threads/turn", in, "alice"); w.Code != 404 {
 			t.Fatalf("a turn on a deleted chat: HTTP %d %s", w.Code, w.Body.String())
 		}
-		if _, err := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", id); asAPIError(err).HTTP != 404 {
+		if _, err := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", id); api.AsError(err).HTTP != 404 {
 			t.Fatalf("the deleted chat came back: %v", err)
 		}
 	})
@@ -233,7 +235,7 @@ func TestAFinishingRunsWritesBlockNothing(t *testing.T) {
 	}
 	<-committing
 	follow := func(r *chatRun) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodPost, "/v1/threads/follow", bytes.NewReader(raw(object{"key": key.base64(), "threadId": r.thread.id, "runId": r.log.id})))
+		req := httptest.NewRequest(http.MethodPost, "/v1/threads/follow", bytes.NewReader(api.Raw(api.Object{"key": key.base64(), "threadId": r.thread.id, "runId": r.log.id})))
 		signIn(req, "alice")
 		return replayOf(h, req)
 	}
@@ -244,7 +246,7 @@ func TestAFinishingRunsWritesBlockNothing(t *testing.T) {
 		return nil
 	})
 	within(t, "cancelling", func() error {
-		if _, err := h.cancelThread(context.Background(), p, key, requestOf[runRequest](object{"key": key.base64(), "threadId": run.thread.id, "runId": run.log.id})); asAPIError(err).Code != "RUN_IN_FLIGHT" {
+		if _, err := h.cancelThread(context.Background(), p, key, requestOf[runRequest](api.Object{"key": key.base64(), "threadId": run.thread.id, "runId": run.log.id})); api.AsError(err).Code != "RUN_IN_FLIGHT" {
 			return fmt.Errorf("a finishing run answered %v", err)
 		}
 		return nil
@@ -268,7 +270,7 @@ func TestARunNamesTheInstanceHoldingIt(t *testing.T) {
 	var named []string
 	for range 2 {
 		events := eventsIn(t, postRoute(h, "/v1/threads/turn", sendInput(key), "alice"))
-		run := obj(obj(obj(eventOfType(events, "STATE_SNAPSHOT").Snapshot)["thread"])["activeRun"])
+		run := api.Obj(api.Obj(api.Obj(eventOfType(events, "STATE_SNAPSHOT").Snapshot)["thread"])["activeRun"])
 		if run["instance"] != events[0].Instance {
 			t.Fatalf("the chat's running hint is %v, not the run's instance %q", run, events[0].Instance)
 		}
@@ -293,8 +295,8 @@ func TestFollowResumesALiveRunAfterTheClientsCursor(t *testing.T) {
 	}
 	awaitFrame(t, run.log, "TEXT_MESSAGE_CHUNK")
 	request := func(lastEventID string) *http.Request {
-		in := object{"key": key.base64(), "threadId": run.thread.id, "runId": run.log.id}
-		req := httptest.NewRequest(http.MethodPost, "/v1/threads/follow", bytes.NewReader(raw(in)))
+		in := api.Object{"key": key.base64(), "threadId": run.thread.id, "runId": run.log.id}
+		req := httptest.NewRequest(http.MethodPost, "/v1/threads/follow", bytes.NewReader(api.Raw(in)))
 		signIn(req, "alice")
 		if lastEventID != "" {
 			req.Header.Set("Last-Event-ID", lastEventID)
@@ -320,7 +322,7 @@ func TestFollowResumesALiveRunAfterTheClientsCursor(t *testing.T) {
 	}
 	for _, lastEventID := range []string{strconv.Itoa(len(frames)), "-1", "first"} {
 		w := replayOf(h, request(lastEventID))
-		if e := obj(obj(decodeValue(w.Body.Bytes()))["error"]); w.Code != 400 || e["code"] != "BAD_REQUEST" || e["action"] != "stop" {
+		if e := api.Obj(api.Obj(decodeValue(w.Body.Bytes()))["error"]); w.Code != 400 || e["code"] != "BAD_REQUEST" || e["action"] != "stop" {
 			t.Fatalf("following after %q: HTTP %d %s", lastEventID, w.Code, w.Body.String())
 		}
 	}
@@ -346,7 +348,7 @@ func TestARetriedRequestFollowsItsRunOrIsAlreadyApplied(t *testing.T) {
 	}
 	awaitFrame(t, run.log, "TEXT_MESSAGE_CHUNK")
 	retry := func(h *harness) *http.Request {
-		req := httptest.NewRequest(http.MethodPost, "/v1/threads/turn", bytes.NewReader(raw(in)))
+		req := httptest.NewRequest(http.MethodPost, "/v1/threads/turn", bytes.NewReader(api.Raw(in)))
 		signIn(req, "alice")
 		return req
 	}
@@ -373,7 +375,7 @@ func TestARetriedRequestFollowsItsRunOrIsAlreadyApplied(t *testing.T) {
 	}
 	// A device chat names its last request in the copy its client sends.
 	local := localInput("", priorThread())
-	obj(local["thread"])["lastRequestId"] = local["clientRequestId"]
+	api.Obj(local["thread"])["lastRequestId"] = local["clientRequestId"]
 	if w := postRoute(h, "/v1/threads/turn", local, "alice"); w.Code != 409 || !strings.Contains(w.Body.String(), "ALREADY_APPLIED") {
 		t.Fatalf("a retried device chat turn: HTTP %d %s", w.Code, w.Body.String())
 	}
@@ -388,7 +390,7 @@ func TestAFirstTurnCreatesItsChatUnderTheClientsID(t *testing.T) {
 	if events[0].ThreadID != in["threadId"] {
 		t.Fatalf("the chat was stored as %s, not %s", events[0].ThreadID, in["threadId"])
 	}
-	if _, err := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", str(in["threadId"])); err != nil {
+	if _, err := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", api.Str(in["threadId"])); err != nil {
 		t.Fatal(err)
 	}
 	in = sendInput(key)
@@ -412,7 +414,7 @@ func TestASlowSafeguardsSidecarHoldsUpNothing(t *testing.T) {
 	drained := heldScreening(t, h, hold)
 	t.Cleanup(answer)
 	first := sendInput(key)
-	for _, in := range []object{first, continueInput(key, str(first["threadId"]))} {
+	for _, in := range []api.Object{first, continueInput(key, api.Str(first["threadId"]))} {
 		within(t, "a turn", func() error {
 			if w := postRoute(h, "/v1/threads/turn", in, "alice"); !strings.Contains(w.Body.String(), `"type":"RUN_FINISHED"`) {
 				return fmt.Errorf("HTTP %d %s", w.Code, w.Body.String())
@@ -434,7 +436,7 @@ func TestAnotherCallerReachesNothingOfALiveRun(t *testing.T) {
 	held, release := heldModel()
 	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		for _, m := range lastRequest(r) {
-			if str(obj(m)["content"]) == "mine" {
+			if api.Str(api.Obj(m)["content"]) == "mine" {
 				io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n")
 				return
 			}
@@ -455,7 +457,7 @@ func TestAnotherCallerReachesNothingOfALiveRun(t *testing.T) {
 	if err != nil || !next.queued {
 		t.Fatalf("turn not queued: %v", err)
 	}
-	for path, body := range map[string]object{
+	for path, body := range map[string]api.Object{
 		"/v1/threads/cancel":       {"key": key.base64(), "threadId": run.thread.id, "runId": run.log.id},
 		"/v1/threads/queue/send":   {"key": key.base64(), "threadId": run.thread.id, "queueId": next.log.id},
 		"/v1/threads/queue/remove": {"key": key.base64(), "threadId": run.thread.id, "queueId": next.log.id},
@@ -465,7 +467,7 @@ func TestAnotherCallerReachesNothingOfALiveRun(t *testing.T) {
 			t.Fatalf("%s for another account's chat answered HTTP %d %s", path, w.Code, w.Body.String())
 		}
 	}
-	events := eventsIn(t, postRoute(h, "/v1/threads/turn", object{"key": key.base64(), "threadId": rowID(), "clientRequestId": in["clientRequestId"], "content": "mine", "kind": "send", "options": object{"model": "kimi-k3", "webSearch": false}}, "bob"))
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", api.Object{"key": key.base64(), "threadId": rowID(), "clientRequestId": in["clientRequestId"], "content": "mine", "kind": "send", "options": api.Object{"model": "kimi-k3", "webSearch": false}}, "bob"))
 	if events[0].Type != "RUN_STARTED" || events[0].RunID == run.log.id || events[0].ThreadID == run.thread.id || events[len(events)-1].Type != "RUN_FINISHED" {
 		t.Fatalf("another account's turn with the same nonce was not its own: %v", events)
 	}
@@ -509,7 +511,7 @@ func TestAFinishedRunsLogIsWipedOnceNothingDrainsIt(t *testing.T) {
 			} else {
 				followed := make(chan *httptest.ResponseRecorder, 1)
 				go func() {
-					followed <- postRoute(h, "/v1/threads/follow", object{"key": key.base64(), "threadId": run.thread.id, "runId": run.log.id}, "alice")
+					followed <- postRoute(h, "/v1/threads/follow", api.Object{"key": key.base64(), "threadId": run.thread.id, "runId": run.log.id}, "alice")
 				}()
 				for deadline := time.Now().Add(5 * time.Second); readers() < 2; {
 					if time.Now().After(deadline) {

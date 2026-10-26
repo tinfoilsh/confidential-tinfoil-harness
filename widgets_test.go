@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 func TestCanonicalizeWidgetArgumentsRecursive(t *testing.T) {
@@ -68,7 +70,7 @@ func TestWidgetSchemaViolationIsReportedToTheModel(t *testing.T) {
 	call := toolCall{id: "c1", name: "render_artifact_preview", args: `{"title":"Demo","source":"<p>hi</p>"}`}
 	for attempt := 1; attempt <= maxWidgetRetries+1; attempt++ {
 		model, shown := invokeWidget(t, set, call)
-		if len(shown) != 1 || obj(decodeValue([]byte(shown[0])))["status"] != "error" {
+		if len(shown) != 1 || api.Obj(decodeValue([]byte(shown[0])))["status"] != "error" {
 			t.Fatalf("attempt %d: the caller was sent %q", attempt, shown)
 		}
 		if attempt > maxWidgetRetries {
@@ -77,8 +79,8 @@ func TestWidgetSchemaViolationIsReportedToTheModel(t *testing.T) {
 			}
 			continue
 		}
-		payload := obj(decodeValue([]byte(model)))
-		message := str(payload["error"])
+		payload := api.Obj(decodeValue([]byte(model)))
+		message := api.Str(payload["error"])
 		if payload["status"] != "error" || !strings.HasPrefix(message, "The arguments for render_artifact_preview did not match the tool's parameter schema and the component was not displayed: ") ||
 			!strings.Contains(message, "source") || strings.Contains(message, "validating root") || !strings.HasSuffix(message, "Call render_artifact_preview again with corrected arguments that match the schema exactly.") {
 			t.Fatalf("attempt %d: the model read %s", attempt, model)
@@ -121,7 +123,7 @@ func TestCallersCopyReadsRepairedArguments(t *testing.T) {
 		{"web_fetch", `{"urls":["https://a.test"]} Now fetching...`, `{"results":[{"url":"https://a.test","status":"failed","error":"timeout"}]}`,
 			`{"failed":[{"error":"timeout","url":"https://a.test"}],"pages":[],"text":"","title":"Fetched page","url":"https://a.test"}`},
 	} {
-		if got := string(raw(normalizeToolResult(toolCall{id: "c1", name: tc.name, args: tc.args}, tc.content))); got != tc.want {
+		if got := string(api.Raw(normalizeToolResult(toolCall{id: "c1", name: tc.name, args: tc.args}, tc.content))); got != tc.want {
 			t.Errorf("%s with arguments %q was shown as %s, want %s", tc.name, tc.args, got, tc.want)
 		}
 	}
@@ -132,15 +134,15 @@ func TestCallersCopyReadsRepairedArguments(t *testing.T) {
 // declares. Its stored copy carries marks the
 // harness would not set now: on the valid card and on a widget no longer
 // declared.
-func statsThread() object {
-	return object{"title": "Stats", "createdAt": "2026-01-01T00:00:00Z", "model": "kimi-k3", "messages": []any{
-		object{"id": "u1", "role": "user", "content": "show the counts", "createdAt": "2026-01-01T00:00:01Z"},
-		object{"id": "a1", "role": "assistant", "content": "Here they are.", "createdAt": "2026-01-01T00:00:02Z", "timeline": []any{
-			object{"id": "bad", "toolCallId": "bad", "type": "tool_call", "name": "render_stat_cards", "arguments": `{"stats":[{"label":"Count"}]}`, "complete": true},
-			object{"id": "good", "toolCallId": "good", "type": "tool_call", "name": "render_stat_cards", "arguments": `{"stats":[{"label":"Count","value":1}]}`, "complete": true, "invalidArguments": true},
-			object{"id": "extra", "toolCallId": "extra", "type": "tool_call", "name": "render_stat_cards", "arguments": `{"stats":[{"label":"Count","value":1,"unit":"%"}],"title":"Counts"}`, "complete": true},
-			object{"id": "retired", "toolCallId": "retired", "type": "tool_call", "name": "render_retired", "arguments": `{}`, "complete": true, "invalidArguments": true},
-			object{"id": "text", "type": "content", "content": "Here they are."},
+func statsThread() api.Object {
+	return api.Object{"title": "Stats", "createdAt": "2026-01-01T00:00:00Z", "model": "kimi-k3", "messages": []any{
+		api.Object{"id": "u1", "role": "user", "content": "show the counts", "createdAt": "2026-01-01T00:00:01Z"},
+		api.Object{"id": "a1", "role": "assistant", "content": "Here they are.", "createdAt": "2026-01-01T00:00:02Z", "timeline": []any{
+			api.Object{"id": "bad", "toolCallId": "bad", "type": "tool_call", "name": "render_stat_cards", "arguments": `{"stats":[{"label":"Count"}]}`, "complete": true},
+			api.Object{"id": "good", "toolCallId": "good", "type": "tool_call", "name": "render_stat_cards", "arguments": `{"stats":[{"label":"Count","value":1}]}`, "complete": true, "invalidArguments": true},
+			api.Object{"id": "extra", "toolCallId": "extra", "type": "tool_call", "name": "render_stat_cards", "arguments": `{"stats":[{"label":"Count","value":1,"unit":"%"}],"title":"Counts"}`, "complete": true},
+			api.Object{"id": "retired", "toolCallId": "retired", "type": "tool_call", "name": "render_retired", "arguments": `{}`, "complete": true, "invalidArguments": true},
+			api.Object{"id": "text", "type": "content", "content": "Here they are."},
 		}},
 	}}
 }
@@ -153,46 +155,46 @@ func TestEveryViewMarksWidgetArgumentsTheDeclarationRefuses(t *testing.T) {
 	cp := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer cp.Close()
 	h.controlplane, h.cpClient = cp.URL, &http.Client{Transport: &callerAuth{inner: cp.Client().Transport}}
-	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: raw(statsThread())}
+	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: api.Raw(statsThread())}
 	marks := func(view string, messages any) {
 		t.Helper()
-		list := arr(messages)
+		list := api.Arr(messages)
 		if len(list) < 2 {
 			t.Fatalf("%s holds %v", view, messages)
 		}
 		marked := map[string]any{}
-		for _, b := range arr(obj(list[1])["timeline"]) {
-			if flag, ok := obj(b)["invalidArguments"]; ok {
-				marked[str(obj(b)["id"])] = flag
+		for _, b := range api.Arr(api.Obj(list[1])["timeline"]) {
+			if flag, ok := api.Obj(b)["invalidArguments"]; ok {
+				marked[api.Str(api.Obj(b)["id"])] = flag
 			}
 		}
 		if !reflect.DeepEqual(marked, map[string]any{"bad": true}) {
 			t.Fatalf("%s marked %v", view, marked)
 		}
 	}
-	body := func(w *httptest.ResponseRecorder) object {
+	body := func(w *httptest.ResponseRecorder) api.Object {
 		t.Helper()
 		if w.Code != 200 {
 			t.Fatalf("HTTP %d %s", w.Code, w.Body.String())
 		}
-		return obj(decodeValue(w.Body.Bytes()))
+		return api.Obj(decodeValue(w.Body.Bytes()))
 	}
-	marks("the thread view", body(postRoute(h, "/v1/threads/get", object{"key": key.base64(), "id": "chat-1"}, "alice"))["messages"])
+	marks("the thread view", body(postRoute(h, "/v1/threads/get", api.Object{"key": key.base64(), "id": "chat-1"}, "alice"))["messages"])
 	events := eventsIn(t, postRoute(h, "/v1/threads/turn", continueInput(key, "chat-1"), "alice"))
 	marks("the run's snapshot", eventOfType(events, "MESSAGES_SNAPSHOT").Messages)
-	marks("the transcript", obj(body(postRoute(h, "/v1/threads/transcript", object{"key": key.base64(), "threadId": "chat-1"}, "alice"))["thread"])["messages"])
-	body(postRoute(h, "/v1/threads/share", object{"key": key.base64(), "threadId": "chat-1"}, "alice"))
+	marks("the transcript", api.Obj(body(postRoute(h, "/v1/threads/transcript", api.Object{"key": key.base64(), "threadId": "chat-1"}, "alice"))["thread"])["messages"])
+	body(postRoute(h, "/v1/threads/share", api.Object{"key": key.base64(), "threadId": "chat-1"}, "alice"))
 	if seals := fake.requests("/v1/share/seal"); len(seals) == 1 {
-		plaintext, _ := base64.StdEncoding.DecodeString(str(seals[0]["plaintext"]))
-		marks("the share", obj(decodeValue(plaintext))["messages"])
+		plaintext, _ := base64.StdEncoding.DecodeString(api.Str(seals[0]["plaintext"]))
+		marks("the share", api.Obj(decodeValue(plaintext))["messages"])
 	} else {
 		t.Fatalf("%d shares were sealed", len(seals))
 	}
 	marks("the device run", endedThread(t, h, localInput("", statsThread()), "RUN_FINISHED")["messages"])
-	marks("the device operation", deviceOperation(t, h, "/v1/threads/update", statsThread(), object{"id": "chat-2", "title": "Renamed"}, "")["messages"])
+	marks("the device operation", deviceOperation(t, h, "/v1/threads/update", statsThread(), api.Object{"id": "chat-2", "title": "Renamed"}, "")["messages"])
 	device := statsThread()
 	device["id"] = "chat-3"
-	marks("the upgrade", obj(upgraded(t, h, "alice", device)[0])["messages"])
+	marks("the upgrade", api.Obj(upgraded(t, h, "alice", device)[0])["messages"])
 }
 
 func TestValidWidgetArgumentsAreAcknowledged(t *testing.T) {
@@ -215,24 +217,24 @@ func TestValidWidgetArgumentsAreAcknowledged(t *testing.T) {
 func TestARetriedLinkPreviewReadsItsPage(t *testing.T) {
 	original, fixed := `{"url":"https://example.com/post"}`, `{"url":"https://example.com/post","title":"A post"}`
 	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(object{"choices": []object{{"message": object{"content": fixed}}}})
+		json.NewEncoder(w).Encode(api.Object{"choices": []api.Object{{"message": api.Object{"content": fixed}}}})
 	})
 	asked := make(chan string, 1)
 	metadata := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var in object
+		var in api.Object
 		json.NewDecoder(r.Body).Decode(&in)
-		asked <- r.URL.Path + " " + str(in["url"])
-		json.NewEncoder(w).Encode(object{"result": object{"title": "The Post", "description": "About it", "site_name": "Example", "image": "https://example.com/i.png"}})
+		asked <- r.URL.Path + " " + api.Str(in["url"])
+		json.NewEncoder(w).Encode(api.Object{"result": api.Object{"title": "The Post", "description": "About it", "site_name": "Example", "image": "https://example.com/i.png"}})
 	}))
 	defer metadata.Close()
 	h.services["metadata"] = &downstreamService{URL: metadata.URL, Client: metadata.Client()}
 	h.catalog.get().EnabledWidgets = []string{"render_link_preview"}
 	refused := widgetFailure(catalogWidgets("render_link_preview")["render_link_preview"], original)
-	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat")] = storedRow{ID: "chat", ETag: "1", Data: raw(object{"createdAt": timestamp(), "title": "Links", "titleState": "manual", "model": "kimi-k3", "messages": []any{
-		object{"id": "user", "role": "user", "content": "link the post", "createdAt": timestamp()},
-		object{"id": "assistant", "role": "assistant", "content": "Here it is.", "createdAt": timestamp(), "timeline": []any{
-			object{"type": "content", "id": "text", "content": "Here it is."},
-			object{"type": "tool_call", "id": "call", "toolCallId": "call", "name": "render_link_preview", "arguments": original, "complete": true, "result": refused},
+	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat")] = storedRow{ID: "chat", ETag: "1", Data: api.Raw(api.Object{"createdAt": api.Timestamp(), "title": "Links", "titleState": "manual", "model": "kimi-k3", "messages": []any{
+		api.Object{"id": "user", "role": "user", "content": "link the post", "createdAt": api.Timestamp()},
+		api.Object{"id": "assistant", "role": "assistant", "content": "Here it is.", "createdAt": api.Timestamp(), "timeline": []any{
+			api.Object{"type": "content", "id": "text", "content": "Here it is."},
+			api.Object{"type": "tool_call", "id": "call", "toolCallId": "call", "name": "render_link_preview", "arguments": original, "complete": true, "result": refused},
 		}},
 	}})}
 	in := sendInput(key)
@@ -250,7 +252,7 @@ func TestARetriedLinkPreviewReadsItsPage(t *testing.T) {
 	default:
 		t.Fatal("the retry read no page")
 	}
-	want := decodeValue(raw(object{"url": "https://example.com/post", "title": "The Post", "description": "About it", "siteName": "Example", "image": "https://example.com/i.png"}))
+	want := decodeValue(api.Raw(api.Object{"url": "https://example.com/post", "title": "The Post", "description": "About it", "siteName": "Example", "image": "https://example.com/i.png"}))
 	if shown := eventOfType(events, "TOOL_CALL_RESULT"); shown == nil || shown.ToolCallID != "call" || !reflect.DeepEqual(decodeValue(shown.Content), want) {
 		t.Fatalf("the retry showed %+v", shown)
 	}
@@ -267,14 +269,14 @@ func TestALinkPreviewReadsItsPageDetails(t *testing.T) {
 	h, _, _ := testChatHarness(t, nil)
 	asked := make(chan string, 2)
 	metadata := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var in object
+		var in api.Object
 		json.NewDecoder(r.Body).Decode(&in)
-		asked <- r.Header.Get("Authorization") + " " + r.URL.Path + " " + str(in["url"])
-		json.NewEncoder(w).Encode(object{"result": object{"title": "The Post", "description": "About it", "site_name": "Example", "image": "https://example.com/i.png", "favicon": "https://example.com/f.ico"}})
+		asked <- r.Header.Get("Authorization") + " " + r.URL.Path + " " + api.Str(in["url"])
+		json.NewEncoder(w).Encode(api.Object{"result": api.Object{"title": "The Post", "description": "About it", "site_name": "Example", "image": "https://example.com/i.png", "favicon": "https://example.com/f.ico"}})
 	}))
 	defer metadata.Close()
 	h.services["metadata"] = &downstreamService{URL: metadata.URL, Client: metadata.Client()}
-	w := postRoute(h, "/v1/metadata/link", object{"url": "https://example.com/post"}, "")
+	w := postRoute(h, "/v1/metadata/link", api.Object{"url": "https://example.com/post"}, "")
 	if want := `{"description":"About it","image":"https://example.com/i.png","siteName":"Example","title":"The Post","url":"https://example.com/post"}` + "\n"; w.Code != 200 || w.Body.String() != want {
 		t.Fatalf("the details: HTTP %d %s", w.Code, w.Body.String())
 	}
@@ -286,7 +288,7 @@ func TestALinkPreviewReadsItsPageDetails(t *testing.T) {
 	default:
 		t.Fatal("the metadata service was not asked")
 	}
-	if w := postRoute(h, "/v1/metadata/link", object{"url": " "}, ""); w.Code != 400 || !strings.Contains(w.Body.String(), "BAD_REQUEST") || len(asked) != 0 {
+	if w := postRoute(h, "/v1/metadata/link", api.Object{"url": " "}, ""); w.Code != 400 || !strings.Contains(w.Body.String(), "BAD_REQUEST") || len(asked) != 0 {
 		t.Fatalf("a link without a URL: HTTP %d %s", w.Code, w.Body.String())
 	}
 }

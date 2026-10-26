@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 // A row or device record names the format it is in. One in the current
@@ -26,7 +28,7 @@ import (
 
 // errRecordUnsupported refuses a record in a format this harness does not
 // read, as a later harness writes, or that breaks the format it names.
-var errRecordUnsupported = apiErr(409, "RECORD_UNSUPPORTED", "The record is in a format this harness cannot read")
+var errRecordUnsupported = api.Err(409, "RECORD_UNSUPPORTED", "The record is in a format this harness cannot read")
 
 // currentFormat reports whether a record is in the current format, as
 // opposed to one written before formats were named.
@@ -305,7 +307,7 @@ func upgradeThread(id string, data []byte, created string) Thread {
 // readBackupThread reads a chat of a backup, whose images the backup holds
 // apart from it.
 func readBackupThread(id string, data []byte, images backupImages) Thread {
-	return readThreadWith(id, data, timestamp(), images)
+	return readThreadWith(id, data, api.Timestamp(), images)
 }
 
 func readThreadWith(id string, data []byte, created string, images backupImages) Thread {
@@ -355,7 +357,7 @@ func readDeviceThread(id string, data []byte) (Thread, error) {
 	case err != nil:
 		return Thread{}, err
 	case !current:
-		t = upgradeThread(id, data, timestamp())
+		t = upgradeThread(id, data, api.Timestamp())
 	default:
 		if err := readCurrentThread(data, &t, &t); err != nil {
 			return Thread{}, err
@@ -416,7 +418,7 @@ func (m *legacyMessage) timeline(message Message) []Block {
 		if legacyFailed(status) {
 			result = json.RawMessage(toolError)
 		}
-		blocks = append(blocks, Block{Type: "tool_call", ID: id, ToolCallID: id, Name: name, Arguments: args, Result: raw(result), Complete: true, StartedAt: startedAt, EndedAt: endedAt})
+		blocks = append(blocks, Block{Type: "tool_call", ID: id, ToolCallID: id, Name: name, Arguments: args, Result: api.Raw(result), Complete: true, StartedAt: startedAt, EndedAt: endedAt})
 	}
 	for index, block := range source {
 		blockID := cmp.Or(block.ID, id+"-block-"+strconv.Itoa(index))
@@ -430,10 +432,10 @@ func (m *legacyMessage) timeline(message Message) []Block {
 			for _, source := range state.Sources {
 				results = append(results, map[string]string{"url": source.URL, "title": source.Title, "snippet": cmp.Or(source.Snippet, source.Description)})
 			}
-			call(block.StartedAt, block.EndedAt, blockID, "web_search", string(raw(map[string]string{"query": state.Query})), map[string]any{"query": state.Query, "results": results}, state.Status)
+			call(block.StartedAt, block.EndedAt, blockID, "web_search", string(api.Raw(map[string]string{"query": state.Query})), map[string]any{"query": state.Query, "results": results}, state.Status)
 		case "url_fetches":
 			for i, fetch := range block.Fetches {
-				call(cmp.Or(fetch.StartedAt, block.StartedAt), cmp.Or(fetch.EndedAt, block.EndedAt), cmp.Or(fetch.ID, blockID+"-"+strconv.Itoa(i)), "web_fetch", string(raw(map[string]string{"url": fetch.URL})), map[string]string{"url": fetch.URL, "title": fetch.Title, "text": fetch.Text}, fetch.Status)
+				call(cmp.Or(fetch.StartedAt, block.StartedAt), cmp.Or(fetch.EndedAt, block.EndedAt), cmp.Or(fetch.ID, blockID+"-"+strconv.Itoa(i)), "web_fetch", string(api.Raw(map[string]string{"url": fetch.URL})), map[string]string{"url": fetch.URL, "title": fetch.Title, "text": fetch.Text}, fetch.Status)
 			}
 		case "code_exec":
 			for i, c := range block.Calls {
@@ -464,7 +466,7 @@ func (c legacyCodeCall) arguments() string {
 	}
 	fields := map[string]any{}
 	json.Unmarshal(c.Arguments, &fields)
-	return string(raw(fields))
+	return string(api.Raw(fields))
 }
 
 // attachments are a message's attachments, made from the document text and
@@ -616,7 +618,7 @@ func upgradeProfile(p *Profile, now time.Time) {
 		return
 	}
 	if p.preset(migratedPromptPresetID) == nil {
-		date := raw(now.UnixMilli())
+		date := api.Raw(now.UnixMilli())
 		p.CustomPromptPresets = append(p.CustomPromptPresets, CustomPreset{ID: migratedPromptPresetID, Name: "My default prompt", Description: new("Migrated from the custom default prompt setting"),
 			SystemPrompt: &prompt, CreatedAt: date, UpdatedAt: date})
 	}
@@ -682,40 +684,40 @@ func (h *harness) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	// A signed-out tab upgrades the old chats it holds once its free key is
 	// accepted.
 	if _, err := h.caller(r, true); err != nil {
-		respond(w, nil, err)
+		api.Respond(w, nil, err)
 		return
 	}
-	body, err := readBody(w, r, maxTurnBody)
+	body, err := api.ReadBody(w, r, maxTurnBody)
 	defer clear(body)
 	if err != nil {
-		respond(w, nil, err)
+		api.Respond(w, nil, err)
 		return
 	}
 	var in upgradeRequest
-	if err := decodeBody(body, &in); err != nil || in.Threads == nil {
-		respond(w, nil, apiErr(400, "BAD_REQUEST", "threads must be an array"))
+	if err := api.DecodeBody(body, &in); err != nil || in.Threads == nil {
+		api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "threads must be an array"))
 		return
 	}
 	threads := make([]Thread, 0, len(*in.Threads))
 	for _, item := range *in.Threads {
-		if !isObject(item) {
-			respond(w, nil, apiErr(400, "BAD_REQUEST", "Each thread must be an object"))
+		if !api.IsObject(item) {
+			api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "Each thread must be an object"))
 			return
 		}
 		var named idRequest
 		json.Unmarshal(item, &named)
 		if err := named.validate(); err != nil {
-			respond(w, nil, err)
+			api.Respond(w, nil, err)
 			return
 		}
 		if err := validateLocalThread(item); err != nil {
-			respond(w, nil, err)
+			api.Respond(w, nil, err)
 			return
 		}
 		// The thread is one its client can send back with a turn.
 		thread, err := readDeviceThread(named.ID, item)
 		if err != nil {
-			respond(w, nil, err)
+			api.Respond(w, nil, err)
 			return
 		}
 		modelCopies(&thread)
@@ -723,7 +725,7 @@ func (h *harness) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 		thread.RecordVersion = recordVersion
 		threads = append(threads, thread)
 	}
-	respond(w, struct {
+	api.Respond(w, struct {
 		Threads []Thread `json:"threads"`
 	}{threads}, nil)
 }

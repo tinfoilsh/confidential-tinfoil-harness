@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 // caller is a request context carrying one API key.
@@ -34,7 +36,7 @@ func TestOutgrowingTheLogStopsTheRun(t *testing.T) {
 	w := httptest.NewRecorder()
 	follow(w, httptest.NewRequest("POST", "/v1/threads/follow", nil), rn, 0)
 	events := eventsIn(t, w)
-	want := asAPIError(errTooLong)
+	want := api.AsError(errTooLong)
 	if last := events[len(events)-1]; last.Type != "RUN_ERROR" || last.Code != "RUN_LOG_FULL" || last.Code != want.Code || last.Message != want.Message {
 		t.Fatalf("the run ended with %+v, not %+v", last, want)
 	}

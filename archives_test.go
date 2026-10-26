@@ -23,6 +23,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 type formPart struct {
@@ -30,8 +32,10 @@ type formPart struct {
 	data           []byte
 }
 
-func optionsPart(options object) formPart { return formPart{name: "options", data: raw(options)} }
-func threadPart(thread any) formPart      { return formPart{name: "thread", data: raw(thread)} }
+func optionsPart(options api.Object) formPart {
+	return formPart{name: "options", data: api.Raw(options)}
+}
+func threadPart(thread any) formPart { return formPart{name: "thread", data: api.Raw(thread)} }
 
 func archiveRoute(h *harness, path, user string, parts ...formPart) *httptest.ResponseRecorder {
 	return archiveRequest(h, path, func(r *http.Request) { signIn(r, user) }, parts...)
@@ -101,7 +105,7 @@ type imported struct {
 }
 
 // importOf posts an archive to /v1/import and reads its lines.
-func importOf(t *testing.T, h *harness, user string, archive []byte, name string, options object) imported {
+func importOf(t *testing.T, h *harness, user string, archive []byte, name string, options api.Object) imported {
 	t.Helper()
 	return importLines(t, archiveRoute(h, "/v1/import", user, optionsPart(options), formPart{name: "file", filename: name, data: archive}))
 }
@@ -234,7 +238,7 @@ func withBackupEntries(t *testing.T, archive []byte, replaced map[string][]byte)
 			manifest.Files[i].SHA256, manifest.Files[i].SizeBytes = hashHex(data), int64(len(data))
 		}
 	}
-	replaced[manifestPath] = raw(manifest)
+	replaced[manifestPath] = api.Raw(manifest)
 	return withEntries(t, archive, replaced)
 }
 
@@ -247,31 +251,31 @@ func TestNativeBackupRoundTrips(t *testing.T) {
 	fake := newFakeSync(t, h)
 	alice := &principal{ID: "alice"}
 	project := "project-1"
-	rows.rows[rowMapKey(alice, "project", project)] = storedRow{ID: project, ETag: "1", Data: raw(object{"name": "Research", "description": "Notes", "systemInstructions": "Cite sources", "color": "teal", "createdAt": "2026-01-01T00:00:00Z"})}
-	rows.rows[rowMapKey(alice, "project_document", project+"/doc-1")] = storedRow{ID: project + "/doc-1", ETag: "1", Data: raw(object{"filename": "paper.md", "contentType": "text/markdown", "sizeBytes": 12, "content": "Paper text"}), project: &project, projectSet: true}
+	rows.rows[rowMapKey(alice, "project", project)] = storedRow{ID: project, ETag: "1", Data: api.Raw(api.Object{"name": "Research", "description": "Notes", "systemInstructions": "Cite sources", "color": "teal", "createdAt": "2026-01-01T00:00:00Z"})}
+	rows.rows[rowMapKey(alice, "project_document", project+"/doc-1")] = storedRow{ID: project + "/doc-1", ETag: "1", Data: api.Raw(api.Object{"filename": "paper.md", "contentType": "text/markdown", "sizeBytes": 12, "content": "Paper text"}), project: &project, projectSet: true}
 	stored := pngFixture(t, 8, 6, 40)
 	imageID, imageKey := fake.seed("chat-1", stored)
 	docID, docKey := fake.seed("chat-1", []byte(`{"textContent":"Stored document"}`))
-	timeline := []Block{{ID: "think", Type: "thinking", Content: "Check sources"}, {ID: "call", Type: "tool_call", ToolCallID: "call", Name: "web_search", Arguments: `{"query":"growth"}`, Complete: true, Result: raw(object{"query": "growth", "results": []object{{"url": "https://example.com", "title": "Example"}}})}, {ID: "text", Type: "content", Content: "It grew."}}
-	cloudChat := object{"title": "Evidence", "titleState": "manual", "createdAt": "2026-01-02T00:00:00Z", "updatedAt": "2026-01-02T01:00:00Z", "model": "kimi-k3", "pinned": true, "messages": []any{
-		object{"id": "m1", "role": "user", "createdAt": "2026-01-02T00:00:00Z", "content": "Explain", "attachments": []any{
-			object{"id": imageID, "kind": "image", "fileName": "chart.png", "mimeType": "image/png", "encryptionKey": imageKey, "thumbnail": "dGh1bWI=", "description": "A chart"},
-			object{"id": docID, "kind": "document", "fileName": "report.txt", "mimeType": "text/plain", "encryptionKey": docKey},
-			object{"id": strings.Repeat("e", 36), "kind": "image", "fileName": "gone.png", "encryptionKey": "gone"},
+	timeline := []Block{{ID: "think", Type: "thinking", Content: "Check sources"}, {ID: "call", Type: "tool_call", ToolCallID: "call", Name: "web_search", Arguments: `{"query":"growth"}`, Complete: true, Result: api.Raw(api.Object{"query": "growth", "results": []api.Object{{"url": "https://example.com", "title": "Example"}}})}, {ID: "text", Type: "content", Content: "It grew."}}
+	cloudChat := api.Object{"title": "Evidence", "titleState": "manual", "createdAt": "2026-01-02T00:00:00Z", "updatedAt": "2026-01-02T01:00:00Z", "model": "kimi-k3", "pinned": true, "messages": []any{
+		api.Object{"id": "m1", "role": "user", "createdAt": "2026-01-02T00:00:00Z", "content": "Explain", "attachments": []any{
+			api.Object{"id": imageID, "kind": "image", "fileName": "chart.png", "mimeType": "image/png", "encryptionKey": imageKey, "thumbnail": "dGh1bWI=", "description": "A chart"},
+			api.Object{"id": docID, "kind": "document", "fileName": "report.txt", "mimeType": "text/plain", "encryptionKey": docKey},
+			api.Object{"id": strings.Repeat("e", 36), "kind": "image", "fileName": "gone.png", "encryptionKey": "gone"},
 		}},
-		object{"id": "m2", "role": "assistant", "createdAt": "2026-01-02T00:01:00Z", "content": "It grew.", "timeline": timeline, "annotations": []any{object{"type": "url_citation", "url_citation": object{"url": "https://example.com", "title": "Example", "start_index": 0, "end_index": 2}}}},
+		api.Object{"id": "m2", "role": "assistant", "createdAt": "2026-01-02T00:01:00Z", "content": "It grew.", "timeline": timeline, "annotations": []any{api.Object{"type": "url_citation", "url_citation": api.Object{"url": "https://example.com", "title": "Example", "start_index": 0, "end_index": 2}}}},
 	}}
-	rows.rows[rowMapKey(alice, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: raw(cloudChat), project: &project, projectSet: true}
+	rows.rows[rowMapKey(alice, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: api.Raw(cloudChat), project: &project, projectSet: true}
 
 	modelCopy, original, page := pngFixture(t, 4, 4, 90), pngFixture(t, 2048, 1024, 90), pngFixture(t, 3, 9, 200)
-	device := object{"id": "9999990000000_00000000-0000-4000-8000-00000000000d", "title": "On my device", "titleState": "generated", "createdAt": "2026-02-01T00:00:00Z", "updatedAt": "2026-02-01T00:00:00Z", "model": "auto", "webSearchEnabled": false, "messages": []any{
-		object{"id": "d1", "role": "user", "createdAt": "2026-02-01T00:00:00Z", "content": "Look", "attachments": []any{
-			object{"id": "att_photo", "kind": "image", "fileName": "photo.png", "mimeType": "image/jpeg", "size": 900, "thumbnail": "dGh1bWI=", "base64": base64.StdEncoding.EncodeToString(modelCopy)},
-			object{"id": "att_scan", "kind": "document", "fileName": "scan.pdf", "mimeType": "application/pdf", "textContent": "Scanned", "pages": []any{object{"page": 1, "text": "One", "is_scanned": true, "image": base64.StdEncoding.EncodeToString(page)}}},
+	device := api.Object{"id": "9999990000000_00000000-0000-4000-8000-00000000000d", "title": "On my device", "titleState": "generated", "createdAt": "2026-02-01T00:00:00Z", "updatedAt": "2026-02-01T00:00:00Z", "model": "auto", "webSearchEnabled": false, "messages": []any{
+		api.Object{"id": "d1", "role": "user", "createdAt": "2026-02-01T00:00:00Z", "content": "Look", "attachments": []any{
+			api.Object{"id": "att_photo", "kind": "image", "fileName": "photo.png", "mimeType": "image/jpeg", "size": 900, "thumbnail": "dGh1bWI=", "base64": base64.StdEncoding.EncodeToString(modelCopy)},
+			api.Object{"id": "att_scan", "kind": "document", "fileName": "scan.pdf", "mimeType": "application/pdf", "textContent": "Scanned", "pages": []any{api.Object{"page": 1, "text": "One", "is_scanned": true, "image": base64.StdEncoding.EncodeToString(page)}}},
 		}},
-		object{"id": "d2", "role": "assistant", "createdAt": "2026-02-01T00:00:01Z", "content": "Seen", "timeline": []any{object{"id": "d2-content", "type": "content", "content": "Seen"}}},
+		api.Object{"id": "d2", "role": "assistant", "createdAt": "2026-02-01T00:00:01Z", "content": "Seen", "timeline": []any{api.Object{"id": "d2-content", "type": "content", "content": "Seen"}}},
 	}}
-	w := archiveRoute(h, "/v1/export", "alice", optionsPart(object{"format": "native", "key": key.base64()}), threadPart(device), formPart{name: "file", filename: "att_photo", data: original})
+	w := archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "native", "key": key.base64()}), threadPart(device), formPart{name: "file", filename: "att_photo", data: original})
 	if w.Code != 200 || w.Header().Get("Content-Type") != "application/zip" {
 		t.Fatalf("export: HTTP %d: %s", w.Code, w.Body.String())
 	}
@@ -291,11 +295,11 @@ func TestNativeBackupRoundTrips(t *testing.T) {
 
 	restored, restoredRows, _ := testChatHarness(t, nil)
 	restoredSync := newFakeSync(t, restored)
-	result := importOf(t, restored, "alice", w.Body.Bytes(), "tinfoil-backup.zip", object{"target": "cloud", "key": key.base64()})
+	result := importOf(t, restored, "alice", w.Body.Bytes(), "tinfoil-backup.zip", api.Object{"target": "cloud", "key": key.base64()})
 	if result.done.JobID == nil || len(result.threads) != 1 || !reflect.DeepEqual(result.done.Warnings, []string{"The backup left out 1 items when it was made."}) {
 		t.Fatalf("restore: %+v %v", result.done, result.threads)
 	}
-	if status := postRoute(restored, "/v1/import/status", object{"jobId": *result.done.JobID}, "alice"); !strings.Contains(status.Body.String(), `"status":"completed"`) {
+	if status := postRoute(restored, "/v1/import/status", api.Object{"jobId": *result.done.JobID}, "alice"); !strings.Contains(status.Body.String(), `"status":"completed"`) {
 		t.Fatalf("job status: %s", status.Body.String())
 	}
 	thread := result.threads[0]
@@ -306,7 +310,7 @@ func TestNativeBackupRoundTrips(t *testing.T) {
 	if decodedImage(photo.Base64) != "jpeg 1536x768 <nil>" || !bytes.Equal(result.originals[photo.ID], original) || photo.MimeType != "image/png" || !bytes.Equal(base64Bytes(t, scan.Pages[0].Image), page) || scan.TextContent != "Scanned" {
 		t.Fatalf("device chat lost its images: %+v %+v", photo, scan)
 	}
-	again := importOf(t, restored, "alice", w.Body.Bytes(), "tinfoil-backup.zip", object{"target": "device"})
+	again := importOf(t, restored, "alice", w.Body.Bytes(), "tinfoil-backup.zip", api.Object{"target": "device"})
 	if len(again.threads) != 2 || again.threads[1].ID != thread.ID || again.done.JobID != nil {
 		t.Fatalf("a second restore named the device chat anew, or kept cloud chats off the device: %+v", again)
 	}
@@ -316,8 +320,8 @@ func TestNativeBackupRoundTrips(t *testing.T) {
 	if !ok || len(chat.Messages) != 2 || !chat.Pinned || chat.Model != "kimi-k3" || chat.TitleState != "manual" {
 		t.Fatalf("cloud chat: %+v", chats)
 	}
-	if !reflect.DeepEqual(decodeValue(raw(chat.Messages[1].Timeline)), decodeValue(raw(mustRead(readThread("chat-1", raw(cloudChat))).Messages[1].Timeline))) || len(chat.Messages[1].Annotations) != 1 {
-		t.Fatalf("the reply changed: %s", raw(chat.Messages[1]))
+	if !reflect.DeepEqual(decodeValue(api.Raw(chat.Messages[1].Timeline)), decodeValue(api.Raw(mustRead(readThread("chat-1", api.Raw(cloudChat))).Messages[1].Timeline))) || len(chat.Messages[1].Annotations) != 1 {
+		t.Fatalf("the reply changed: %s", api.Raw(chat.Messages[1]))
 	}
 	attachments := chat.Messages[0].Attachments
 	if len(attachments) != 2 || attachments[0].Description != "A chart" || attachments[0].Thumbnail != "dGh1bWI=" || !bytes.Equal(blobOf(t, restoredSync, attachments[0]), stored) || attachments[1].TextContent != "Stored document" {
@@ -339,17 +343,17 @@ func TestNativeBackupRoundTrips(t *testing.T) {
 func TestBackupsHoldWhatRestoresTake(t *testing.T) {
 	h, _, _ := testChatHarness(t, nil)
 	largest := append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, imageUploads.MaxBytes-8)...)
-	device := object{"id": "local-chat", "title": "Large photo", "messages": []any{object{"id": "m", "role": "user", "content": "Look", "attachments": []any{object{"id": "att_large", "kind": "image", "fileName": "large.png"}}}}}
-	w := archiveRoute(h, "/v1/export", "alice", optionsPart(object{"format": "native"}), threadPart(device), formPart{name: "file", filename: "att_large", data: largest})
+	device := api.Object{"id": "local-chat", "title": "Large photo", "messages": []any{api.Object{"id": "m", "role": "user", "content": "Look", "attachments": []any{api.Object{"id": "att_large", "kind": "image", "fileName": "large.png"}}}}}
+	w := archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "native"}), threadPart(device), formPart{name: "file", filename: "att_large", data: largest})
 	if w.Code != 200 {
 		t.Fatalf("export: HTTP %d %.300s", w.Code, w.Body.String())
 	}
-	result := importOf(t, h, "alice", w.Body.Bytes(), "tinfoil-backup.zip", object{"target": "device"})
+	result := importOf(t, h, "alice", w.Body.Bytes(), "tinfoil-backup.zip", api.Object{"target": "device"})
 	if len(result.threads) != 1 || len(result.threads[0].Messages[0].Attachments) != 1 || !bytes.Equal(result.originals[result.threads[0].Messages[0].Attachments[0].ID], largest) {
 		t.Fatalf("the largest image was not restored: %+v", result.done)
 	}
 
-	tooLarge := func(err error) bool { return err != nil && asAPIError(err).Code == "ARCHIVE_TOO_LARGE" }
+	tooLarge := func(err error) bool { return err != nil && api.AsError(err).Code == "ARCHIVE_TOO_LARGE" }
 	if err := newBackupWriter(io.Discard).add("images", backupImagePath("larger", ".bin"), append(largest, 0)); !tooLarge(err) {
 		t.Fatalf("a backup held an image no restore takes: %v", err)
 	}
@@ -369,17 +373,17 @@ func TestBackupsHoldWhatRestoresTake(t *testing.T) {
 func TestARestoreReadsDeviceChatsBeforeStoringTheCloud(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	newFakeSync(t, h)
-	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: raw(object{"title": "Stored", "messages": []any{object{"id": "m", "role": "user", "content": "hi"}}})}
-	device := object{"id": "local-chat", "title": "On my device", "messages": []any{object{"id": "d", "role": "user", "content": "hello"}}}
-	w := archiveRoute(h, "/v1/export", "alice", optionsPart(object{"format": "native", "key": key.base64()}), threadPart(device))
+	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: api.Raw(api.Object{"title": "Stored", "messages": []any{api.Object{"id": "m", "role": "user", "content": "hi"}}})}
+	device := api.Object{"id": "local-chat", "title": "On my device", "messages": []any{api.Object{"id": "d", "role": "user", "content": "hello"}}}
+	w := archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "native", "key": key.base64()}), threadPart(device))
 	if w.Code != 200 {
 		t.Fatalf("export: HTTP %d %s", w.Code, w.Body.String())
 	}
-	archive := withBackupEntries(t, w.Body.Bytes(), map[string][]byte{backupEntityPath("local_chats", "local-chat"): raw(object{"id": "another-chat", "title": "On my device"})})
+	archive := withBackupEntries(t, w.Body.Bytes(), map[string][]byte{backupEntityPath("local_chats", "local-chat"): api.Raw(api.Object{"id": "another-chat", "title": "On my device"})})
 
 	restored, restoredRows, _ := testChatHarness(t, nil)
 	newFakeSync(t, restored)
-	r := archiveRoute(restored, "/v1/import", "alice", optionsPart(object{"target": "cloud", "key": key.base64()}), formPart{name: "file", filename: "backup.zip", data: archive})
+	r := archiveRoute(restored, "/v1/import", "alice", optionsPart(api.Object{"target": "cloud", "key": key.base64()}), formPart{name: "file", filename: "backup.zip", data: archive})
 	if r.Code != 400 || !strings.Contains(r.Body.String(), "a chat is filed under another id") {
 		t.Fatalf("restore: HTTP %d %s", r.Code, r.Body.String())
 	}
@@ -393,21 +397,21 @@ func TestARestoreReadsDeviceChatsBeforeStoringTheCloud(t *testing.T) {
 func TestRestoresCountTheImagesTheyLeaveOut(t *testing.T) {
 	h, _, _ := testChatHarness(t, nil)
 	notImage := base64.StdEncoding.EncodeToString([]byte("plain text, not an image"))
-	device := object{"id": "local-chat", "title": "Pictures", "messages": []any{object{"id": "m", "role": "user", "content": "Look", "attachments": []any{
-		object{"id": "att_photo", "kind": "image", "fileName": "photo.png", "base64": notImage},
-		object{"id": "att_scan", "kind": "document", "fileName": "scan.pdf", "textContent": "Scanned", "pages": []any{object{"page": 1, "text": "One", "image": notImage}}},
+	device := api.Object{"id": "local-chat", "title": "Pictures", "messages": []any{api.Object{"id": "m", "role": "user", "content": "Look", "attachments": []any{
+		api.Object{"id": "att_photo", "kind": "image", "fileName": "photo.png", "base64": notImage},
+		api.Object{"id": "att_scan", "kind": "document", "fileName": "scan.pdf", "textContent": "Scanned", "pages": []any{api.Object{"page": 1, "text": "One", "image": notImage}}},
 	}}}}
-	w := archiveRoute(h, "/v1/export", "alice", optionsPart(object{"format": "native"}), threadPart(device))
+	w := archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "native"}), threadPart(device))
 	if w.Code != 200 {
 		t.Fatalf("export: HTTP %d %s", w.Code, w.Body.String())
 	}
-	result := importOf(t, h, "alice", w.Body.Bytes(), "tinfoil-backup.zip", object{"target": "device"})
+	result := importOf(t, h, "alice", w.Body.Bytes(), "tinfoil-backup.zip", api.Object{"target": "device"})
 	if want := []string{"2 images were left out: the archive does not hold them, or they are not supported images."}; !reflect.DeepEqual(result.done.Warnings, want) {
 		t.Fatalf("warnings: %v", result.done.Warnings)
 	}
 
 	old := withBackupEntries(t, fixture(t, "web-backup-v1.zip"), map[string][]byte{backupImagePath("legacy:local-1:0:0", ".bin"): []byte("plain text, not an image")})
-	result = importOf(t, h, "alice", old, "backup.zip", object{"target": "device"})
+	result = importOf(t, h, "alice", old, "backup.zip", api.Object{"target": "device"})
 	if len(result.done.Warnings) != 3 || !strings.HasPrefix(result.done.Warnings[0], "1 images were left out") {
 		t.Fatalf("warnings of an old backup: %v", result.done.Warnings)
 	}
@@ -422,7 +426,7 @@ func TestOldBackupImagesKeepTheirType(t *testing.T) {
 		t.Fatal(err)
 	}
 	backup := withBackupEntries(t, fixture(t, "web-backup-v1.zip"), map[string][]byte{backupImagePath("legacy:local-1:0:0", ".bin"): photo.Bytes()})
-	result := importOf(t, h, "alice", backup, "backup.zip", object{"target": "device"})
+	result := importOf(t, h, "alice", backup, "backup.zip", api.Object{"target": "device"})
 	for _, thread := range result.threads {
 		if thread.Title != "Old device chat" {
 			continue
@@ -449,7 +453,7 @@ func TestWebAppBackupsRestore(t *testing.T) {
 		t.Run(tc.fixture, func(t *testing.T) {
 			h, rows, key := testChatHarness(t, nil)
 			fake := newFakeSync(t, h)
-			result := importOf(t, h, "alice", fixture(t, tc.fixture), tc.fixture, object{"target": "cloud", "key": key.base64()})
+			result := importOf(t, h, "alice", fixture(t, tc.fixture), tc.fixture, api.Object{"target": "cloud", "key": key.base64()})
 			if result.done.JobID == nil || !reflect.DeepEqual(result.done.Warnings, tc.warnings) || len(result.threads) != 2 {
 				t.Fatalf("restore: %+v, %d device chats", result.done, len(result.threads))
 			}
@@ -463,7 +467,7 @@ func TestWebAppBackupsRestore(t *testing.T) {
 			}
 			reply := legacy.Messages[1].Timeline
 			if len(reply) != 3 || reply[0].Content != "It is green" || reply[1].Name != "web_search" || reply[1].Display == nil || reply[1].Display.Query != "green squares" || reply[2].Content != "A green square." {
-				t.Fatalf("the old reply was not read: %s", raw(reply))
+				t.Fatalf("the old reply was not read: %s", api.Raw(reply))
 			}
 			scan := scanned.Messages[0].Attachments[0]
 			if scan.TextContent != "Scanned text" || len(scan.Pages) != 1 || !strings.HasPrefix(string(base64Bytes(t, scan.Pages[0].Image)), "\x89PNG") {
@@ -493,7 +497,7 @@ func TestWebAppBackupsRestore(t *testing.T) {
 		})
 	}
 	h, _, _ := testChatHarness(t, nil)
-	result := importOf(t, h, "alice", fixture(t, "web-backup-v1.zip"), "backup.zip", object{"target": "device"})
+	result := importOf(t, h, "alice", fixture(t, "web-backup-v1.zip"), "backup.zip", api.Object{"target": "device"})
 	if len(result.threads) != 3 || result.threads[0].Title != "Evidence" || result.threads[0].ProjectID != nil || result.done.JobID != nil ||
 		!reflect.DeepEqual(result.done.Warnings, []string{"1 projects were not imported: projects are kept in the cloud.", "1 chats were imported without their project."}) {
 		t.Fatalf("a restore to the device: %d chats, %+v", len(result.threads), result.done)
@@ -521,7 +525,7 @@ func sameForm(t *testing.T, fake *fakeSync, originals map[string][]byte, thread 
 		}
 	}
 	thread.ID, thread.ProjectID, thread.UpdatedAt, thread.RecordVersion = "", nil, "", 0
-	return string(raw(thread))
+	return string(api.Raw(thread))
 }
 
 // Exports of other apps import into the same threads in the cloud and on
@@ -539,11 +543,11 @@ func TestExportsImportAlikeToCloudAndDevice(t *testing.T) {
 		{"chatgpt-export.zip", map[string][]byte{"file_00000000abc-cat.png": large}, 2, documentLeftOut, documentLeftOut, func(t *testing.T, threads map[string]Thread, originals map[string][]byte) {
 			branch := threads["Branching"]
 			if len(branch.Messages) != 2 || branch.Messages[1].Content != "The second one." || branch.Messages[1].Timeline[0].Content != "Compare the two sizes" {
-				t.Fatalf("not the current branch: %s", raw(branch.Messages))
+				t.Fatalf("not the current branch: %s", api.Raw(branch.Messages))
 			}
 			photo := threads["Photo question"].Messages[0]
 			if photo.Content != "What is in this picture?" || len(photo.Attachments) != 1 || photo.Attachments[0].FileName != "cat.png" {
-				t.Fatalf("the photo was lost: %s", raw(photo))
+				t.Fatalf("the photo was lost: %s", api.Raw(photo))
 			}
 			if cat := photo.Attachments[0]; decodedImage(cat.Base64) != "jpeg 1536x768 <nil>" || !bytes.Equal(originals[cat.ID], large) || cat.MimeType != "image/png" {
 				t.Fatalf("the photo came as %s, its original as %d bytes", decodedImage(cat.Base64), len(originals[cat.ID]))
@@ -552,13 +556,13 @@ func TestExportsImportAlikeToCloudAndDevice(t *testing.T) {
 		{"claude-export.zip", nil, 1, []string{"1 projects were not imported: projects are kept in the cloud."}, []string{}, func(t *testing.T, threads map[string]Thread, _ map[string][]byte) {
 			messages := threads["Reading a spec"].Messages
 			if len(messages) != 2 || messages[0].Attachments[0].TextContent != "The contents" || messages[0].Attachments[1].FileName != "diagram.png" || messages[1].Timeline[0].Content != "Reading carefully" {
-				t.Fatalf("claude chat: %s", raw(messages))
+				t.Fatalf("claude chat: %s", api.Raw(messages))
 			}
 		}},
 		{"tinfoil-export.zip", map[string][]byte{"attachments/tf-sketch/sketch.png": broken}, 2, []string{}, []string{}, func(t *testing.T, threads map[string]Thread, originals map[string][]byte) {
 			trip := threads["Trip plans"].Messages
 			if len(trip) != 2 || trip[0].Attachments[0].ID != "tf-photo" || trip[0].Attachments[1].TextContent != "# Packing list" || trip[1].Timeline[0].Content != "It is sunny" || trip[0].CreatedAt != "2026-04-01T08:00:00Z" {
-				t.Fatalf("tinfoil chat: %s", raw(trip))
+				t.Fatalf("tinfoil chat: %s", api.Raw(trip))
 			}
 			// An image that does not decode has no copy for models, and
 			// keeps its original.
@@ -571,8 +575,8 @@ func TestExportsImportAlikeToCloudAndDevice(t *testing.T) {
 			h, rows, key := testChatHarness(t, nil)
 			fake := newFakeSync(t, h)
 			archive := withEntries(t, fixture(t, tc.fixture), tc.images)
-			onDevice := importOf(t, h, "alice", archive, tc.fixture, object{"target": "device"})
-			inCloud := importOf(t, h, "alice", archive, tc.fixture, object{"target": "cloud", "key": key.base64()})
+			onDevice := importOf(t, h, "alice", archive, tc.fixture, api.Object{"target": "device"})
+			inCloud := importOf(t, h, "alice", archive, tc.fixture, api.Object{"target": "cloud", "key": key.base64()})
 			if len(onDevice.threads) != tc.chats || inCloud.threads != nil || onDevice.done.JobID != nil || inCloud.done.JobID == nil || !reflect.DeepEqual(onDevice.done.Warnings, tc.onDevice) || !reflect.DeepEqual(inCloud.done.Warnings, tc.inCloud) {
 				t.Fatalf("device %d chats %+v, cloud %+v", len(onDevice.threads), onDevice.done, inCloud.done)
 			}
@@ -597,13 +601,13 @@ func TestExportsImportAlikeToCloudAndDevice(t *testing.T) {
 // turn, and a reply without any keeps none of an earlier turn's.
 func TestChatGPTRepliesKeepTheirTurnsReasoning(t *testing.T) {
 	h, _, _ := testChatHarness(t, nil)
-	node := func(parent, role, kind string, content object) object {
+	node := func(parent, role, kind string, content api.Object) api.Object {
 		content["content_type"] = kind
-		return object{"parent": parent, "message": object{"author": object{"role": role}, "content": content}}
+		return api.Object{"parent": parent, "message": api.Object{"author": api.Object{"role": role}, "content": content}}
 	}
-	thoughts := func(text string) object { return object{"thoughts": []object{{"content": text}}} }
-	text := func(text string) object { return object{"parts": []string{text}} }
-	conversation := object{"id": "turns", "title": "Two turns", "current_node": "a2", "mapping": object{
+	thoughts := func(text string) api.Object { return api.Object{"thoughts": []api.Object{{"content": text}}} }
+	text := func(text string) api.Object { return api.Object{"parts": []string{text}} }
+	conversation := api.Object{"id": "turns", "title": "Two turns", "current_node": "a2", "mapping": api.Object{
 		"u1":     node("", "user", "text", text("First question")),
 		"older":  node("u1", "assistant", "thoughts", thoughts("Older thought")),
 		"nearer": node("older", "assistant", "thoughts", thoughts("Nearer thought")),
@@ -611,12 +615,12 @@ func TestChatGPTRepliesKeepTheirTurnsReasoning(t *testing.T) {
 		"u2":     node("a1", "user", "text", text("Second question")),
 		"a2":     node("u2", "assistant", "text", text("Second answer")),
 	}}
-	result := importOf(t, h, "alice", raw([]object{conversation}), "conversations.json", object{"target": "device"})
+	result := importOf(t, h, "alice", api.Raw([]api.Object{conversation}), "conversations.json", api.Object{"target": "device"})
 	if len(result.threads) != 1 || len(result.threads[0].Messages) != 4 {
-		t.Fatalf("threads: %s", raw(result.threads))
+		t.Fatalf("threads: %s", api.Raw(result.threads))
 	}
 	if messages := result.threads[0].Messages; timelineText(messages[1].Timeline, "thinking") != "Nearer thought" || timelineText(messages[3].Timeline, "thinking") != "" {
-		t.Fatalf("reasoning: %s", raw(messages))
+		t.Fatalf("reasoning: %s", api.Raw(messages))
 	}
 }
 
@@ -625,17 +629,17 @@ func TestChatGPTRepliesKeepTheirTurnsReasoning(t *testing.T) {
 func TestClaudeImagesAreFoundByTheirID(t *testing.T) {
 	h, _, _ := testChatHarness(t, nil)
 	ours, theirs := pngFixture(t, 3, 3, 200), pngFixture(t, 2, 2, 10)
-	conversation := object{"uuid": "photo-chat", "name": "Photo", "chat_messages": []object{{"sender": "human", "text": "Look", "files": []object{{"file_name": "image.png", "file_uuid": "file-ours"}}}}}
+	conversation := api.Object{"uuid": "photo-chat", "name": "Photo", "chat_messages": []api.Object{{"sender": "human", "text": "Look", "files": []api.Object{{"file_name": "image.png", "file_uuid": "file-ours"}}}}}
 	var archive bytes.Buffer
 	zw := zip.NewWriter(&archive)
-	for name, data := range map[string][]byte{"conversations.json": raw([]object{conversation}), "image.png": theirs, "file-ours.png": ours} {
+	for name, data := range map[string][]byte{"conversations.json": api.Raw([]api.Object{conversation}), "image.png": theirs, "file-ours.png": ours} {
 		w, _ := zw.Create(name)
 		w.Write(data)
 	}
 	zw.Close()
-	result := importOf(t, h, "alice", archive.Bytes(), "claude.zip", object{"target": "device"})
+	result := importOf(t, h, "alice", archive.Bytes(), "claude.zip", api.Object{"target": "device"})
 	if len(result.threads) != 1 || len(result.threads[0].Messages[0].Attachments) != 1 {
-		t.Fatalf("threads: %s", raw(result.threads))
+		t.Fatalf("threads: %s", api.Raw(result.threads))
 	}
 	if image := result.threads[0].Messages[0].Attachments[0]; !bytes.Equal(result.originals[image.ID], ours) {
 		t.Fatalf("the chat holds another image of %d bytes", len(result.originals[image.ID]))
@@ -646,7 +650,7 @@ func TestClaudeImagesAreFoundByTheirID(t *testing.T) {
 func TestNullFormatKeysAreNotExports(t *testing.T) {
 	h, _, _ := testChatHarness(t, nil)
 	for _, record := range []string{`{"mapping":null}`, `[{"chat_messages":null}]`, `{"prompt_template":null,"docs":null}`} {
-		w := archiveRoute(h, "/v1/import", "alice", optionsPart(object{"target": "device"}), formPart{name: "file", filename: "conversations.json", data: []byte(record)})
+		w := archiveRoute(h, "/v1/import", "alice", optionsPart(api.Object{"target": "device"}), formPart{name: "file", filename: "conversations.json", data: []byte(record)})
 		if w.Code != 400 || !strings.Contains(w.Body.String(), "IMPORT_INVALID") {
 			t.Errorf("%s imported: HTTP %d %s", record, w.Code, w.Body.String())
 		}
@@ -659,11 +663,11 @@ func TestClaudeProjectsRequireTheCloud(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	newFakeSync(t, h)
 	projects := fixture(t, "claude-projects.json")
-	w := archiveRoute(h, "/v1/import", "alice", optionsPart(object{"target": "device"}), formPart{name: "file", filename: "projects.json", data: projects})
+	w := archiveRoute(h, "/v1/import", "alice", optionsPart(api.Object{"target": "device"}), formPart{name: "file", filename: "projects.json", data: projects})
 	if w.Code != 400 || !strings.Contains(w.Body.String(), "PROJECTS_REQUIRE_CLOUD") {
 		t.Fatalf("projects imported to the device: HTTP %d %s", w.Code, w.Body.String())
 	}
-	result := importOf(t, h, "alice", projects, "projects.json", object{"target": "cloud", "key": key.base64()})
+	result := importOf(t, h, "alice", projects, "projects.json", api.Object{"target": "cloud", "key": key.base64()})
 	stored, _ := rows.list(context.Background(), &principal{ID: "alice"}, key, "project", "", "", 0)
 	if result.done.JobID == nil || len(stored.Rows) != 1 {
 		t.Fatalf("projects: %d stored, done %+v", len(stored.Rows), result.done)
@@ -676,11 +680,11 @@ func TestClaudeProjectsRequireTheCloud(t *testing.T) {
 	// Claude's newer exports hold each project in a file of its own.
 	var split []json.RawMessage
 	json.Unmarshal(projects, &split)
-	one := importOf(t, h, "bob", split[0], "release-notes.json", object{"target": "cloud", "key": key.base64()})
+	one := importOf(t, h, "bob", split[0], "release-notes.json", api.Object{"target": "cloud", "key": key.base64()})
 	if stored, _ := rows.list(context.Background(), &principal{ID: "bob"}, key, "project", "", "", 0); one.done.JobID == nil || len(stored.Rows) != 1 {
 		t.Fatalf("a project file of its own was not imported: %+v", one.done)
 	}
-	full := importOf(t, h, "alice", fixture(t, "claude-export.zip"), "claude.zip", object{"target": "device"})
+	full := importOf(t, h, "alice", fixture(t, "claude-export.zip"), "claude.zip", api.Object{"target": "device"})
 	if len(full.threads) != 1 || !reflect.DeepEqual(full.done.Warnings, []string{"1 projects were not imported: projects are kept in the cloud."}) {
 		t.Fatalf("a full export to the device: %+v", full.done)
 	}
@@ -703,13 +707,13 @@ func TestConversationsExportMatchesTheWebApp(t *testing.T) {
 		for j := range stored.Messages[i].Attachments {
 			a := &stored.Messages[i].Attachments[j]
 			a.EncryptionKey = "key-" + a.ID
-			fake.blobs[a.ID] = fakeBlob{chat: stored.ID, key: a.EncryptionKey, data: decodedOr(a.Base64, raw(documentBlob{TextContent: a.TextContent}))}
+			fake.blobs[a.ID] = fakeBlob{chat: stored.ID, key: a.EncryptionKey, data: decodedOr(a.Base64, api.Raw(documentBlob{TextContent: a.TextContent}))}
 			a.Base64, a.TextContent = "", ""
 		}
 	}
 	project := valueOr(stored.ProjectID, "")
-	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", stored.ID)] = storedRow{ID: stored.ID, ETag: "1", Data: raw(stored), project: &project, projectSet: true}
-	parts := []formPart{optionsPart(object{"format": "conversations", "key": key.base64()})}
+	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", stored.ID)] = storedRow{ID: stored.ID, ETag: "1", Data: api.Raw(stored), project: &project, projectSet: true}
+	parts := []formPart{optionsPart(api.Object{"format": "conversations", "key": key.base64()})}
 	for _, thread := range threads.Device {
 		parts = append(parts, formPart{name: "thread", data: thread})
 	}
@@ -732,7 +736,7 @@ func TestConversationsExportMatchesTheWebApp(t *testing.T) {
 				t.Fatalf("manifest time: %q", gotManifest.CreatedAt)
 			}
 			gotManifest.CreatedAt, wantManifest.CreatedAt = "", ""
-			gotEntry, wantEntry = raw(gotManifest), raw(wantManifest)
+			gotEntry, wantEntry = api.Raw(gotManifest), api.Raw(wantManifest)
 		}
 		if !bytes.Equal(gotEntry, wantEntry) {
 			t.Fatalf("%s differs from the web app's:\n%s\nwant\n%s", name, gotEntry, wantEntry)
@@ -753,8 +757,8 @@ func decodedOr(encoded string, fallback []byte) []byte {
 // nothing is read from sync for it.
 func TestAnExportWithoutTheKeyHoldsOnlyItsDeviceChats(t *testing.T) {
 	h, rows, _ := testChatHarness(t, nil)
-	thread := object{"id": "local-chat", "title": "Tab chat", "messages": []any{object{"id": "m", "role": "user", "content": "hi"}}}
-	w := archiveRoute(h, "/v1/export", "alice", optionsPart(object{"format": "native"}), threadPart(thread))
+	thread := api.Object{"id": "local-chat", "title": "Tab chat", "messages": []any{api.Object{"id": "m", "role": "user", "content": "hi"}}}
+	w := archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "native"}), threadPart(thread))
 	if w.Code != 200 {
 		t.Fatalf("export: HTTP %d %s", w.Code, w.Body.String())
 	}
@@ -771,7 +775,7 @@ func TestAnExportWithoutTheKeyHoldsOnlyItsDeviceChats(t *testing.T) {
 // them.
 func TestArchivesNeedNoChatAccess(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: raw(object{"title": "Stored", "messages": []any{object{"id": "m", "role": "user", "content": "hi"}}})}
+	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: api.Raw(api.Object{"title": "Stored", "messages": []any{api.Object{"id": "m", "role": "user", "content": "hi"}}})}
 	for name, credential := range map[string]string{"a free user": "free_anonymous-key", "a subscriber at its cap": ""} {
 		signedIn := func(r *http.Request) {
 			r.Header.Set("Authorization", "Bearer clerk-alice")
@@ -779,13 +783,13 @@ func TestArchivesNeedNoChatAccess(t *testing.T) {
 				r.Header.Set(inferenceKeyHeader, credential)
 			}
 		}
-		export := archiveRequest(h, "/v1/export", signedIn, optionsPart(object{"format": "native", "key": key.base64()}))
+		export := archiveRequest(h, "/v1/export", signedIn, optionsPart(api.Object{"format": "native", "key": key.base64()}))
 		if export.Code != 200 {
 			t.Fatalf("%s exported: HTTP %d %s", name, export.Code, export.Body.String())
 		}
 		restored, restoredRows, _ := testChatHarness(t, nil)
 		newFakeSync(t, restored)
-		result := importLines(t, archiveRequest(restored, "/v1/import", signedIn, optionsPart(object{"target": "cloud", "key": key.base64()}), formPart{name: "file", filename: "tinfoil-backup.zip", data: export.Body.Bytes()}))
+		result := importLines(t, archiveRequest(restored, "/v1/import", signedIn, optionsPart(api.Object{"target": "cloud", "key": key.base64()}), formPart{name: "file", filename: "tinfoil-backup.zip", data: export.Body.Bytes()}))
 		chats := storedChats(restoredRows, "alice")
 		if chat := chats["Stored"]; result.done.JobID == nil || len(chats) != 1 || len(chat.Messages) != 1 || chat.Messages[0].Role != "user" || chat.Messages[0].Content != "hi" {
 			t.Fatalf("%s restored %+v: %+v", name, result.done, chats)
@@ -799,19 +803,19 @@ func TestArchivesNeedNoChatAccess(t *testing.T) {
 func TestArchivesWaitForScratchSpace(t *testing.T) {
 	h, _, _ := testChatHarness(t, nil)
 	h.scratch = newScratchSpace(t.TempDir(), 64<<10)
-	thread := threadPart(object{"id": "local-chat", "title": "Tab chat", "messages": []any{object{"id": "m", "role": "user", "content": strings.Repeat("x", 8<<10)}}})
-	if w := archiveRoute(h, "/v1/import", "alice", optionsPart(object{"target": "device"}), formPart{name: "file", filename: "big.json", data: bytes.Repeat([]byte(" "), 40<<10)}); w.Code != 413 || !strings.Contains(w.Body.String(), "ARCHIVE_TOO_LARGE") {
+	thread := threadPart(api.Object{"id": "local-chat", "title": "Tab chat", "messages": []any{api.Object{"id": "m", "role": "user", "content": strings.Repeat("x", 8<<10)}}})
+	if w := archiveRoute(h, "/v1/import", "alice", optionsPart(api.Object{"target": "device"}), formPart{name: "file", filename: "big.json", data: bytes.Repeat([]byte(" "), 40<<10)}); w.Code != 413 || !strings.Contains(w.Body.String(), "ARCHIVE_TOO_LARGE") {
 		t.Fatalf("an import that cannot fit: HTTP %d %s", w.Code, w.Body.String())
 	}
 	// The export fits the space, but not with the conversations it writes.
-	large := threadPart(object{"id": "local-chat", "title": "Tab chat", "messages": []any{object{"id": "m", "role": "user", "content": strings.Repeat("x", 40<<10)}}})
-	if w := archiveRoute(h, "/v1/export", "alice", optionsPart(object{"format": "conversations"}), large); w.Code != 413 || !strings.Contains(w.Body.String(), "ARCHIVE_TOO_LARGE") {
+	large := threadPart(api.Object{"id": "local-chat", "title": "Tab chat", "messages": []any{api.Object{"id": "m", "role": "user", "content": strings.Repeat("x", 40<<10)}}})
+	if w := archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "conversations"}), large); w.Code != 413 || !strings.Contains(w.Body.String(), "ARCHIVE_TOO_LARGE") {
 		t.Fatalf("an export that cannot fit: HTTP %d %s", w.Code, w.Body.String())
 	}
 	held := heldScratch(t, h, 60<<10)
 	done := make(chan *httptest.ResponseRecorder)
 	go func() {
-		done <- archiveRoute(h, "/v1/export", "alice", optionsPart(object{"format": "conversations"}), thread)
+		done <- archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "conversations"}), thread)
 	}()
 	for h.scratch.waiting.Load() == 0 {
 		select {
@@ -827,7 +831,7 @@ func TestArchivesWaitForScratchSpace(t *testing.T) {
 	held = heldScratch(t, h, 60<<10)
 	defer held.release()
 	h.scratch.wait = 10 * time.Millisecond
-	if w := archiveRoute(h, "/v1/export", "alice", optionsPart(object{"format": "conversations"}), thread); w.Code != 503 || w.Header().Get("Retry-After") == "" || !strings.Contains(w.Body.String(), "TEMP_SPACE_BUSY") {
+	if w := archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "conversations"}), thread); w.Code != 503 || w.Header().Get("Retry-After") == "" || !strings.Contains(w.Body.String(), "TEMP_SPACE_BUSY") {
 		t.Fatalf("an export that waited too long: HTTP %d %s", w.Code, w.Body.String())
 	}
 }
@@ -885,9 +889,9 @@ func TestStalledArchivesFreeTheirSpace(t *testing.T) {
 	var form bytes.Buffer
 	writer := multipart.NewWriter(&form)
 	options, _ := writer.CreateFormField("options")
-	options.Write(raw(object{"target": "device"}))
+	options.Write(api.Raw(api.Object{"target": "device"}))
 	file, _ := writer.CreateFormFile("file", "conversations.json")
-	file.Write(raw([]object{{"uuid": "slow-chat", "name": "Slow", "chat_messages": []object{{"sender": "human", "text": "hi"}}}}))
+	file.Write(api.Raw([]api.Object{{"uuid": "slow-chat", "name": "Slow", "chat_messages": []api.Object{{"sender": "human", "text": "hi"}}}}))
 	writer.Close()
 	slow := postRaw(t, server, "/v1/import", writer.FormDataContentType(), form.Len())
 	trickled := make(chan struct{})
@@ -900,8 +904,8 @@ func TestStalledArchivesFreeTheirSpace(t *testing.T) {
 		}
 	}()
 
-	thread := threadPart(object{"id": "local-chat", "title": "Tab chat", "messages": []any{object{"id": "m", "role": "user", "content": strings.Repeat("x", 16<<10)}}})
-	if w := archiveRoute(h, "/v1/export", "alice", optionsPart(object{"format": "conversations"}), thread); w.Code != 200 {
+	thread := threadPart(api.Object{"id": "local-chat", "title": "Tab chat", "messages": []any{api.Object{"id": "m", "role": "user", "content": strings.Repeat("x", 16<<10)}}})
+	if w := archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "conversations"}), thread); w.Code != 200 {
 		t.Fatalf("an export waited for a stalled import's space: HTTP %d %s", w.Code, w.Body.String())
 	}
 	if r, body := rawResponse(t, stalled); r.StatusCode != http.StatusRequestTimeout || !strings.Contains(body, "REQUEST_TIMEOUT") {
@@ -928,13 +932,13 @@ func TestArchivesHoldingSpaceDoNotWaitForMore(t *testing.T) {
 	server := httptest.NewServer(h.routes())
 	t.Cleanup(server.Close)
 	chat := func(id string) formPart {
-		return threadPart(object{"id": id, "title": id, "messages": []any{object{"id": "m", "role": "user", "content": strings.Repeat("x", 24<<10)}}})
+		return threadPart(api.Object{"id": id, "title": id, "messages": []any{api.Object{"id": "m", "role": "user", "content": strings.Repeat("x", 24<<10)}}})
 	}
 	// Each export sends its first chat and holds the space it takes, and
 	// keeps back its second.
 	start := func(name string) (net.Conn, []byte) {
 		second := chat(name + "-2")
-		body, contentType := archiveForm(optionsPart(object{"format": "native"}), chat(name+"-1"), second)
+		body, contentType := archiveForm(optionsPart(api.Object{"format": "native"}), chat(name+"-1"), second)
 		split := bytes.Index(body, second.data)
 		conn := postRaw(t, server, "/v1/export", contentType, len(body))
 		conn.Write(body[:split])

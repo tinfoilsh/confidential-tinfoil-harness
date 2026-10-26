@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 // A flag lookup the control plane is slow to answer flags nothing rather
@@ -34,7 +36,7 @@ func TestASlowFlagLookupFlagsNothing(t *testing.T) {
 		var list struct {
 			Threads []threadSummary `json:"threads"`
 		}
-		w := postRoute(h, "/v1/threads/list", object{"key": key.base64()}, "alice")
+		w := postRoute(h, "/v1/threads/list", api.Object{"key": key.base64()}, "alice")
 		if json.Unmarshal(w.Body.Bytes(), &list); len(list.Threads) != 1 || list.Threads[0].ID != "chat-1" || list.Threads[0].Flagged {
 			return fmt.Errorf("HTTP %d %s", w.Code, w.Body.String())
 		}
@@ -63,10 +65,10 @@ func TestAFlaggedChatTakesNoTurns(t *testing.T) {
 	storedThread(rows, "alice", "fine")
 	// A flagged chat that takes no turn is flagged only by the control plane.
 	storedThread(rows, "alice", "listed")
-	rows.rows["user:alice/profile/profile"] = storedRow{ID: "profile", ETag: "1", Data: raw(object{"pinnedChatIds": []string{"listed", "fine"}})}
+	rows.rows["user:alice/profile/profile"] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(api.Object{"pinnedChatIds": []string{"listed", "fine"}})}
 	code := func(w *httptest.ResponseRecorder) string {
 		var refused struct {
-			Error apiError `json:"error"`
+			Error api.Error `json:"error"`
 		}
 		json.Unmarshal(w.Body.Bytes(), &refused)
 		return refused.Error.Code
@@ -75,7 +77,7 @@ func TestAFlaggedChatTakesNoTurns(t *testing.T) {
 	ask["kind"], ask["quote"] = "ask", "ok"
 	delete(ask, "content")
 	device := localInput("flagged", priorThread())
-	for name, in := range map[string]object{"stored": continueInput(key, "flagged"), "ask": ask, "device": device} {
+	for name, in := range map[string]api.Object{"stored": continueInput(key, "flagged"), "ask": ask, "device": device} {
 		if w := postRoute(h, "/v1/threads/turn", in, "alice"); w.Code != 403 || code(w) != "CHAT_FLAGGED" {
 			t.Fatalf("%s turn on a flagged chat: HTTP %d %s", name, w.Code, w.Body.String())
 		}
@@ -90,7 +92,7 @@ func TestAFlaggedChatTakesNoTurns(t *testing.T) {
 		Threads []threadSummary `json:"threads"`
 		Pinned  []threadSummary `json:"pinned"`
 	}
-	json.Unmarshal(postRoute(h, "/v1/threads/list", object{"key": key.base64()}, "alice").Body.Bytes(), &list)
+	json.Unmarshal(postRoute(h, "/v1/threads/list", api.Object{"key": key.base64()}, "alice").Body.Bytes(), &list)
 	pinned := map[string]bool{}
 	for _, summary := range list.Pinned {
 		pinned[summary.ID] = summary.Flagged
@@ -106,11 +108,11 @@ func TestAFlaggedChatTakesNoTurns(t *testing.T) {
 		t.Fatalf("the list shows %+v", list.Threads)
 	}
 	var got threadSummary
-	json.Unmarshal(postRoute(h, "/v1/threads/get", object{"key": key.base64(), "id": "listed"}, "alice").Body.Bytes(), &got)
+	json.Unmarshal(postRoute(h, "/v1/threads/get", api.Object{"key": key.base64(), "id": "listed"}, "alice").Body.Bytes(), &got)
 	if got.ID != "listed" || !got.Flagged {
 		t.Fatalf("the chat reads as %+v", got)
 	}
-	if renamed := deviceOperation(t, h, "/v1/threads/update", priorThread(), object{"id": "flagged", "title": "Renamed"}, "alice"); renamed["flagged"] != true {
+	if renamed := deviceOperation(t, h, "/v1/threads/update", priorThread(), api.Object{"id": "flagged", "title": "Renamed"}, "alice"); renamed["flagged"] != true {
 		t.Fatalf("the device chat came back as %v", renamed)
 	}
 	finishedRun(t, h, "/v1/threads/turn", continueInput(key, "fine"))
@@ -135,7 +137,7 @@ func TestFlagsAreReusedOnlyForTheirCaller(t *testing.T) {
 	storedThread(rows, "bob", "chat-1")
 	flagged := func(user string) bool {
 		var got threadSummary
-		json.Unmarshal(postRoute(h, "/v1/threads/get", object{"key": key.base64(), "id": "chat-1"}, user).Body.Bytes(), &got)
+		json.Unmarshal(postRoute(h, "/v1/threads/get", api.Object{"key": key.base64(), "id": "chat-1"}, user).Body.Bytes(), &got)
 		return got.Flagged
 	}
 	if seen := []bool{flagged("alice"), flagged("alice"), flagged("bob"), flagged("bob")}; !reflect.DeepEqual(seen, []bool{true, true, false, false}) {

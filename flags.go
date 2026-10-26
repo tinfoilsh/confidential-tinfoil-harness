@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/golang-lru/v2/expirable"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 // safeguardFlagsPath lists the chats the safeguards flagged for the caller.
@@ -28,7 +29,7 @@ const (
 	maxFlagCallers = 10000
 )
 
-var errChatFlagged = apiErr(403, "CHAT_FLAGGED", "This chat was flagged under the acceptable use policy and takes no more turns")
+var errChatFlagged = api.Err(403, "CHAT_FLAGGED", "This chat was flagged under the acceptable use policy and takes no more turns")
 
 // chatFlags are the ids of the chats the safeguards flagged.
 type chatFlags map[string]bool
@@ -77,7 +78,7 @@ func (a *authenticator) readFlags(ctx context.Context, p *principal) (chatFlags,
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, downstreamError(resp.StatusCode, body)
+		return nil, api.DownstreamError(resp.StatusCode, body)
 	}
 	var listed struct {
 		Flags []struct {

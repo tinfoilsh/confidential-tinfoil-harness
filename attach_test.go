@@ -20,6 +20,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 func routerHarness(t *testing.T, router http.HandlerFunc) *harness {
@@ -56,10 +58,10 @@ func TestDocumentsConvertThroughTheRouter(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			fields := obj(decodeValue(raw(descriptor)))
+			fields := api.Obj(decodeValue(api.Raw(descriptor)))
 			text, hasText := fields["textContent"]
 			pages, hasPages := fields["pages"]
-			if hasText != (tc.text != nil) || text != tc.text || hasPages != (tc.pages > 0) || len(arr(pages)) != tc.pages {
+			if hasText != (tc.text != nil) || text != tc.text || hasPages != (tc.pages > 0) || len(api.Arr(pages)) != tc.pages {
 				t.Fatalf("descriptor kept absent fields or lost present ones: %v", descriptor)
 			}
 		})
@@ -99,7 +101,7 @@ func TestDocumentConversionWaitsOutCapacityRejections(t *testing.T) {
 				Attachment struct {
 					TextContent string `json:"textContent"`
 				} `json:"attachment"`
-				Error apiError `json:"error"`
+				Error api.Error `json:"error"`
 			}
 			json.Unmarshal(response.Body.Bytes(), &body)
 			if int(calls.Load()) != tc.calls || body.Error.Code != tc.code || body.Error.Upstream != tc.upstream {
@@ -128,7 +130,7 @@ func TestDocumentConversionStopsWaitingWithItsCaller(t *testing.T) {
 	time.AfterFunc(100*time.Millisecond, cancel)
 	began := time.Now()
 	_, err := h.convert(ctx, "report.pdf", []byte("%PDF-1.7 report"))
-	if asAPIError(err).Code != "RATE_LIMITED" || calls.Load() != 1 || time.Since(began) < 100*time.Millisecond || time.Since(began) > 2*time.Second {
+	if api.AsError(err).Code != "RATE_LIMITED" || calls.Load() != 1 || time.Since(began) < 100*time.Millisecond || time.Since(began) > 2*time.Second {
 		t.Fatalf("waited %v after its caller left: calls=%d err=%v", time.Since(began), calls.Load(), err)
 	}
 }
@@ -165,7 +167,7 @@ func TestTheComposerOffersWhatUploadsAccept(t *testing.T) {
 			DictationMaxSeconds           int
 		} `json:"composer"`
 	}
-	json.Unmarshal(postRoute(h, "/v1/session", object{}, "").Body.Bytes(), &session)
+	json.Unmarshal(postRoute(h, "/v1/session", api.Object{}, "").Body.Bytes(), &session)
 	offered := session.Composer
 	limitOf := func(groups []uploadGroup, ext string) int {
 		for _, g := range groups {
@@ -179,7 +181,7 @@ func TestTheComposerOffersWhatUploadsAccept(t *testing.T) {
 		limitOf(offered.Attachments, ".txt") == limitOf(offered.Attachments, ".png") || limitOf(offered.ProjectDocuments, ".png") == 0 || offered.PasteAsFileChars == 0 || offered.DictationMaxSeconds == 0 {
 		t.Fatalf("the composer offers %+v", offered)
 	}
-	refusal := func(name string, size int) apiError {
+	refusal := func(name string, size int) api.Error {
 		data := bytes.Repeat([]byte("x"), size)
 		// A file of no type uploads take is refused unless it reads as text.
 		if filepath.Ext(name) == ".exe" {
@@ -187,7 +189,7 @@ func TestTheComposerOffersWhatUploadsAccept(t *testing.T) {
 		}
 		w := uploadRoute(h, "/v1/attachments/upload", name, data, nil, "alice")
 		var body struct {
-			Error apiError `json:"error"`
+			Error api.Error `json:"error"`
 		}
 		json.Unmarshal(w.Body.Bytes(), &body)
 		return body.Error
@@ -232,7 +234,7 @@ func TestFilesThatReadAsTextAreTakenAsText(t *testing.T) {
 		w := uploadRoute(h, "/v1/attachments/upload", tc.name, tc.data, nil, "alice")
 		var got struct {
 			Attachment Attachment `json:"attachment"`
-			Error      apiError   `json:"error"`
+			Error      api.Error  `json:"error"`
 		}
 		json.Unmarshal(w.Body.Bytes(), &got)
 		if got.Error.Code != tc.code || got.Attachment.TextContent != tc.text || tc.code == "" && (got.Attachment.Kind != "document" || got.Attachment.FileName != tc.name) {
@@ -249,7 +251,7 @@ func TestFilesThatReadAsTextAreTakenAsText(t *testing.T) {
 		t.Errorf("text longer than its limit once read: HTTP %d %s", w.Code, w.Body.String())
 	}
 	in := sendInput(key)
-	in["attachments"] = []any{object{"id": "att_docker", "kind": "document", "fileName": "Dockerfile", "mimeType": "text/plain; charset=utf-8", "textContent": "FROM scratch\n"}}
+	in["attachments"] = []any{api.Object{"id": "att_docker", "kind": "document", "fileName": "Dockerfile", "mimeType": "text/plain; charset=utf-8", "textContent": "FROM scratch\n"}}
 	events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice"))
 	if last := events[len(events)-1]; last.Type != "RUN_FINISHED" {
 		t.Fatalf("a turn attaching a text file of no known type ended with %+v", last)
@@ -271,9 +273,9 @@ func TestATurnsUploadIsHeldToWhatUploadsMake(t *testing.T) {
 		png.Encode(&b, image.NewRGBA(image.Rect(0, 0, width, 10)))
 		return b.Bytes()
 	}
-	turn := func(attachments ...object) *httptest.ResponseRecorder {
+	turn := func(attachments ...api.Object) *httptest.ResponseRecorder {
 		in := sendInput(key)
-		obj(in["options"])["model"] = "auto"
+		api.Obj(in["options"])["model"] = "auto"
 		sent := []any{}
 		for _, a := range attachments {
 			sent = append(sent, a)
@@ -282,8 +284,8 @@ func TestATurnsUploadIsHeldToWhatUploadsMake(t *testing.T) {
 		return postRoute(h, "/v1/threads/turn", in, "alice")
 	}
 	large, small := picture(2000), picture(100)
-	events := eventsIn(t, turn(object{"id": "att_large", "kind": "image", "fileName": "large.png", "mimeType": "image/png", "base64": base64.StdEncoding.EncodeToString(large), "thumbnail": "dGh1bWI="},
-		object{"id": "att_small", "kind": "image", "fileName": "small.png", "mimeType": "image/png", "base64": base64.StdEncoding.EncodeToString(small), "thumbnail": "dGh1bWI="}))
+	events := eventsIn(t, turn(api.Object{"id": "att_large", "kind": "image", "fileName": "large.png", "mimeType": "image/png", "base64": base64.StdEncoding.EncodeToString(large), "thumbnail": "dGh1bWI="},
+		api.Object{"id": "att_small", "kind": "image", "fileName": "small.png", "mimeType": "image/png", "base64": base64.StdEncoding.EncodeToString(small), "thumbnail": "dGh1bWI="}))
 	chat := storedChat(t, rows, key, events[0].ThreadID)
 	dimensions := func(encoded []byte) string {
 		config, format, err := image.DecodeConfig(bytes.NewReader(encoded))
@@ -305,27 +307,27 @@ func TestATurnsUploadIsHeldToWhatUploadsMake(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name       string
-		attachment object
+		attachment api.Object
 		code       string
 	}{
-		{"unknown type", object{"kind": "document", "fileName": "run.exe", "base64": base64.StdEncoding.EncodeToString([]byte{0, 1, 2})}, "ATTACHMENT_UNSUPPORTED"},
-		{"wrong kind", object{"kind": "image", "fileName": "notes.txt", "textContent": "text"}, "ATTACHMENT_UNSUPPORTED"},
-		{"long text", object{"kind": "document", "fileName": "notes.txt", "textContent": strings.Repeat("x", 65)}, "ATTACHMENT_TOO_LARGE"},
-		{"large image", object{"kind": "image", "fileName": "small.png", "base64": base64.StdEncoding.EncodeToString(small)}, "ATTACHMENT_TOO_LARGE"},
-		{"not an image", object{"kind": "image", "fileName": "photo.png", "base64": base64.StdEncoding.EncodeToString([]byte("not an image"))}, "ATTACHMENT_UNSUPPORTED"},
-		{"image without its bytes", object{"kind": "image", "fileName": "photo.png", "thumbnail": "dGh1bWI="}, "BAD_REQUEST"},
+		{"unknown type", api.Object{"kind": "document", "fileName": "run.exe", "base64": base64.StdEncoding.EncodeToString([]byte{0, 1, 2})}, "ATTACHMENT_UNSUPPORTED"},
+		{"wrong kind", api.Object{"kind": "image", "fileName": "notes.txt", "textContent": "text"}, "ATTACHMENT_UNSUPPORTED"},
+		{"long text", api.Object{"kind": "document", "fileName": "notes.txt", "textContent": strings.Repeat("x", 65)}, "ATTACHMENT_TOO_LARGE"},
+		{"large image", api.Object{"kind": "image", "fileName": "small.png", "base64": base64.StdEncoding.EncodeToString(small)}, "ATTACHMENT_TOO_LARGE"},
+		{"not an image", api.Object{"kind": "image", "fileName": "photo.png", "base64": base64.StdEncoding.EncodeToString([]byte("not an image"))}, "ATTACHMENT_UNSUPPORTED"},
+		{"image without its bytes", api.Object{"kind": "image", "fileName": "photo.png", "thumbnail": "dGh1bWI="}, "BAD_REQUEST"},
 	} {
 		tc.attachment["id"] = "att_refused"
 		w := turn(tc.attachment)
 		var refused struct {
-			Error apiError `json:"error"`
+			Error api.Error `json:"error"`
 		}
 		json.Unmarshal(w.Body.Bytes(), &refused)
 		if refused.Error.Code != tc.code {
 			t.Errorf("%s: HTTP %d %s", tc.name, w.Code, w.Body.String())
 		}
 	}
-	events = eventsIn(t, turn(object{"id": "att_text", "kind": "document", "fileName": "notes.txt", "textContent": strings.Repeat("x", 64)}))
+	events = eventsIn(t, turn(api.Object{"id": "att_text", "kind": "document", "fileName": "notes.txt", "textContent": strings.Repeat("x", 64)}))
 	if events[len(events)-1].Type != "RUN_FINISHED" {
 		t.Fatalf("text at the limit ended with %+v", events[len(events)-1])
 	}
@@ -365,12 +367,12 @@ func TestATurnResizesNoMorePixelsThanOneImageHolds(t *testing.T) {
 		encoded := base64.StdEncoding.EncodeToString(declaredPNG(width, tc.height))
 		in := sendInput(key)
 		in["attachments"] = []any{
-			object{"id": "att_first", "kind": "image", "fileName": "first.png", "base64": encoded},
-			object{"id": "att_second", "kind": "image", "fileName": "second.png", "base64": encoded},
+			api.Object{"id": "att_first", "kind": "image", "fileName": "first.png", "base64": encoded},
+			api.Object{"id": "att_second", "kind": "image", "fileName": "second.png", "base64": encoded},
 		}
 		w := postRoute(h, "/v1/threads/turn", in, "alice")
 		var refused struct {
-			Error apiError `json:"error"`
+			Error api.Error `json:"error"`
 		}
 		json.Unmarshal(w.Body.Bytes(), &refused)
 		if w.Code != tc.status || refused.Error.Code != tc.code {
@@ -390,40 +392,40 @@ func TestAnImageKeepsOneFormFromUploadToView(t *testing.T) {
 	png.Encode(&source, image.NewRGBA(image.Rect(0, 0, 2000, 10)))
 	upload := uploadRoute(h, "/v1/attachments/upload", "photo.png", source.Bytes(), nil, "alice")
 	var uploaded struct {
-		Attachment object `json:"attachment"`
+		Attachment api.Object `json:"attachment"`
 	}
 	json.Unmarshal(upload.Body.Bytes(), &uploaded)
 	sent := uploaded.Attachment
 	shown := []string{"fileName", "id", "kind", "mimeType", "size", "thumbnail"}
-	if got := slices.Sorted(maps.Keys(sent)); upload.Code != 200 || !slices.Equal(got, slices.Sorted(slices.Values(append(shown, "base64")))) || sent["kind"] != "image" || integer(sent["size"]) != source.Len() {
+	if got := slices.Sorted(maps.Keys(sent)); upload.Code != 200 || !slices.Equal(got, slices.Sorted(slices.Values(append(shown, "base64")))) || sent["kind"] != "image" || api.Int(sent["size"]) != source.Len() {
 		t.Fatalf("upload: HTTP %d %v", upload.Code, sent)
 	}
-	modelCopy, _ := base64.StdEncoding.DecodeString(str(sent["base64"]))
+	modelCopy, _ := base64.StdEncoding.DecodeString(api.Str(sent["base64"]))
 	if config, format, err := image.DecodeConfig(bytes.NewReader(modelCopy)); err != nil || format != "jpeg" || config.Width != 1536 {
 		t.Fatalf("the upload's copy for models is %s %+v: %v", format, config, err)
 	}
-	fieldsOf := func(a any) []string { return slices.Sorted(maps.Keys(obj(a))) }
+	fieldsOf := func(a any) []string { return slices.Sorted(maps.Keys(api.Obj(a))) }
 	in := sendInput(key)
-	obj(in["options"])["model"] = "auto"
+	api.Obj(in["options"])["model"] = "auto"
 	in["attachments"] = []any{sent}
 	events := finishedRun(t, h, "/v1/threads/turn", in)
 	thread := events[0].ThreadID
 	row, _ := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", thread)
-	stored := obj(arr(obj(arr(rowJSON(row)["messages"])[0])["attachments"])[0])
-	if got := fieldsOf(stored); !slices.Equal(got, []string{"encryptionKey", "fileName", "id", "kind", "mimeType", "size", "storageThreadId", "thumbnail"}) || stored["thumbnail"] != sent["thumbnail"] || !bytes.Equal(fake.blobs[str(stored["id"])].data, modelCopy) {
+	stored := api.Obj(api.Arr(api.Obj(api.Arr(rowJSON(row)["messages"])[0])["attachments"])[0])
+	if got := fieldsOf(stored); !slices.Equal(got, []string{"encryptionKey", "fileName", "id", "kind", "mimeType", "size", "storageThreadId", "thumbnail"}) || stored["thumbnail"] != sent["thumbnail"] || !bytes.Equal(fake.blobs[api.Str(stored["id"])].data, modelCopy) {
 		t.Fatalf("the chat stored %v", stored)
 	}
 	var window struct {
-		Messages []object `json:"messages"`
+		Messages []api.Object `json:"messages"`
 	}
-	json.Unmarshal(postRoute(h, "/v1/threads/get", object{"key": key.base64(), "id": thread}, "alice").Body.Bytes(), &window)
-	views := []any{arr(obj(arr(eventOfType(events, "MESSAGES_SNAPSHOT").Messages)[0])["attachments"])[0], arr(window.Messages[0]["attachments"])[0]}
+	json.Unmarshal(postRoute(h, "/v1/threads/get", api.Object{"key": key.base64(), "id": thread}, "alice").Body.Bytes(), &window)
+	views := []any{api.Arr(api.Obj(api.Arr(eventOfType(events, "MESSAGES_SNAPSHOT").Messages)[0])["attachments"])[0], api.Arr(window.Messages[0]["attachments"])[0]}
 	local := localInput("", nil)
-	obj(local["options"])["model"] = "auto"
+	api.Obj(local["options"])["model"] = "auto"
 	local["attachments"] = []any{sent}
-	views = append(views, arr(obj(arr(endedThread(t, h, local, "RUN_FINISHED")["messages"])[0])["attachments"])[0])
+	views = append(views, api.Arr(api.Obj(api.Arr(endedThread(t, h, local, "RUN_FINISHED")["messages"])[0])["attachments"])[0])
 	for _, view := range views {
-		if got := fieldsOf(view); !slices.Equal(got, shown) || obj(view)["thumbnail"] != sent["thumbnail"] || obj(view)["fileName"] != "photo.png" {
+		if got := fieldsOf(view); !slices.Equal(got, shown) || api.Obj(view)["thumbnail"] != sent["thumbnail"] || api.Obj(view)["fileName"] != "photo.png" {
 			t.Fatalf("an attachment is shown as %v", view)
 		}
 	}

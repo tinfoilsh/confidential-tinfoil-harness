@@ -1,8 +1,12 @@
 package main
 
-import "context"
+import (
+	"context"
 
-var errShutdown = apiErr(503, "UPSTREAM_REFUSED", "The service is shutting down")
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+)
+
+var errShutdown = api.Err(503, "UPSTREAM_REFUSED", "The service is shutting down")
 
 // stopRuns refuses new turns, cancels every running reply, and ends every
 // queued turn.

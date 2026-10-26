@@ -1,6 +1,10 @@
 package main
 
-import "context"
+import (
+	"context"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+)
 
 // Change tokens describe storage metadata, without loading chat contents.
 func (h *harness) storageChanges(ctx context.Context, p *principal) (any, error) {
@@ -27,10 +31,10 @@ func (h *harness) storageChanges(ctx context.Context, p *principal) (any, error)
 		if scope == "profile" {
 			direction = "asc"
 		}
-		if err := h.syncAPI.call(ctx, p, "/v1/sync/list-status", object{"scope": scope, "direction": direction, "limit": 1}, &status); err != nil {
+		if err := h.syncAPI.call(ctx, p, "/v1/sync/list-status", api.Object{"scope": scope, "direction": direction, "limit": 1}, &status); err != nil {
 			return nil, err
 		}
-		tokens[scope] = hashHex(raw(status))
+		tokens[scope] = hashHex(api.Raw(status))
 	}
 	return struct {
 		Chats    string `json:"chats"`

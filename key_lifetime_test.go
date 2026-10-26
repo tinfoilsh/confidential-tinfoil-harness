@@ -8,14 +8,16 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 func TestInvalidKeyEncodingNamesTheKey(t *testing.T) {
 	h, _, _ := testChatHarness(t, nil)
 	for _, key := range []any{true, "not-base64"} {
-		w := postRoute(h, "/v1/threads/get", object{"key": key, "id": "chat-1"}, "alice")
+		w := postRoute(h, "/v1/threads/get", api.Object{"key": key, "id": "chat-1"}, "alice")
 		var response struct {
-			Error apiError `json:"error"`
+			Error api.Error `json:"error"`
 		}
 		json.Unmarshal(w.Body.Bytes(), &response)
 		if w.Code != http.StatusBadRequest || response.Error.Code != "BAD_REQUEST" || !strings.Contains(response.Error.Message, "key") {
@@ -24,26 +26,15 @@ func TestInvalidKeyEncodingNamesTheKey(t *testing.T) {
 	}
 }
 
-func TestKeyBufferGrowthErasesPreviousAllocation(t *testing.T) {
-	key := randomKey()
-	var buffer wipingBuffer
-	buffer.Write(key[:])
-	previous := buffer.data
-	buffer.Write(bytes.Repeat([]byte("x"), cap(previous)+1))
-	if !bytes.Equal(previous, make([]byte, len(previous))) || !bytes.Equal(buffer.data[:len(key)], key[:]) {
-		t.Fatal("growing the key buffer retained the old allocation or lost the key")
-	}
-}
-
 // The streaming handler must not retain the encoded key after decoding it.
 func TestRequestKeysAreClearedAfterDecoding(t *testing.T) {
 	key := randomKey()
-	body := raw(object{"key": key.base64(), "threadId": "chat-1"})
+	body := api.Raw(api.Object{"key": key.base64(), "threadId": "chat-1"})
 	var received *runRequest
 	handle := decoded(func(_ context.Context, _ *principal, _ contentKey, in *runRequest) (any, error) {
 		received = in
-		var wire object
-		json.Unmarshal(raw(in), &wire)
+		var wire api.Object
+		json.Unmarshal(api.Raw(in), &wire)
 		if wire["key"] != key.base64() || in.ThreadID != "chat-1" {
 			t.Fatal("the decoded request lost its key or thread")
 		}
@@ -104,7 +95,7 @@ func TestSyncRequestKeyReadersAreCleared(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				var in object
+				var in api.Object
 				if json.Unmarshal(first, &in) != nil || in["key"] != key.base64() || in["id"] != "chat-1" || in["scope"] != "chat" {
 					t.Fatal("sync did not receive the requested key and row")
 				}
@@ -121,7 +112,7 @@ func TestSyncRequestKeyReadersAreCleared(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				return syncTestResponse(status, object{})
+				return syncTestResponse(status, api.Object{})
 			})}}
 			err := s.remove(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, key, "chat", "chat-1")
 			if (err == nil) != (status == http.StatusOK) || sent == nil || late == nil {

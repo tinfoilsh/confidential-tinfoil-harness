@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"slices"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 func (h *harness) cancelThread(ctx context.Context, p *principal, _ contentKey, in *runRequest) (any, error) {
@@ -18,7 +20,7 @@ func (h *harness) cancelThread(ctx context.Context, p *principal, _ contentKey, 
 	h.live.mu.Lock()
 	defer h.live.mu.Unlock()
 	if r.thread.active != r || r.ending {
-		return nil, apiErr(409, "RUN_IN_FLIGHT", "This run is no longer active")
+		return nil, api.Err(409, "RUN_IN_FLIGHT", "This run is no longer active")
 	}
 	r.cancelled = true
 	r.log.stop()
@@ -41,7 +43,7 @@ func (h *harness) sendQueued(ctx context.Context, p *principal, _ contentKey, in
 	index := slices.Index(s.queue, r)
 	if index < 0 {
 		h.live.mu.Unlock()
-		return nil, apiErr(409, "RUN_IN_FLIGHT", "The queued turn has started")
+		return nil, api.Err(409, "RUN_IN_FLIGHT", "The queued turn has started")
 	}
 	s.queue = append([]*chatRun{r}, slices.Delete(s.queue, index, index+1)...)
 	queueChanged(s)
@@ -70,7 +72,7 @@ func (h *harness) removeQueued(ctx context.Context, p *principal, _ contentKey, 
 	s := r.thread
 	index := slices.Index(s.queue, r)
 	if index < 0 {
-		return nil, apiErr(409, "RUN_IN_FLIGHT", "The queued turn has started")
+		return nil, api.Err(409, "RUN_IN_FLIGHT", "The queued turn has started")
 	}
 	s.queue = slices.Delete(s.queue, index, index+1)
 	r.cancelled = true

@@ -1,5 +1,7 @@
 package main
 
+import "github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+
 // applyTurn makes the change a turn's kind makes to a transcript before its
 // reply: a new or edited question, or the cut a regeneration or
 // continuation starts from. An answer to the last question changes nothing.
@@ -16,14 +18,14 @@ func applyTurn(t *Thread, in *turnRequest, messageID string, attachments []Attac
 			index = len(messages) - 1
 		}
 		if index < 0 {
-			return apiErr(404, "THREAD_NOT_FOUND", "The message was not found")
+			return api.Err(404, "THREAD_NOT_FOUND", "The message was not found")
 		}
 		role := "user"
 		if in.Kind != "edit" {
 			role = "assistant"
 		}
 		if messages[index].Role != role {
-			return apiErr(400, "BAD_REQUEST", "The turn kind does not match the message role")
+			return api.Err(400, "BAD_REQUEST", "The turn kind does not match the message role")
 		}
 		if in.Kind == "edit" {
 			if in.Content == nil {
@@ -49,7 +51,7 @@ func applyTurn(t *Thread, in *turnRequest, messageID string, attachments []Attac
 		content, quote = valueOr(in.Quote, ""), ""
 	}
 	if in.Kind != "regenerate" && in.Kind != "retryToolCall" && in.Kind != "continue" && in.Kind != "answer" {
-		messages = append(messages, Message{ID: messageID, Role: "user", Content: content, Quote: quote, Attachments: attachments, CreatedAt: timestamp()})
+		messages = append(messages, Message{ID: messageID, Role: "user", Content: content, Quote: quote, Attachments: attachments, CreatedAt: api.Timestamp()})
 	}
 	t.Messages = messages
 	return nil
@@ -60,7 +62,7 @@ func applyTurn(t *Thread, in *turnRequest, messageID string, attachments []Attac
 // regenerated, and a last question without a reply is answered.
 func retried(t *Thread, in *turnRequest) (*turnRequest, error) {
 	if len(t.Messages) == 0 {
-		return nil, apiErr(400, "BAD_REQUEST", "The chat has nothing to retry")
+		return nil, api.Err(400, "BAD_REQUEST", "The chat has nothing to retry")
 	}
 	turn, last := *in, t.Messages[len(t.Messages)-1]
 	switch {

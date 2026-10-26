@@ -13,6 +13,8 @@ import (
 	"path"
 	"slices"
 	"strings"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 // nativeBackup is a native backup whose every entry was found listed in
@@ -25,7 +27,7 @@ type nativeBackup struct {
 	chatImages map[string][]string
 }
 
-var errInvalidBackup = func(why string) error { return apiErr(400, "IMPORT_INVALID", "The backup is invalid: "+why) }
+var errInvalidBackup = func(why string) error { return api.Err(400, "IMPORT_INVALID", "The backup is invalid: "+why) }
 
 // openNativeBackup checks an archive that names itself a native backup,
 // or returns nil for any other archive.
@@ -52,7 +54,7 @@ func openNativeBackup(zr *zip.Reader) (*nativeBackup, error) {
 			return nil, errInvalidBackup("it holds an unknown, unsafe or repeated entry")
 		}
 		if expanded += f.UncompressedSize64; f.UncompressedSize64 > backupEntryLimit(f.Name) || expanded > maxArchiveExpansion {
-			return nil, apiErr(413, "IMPORT_TOO_LARGE", "The backup exceeds the size limits")
+			return nil, api.Err(413, "IMPORT_TOO_LARGE", "The backup exceeds the size limits")
 		}
 		b.entries[f.Name] = f
 	}

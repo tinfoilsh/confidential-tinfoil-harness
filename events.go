@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 // runEvent is one event of a run, each type as protocol/openapi.yaml names it.
@@ -126,12 +128,12 @@ type runFinished struct {
 type runError struct {
 	ThreadID string `json:"threadId,omitempty"`
 	RunID    string `json:"runId,omitempty"`
-	*apiError
+	*api.Error
 	Metadata *runMetadata `json:"metadata,omitempty"`
 }
 
-func failedRun(threadID, runID string, e *apiError, metadata *runMetadata) runError {
-	return runError{ThreadID: threadID, RunID: runID, apiError: e, Metadata: metadata}
+func failedRun(threadID, runID string, e *api.Error, metadata *runMetadata) runError {
+	return runError{ThreadID: threadID, RunID: runID, Error: e, Metadata: metadata}
 }
 
 func (runStarted) eventType() string         { return "RUN_STARTED" }

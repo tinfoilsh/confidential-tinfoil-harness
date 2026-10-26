@@ -16,6 +16,7 @@ import (
 	"github.com/MicahParks/keyfunc/v3"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/hashicorp/golang-lru/v2/expirable"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 type secret string
@@ -49,61 +50,10 @@ func (p *principal) scope() string {
 	return "anonymous:" + p.AnonymousID
 }
 
-type tokenBudget struct {
-	Max       int `json:"max"`
-	Used      int `json:"used"`
-	Remaining int `json:"remaining"`
-}
-
-// Only free keys count requests; a subscriber's hourly cap is in tokens.
-type rateLimit struct {
-	Kind         any          `json:"kind"`
-	MaxRequests  *int         `json:"maxRequests,omitempty"`
-	Remaining    *int         `json:"remaining,omitempty"`
-	InputTokens  *tokenBudget `json:"inputTokens,omitempty"`
-	OutputTokens *tokenBudget `json:"outputTokens,omitempty"`
-	ResetsAt     string       `json:"resetsAt,omitempty"`
-}
-
-func (l rateLimit) exhausted() bool { return l.Remaining != nil && *l.Remaining <= 0 }
-
-func exhaustedLimit(kind string) rateLimit {
-	return rateLimit{Kind: kind, MaxRequests: new(0), Remaining: new(0)}
-}
-
-// quota is the rate_limit object both credential exchanges answer with. A
-// missing or zero maximum leaves that dimension unlimited.
-type quota struct {
-	MaxRequests     *int   `json:"max_requests"`
-	Remaining       *int   `json:"remaining"`
-	MaxInput        *int   `json:"max_input_tokens"`
-	InputUsed       *int   `json:"input_tokens_used"`
-	InputRemaining  *int   `json:"input_tokens_remaining"`
-	MaxOutput       *int   `json:"max_output_tokens"`
-	OutputUsed      *int   `json:"output_tokens_used"`
-	OutputRemaining *int   `json:"output_tokens_remaining"`
-	ResetsAt        string `json:"resets_at"`
-}
-
-func (q quota) limit(kind string) rateLimit {
-	l := rateLimit{Kind: kind, InputTokens: budget(q.MaxInput, q.InputUsed, q.InputRemaining), OutputTokens: budget(q.MaxOutput, q.OutputUsed, q.OutputRemaining), ResetsAt: q.ResetsAt}
-	if q.MaxRequests != nil && *q.MaxRequests > 0 && q.Remaining != nil {
-		l.MaxRequests, l.Remaining = q.MaxRequests, q.Remaining
-	}
-	return l
-}
-
-func budget(limit, used, remaining *int) *tokenBudget {
-	if limit == nil || used == nil || remaining == nil || *limit <= 0 {
-		return nil
-	}
-	return &tokenBudget{*limit, *used, *remaining}
-}
-
 type inferenceCredential struct {
 	Key     secret
 	Expires time.Time
-	Limit   rateLimit
+	Limit   api.RateLimit
 	// firstParty marks a Tinfoil Chat access token, which only a subscriber
 	// holds and whose conversations are screened.
 	firstParty bool
@@ -141,7 +91,7 @@ const (
 	credentialTTL    = time.Hour
 )
 
-var errCredentialRequired = apiErr(401, "CREDENTIAL_REQUIRED", "Chat access is missing or expired")
+var errCredentialRequired = api.Err(401, "CREDENTIAL_REQUIRED", "Chat access is missing or expired")
 
 type authenticator struct {
 	verify       func(context.Context, string) (string, error)
@@ -201,11 +151,11 @@ func newAuthenticator(ctx context.Context, issuer, cp string) (*authenticator, e
 // session, or, where anonymous is allowed, a signed-out caller's free key.
 func (a *authenticator) authenticate(r *http.Request, anonymous bool) (*principal, error) {
 	if a == nil {
-		return nil, apiErr(503, "UNAUTHENTICATED", "Authentication is not configured").withAction(actionStop)
+		return nil, api.Err(503, "UNAUTHENTICATED", "Authentication is not configured").WithAction(api.ActionStop)
 	}
 	token := bearer(r.Header.Get("Authorization"))
 	if token == "" {
-		return nil, apiErr(401, "UNAUTHENTICATED", "A Clerk session is required")
+		return nil, api.Err(401, "UNAUTHENTICATED", "A Clerk session is required")
 	}
 	if anonymous && strings.HasPrefix(token, "free_") && len(token) > len("free_") && len(token) <= 256 {
 		// Possession scopes ephemeral state. The prefix is not validation:
@@ -214,7 +164,7 @@ func (a *authenticator) authenticate(r *http.Request, anonymous bool) (*principa
 	}
 	id, err := a.verify(r.Context(), token)
 	if err != nil {
-		return nil, apiErr(401, "UNAUTHENTICATED", "The Clerk session is invalid or expired")
+		return nil, api.Err(401, "UNAUTHENTICATED", "The Clerk session is invalid or expired")
 	}
 	p := &principal{ID: id, JWT: secret(token), InferenceKey: secret(strings.TrimSpace(r.Header.Get(inferenceKeyHeader)))}
 	// Every request carrying a chat token keeps the newest one at hand for
@@ -250,8 +200,8 @@ type keyValidation struct {
 
 // validatedKey is a valid key's validation, with a free chat key's quota.
 type validatedKey struct {
-	OK        bool   `json:"ok"`
-	RateLimit *quota `json:"rate_limit"`
+	OK        bool       `json:"ok"`
+	RateLimit *api.Quota `json:"rate_limit"`
 }
 
 // freeKey validates a free key, a signed-out caller's or a signed-in
@@ -274,7 +224,7 @@ func (a *authenticator) validateFreeKey(ctx context.Context, p *principal) (infe
 	// Reuse the validation endpoint already used by shims on Tinfoil hosts,
 	// asking it for the key's quota. No key issuance, client IP, or expiry
 	// metadata comes from this call.
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.controlplane+"/api/shim/validate-key", bytes.NewReader(raw(keyValidation{APIKey: p.InferenceKey, IncludeRateLimit: true})))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.controlplane+"/api/shim/validate-key", bytes.NewReader(api.Raw(keyValidation{APIKey: p.InferenceKey, IncludeRateLimit: true})))
 	if err != nil {
 		return inferenceCredential{}, err
 	}
@@ -297,33 +247,33 @@ func (a *authenticator) validateFreeKey(ctx context.Context, p *principal) (infe
 	if resp.StatusCode == http.StatusOK && json.Unmarshal(body, &validated) == nil && validated.OK {
 		credential := inferenceCredential{Key: p.InferenceKey}
 		if validated.RateLimit != nil {
-			credential.Limit = validated.RateLimit.limit("free_daily")
+			credential.Limit = validated.RateLimit.Limit("free_daily")
 		}
 		return credential, nil
 	}
-	var detail object
+	var detail api.Object
 	json.Unmarshal(body, &detail)
-	if resp.StatusCode == http.StatusTooManyRequests && str(obj(detail["error"])["code"]) == "insufficient_quota" {
+	if resp.StatusCode == http.StatusTooManyRequests && api.Str(api.Obj(detail["error"])["code"]) == "insufficient_quota" {
 		// An exhausted key may still open the session and show the quota
 		// banner. acceptTurn refuses to start work with this zero balance.
-		return inferenceCredential{Key: p.InferenceKey, Limit: exhaustedLimit("free_daily")}, nil
+		return inferenceCredential{Key: p.InferenceKey, Limit: api.ExhaustedLimit("free_daily")}, nil
 	}
 	switch {
 	case resp.StatusCode/100 == 2:
 		return inferenceCredential{}, errors.New("invalid key validation response")
 	case resp.StatusCode == http.StatusPaymentRequired:
-		return inferenceCredential{}, apiErr(403, "UPSTREAM_REFUSED", "This chat key is disabled").withAction(actionStop)
-	case resp.StatusCode == http.StatusUnauthorized && str(detail["error"]) != "":
+		return inferenceCredential{}, api.Err(403, "UPSTREAM_REFUSED", "This chat key is disabled").WithAction(api.ActionStop)
+	case resp.StatusCode == http.StatusUnauthorized && api.Str(detail["error"]) != "":
 		// A refused caller address, not a refused key: the controlplane
 		// answers only Tinfoil hosts registered for key validation.
 		slog.Error("controlplane refused key validation from this host", "status", resp.StatusCode)
-		return inferenceCredential{}, apiErr(503, "UPSTREAM_REFUSED", "Anonymous chat is unavailable on this deployment").withAction(actionStop)
+		return inferenceCredential{}, api.Err(503, "UPSTREAM_REFUSED", "Anonymous chat is unavailable on this deployment").WithAction(api.ActionStop)
 	case resp.StatusCode == http.StatusServiceUnavailable:
-		e := apiErr(503, "UPSTREAM_REFUSED", "Key validation is temporarily unavailable")
-		e.RetryAfter = retryAfter(resp.Header)
+		e := api.Err(503, "UPSTREAM_REFUSED", "Key validation is temporarily unavailable")
+		e.RetryAfter = api.RetryAfter(resp.Header)
 		return inferenceCredential{}, e
 	}
-	return inferenceCredential{}, withRetryAfter(downstreamError(resp.StatusCode, body), resp.Header)
+	return inferenceCredential{}, api.WithRetryAfter(api.DownstreamError(resp.StatusCode, body), resp.Header)
 }
 
 // inference is the credential a caller's model calls carry: a signed-out
@@ -331,7 +281,7 @@ func (a *authenticator) validateFreeKey(ctx context.Context, p *principal) (infe
 func (a *authenticator) inference(ctx context.Context, p *principal) (inferenceCredential, error) {
 	switch {
 	case p.InferenceKey == "" && p.Anonymous:
-		return inferenceCredential{}, apiErr(401, "UNAUTHENTICATED", "An anonymous chat key is required")
+		return inferenceCredential{}, api.Err(401, "UNAUTHENTICATED", "An anonymous chat key is required")
 	case p.InferenceKey == "":
 		return inferenceCredential{}, errCredentialRequired
 	case strings.HasPrefix(string(p.InferenceKey), "free_"):
@@ -367,44 +317,17 @@ func (a *authenticator) chatToken(p *principal) (inferenceCredential, error) {
 func (a *authenticator) renewed(p *principal, refused secret) (inferenceCredential, error) {
 	a.caches()
 	credential, ok := a.newest.Get(p.scope())
-	if !ok || credential.Key == refused || !credential.Expires.After(nowUTC()) {
+	if !ok || credential.Key == refused || !credential.Expires.After(api.Now()) {
 		return inferenceCredential{}, errCredentialRequired
 	}
 	return credential, nil
 }
 
-// debited is the quota after a run's request and the tokens it spent.
-func (l rateLimit) debited(spent usage) rateLimit {
-	if l.Remaining != nil {
-		l.Remaining = new(max(0, *l.Remaining-1))
-	}
-	l.InputTokens = l.InputTokens.spend(spent.Prompt)
-	l.OutputTokens = l.OutputTokens.spend(spent.Completion)
-	return l
-}
-
-// none is the quota with no request left.
-func (l rateLimit) none() rateLimit {
-	if l.MaxRequests == nil {
-		l.MaxRequests = new(0)
-	}
-	l.Remaining = new(0)
-	return l
-}
-
-// spend is a token budget after tokens are spent from it.
-func (b *tokenBudget) spend(tokens int64) *tokenBudget {
-	if b == nil {
-		return nil
-	}
-	return &tokenBudget{Max: b.Max, Used: b.Used + int(tokens), Remaining: max(0, b.Remaining-int(tokens))}
-}
-
 // exhausted is the quota a refusal for a spent one leaves: no request left,
 // and a free key's quota is its daily one.
-func exhausted(p *principal, held rateLimit) rateLimit {
+func exhausted(p *principal, held api.RateLimit) api.RateLimit {
 	if strings.HasPrefix(string(p.InferenceKey), "free_") {
 		held.Kind = "free_daily"
 	}
-	return held.none()
+	return held.None()
 }

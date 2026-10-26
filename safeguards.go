@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 // Completed first-party chat conversations are submitted to the safeguards
@@ -123,12 +125,12 @@ func flattenContent(content any) string {
 			if i > 0 {
 				b.WriteByte('\n')
 			}
-			if kind := str(p["type"]); kind != "text" {
+			if kind := api.Str(p["type"]); kind != "text" {
 				fmt.Fprintf(&b, "[%s]", kind)
 			} else if text, ok := p["text"].(string); ok {
 				b.WriteString(text)
 			} else {
-				b.WriteString(str(p["refusal"]))
+				b.WriteString(api.Str(p["refusal"]))
 			}
 		}
 		return b.String()

@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 // What the API returns of a thread and its parts.
@@ -33,7 +35,7 @@ func summarize(t *Thread) threadSummary {
 	// stored by a process from before runs named theirs, whose runs ended
 	// when it did.
 	if run := t.ActiveRun; run != nil && run.Instance != "" {
-		if expires, err := time.Parse(time.RFC3339Nano, run.ExpiresAt); err == nil && nowUTC().Before(expires) {
+		if expires, err := time.Parse(time.RFC3339Nano, run.ExpiresAt); err == nil && api.Now().Before(expires) {
 			s.ActiveRun = &ActiveRun{RunID: run.RunID, ExpiresAt: run.ExpiresAt, Instance: run.Instance}
 		}
 	}
@@ -203,8 +205,8 @@ type statePatch struct {
 type runMetadata struct {
 	Messages  []committedReply `json:"messages,omitzero"`
 	Thread    *Thread          `json:"thread,omitempty"`
-	Usage     *usage           `json:"usage,omitempty"`
-	RateLimit *rateLimit       `json:"rateLimit,omitempty"`
+	Usage     *api.Usage       `json:"usage,omitempty"`
+	RateLimit *api.RateLimit   `json:"rateLimit,omitempty"`
 	Cancelled *bool            `json:"cancelled,omitempty"`
 }
 
@@ -243,7 +245,7 @@ type queuedAttachment struct {
 type stateSnapshot struct {
 	Thread    threadSummary `json:"thread"`
 	Queue     []queueItem   `json:"queue"`
-	RateLimit rateLimit     `json:"rateLimit"`
+	RateLimit api.RateLimit `json:"rateLimit"`
 }
 
 // The version of protocol/openapi.yaml this harness speaks, and the oldest
@@ -262,7 +264,7 @@ type protocolView struct {
 type sessionView struct {
 	Protocol        protocolView    `json:"protocol"`
 	User            sessionUser     `json:"user"`
-	RateLimit       rateLimit       `json:"rateLimit"`
+	RateLimit       api.RateLimit   `json:"rateLimit"`
 	Models          []sessionModel  `json:"models"`
 	Auto            autoView        `json:"auto"`
 	DefaultModel    string          `json:"defaultModel"`

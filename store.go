@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 // The store is the harness's typed view of sync: chats, the profile,
@@ -19,7 +20,7 @@ import (
 // Nothing else calls sync. Rows are read through the legacy reader, so a
 // row any client wrote reads in the current format.
 
-var errEveryCommitConflicted = apiErr(409, "REVISION_CONFLICT", "The row changed during every commit attempt")
+var errEveryCommitConflicted = api.Err(409, "REVISION_CONFLICT", "The row changed during every commit attempt")
 
 // push writes a row at the revision it was read at; an empty one creates
 // it. A push whose outcome is unknown is sent again under the same
@@ -32,7 +33,7 @@ func (h *harness) push(ctx context.Context, p *principal, key contentKey, scope 
 			row.ETag = etag
 			return nil
 		}
-		if asAPIError(err).Code != "SYNC_OUTCOME_UNKNOWN" || attempt == maxCommitAttempts {
+		if api.AsError(err).Code != "SYNC_OUTCOME_UNKNOWN" || attempt == maxCommitAttempts {
 			return err
 		}
 	}
@@ -46,7 +47,7 @@ func (h *harness) commitRow(ctx context.Context, p *principal, key contentKey, s
 		row, err := h.storeRows.load(ctx, p, key, scope, id)
 		exists := err == nil
 		if !exists {
-			if !create || asAPIError(err).HTTP != 404 {
+			if !create || api.AsError(err).HTTP != 404 {
 				return err
 			}
 			row = &storedRow{ID: id}
@@ -55,7 +56,7 @@ func (h *harness) commitRow(ctx context.Context, p *principal, key contentKey, s
 			return err
 		}
 		err = h.push(ctx, p, key, scope, row)
-		if err == nil || asAPIError(err).Code != "REVISION_CONFLICT" {
+		if err == nil || api.AsError(err).Code != "REVISION_CONFLICT" {
 			return err
 		}
 	}
@@ -83,7 +84,7 @@ func (h *harness) eachRowOrUnreadable(ctx context.Context, p *principal, key con
 			return nil
 		}
 		if cursor == page.Next {
-			return apiErr(502, "UPSTREAM_REFUSED", "The storage cursor did not advance")
+			return api.Err(502, "UPSTREAM_REFUSED", "The storage cursor did not advance")
 		}
 		cursor = page.Next
 	}
@@ -114,7 +115,7 @@ func (h *harness) threadBatch(ctx context.Context, p *principal, key contentKey,
 		return nil, err
 	}
 	for _, err := range failed {
-		if asAPIError(err).HTTP != 409 {
+		if api.AsError(err).HTTP != 409 {
 			return nil, err
 		}
 	}
@@ -154,17 +155,17 @@ func (h *harness) threadPage(ctx context.Context, p *principal, key contentKey, 
 // attachments sync does not hold under it is repaired once and pushed again.
 func (h *harness) saveThread(ctx context.Context, p *principal, key contentKey, row *threadRow) error {
 	row.RecordVersion = recordVersion
-	row.UpdatedAt = timestamp()
+	row.UpdatedAt = api.Timestamp()
 	for repaired := false; ; repaired = true {
-		stored := storedRow{ID: row.ID, ETag: row.etag, Data: raw(row.Thread), project: row.ProjectID, projectSet: true, restore: row.restore}
+		stored := storedRow{ID: row.ID, ETag: row.etag, Data: api.Raw(row.Thread), project: row.ProjectID, projectSet: true, restore: row.restore}
 		err := h.push(ctx, p, key, "chat", &stored)
 		if err == nil {
 			row.etag = stored.ETag
 			return nil
 		}
-		if e := asAPIError(err); e.Code != "MISSING_ATTACHMENT" || repaired {
+		if e := api.AsError(err); e.Code != "MISSING_ATTACHMENT" || repaired {
 			return err
-		} else if err := h.repairAttachments(ctx, p, &row.Thread, e.missing); err != nil {
+		} else if err := h.repairAttachments(ctx, p, &row.Thread, e.Missing); err != nil {
 			return err
 		}
 	}
@@ -185,7 +186,7 @@ func (h *harness) mutateThread(ctx context.Context, p *principal, key contentKey
 		if err == nil {
 			return row, nil
 		}
-		if asAPIError(err).Code != "REVISION_CONFLICT" {
+		if api.AsError(err).Code != "REVISION_CONFLICT" {
 			return nil, err
 		}
 	}
@@ -206,7 +207,7 @@ func (h *harness) chatIDs(ctx context.Context, p *principal, project string) ([]
 // forkStored has sync copy a chat's first count messages, with their
 // attachments, into a new chat.
 func (h *harness) forkStored(ctx context.Context, p *principal, key contentKey, source, target, title string, count int) error {
-	return h.syncAPI.callKey(ctx, p, "/v1/sync/fork", key, object{"source_id": source, "target_id": target, "message_count": count, "title": title, "created_at": timestamp(), "idempotency_key": uuid.NewString()}, nil)
+	return h.syncAPI.callKey(ctx, p, "/v1/sync/fork", key, api.Object{"source_id": source, "target_id": target, "message_count": count, "title": title, "created_at": api.Timestamp(), "idempotency_key": uuid.NewString()}, nil)
 }
 
 // searchResults are the chats a search found, in its order, and how many of
@@ -250,7 +251,7 @@ func (h *harness) searchChats(ctx context.Context, p *principal, key contentKey,
 			ID string `json:"id"`
 		} `json:"results"`
 	}
-	if err := h.syncAPI.callKey(ctx, p, "/v1/search/query", key, object{"query": query, "limit": limit}, &found); err != nil {
+	if err := h.syncAPI.callKey(ctx, p, "/v1/search/query", key, api.Object{"query": query, "limit": limit}, &found); err != nil {
 		return nil, false, err
 	}
 	ids := make([]string, len(found.Results))
@@ -271,7 +272,7 @@ func (h *harness) reindexChats(ctx context.Context, p *principal, key contentKey
 		Status  string `json:"status"`
 		Partial bool   `json:"partial"`
 	}
-	if err := h.syncAPI.call(ctx, p, "/v1/search/reindex", keyedBody(key, object{}, true), &job); err != nil {
+	if err := h.syncAPI.call(ctx, p, "/v1/search/reindex", keyedBody(key, api.Object{}, true), &job); err != nil {
 		return false, err
 	}
 	switch job.Status {
@@ -281,7 +282,7 @@ func (h *harness) reindexChats(ctx context.Context, p *principal, key contentKey
 		// A clean partial checkpoint resumes on the next request.
 		return job.Partial, nil
 	default:
-		return false, apiErr(http.StatusBadGateway, "SEARCH_INDEX_FAILED", "The search index could not be rebuilt")
+		return false, api.Err(http.StatusBadGateway, "SEARCH_INDEX_FAILED", "The search index could not be rebuilt")
 	}
 }
 
@@ -291,7 +292,7 @@ func (h *harness) reindexChats(ctx context.Context, p *principal, key contentKey
 func (h *harness) loadProfile(ctx context.Context, p *principal, key contentKey) (*storedProfile, error) {
 	row, err := h.storeRows.load(ctx, p, key, "profile", "profile")
 	if err != nil {
-		if asAPIError(err).HTTP == 404 {
+		if api.AsError(err).HTTP == 404 {
 			return nil, nil
 		}
 		return nil, err
@@ -313,16 +314,16 @@ func (h *harness) mutateProfile(ctx context.Context, p *principal, key contentKe
 				return err
 			}
 		}
-		before := raw(profile)
+		before := api.Raw(profile)
 		if err := change(&profile); err != nil {
 			return err
 		}
-		if bytes.Equal(before, raw(profile)) {
+		if bytes.Equal(before, api.Raw(profile)) {
 			return errProfileUnchanged
 		}
-		profile.UpdatedAt = timestamp()
+		profile.UpdatedAt = api.Timestamp()
 		profile.RecordVersion = recordVersion
-		row.Data = raw(profile)
+		row.Data = api.Raw(profile)
 		return nil
 	})
 	if errors.Is(err, errProfileUnchanged) {
@@ -363,7 +364,7 @@ func (h *harness) projectPage(ctx context.Context, p *principal, key contentKey,
 func (h *harness) mutateProject(ctx context.Context, p *principal, key contentKey, id string, create bool, change func(*Project)) (Project, error) {
 	var project Project
 	err := h.commitRow(ctx, p, key, "project", id, create, func(row *storedRow, exists bool) error {
-		project = Project{ID: id, CreatedAt: timestamp()}
+		project = Project{ID: id, CreatedAt: api.Timestamp()}
 		if exists {
 			var err error
 			if project, err = readProject(row); err != nil {
@@ -371,8 +372,8 @@ func (h *harness) mutateProject(ctx context.Context, p *principal, key contentKe
 			}
 		}
 		change(&project)
-		project.UpdatedAt = timestamp()
-		row.Data = raw(storedProject{project, recordVersion})
+		project.UpdatedAt = api.Timestamp()
+		row.Data = api.Raw(storedProject{project, recordVersion})
 		return nil
 	})
 	return project, err
@@ -383,7 +384,7 @@ func (h *harness) removeAllProjects(ctx context.Context, p *principal, key conte
 	var result struct {
 		Deleted int `json:"deleted"`
 	}
-	err := h.syncAPI.callKey(ctx, p, "/v1/sync/delete-all-projects", key, object{"idempotency_key": uuid.NewString()}, &result)
+	err := h.syncAPI.callKey(ctx, p, "/v1/sync/delete-all-projects", key, api.Object{"idempotency_key": uuid.NewString()}, &result)
 	return result.Deleted, err
 }
 
@@ -417,7 +418,7 @@ func (h *harness) projectDocuments(ctx context.Context, p *principal, key conten
 			break
 		}
 		if page.Next == cursor {
-			return nil, apiErr(502, "UPSTREAM_REFUSED", "The document cursor did not advance")
+			return nil, api.Err(502, "UPSTREAM_REFUSED", "The document cursor did not advance")
 		}
 		cursor = page.Next
 	}
@@ -451,7 +452,7 @@ func (h *harness) createProjectDocument(ctx context.Context, p *principal, key c
 	id := doc.ProjectID + "/" + doc.ID
 	err := h.commitRow(ctx, p, key, "project_document", id, true, func(row *storedRow, exists bool) error {
 		row.project, row.projectSet = &doc.ProjectID, true
-		doc.CreatedAt = timestamp()
+		doc.CreatedAt = api.Timestamp()
 		if exists {
 			stored, err := readProjectDocument(row, doc.ProjectID)
 			if err != nil {
@@ -459,8 +460,8 @@ func (h *harness) createProjectDocument(ctx context.Context, p *principal, key c
 			}
 			doc.CreatedAt = stored.CreatedAt
 		}
-		doc.UpdatedAt = timestamp()
-		row.Data, row.project, row.projectSet = raw(storedDocument{doc, recordVersion}), &doc.ProjectID, true
+		doc.UpdatedAt = api.Timestamp()
+		row.Data, row.project, row.projectSet = api.Raw(storedDocument{doc, recordVersion}), &doc.ProjectID, true
 		return nil
 	})
 	return doc, err
@@ -472,7 +473,7 @@ func (h *harness) createProjectDocument(ctx context.Context, p *principal, key c
 // idempotency key, chat and bytes, so storing the same attachment again
 // reuses its blob.
 func (h *harness) putAttachment(ctx context.Context, p *principal, chatID, clientID string, data []byte) (string, string, error) {
-	in := object{"chat_id": chatID, "plaintext": base64.StdEncoding.EncodeToString(data), "idempotency_key": clientID}
+	in := api.Object{"chat_id": chatID, "plaintext": base64.StdEncoding.EncodeToString(data), "idempotency_key": clientID}
 	var stored struct {
 		ID  string `json:"id"`
 		Key string `json:"att_key"`
@@ -489,7 +490,7 @@ func (h *harness) putAttachment(ctx context.Context, p *principal, chatID, clien
 		stored.ID, stored.Key = "", ""
 		// A purge of the same chat or a lost index write fails with a 502.
 		// The idempotency key makes the retry store the same blob.
-		if err = h.syncAPI.call(ctx, p, "/v1/attachment/put", in, &stored); err == nil || asAPIError(err).Status != 502 {
+		if err = h.syncAPI.call(ctx, p, "/v1/attachment/put", in, &stored); err == nil || api.AsError(err).Status != 502 {
 			break
 		}
 	}
@@ -497,7 +498,7 @@ func (h *harness) putAttachment(ctx context.Context, p *principal, chatID, clien
 		return "", "", err
 	}
 	if !enclaveAttachmentID.MatchString(stored.ID) || stored.Key == "" {
-		return "", "", apiErr(502, "UPSTREAM_REFUSED", "The sync service returned an invalid attachment")
+		return "", "", api.Err(502, "UPSTREAM_REFUSED", "The sync service returned an invalid attachment")
 	}
 	return stored.ID, stored.Key, nil
 }
@@ -511,7 +512,7 @@ func (h *harness) getAttachment(ctx context.Context, p *principal, id, attKey st
 	var result struct {
 		Plaintext string `json:"plaintext"`
 	}
-	if err := h.syncAPI.call(ctx, p, path, object{"id": id, "att_key": attKey}, &result); err != nil {
+	if err := h.syncAPI.call(ctx, p, path, api.Object{"id": id, "att_key": attKey}, &result); err != nil {
 		return nil, err
 	}
 	return base64.StdEncoding.DecodeString(result.Plaintext)
@@ -525,7 +526,7 @@ func (h *harness) sealShare(ctx context.Context, p *principal, plaintext []byte)
 		Ciphertext string `json:"ciphertext"`
 		ShareKey   string `json:"share_key"`
 	}
-	if err := h.syncAPI.call(ctx, p, "/v1/share/seal", object{"plaintext": base64.StdEncoding.EncodeToString(plaintext)}, &sealed); err != nil {
+	if err := h.syncAPI.call(ctx, p, "/v1/share/seal", api.Object{"plaintext": base64.StdEncoding.EncodeToString(plaintext)}, &sealed); err != nil {
 		return nil, "", err
 	}
 	ciphertext, err := base64.StdEncoding.DecodeString(sealed.Ciphertext)
@@ -536,7 +537,7 @@ func (h *harness) openSealedShare(ctx context.Context, shareKey string, cipherte
 	var opened struct {
 		Plaintext string `json:"plaintext"`
 	}
-	if err := h.syncAPI.call(ctx, &principal{Anonymous: true}, "/v1/share/open", object{"share_key": shareKey, "ciphertext": base64.StdEncoding.EncodeToString(ciphertext)}, &opened); err != nil {
+	if err := h.syncAPI.call(ctx, &principal{Anonymous: true}, "/v1/share/open", api.Object{"share_key": shareKey, "ciphertext": base64.StdEncoding.EncodeToString(ciphertext)}, &opened); err != nil {
 		return nil, err
 	}
 	return base64.StdEncoding.DecodeString(opened.Plaintext)

@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"net/http"
 	"strconv"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 // Moving a chat between the cloud and the device keeps its id, as the web
@@ -20,7 +22,7 @@ func (h *harness) threadTranscript(ctx context.Context, p *principal, key conten
 	running := live != nil && (live.active != nil || len(live.queue) > 0)
 	h.live.mu.Unlock()
 	if running {
-		return nil, apiErr(409, "RUN_IN_FLIGHT", "Wait for the reply to finish before moving this chat").withAction(actionRetry)
+		return nil, api.Err(409, "RUN_IN_FLIGHT", "Wait for the reply to finish before moving this chat").WithAction(api.ActionRetry)
 	}
 	row, err := h.loadThread(ctx, p, key, in.ThreadID)
 	if err != nil {
@@ -58,7 +60,7 @@ func (h *harness) threadTranscript(ctx context.Context, p *principal, key conten
 		return nil, err
 	}
 	if missing > 0 {
-		return nil, apiErr(409, "ATTACHMENTS_UNAVAILABLE", strconv.Itoa(missing)+" attachments in this chat could not be read")
+		return nil, api.Err(409, "ATTACHMENTS_UNAVAILABLE", strconv.Itoa(missing)+" attachments in this chat could not be read")
 	}
 	row.checkWidgets()
 	row.RecordVersion = recordVersion
@@ -74,7 +76,7 @@ func (h *harness) finishTransfer(ctx context.Context, p *principal, key contentK
 	s := h.live.threads[name]
 	if s != nil && (s.deleted || s.active != nil || len(s.queue) > 0) {
 		h.live.mu.Unlock()
-		return apiErr(409, "RUN_IN_FLIGHT", "Wait for the reply to finish before moving this chat").withAction(actionRetry)
+		return api.Err(409, "RUN_IN_FLIGHT", "Wait for the reply to finish before moving this chat").WithAction(api.ActionRetry)
 	}
 	if h.live.threads == nil {
 		h.live.threads = map[string]*threadSession{}
@@ -97,30 +99,30 @@ func (h *harness) finishTransfer(ctx context.Context, p *principal, key contentK
 func (h *harness) handleThreadImport(w http.ResponseWriter, r *http.Request) {
 	p, err := h.auth.authenticate(r, false)
 	if err != nil {
-		respond(w, nil, err)
+		api.Respond(w, nil, err)
 		return
 	}
-	body, err := readBody(w, r, maxTurnBody)
+	body, err := api.ReadBody(w, r, maxTurnBody)
 	defer clear(body)
 	if err != nil {
-		respond(w, nil, err)
+		api.Respond(w, nil, err)
 		return
 	}
 	var in threadImportRequest
-	defer in.clearKey()
-	if err := decodeBody(body, &in); err != nil {
-		respond(w, nil, err)
+	defer in.ClearKey()
+	if err := api.DecodeBody(body, &in); err != nil {
+		api.Respond(w, nil, err)
 		return
 	}
 	key, err := decodeContentKey(in.Key)
-	in.clearKey()
+	in.ClearKey()
 	if err != nil {
-		respond(w, nil, err)
+		api.Respond(w, nil, err)
 		return
 	}
 	defer clear(key[:])
 	result, err := h.importThread(r.Context(), p, key, &in)
-	respond(w, result, err)
+	api.Respond(w, result, err)
 }
 
 func (h *harness) importThread(ctx context.Context, p *principal, key contentKey, in *threadImportRequest) (any, error) {
@@ -138,8 +140,8 @@ func (h *harness) importThread(ctx context.Context, p *principal, key contentKey
 	}
 	stripInlineAttachments(&row.Thread)
 	if err := h.saveThread(ctx, p, key, row); err != nil {
-		if asAPIError(err).Code == "REVISION_CONFLICT" {
-			return nil, apiErr(409, "THREAD_EXISTS", "This chat is already in the cloud")
+		if api.AsError(err).Code == "REVISION_CONFLICT" {
+			return nil, api.Err(409, "THREAD_EXISTS", "This chat is already in the cloud")
 		}
 		return nil, err
 	}

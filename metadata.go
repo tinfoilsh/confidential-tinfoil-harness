@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 func (h *harness) favicon(ctx context.Context, p *principal, _ contentKey, in *pageRequest) (any, error) {
@@ -29,13 +31,13 @@ func (h *harness) linkPreview(ctx context.Context, p *principal, _ contentKey, i
 // linkDetails are a page's details, read by the metadata service, as a link
 // preview shows them.
 func (h *harness) linkDetails(ctx context.Context, url string) (any, error) {
-	var response object
-	if err := h.serviceCall(ctx, "metadata", "/metadata", object{"url": url}, &response); err != nil {
+	var response api.Object
+	if err := h.serviceCall(ctx, "metadata", "/metadata", api.Object{"url": url}, &response); err != nil {
 		return nil, err
 	}
-	result := obj(response["result"])
+	result := api.Obj(response["result"])
 	if len(result) == 0 {
 		result = response
 	}
-	return object{"url": url, "title": result["title"], "description": result["description"], "siteName": firstString(result["siteName"], result["site_name"]), "image": result["image"]}, nil
+	return api.Object{"url": url, "title": result["title"], "description": result["description"], "siteName": api.FirstString(result["siteName"], result["site_name"]), "image": result["image"]}, nil
 }

@@ -3,44 +3,46 @@ package main
 import (
 	"net/http"
 	"strconv"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 // handleFollow re-attaches a client to a run that is live on this instance.
 func (h *harness) handleFollow(w http.ResponseWriter, r *http.Request) {
 	p, err := h.caller(r, true)
 	if err != nil {
-		respond(w, nil, err)
+		api.Respond(w, nil, err)
 		return
 	}
-	body, err := readBody(w, r, maxRequestBody)
+	body, err := api.ReadBody(w, r, api.MaxRequestBody)
 	defer clear(body)
 	if err != nil {
-		respond(w, nil, err)
+		api.Respond(w, nil, err)
 		return
 	}
 	var in runRequest
-	defer in.clearKey()
-	if err := decodeBody(body, &in); err != nil {
-		respond(w, nil, err)
+	defer in.ClearKey()
+	if err := api.DecodeBody(body, &in); err != nil {
+		api.Respond(w, nil, err)
 		return
 	}
 	key, err := requestKey(in.Key)
-	in.clearKey()
+	in.ClearKey()
 	if err != nil {
-		respond(w, nil, err)
+		api.Respond(w, nil, err)
 		return
 	}
 	defer clear(key[:])
 	live, err := h.authorizedRun(p, key, in.ThreadID, in.RunID)
 	clear(key[:])
 	if err != nil {
-		respond(w, nil, err)
+		api.Respond(w, nil, err)
 		return
 	}
 	h.live.mu.Lock()
 	if h.live.runs[liveKey(p, in.RunID)] != live {
 		h.live.mu.Unlock()
-		respond(w, nil, errRunNotFound)
+		api.Respond(w, nil, errRunNotFound)
 		return
 	}
 	live.log.log.attach()
@@ -53,7 +55,7 @@ func (h *harness) handleFollow(w http.ResponseWriter, r *http.Request) {
 	defer live.log.log.detach()
 	from, err := resumeFrom(live.log.log, r.Header.Get(lastEventIDHeader))
 	if err != nil {
-		respond(w, nil, err)
+		api.Respond(w, nil, err)
 		return
 	}
 	follow(w, r, live.log, from)
@@ -74,7 +76,7 @@ func resumeFrom(log *runlog, lastEventID string) (int, error) {
 	sent, _, closed := log.read(0)
 	switch {
 	case err != nil || after < 0:
-		return 0, apiErr(400, "BAD_REQUEST", "Last-Event-ID must be an event's cursor")
+		return 0, api.Err(400, "BAD_REQUEST", "Last-Event-ID must be an event's cursor")
 	case after < len(sent):
 		return after + 1, nil
 	// A log that failed ends its streams with the error, under the cursor
@@ -83,5 +85,5 @@ func resumeFrom(log *runlog, lastEventID string) (int, error) {
 	case after == len(sent) && closed != nil && closed != errDone:
 		return after, nil
 	}
-	return 0, apiErr(400, "BAD_REQUEST", "Last-Event-ID names an event this run never sent")
+	return 0, api.Err(400, "BAD_REQUEST", "Last-Event-ID names an event this run never sent")
 }

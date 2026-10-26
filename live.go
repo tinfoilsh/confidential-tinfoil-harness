@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"sync"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 // liveRuns holds what this instance is executing: each chat's running reply
@@ -22,7 +24,7 @@ type liveRuns struct {
 
 func liveKey(p *principal, id string) string { return p.scope() + "/" + id }
 
-var errRunNotFound = apiErr(404, "RUN_NOT_FOUND", "The run is not live on this instance")
+var errRunNotFound = api.Err(404, "RUN_NOT_FOUND", "The run is not live on this instance")
 
 // forget unregisters a run that is ending.
 func (l *liveRuns) forget(r *chatRun) {
@@ -87,10 +89,10 @@ func (r *chatRun) release() {
 }
 
 func (h *harness) authorizedRun(p *principal, key contentKey, id, runID string) (*chatRun, error) {
-	if err := requireID("threadId", id); err != nil {
+	if err := api.RequireID("threadId", id); err != nil {
 		return nil, err
 	}
-	if err := requireID("runId", runID); err != nil {
+	if err := api.RequireID("runId", runID); err != nil {
 		return nil, err
 	}
 	h.live.mu.Lock()
@@ -100,7 +102,7 @@ func (h *harness) authorizedRun(p *principal, key contentKey, id, runID string) 
 		return nil, errRunNotFound
 	}
 	if !r.thread.keyless && r.thread.keyHash != key.fingerprint() {
-		return nil, apiErr(409, "KEY_MISMATCH", "The run uses another key")
+		return nil, api.Err(409, "KEY_MISMATCH", "The run uses another key")
 	}
 	return r, nil
 }
@@ -177,7 +179,7 @@ func (h *harness) endQueued(r *chatRun, why error) {
 	if why == nil {
 		r.out.emit(runFinished{ThreadID: r.thread.id, RunID: r.log.id, Metadata: runMetadata{Cancelled: new(true)}})
 	} else {
-		r.out.emit(failedRun(r.thread.id, r.log.id, asAPIError(why), nil))
+		r.out.emit(failedRun(r.thread.id, r.log.id, api.AsError(why), nil))
 	}
 	r.log.log.close(errDone)
 	r.release()
