@@ -846,17 +846,18 @@ func heldScratch(t *testing.T, h *harness, n int64) *scratchLease {
 }
 
 // A process that ends mid-archive leaves its spool file; the next one
-// removes it, and nothing else in the directory.
+// removes it as it measures the directory, and nothing else in there.
 func TestStartupRemovesTheSpoolFilesAPreviousProcessLeft(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("TMPDIR", dir)
 	left, other := filepath.Join(dir, "harness-archive-123"), filepath.Join(dir, "other")
 	for _, name := range []string{left, other} {
 		if err := os.WriteFile(name, []byte("bytes"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := sweepScratch(dir); err != nil {
-		t.Fatal(err)
+	if scratch, err := measuredScratch(); err != nil || scratch.dir != dir {
+		t.Fatalf("measured %v: %v", scratch, err)
 	}
 	if _, err := os.Stat(left); !os.IsNotExist(err) {
 		t.Fatalf("the spool file is still there: %v", err)
