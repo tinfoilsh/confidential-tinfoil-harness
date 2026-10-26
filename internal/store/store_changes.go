@@ -1,4 +1,4 @@
-package main
+package store
 
 import (
 	"context"
@@ -8,11 +8,11 @@ import (
 )
 
 // Change tokens describe storage metadata, without loading chat contents.
-func (h *harness) storageChanges(ctx context.Context, p *auth.Principal) (any, error) {
+func (s *Store) StorageChanges(ctx context.Context, p *auth.Principal) (any, error) {
 	var chats struct {
 		Current string `json:"current_revision"`
 	}
-	if err := h.syncAPI.call(ctx, p, "/v1/sync/revision-summary", struct{}{}, &chats); err != nil {
+	if err := s.API.call(ctx, p, "/v1/sync/revision-summary", struct{}{}, &chats); err != nil {
 		return nil, err
 	}
 	tokens := map[string]string{"chats": chats.Current}
@@ -32,7 +32,7 @@ func (h *harness) storageChanges(ctx context.Context, p *auth.Principal) (any, e
 		if scope == "profile" {
 			direction = "asc"
 		}
-		if err := h.syncAPI.call(ctx, p, "/v1/sync/list-status", api.Object{"scope": scope, "direction": direction, "limit": 1}, &status); err != nil {
+		if err := s.API.call(ctx, p, "/v1/sync/list-status", api.Object{"scope": scope, "direction": direction, "limit": 1}, &status); err != nil {
 			return nil, err
 		}
 		tokens[scope] = api.HashHex(api.Raw(status))

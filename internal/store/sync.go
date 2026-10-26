@@ -1,4 +1,4 @@
-package main
+package store
 
 import (
 	"bytes"
@@ -17,7 +17,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
-type rowPage struct {
+type Page struct {
 	Rows []domain.StoredRow
 	Next string
 	// Rows sync holds but cannot open, such as one sealed to a retired key,
@@ -25,22 +25,25 @@ type rowPage struct {
 	// the rest.
 	Unreadable map[string]error
 }
-type rowStore interface {
-	authorizeRun(context.Context, *auth.Principal, auth.ContentKey, string, *string) (storageGrant, error)
-	authorizeStorage(context.Context, *auth.Principal, auth.ContentKey, string, string) (auth.Secret, error)
-	load(context.Context, *auth.Principal, auth.ContentKey, string, string) (*domain.StoredRow, error)
-	pull(context.Context, *auth.Principal, auth.ContentKey, string, []string) ([]domain.StoredRow, map[string]error, error)
-	list(context.Context, *auth.Principal, auth.ContentKey, string, string, string, int) (rowPage, error)
-	push(context.Context, *auth.Principal, auth.ContentKey, string, *domain.StoredRow, string) (string, error)
+type RowStore interface {
+	AuthorizeRun(context.Context, *auth.Principal, auth.ContentKey, string, *string) (Grant, error)
+	AuthorizeStorage(context.Context, *auth.Principal, auth.ContentKey, string, string) (auth.Secret, error)
+	Load(context.Context, *auth.Principal, auth.ContentKey, string, string) (*domain.StoredRow, error)
+	Pull(context.Context, *auth.Principal, auth.ContentKey, string, []string) ([]domain.StoredRow, map[string]error, error)
+	List(context.Context, *auth.Principal, auth.ContentKey, string, string, string, int) (Page, error)
+	Push(context.Context, *auth.Principal, auth.ContentKey, string, *domain.StoredRow, string) (string, error)
 	// remove deletes a row whatever its revision; a missing row is gone.
-	remove(context.Context, *auth.Principal, auth.ContentKey, string, string) error
-	removeRevision(context.Context, *auth.Principal, auth.ContentKey, string, string) error
+	Remove(context.Context, *auth.Principal, auth.ContentKey, string, string) error
+	RemoveRevision(context.Context, *auth.Principal, auth.ContentKey, string, string) error
 	// ids lists every row of a scope, or a project's chats, unopened.
-	ids(context.Context, *auth.Principal, string, string) ([]string, error)
+	IDs(context.Context, *auth.Principal, string, string) ([]string, error)
 }
-type syncClient struct {
+type Client struct {
 	URL    string
 	Client *http.Client
+	// MinimumGrant is how long a storage grant must still last to be
+	// accepted: a run and its commit.
+	MinimumGrant time.Duration
 }
 
 const (
@@ -49,15 +52,15 @@ const (
 	// Sync answers within its own route budgets; this bounds a call to the
 	// longest of them, an attachment's.
 	syncTimeout = 5 * time.Minute
-	// pullBatch is the most rows sync opens in one pull (MaxPullIDs).
-	pullBatch = 100
-	// listStatusPage is the largest page of row ids sync lists.
-	listStatusPage = 500
-	// maxCommitAttempts bounds the pushes of one change to a row.
-	maxCommitAttempts = 3
+	// PullBatch is the most rows sync opens in one pull (MaxPullIDs).
+	PullBatch = 100
+	// ListStatusPage is the largest page of row ids sync lists.
+	ListStatusPage = 500
+	// MaxCommitAttempts bounds the pushes of one change to a row.
+	MaxCommitAttempts = 3
 )
 
-func (s *syncClient) call(ctx context.Context, p *auth.Principal, path string, in, out any) error {
+func (s *Client) call(ctx context.Context, p *auth.Principal, path string, in, out any) error {
 	if body, ok := in.(json.RawMessage); ok {
 		defer clear(body)
 	}
@@ -66,8 +69,8 @@ func (s *syncClient) call(ctx context.Context, p *auth.Principal, path string, i
 	}
 	ctx, cancel := context.WithTimeout(ctx, syncTimeout)
 	defer cancel()
-	ctx = context.WithValue(ctx, apiKeyKey{}, "")
-	ctx = context.WithValue(ctx, usageContextKey{}, false)
+	ctx = auth.WithCallerKey(ctx, "")
+	ctx = auth.WithoutUsage(ctx)
 	return api.PostJSONWithHeaders(ctx, s.Client, s.URL+path, string(cmp.Or(p.SyncToken, p.JWT)), map[string]string{"X-Sync-Protocol": syncProtocol}, in, out)
 }
 
@@ -91,12 +94,12 @@ func keyedBody(key auth.ContentKey, in api.Object, multiple bool) json.RawMessag
 	return append(out, suffix...)
 }
 
-func (s *syncClient) callKey(ctx context.Context, p *auth.Principal, path string, key auth.ContentKey, in api.Object, out any) error {
+func (s *Client) CallKey(ctx context.Context, p *auth.Principal, path string, key auth.ContentKey, in api.Object, out any) error {
 	defer clear(key[:])
 	return s.call(ctx, p, path, keyedBody(key, in, false), out)
 }
 
-func (s *syncClient) authorizeRun(ctx context.Context, p *auth.Principal, key auth.ContentKey, threadID string, projectID *string) (storageGrant, error) {
+func (s *Client) AuthorizeRun(ctx context.Context, p *auth.Principal, key auth.ContentKey, threadID string, projectID *string) (Grant, error) {
 	defer clear(key[:])
 	in := api.Object{"thread_id": threadID}
 	if projectID != nil {
@@ -105,7 +108,7 @@ func (s *syncClient) authorizeRun(ctx context.Context, p *auth.Principal, key au
 	return s.storageCredential(ctx, p, "/v1/runs/authorize", key, in)
 }
 
-func (s *syncClient) authorizeStorage(ctx context.Context, p *auth.Principal, key auth.ContentKey, operation, projectID string) (auth.Secret, error) {
+func (s *Client) AuthorizeStorage(ctx context.Context, p *auth.Principal, key auth.ContentKey, operation, projectID string) (auth.Secret, error) {
 	defer clear(key[:])
 	in := api.Object{"operation": operation}
 	if projectID != "" {
@@ -115,20 +118,20 @@ func (s *syncClient) authorizeStorage(ctx context.Context, p *auth.Principal, ke
 	return grant.Token, err
 }
 
-type storageGrant struct {
+type Grant struct {
 	Token     auth.Secret `json:"token"`
 	ExpiresAt time.Time   `json:"expires_at"`
 }
 
-func (s *syncClient) storageCredential(ctx context.Context, p *auth.Principal, path string, key auth.ContentKey, input api.Object) (storageGrant, error) {
+func (s *Client) storageCredential(ctx context.Context, p *auth.Principal, path string, key auth.ContentKey, input api.Object) (Grant, error) {
 	defer clear(key[:])
-	var out storageGrant
-	err := s.callKey(ctx, p, path, key, input, &out)
+	var out Grant
+	err := s.CallKey(ctx, p, path, key, input, &out)
 	if err != nil {
-		return storageGrant{}, err
+		return Grant{}, err
 	}
-	if out.Token == "" || !out.ExpiresAt.After(api.Now().Add(runTimeout+commitTimeout)) {
-		return storageGrant{}, api.Err(502, "UPSTREAM_REFUSED", "The storage service returned an invalid run credential")
+	if out.Token == "" || !out.ExpiresAt.After(api.Now().Add(s.MinimumGrant)) {
+		return Grant{}, api.Err(502, "UPSTREAM_REFUSED", "The storage service returned an invalid run credential")
 	}
 	return out, nil
 }
@@ -144,22 +147,22 @@ type pullItem struct {
 	ProjectID  *string `json:"project_id"`
 }
 
-// pull returns the rows it could open and the error for each it could not.
 // errRowNotFetched is a row sync could not fetch within its deadline twice
 // running. A later request may fetch it.
 var errRowNotFetched = api.Err(502, "UPSTREAM_REFUSED", "The sync service could not fetch the data in time")
 
-func (s *syncClient) pull(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope string, ids []string) ([]domain.StoredRow, map[string]error, error) {
+// Pull returns the rows it could open and the error for each it could not.
+func (s *Client) Pull(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope string, ids []string) ([]domain.StoredRow, map[string]error, error) {
 	rows, failed := []domain.StoredRow{}, map[string]error{}
-	for start := 0; start < len(ids); start += pullBatch {
-		if err := s.pullBatch(ctx, p, key, scope, ids[start:min(len(ids), start+pullBatch)], true, &rows, failed); err != nil {
+	for start := 0; start < len(ids); start += PullBatch {
+		if err := s.pullBatch(ctx, p, key, scope, ids[start:min(len(ids), start+PullBatch)], true, &rows, failed); err != nil {
 			return nil, nil, err
 		}
 	}
 	return rows, failed, nil
 }
 
-func (s *syncClient) pullBatch(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope string, ids []string, retry bool, rows *[]domain.StoredRow, failed map[string]error) error {
+func (s *Client) pullBatch(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope string, ids []string, retry bool, rows *[]domain.StoredRow, failed map[string]error) error {
 	var result struct {
 		Items []pullItem `json:"items"`
 	}
@@ -199,8 +202,8 @@ func (s *syncClient) pullBatch(ctx context.Context, p *auth.Principal, key auth.
 	}
 	return nil
 }
-func (s *syncClient) load(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, id string) (*domain.StoredRow, error) {
-	rows, failed, err := s.pull(ctx, p, key, scope, []string{id})
+func (s *Client) Load(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, id string) (*domain.StoredRow, error) {
+	rows, failed, err := s.Pull(ctx, p, key, scope, []string{id})
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +219,7 @@ func (s *syncClient) load(ctx context.Context, p *auth.Principal, key auth.Conte
 }
 
 // listStatus is one page of row ids, newest first.
-func (s *syncClient) listStatus(ctx context.Context, p *auth.Principal, scope, cursor, project string, limit int) ([]string, string, error) {
+func (s *Client) listStatus(ctx context.Context, p *auth.Principal, scope, cursor, project string, limit int) ([]string, string, error) {
 	var status struct {
 		Updates []struct {
 			ID string `json:"id"`
@@ -242,10 +245,10 @@ func (s *syncClient) listStatus(ctx context.Context, p *auth.Principal, scope, c
 	return ids, status.Next, nil
 }
 
-func (s *syncClient) ids(ctx context.Context, p *auth.Principal, scope, project string) ([]string, error) {
+func (s *Client) IDs(ctx context.Context, p *auth.Principal, scope, project string) ([]string, error) {
 	all, cursor := []string{}, ""
 	for {
-		ids, next, err := s.listStatus(ctx, p, scope, cursor, project, listStatusPage)
+		ids, next, err := s.listStatus(ctx, p, scope, cursor, project, ListStatusPage)
 		if err != nil {
 			return nil, err
 		}
@@ -260,21 +263,21 @@ func (s *syncClient) ids(ctx context.Context, p *auth.Principal, scope, project 
 	}
 }
 
-func (s *syncClient) list(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, cursor, project string, limit int) (rowPage, error) {
+func (s *Client) List(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, cursor, project string, limit int) (Page, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
 	ids, next, err := s.listStatus(ctx, p, scope, cursor, project, limit)
 	if err != nil {
-		return rowPage{}, err
+		return Page{}, err
 	}
-	page := rowPage{Rows: []domain.StoredRow{}, Next: next}
+	page := Page{Rows: []domain.StoredRow{}, Next: next}
 	if len(ids) != 0 {
-		page.Rows, page.Unreadable, err = s.pull(ctx, p, key, scope, ids)
+		page.Rows, page.Unreadable, err = s.Pull(ctx, p, key, scope, ids)
 	}
 	return page, err
 }
-func (s *syncClient) push(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope string, row *domain.StoredRow, nonce string) (string, error) {
+func (s *Client) Push(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope string, row *domain.StoredRow, nonce string) (string, error) {
 	var match any
 	if row.ETag != "" {
 		match = row.ETag
@@ -292,16 +295,16 @@ func (s *syncClient) push(ctx context.Context, p *auth.Principal, key auth.Conte
 	var result struct {
 		ETag string `json:"etag"`
 	}
-	err := s.callKey(ctx, p, "/v1/sync/push", key, api.Object{"scope": scope, "id": row.ID, "plaintext": base64.StdEncoding.EncodeToString(row.Data), "if_match": match, "idempotency_key": nonce, "metadata": metadata}, &result)
+	err := s.CallKey(ctx, p, "/v1/sync/push", key, api.Object{"scope": scope, "id": row.ID, "plaintext": base64.StdEncoding.EncodeToString(row.Data), "if_match": match, "idempotency_key": nonce, "metadata": metadata}, &result)
 	return result.ETag, err
 }
 
 // An empty if_match has sync read the row's revision, delete at it, retry a
 // race, and treat a missing row as deleted.
-func (s *syncClient) remove(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, id string) error {
-	return s.callKey(ctx, p, "/v1/sync/delete", key, api.Object{"scope": scope, "id": id, "if_match": "", "idempotency_key": uuid.NewString()}, nil)
+func (s *Client) Remove(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, id string) error {
+	return s.CallKey(ctx, p, "/v1/sync/delete", key, api.Object{"scope": scope, "id": id, "if_match": "", "idempotency_key": uuid.NewString()}, nil)
 }
 
-func (s *syncClient) removeRevision(ctx context.Context, p *auth.Principal, key auth.ContentKey, id, revision string) error {
-	return s.callKey(ctx, p, "/v1/sync/delete", key, api.Object{"scope": "chat", "id": id, "if_match": revision, "idempotency_key": uuid.NewString()}, nil)
+func (s *Client) RemoveRevision(ctx context.Context, p *auth.Principal, key auth.ContentKey, id, revision string) error {
+	return s.CallKey(ctx, p, "/v1/sync/delete", key, api.Object{"scope": "chat", "id": id, "if_match": revision, "idempotency_key": uuid.NewString()}, nil)
 }

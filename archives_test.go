@@ -27,6 +27,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
 
 type formPart struct {
@@ -157,7 +158,7 @@ func importLines(t *testing.T, w *httptest.ResponseRecorder) imported {
 // storedChats are a user's stored chats read as the harness reads them.
 func storedChats(rows *memoryRows, user string) map[string]domain.Thread {
 	chats := map[string]domain.Thread{}
-	page, _ := rows.list(context.Background(), &auth.Principal{ID: user}, rows.key, "chat", "", "", 0)
+	page, _ := rows.List(context.Background(), &auth.Principal{ID: user}, rows.key, "chat", "", "", 0)
 	for _, row := range page.Rows {
 		t := mustRead(domain.ReadThreadRow(&row)).Thread
 		chats[t.Title] = t
@@ -329,12 +330,12 @@ func TestNativeBackupRoundTrips(t *testing.T) {
 	if len(attachments) != 2 || attachments[0].Description != "A chart" || attachments[0].Thumbnail != "dGh1bWI=" || !bytes.Equal(blobOf(t, restoredSync, attachments[0]), stored) || attachments[1].TextContent != "Stored document" {
 		t.Fatalf("cloud attachments: %+v", attachments)
 	}
-	projects, _ := restoredRows.list(context.Background(), alice, key, "project", "", "", 0)
+	projects, _ := restoredRows.List(context.Background(), alice, key, "project", "", "", 0)
 	if len(projects.Rows) != 1 || domain.ValueOr(chat.ProjectID, "") != projects.Rows[0].ID {
 		t.Fatalf("the chat lost its project: %v", chat.ProjectID)
 	}
 	restoredProject := mustRead(domain.ReadProject(&projects.Rows[0]))
-	docs, _ := restored.projectDocuments(context.Background(), alice, key, restoredProject.ID, refuseUnreadable)
+	docs, _ := restored.store.ProjectDocuments(context.Background(), alice, key, restoredProject.ID, store.RefuseUnreadable)
 	if restoredProject.Name != "Research" || restoredProject.SystemInstructions != "Cite sources" || domain.ValueOr(restoredProject.Color, "") != "teal" || len(docs) != 1 || docs[0].Content != "Paper text" || docs[0].Filename != "paper.md" {
 		t.Fatalf("project: %+v %+v", restoredProject, docs)
 	}
@@ -491,8 +492,8 @@ func TestWebAppBackupsRestore(t *testing.T) {
 			if strings.Join(names, " ") != "thinking: tool_call:web_search tool_call:web_fetch tool_call:python content:" || len(chat.Messages[1].Annotations) != 1 {
 				t.Fatalf("the old timeline was not read: %v", names)
 			}
-			projects, _ := rows.list(context.Background(), &auth.Principal{ID: "alice"}, key, "project", "", "", 0)
-			docs, _ := h.projectDocuments(context.Background(), &auth.Principal{ID: "alice"}, key, *chat.ProjectID, refuseUnreadable)
+			projects, _ := rows.List(context.Background(), &auth.Principal{ID: "alice"}, key, "project", "", "", 0)
+			docs, _ := h.store.ProjectDocuments(context.Background(), &auth.Principal{ID: "alice"}, key, *chat.ProjectID, store.RefuseUnreadable)
 			if len(projects.Rows) != 1 || mustRead(domain.ReadProject(&projects.Rows[0])).Name != "Research" || len(docs) != 1 || docs[0].Content != "Extracted paper text" {
 				t.Fatalf("project: %v %v", projects.Rows, docs)
 			}
@@ -670,12 +671,12 @@ func TestClaudeProjectsRequireTheCloud(t *testing.T) {
 		t.Fatalf("projects imported to the device: HTTP %d %s", w.Code, w.Body.String())
 	}
 	result := importOf(t, h, "alice", projects, "projects.json", api.Object{"target": "cloud", "key": keyBase64(key)})
-	stored, _ := rows.list(context.Background(), &auth.Principal{ID: "alice"}, key, "project", "", "", 0)
+	stored, _ := rows.List(context.Background(), &auth.Principal{ID: "alice"}, key, "project", "", "", 0)
 	if result.done.JobID == nil || len(stored.Rows) != 1 {
 		t.Fatalf("projects: %d stored, done %+v", len(stored.Rows), result.done)
 	}
 	project := mustRead(domain.ReadProject(&stored.Rows[0]))
-	docs, _ := h.projectDocuments(context.Background(), &auth.Principal{ID: "alice"}, key, project.ID, refuseUnreadable)
+	docs, _ := h.store.ProjectDocuments(context.Background(), &auth.Principal{ID: "alice"}, key, project.ID, store.RefuseUnreadable)
 	if project.Name != "Release Notes" || project.SystemInstructions != "Write concise release notes." || len(docs) != 1 || docs[0].Filename != "style-guide.md" || docs[0].Content != "# Style guide" {
 		t.Fatalf("project: %+v %+v", project, docs)
 	}
@@ -683,7 +684,7 @@ func TestClaudeProjectsRequireTheCloud(t *testing.T) {
 	var split []json.RawMessage
 	json.Unmarshal(projects, &split)
 	one := importOf(t, h, "bob", split[0], "release-notes.json", api.Object{"target": "cloud", "key": keyBase64(key)})
-	if stored, _ := rows.list(context.Background(), &auth.Principal{ID: "bob"}, key, "project", "", "", 0); one.done.JobID == nil || len(stored.Rows) != 1 {
+	if stored, _ := rows.List(context.Background(), &auth.Principal{ID: "bob"}, key, "project", "", "", 0); one.done.JobID == nil || len(stored.Rows) != 1 {
 		t.Fatalf("a project file of its own was not imported: %+v", one.done)
 	}
 	full := importOf(t, h, "alice", fixture(t, "claude-export.zip"), "claude.zip", api.Object{"target": "device"})

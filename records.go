@@ -11,6 +11,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
 
 func (h *harness) apiRoutes() []routeSpec {
@@ -36,14 +37,14 @@ func (h *harness) apiRoutes() []routeSpec {
 	}
 	for _, pair := range [][2]string{{"current", "/v1/key/current"}, {"register", "/v1/key/register"}, {"add-bundle", "/v1/key/add-bundle"}, {"remove-bundle", "/v1/key/remove-bundle"}, {"migrate-all", "/v1/blobs/migrate-all"}} {
 		routes = append(routes, routeSpec{"/v1/keys/" + pair[0], false, false, func(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in json.RawMessage) (any, error) {
-			return h.keyCall(ctx, p, pair[1], in)
+			return h.store.KeyCall(ctx, p, pair[1], in)
 		}})
 	}
 	return routes
 }
 
 func (h *harness) changes(ctx context.Context, p *auth.Principal, _ auth.ContentKey, _ json.RawMessage) (any, error) {
-	return h.storageChanges(ctx, p)
+	return h.store.StorageChanges(ctx, p)
 }
 
 // threadOperations change a stored chat or a device chat in one way each.
@@ -84,11 +85,11 @@ func (h *harness) session(ctx context.Context, p *auth.Principal, _ auth.Content
 }
 
 func (h *harness) listThreads(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *listRequest) (any, error) {
-	rows, next, err := h.threadPage(ctx, p, key, in.Cursor, in.ProjectID, in.Limit)
+	rows, next, err := h.store.ThreadPage(ctx, p, key, in.Cursor, in.ProjectID, in.Limit)
 	if err != nil {
 		return nil, err
 	}
-	if err := h.applyPins(ctx, p, key, rows); err != nil {
+	if err := h.store.ApplyPins(ctx, p, key, rows); err != nil {
 		return nil, err
 	}
 	flags := h.auth.FlaggedChats(ctx, p)
@@ -111,11 +112,11 @@ func (h *harness) listThreads(ctx context.Context, p *auth.Principal, key auth.C
 	}{list, next, pinned}, nil
 }
 func (h *harness) getThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *windowRequest) (any, error) {
-	row, err := h.loadThread(ctx, p, key, in.ID)
+	row, err := h.store.LoadThread(ctx, p, key, in.ID)
 	if err != nil {
 		return nil, err
 	}
-	if err := h.applyPins(ctx, p, key, []*domain.ThreadRow{row}); err != nil {
+	if err := h.store.ApplyPins(ctx, p, key, []*domain.ThreadRow{row}); err != nil {
 		return nil, err
 	}
 	markFlagged(h.auth.FlaggedChats(ctx, p), &row.Thread)
@@ -126,7 +127,7 @@ func (h *harness) updateThread(ctx context.Context, p *auth.Principal, key auth.
 		return nil, api.Err(404, "MODEL_UNAVAILABLE", "Unknown model")
 	}
 	if project := domain.ValueOr(in.ProjectID.Value, ""); project != "" {
-		if _, err := h.loadProject(ctx, p, key, project); err != nil {
+		if _, err := h.store.LoadProject(ctx, p, key, project); err != nil {
 			return nil, err
 		}
 	}
@@ -153,7 +154,7 @@ func (h *harness) updateThread(ctx context.Context, p *auth.Principal, key auth.
 		return deviceReply(row), nil
 	}
 	if in.Pinned != nil {
-		if err := h.setPin(ctx, p, key, in.ID, *in.Pinned); err != nil {
+		if err := h.store.SetPin(ctx, p, key, in.ID, *in.Pinned); err != nil {
 			return nil, err
 		}
 	}
@@ -161,12 +162,12 @@ func (h *harness) updateThread(ctx context.Context, p *auth.Principal, key auth.
 }
 
 func (h *harness) pinnedThreads(ctx context.Context, p *auth.Principal, key auth.ContentKey, flags auth.ChatFlags) ([]domain.ThreadSummary, error) {
-	ids, err := h.pinnedIDs(ctx, p, key)
+	ids, err := h.store.PinnedIDs(ctx, p, key)
 	if err != nil {
 		return nil, err
 	}
 	threads := []domain.ThreadSummary{}
-	rows, err := h.threadBatch(ctx, p, key, ids)
+	rows, err := h.store.ThreadBatch(ctx, p, key, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -190,7 +191,7 @@ func (h *harness) pinnedThreads(ctx context.Context, p *auth.Principal, key auth
 // once changed, or the device chat its client sent.
 func (h *harness) changeThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, source threadSource, id string, change func(*domain.Thread) error) (*domain.ThreadRow, error) {
 	if !source.Local {
-		return h.mutateThread(ctx, p, key, id, change)
+		return h.store.MutateThread(ctx, p, key, id, change)
 	}
 	t, err := domain.ReadDeviceThread(id, source.Thread)
 	if err != nil {
@@ -227,12 +228,12 @@ func (h *harness) deleteThread(ctx context.Context, p *auth.Principal, key auth.
 		err = h.finishTransfer(ctx, p, key, in)
 	} else {
 		h.stopThread(p, in.ID)
-		err = h.removeRow(ctx, p, key, "chat", in.ID)
+		err = h.store.RemoveRow(ctx, p, key, "chat", in.ID)
 	}
 	if err != nil {
 		return nil, err
 	}
-	if err := h.setPin(ctx, p, key, in.ID, false); err != nil {
+	if err := h.store.SetPin(ctx, p, key, in.ID, false); err != nil {
 		slog.Warn("could not remove a deleted chat from favorites", "error", err)
 	}
 	return struct{}{}, nil
@@ -280,7 +281,7 @@ func (h *harness) forkThread(ctx context.Context, p *auth.Principal, key auth.Co
 		startFork(&fork)
 		return deviceReply(&domain.ThreadRow{Thread: fork}), nil
 	}
-	row, err := h.loadThread(ctx, p, key, in.ThreadID)
+	row, err := h.store.LoadThread(ctx, p, key, in.ThreadID)
 	if err != nil {
 		return nil, err
 	}
@@ -289,11 +290,11 @@ func (h *harness) forkThread(ctx context.Context, p *auth.Principal, key auth.Co
 		return nil, err
 	}
 	target := domain.RowID()
-	if err := h.forkStored(ctx, p, key, in.ThreadID, target, forkTitle(row.Title), count); err != nil {
+	if err := h.store.ForkStored(ctx, p, key, in.ThreadID, target, forkTitle(row.Title), count); err != nil {
 		return nil, err
 	}
 	// Sync leaves out the web client's bookkeeping, not the harness's.
-	forked, err := h.mutateThread(ctx, p, key, target, func(t *domain.Thread) error {
+	forked, err := h.store.MutateThread(ctx, p, key, target, func(t *domain.Thread) error {
 		startFork(t)
 		return nil
 	})
@@ -346,7 +347,7 @@ func (h *harness) changeMessages(ctx context.Context, p *auth.Principal, key aut
 func (h *harness) deleteAllThreads(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *deleteAllRequest) (any, error) {
 	// Every id is listed before any is deleted, so a shrinking list cannot
 	// skip a page, and rows this key cannot open are deleted too.
-	ids, err := h.chatIDs(ctx, p, domain.ValueOr(in.ProjectID, ""))
+	ids, err := h.store.ChatIDs(ctx, p, domain.ValueOr(in.ProjectID, ""))
 	if err != nil {
 		return nil, err
 	}
@@ -365,7 +366,7 @@ type deletedCount struct {
 
 // profile is a user's settings as a prompt reads them.
 func (h *harness) profile(ctx context.Context, p *auth.Principal, key auth.ContentKey) (domain.Profile, error) {
-	stored, err := h.loadProfile(ctx, p, key)
+	stored, err := h.store.LoadProfile(ctx, p, key)
 	if err != nil || stored == nil {
 		return domain.Profile{}, err
 	}
@@ -377,7 +378,7 @@ func (h *harness) viewProfile(stored domain.StoredProfile) domain.ProfileView {
 	return domain.ProfileView{Profile: h.catalog.get().EffectiveProfile(stored.Profile), UpdatedAt: stored.UpdatedAt}
 }
 func (h *harness) getProfile(ctx context.Context, p *auth.Principal, key auth.ContentKey, _ json.RawMessage) (any, error) {
-	stored, err := h.loadProfile(ctx, p, key)
+	stored, err := h.store.LoadProfile(ctx, p, key)
 	if err != nil {
 		return nil, err
 	}
@@ -399,7 +400,7 @@ func (h *harness) updateProfile(ctx context.Context, p *auth.Principal, key auth
 	if err != nil {
 		return nil, err
 	}
-	stored, err := h.mutateProfile(ctx, p, key, func(profile *domain.StoredProfile) error {
+	stored, err := h.store.MutateProfile(ctx, p, key, func(profile *domain.StoredProfile) error {
 		profile.Apply(patch)
 		if clearsDefault {
 			profile.DefaultPromptPresetID = nil
@@ -414,7 +415,7 @@ func (h *harness) updateProfile(ctx context.Context, p *auth.Principal, key auth
 
 func (h *harness) mergeDeviceProfile(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *profileMergeRequest) (any, error) {
 	local := domain.LocalProfile(in.Profile)
-	merged, err := h.mutateProfile(ctx, p, key, func(stored *domain.StoredProfile) error {
+	merged, err := h.store.MutateProfile(ctx, p, key, func(stored *domain.StoredProfile) error {
 		stored.Profile = domain.MergeDeviceProfile(stored.Profile, *local, in.ChangedFields)
 		return stored.Profile.Validate()
 	})
@@ -424,7 +425,7 @@ func (h *harness) mergeDeviceProfile(ctx context.Context, p *auth.Principal, key
 	return h.viewProfile(merged), nil
 }
 func (h *harness) listProjects(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *listRequest) (any, error) {
-	projects, next, err := h.projectPage(ctx, p, key, in.Cursor, 50)
+	projects, next, err := h.store.ProjectPage(ctx, p, key, in.Cursor, 50)
 	if err != nil {
 		return nil, err
 	}
@@ -434,11 +435,11 @@ func (h *harness) listProjects(ctx context.Context, p *auth.Principal, key auth.
 	}{projects, next}, nil
 }
 func (h *harness) getProject(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *idRequest) (any, error) {
-	project, err := h.loadProject(ctx, p, key, in.ID)
+	project, err := h.store.LoadProject(ctx, p, key, in.ID)
 	if err != nil {
 		return nil, err
 	}
-	docs, err := h.projectDocuments(ctx, p, key, in.ID, refuseUnreadable)
+	docs, err := h.store.ProjectDocuments(ctx, p, key, in.ID, store.RefuseUnreadable)
 	if err != nil {
 		return nil, err
 	}
@@ -451,7 +452,7 @@ func (h *harness) createProject(ctx context.Context, p *auth.Principal, key auth
 	if strings.TrimSpace(domain.ValueOr(in.Name, "")) == "" {
 		return nil, api.Err(400, "BAD_REQUEST", "A project name is required")
 	}
-	return h.mutateProject(ctx, p, key, domain.RowID(), true, func(project *domain.Project) {
+	return h.store.MutateProject(ctx, p, key, domain.RowID(), true, func(project *domain.Project) {
 		project.Name, project.Description, project.SystemInstructions, project.Color = *in.Name, domain.ValueOr(in.Description, ""), domain.ValueOr(in.SystemInstructions, ""), in.Color.Value
 	})
 }
@@ -459,7 +460,7 @@ func (h *harness) updateProject(ctx context.Context, p *auth.Principal, key auth
 	if err := api.RequireID("id", in.ID); err != nil {
 		return nil, err
 	}
-	return h.mutateProject(ctx, p, key, in.ID, false, func(project *domain.Project) {
+	return h.store.MutateProject(ctx, p, key, in.ID, false, func(project *domain.Project) {
 		project.Name = domain.ValueOr(in.Name, project.Name)
 		project.Description = domain.ValueOr(in.Description, project.Description)
 		project.SystemInstructions = domain.ValueOr(in.SystemInstructions, project.SystemInstructions)
@@ -469,11 +470,11 @@ func (h *harness) updateProject(ctx context.Context, p *auth.Principal, key auth
 	})
 }
 func (h *harness) deleteProject(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *idRequest) (any, error) {
-	return struct{}{}, h.removeRow(ctx, p, key, "project", in.ID)
+	return struct{}{}, h.store.RemoveRow(ctx, p, key, "project", in.ID)
 }
 
 func (h *harness) deleteAllProjects(ctx context.Context, p *auth.Principal, key auth.ContentKey, _ json.RawMessage) (any, error) {
-	deleted, err := h.removeAllProjects(ctx, p, key)
+	deleted, err := h.store.RemoveAllProjects(ctx, p, key)
 	if err != nil {
 		return nil, err
 	}
@@ -481,24 +482,24 @@ func (h *harness) deleteAllProjects(ctx context.Context, p *auth.Principal, key 
 }
 
 func (h *harness) deleteDocument(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *projectDocumentRequest) (any, error) {
-	return struct{}{}, h.removeRow(ctx, p, key, "project_document", in.ProjectID+"/"+in.DocumentID)
+	return struct{}{}, h.store.RemoveRow(ctx, p, key, "project_document", in.ProjectID+"/"+in.DocumentID)
 }
 func (h *harness) searchThreads(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *searchRequest) (any, error) {
-	ids, indexing, err := h.searchChats(ctx, p, key, in.Query, in.Limit)
+	ids, indexing, err := h.store.SearchChats(ctx, p, key, in.Query, in.Limit)
 	if err != nil {
 		return nil, err
 	}
 	if indexing {
-		if indexing, err = h.reindexChats(ctx, p, key); err != nil {
+		if indexing, err = h.store.ReindexChats(ctx, p, key); err != nil {
 			return nil, err
 		}
 		if !indexing {
-			if ids, indexing, err = h.searchChats(ctx, p, key, in.Query, in.Limit); err != nil {
+			if ids, indexing, err = h.store.SearchChats(ctx, p, key, in.Query, in.Limit); err != nil {
 				return nil, err
 			}
 		}
 	}
-	found, unreadable, err := h.searchResults(ctx, p, key, ids)
+	found, unreadable, err := h.store.SearchResults(ctx, p, key, ids)
 	if err != nil {
 		return nil, err
 	}

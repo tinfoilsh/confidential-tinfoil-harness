@@ -26,8 +26,8 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 	h.live.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), commitTimeout)
 	defer cancel()
-	ctx = context.WithValue(ctx, apiKeyKey{}, string(r.credential.Key))
-	ctx = context.WithValue(ctx, usageContextKey{}, usageForRun(r))
+	ctx = auth.WithCallerKey(ctx, string(r.credential.Key))
+	ctx = auth.WithUsage(ctx, usageForRun(r))
 	ctx = context.WithValue(ctx, usageSinkKey{}, r.out)
 	r.out.mu.Lock()
 	messages := r.assembler.Messages()
@@ -85,7 +85,7 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 				runErr = err
 			}
 		} else {
-			row, err := h.mutateThread(ctx, p, r.key, s.id, commit)
+			row, err := h.store.MutateThread(ctx, p, r.key, s.id, commit)
 			if err != nil {
 				runErr = err
 			} else {

@@ -40,7 +40,7 @@ func TestSearchesShowWhatTheyFoundAsTheyRun(t *testing.T) {
 	if !reflect.DeepEqual(displays, want) {
 		t.Fatalf("the run showed %+v", displays)
 	}
-	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
+	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
 	stored := mustRead(domain.ReadThreadRow(row))
 	if blocks := stored.Messages[1].Timeline; len(blocks) < 2 || !reflect.DeepEqual(blocks[0].Display, &searched) || blocks[1].Display.Status != "failed" {
 		t.Fatalf("the reply stored %+v", blocks)

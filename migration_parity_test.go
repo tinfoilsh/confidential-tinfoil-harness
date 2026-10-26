@@ -20,6 +20,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
 
 func TestResponseLanguageUsesTheDeviceUnlessTheProfileChoosesOne(t *testing.T) {
@@ -75,7 +76,7 @@ func TestMergingDeviceSettingsPreservesBothPromptLibraries(t *testing.T) {
 	if api.Str(cleared["defaultPromptPresetId"]) != "" {
 		t.Fatalf("clearing the device default was lost: %v", cleared["defaultPromptPresetId"])
 	}
-	stored, _ := rows.load(context.Background(), p, key, "profile", "profile")
+	stored, _ := rows.Load(context.Background(), p, key, "profile", "profile")
 	if mustRead(domain.ReadProfile(stored.Data)).DefaultPromptPresetID != nil {
 		t.Fatal("the cleared default was not stored")
 	}
@@ -171,7 +172,7 @@ func TestACloudRunUsesItsStorageCredentialForTheFinalSave(t *testing.T) {
 			items := []api.Object{}
 			for _, value := range api.Arr(in["ids"]) {
 				id := api.Str(value)
-				row, err := rows.load(r.Context(), p, key, api.Str(in["scope"]), id)
+				row, err := rows.Load(r.Context(), p, key, api.Str(in["scope"]), id)
 				if err != nil {
 					items = append(items, api.Object{"id": id, "ok": false, "code": "NOT_FOUND"})
 					continue
@@ -181,7 +182,7 @@ func TestACloudRunUsesItsStorageCredentialForTheFinalSave(t *testing.T) {
 			json.NewEncoder(w).Encode(api.Object{"items": items})
 		case "/v1/sync/push":
 			plain, _ := base64.StdEncoding.DecodeString(api.Str(in["plaintext"]))
-			etag, err := rows.push(r.Context(), p, key, api.Str(in["scope"]), &domain.StoredRow{ID: api.Str(in["id"]), ETag: api.Str(in["if_match"]), Data: plain}, "write")
+			etag, err := rows.Push(r.Context(), p, key, api.Str(in["scope"]), &domain.StoredRow{ID: api.Str(in["id"]), ETag: api.Str(in["if_match"]), Data: plain}, "write")
 			if err != nil {
 				w.WriteHeader(409)
 				return
@@ -193,10 +194,10 @@ func TestACloudRunUsesItsStorageCredentialForTheFinalSave(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	h.storeRows = &syncClient{URL: server.URL, Client: server.Client()}
+	h.store.Rows = &store.Client{URL: server.URL, Client: server.Client()}
 	in := sendInput(key)
 	events := finishedRun(t, h, "/v1/threads/turn", in)
-	row, err := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", api.Str(in["threadId"]))
+	row, err := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", api.Str(in["threadId"]))
 	if err != nil || grantCalls.Load() != 1 || eventOfType(events, "RUN_FINISHED") == nil || len(mustRead(domain.ReadThreadRow(row)).Messages) != 2 || mustRead(domain.ReadThreadRow(row)).Messages[1].Content != "hello" {
 		t.Fatalf("reply was not stored with the run credential: %v", err)
 	}
@@ -229,7 +230,7 @@ func TestRemoteChangesReadOnlyStorageMetadata(t *testing.T) {
 		json.NewEncoder(w).Encode(api.Object{"updates": []api.Object{{"id": scope, "etag": revisions[scope]}}})
 	}))
 	defer server.Close()
-	h.syncAPI = &syncClient{URL: server.URL, Client: server.Client()}
+	h.store.API = &store.Client{URL: server.URL, Client: server.Client()}
 	read := func() api.Object {
 		t.Helper()
 		w := postRoute(h, "/v1/changes", api.Object{}, "alice")
@@ -274,9 +275,9 @@ type countedRunGrants struct {
 	grants atomic.Int32
 }
 
-func (s *countedRunGrants) authorizeRun(ctx context.Context, p *auth.Principal, key auth.ContentKey, id string, project *string) (storageGrant, error) {
+func (s *countedRunGrants) AuthorizeRun(ctx context.Context, p *auth.Principal, key auth.ContentKey, id string, project *string) (store.Grant, error) {
 	s.grants.Add(1)
-	return s.memoryRows.authorizeRun(ctx, p, key, id, project)
+	return s.memoryRows.AuthorizeRun(ctx, p, key, id, project)
 }
 
 func TestAQueuedTurnRefreshesStorageAccessBeforeStarting(t *testing.T) {
@@ -284,7 +285,7 @@ func TestAQueuedTurnRefreshesStorageAccessBeforeStarting(t *testing.T) {
 	h, rows, key := testChatHarness(t, model)
 	t.Cleanup(release)
 	grants := &countedRunGrants{memoryRows: rows}
-	h.storeRows = grants
+	h.store.Rows = grants
 	p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
 	in := sendInput(key)
 	first, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](in))
@@ -303,7 +304,7 @@ func TestAQueuedTurnRefreshesStorageAccessBeforeStarting(t *testing.T) {
 	h.live.mu.Unlock()
 	release()
 	<-queued.finished
-	row, err := rows.load(context.Background(), p, key, "chat", api.Str(in["threadId"]))
+	row, err := rows.Load(context.Background(), p, key, "chat", api.Str(in["threadId"]))
 	if err != nil || len(mustRead(domain.ReadThreadRow(row)).Messages) != 4 || mustRead(domain.ReadThreadRow(row)).Messages[2].Content != "Queued question" || mustRead(domain.ReadThreadRow(row)).Messages[3].Content == "" || grants.grants.Load() != 3 {
 		t.Fatalf("queued reply did not renew and save: %v, grants=%d, row=%+v", err, grants.grants.Load(), row)
 	}

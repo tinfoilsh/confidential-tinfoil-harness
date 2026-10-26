@@ -210,7 +210,7 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 					api.Respond(w, nil, err)
 					return
 				}
-				p.SyncToken, err = h.storeRows.authorizeStorage(r.Context(), p, key, "project-upload", fields["projectId"])
+				p.SyncToken, err = h.store.Rows.AuthorizeStorage(r.Context(), p, key, "project-upload", fields["projectId"])
 				if err != nil {
 					api.Respond(w, nil, err)
 					return
@@ -249,7 +249,7 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "A nonempty file is required"))
 		return
 	}
-	ctx := context.WithValue(r.Context(), apiKeyKey{}, string(cred.Key))
+	ctx := auth.WithCallerKey(r.Context(), string(cred.Key))
 	if r.URL.Path == "/v1/transcriptions" {
 		text, err := h.transcribe(ctx, filename, file)
 		api.Respond(w, api.Object{"text": text}, h.withQuota(p, cred.Limit, err))
@@ -275,7 +275,7 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 			api.Respond(w, nil, err)
 			return
 		}
-		if _, err := h.loadProject(ctx, p, key, projectID); err != nil {
+		if _, err := h.store.LoadProject(ctx, p, key, projectID); err != nil {
 			api.Respond(w, nil, err)
 			return
 		}
@@ -290,7 +290,7 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 			api.Respond(w, nil, api.Err(415, "ATTACHMENT_UNSUPPORTED", "Project documents require extracted text"))
 			return
 		}
-		doc, err := h.createProjectDocument(ctx, p, key, domain.ProjectDocument{ID: domain.RowID(), ProjectID: projectID, Filename: filename, ContentType: descriptor.MimeType, SizeBytes: len(file), Content: descriptor.TextContent})
+		doc, err := h.store.CreateProjectDocument(ctx, p, key, domain.ProjectDocument{ID: domain.RowID(), ProjectID: projectID, Filename: filename, ContentType: descriptor.MimeType, SizeBytes: len(file), Content: descriptor.TextContent})
 		api.Respond(w, doc, err)
 		return
 	}
@@ -532,7 +532,7 @@ func multipartCall(ctx context.Context, service *downstreamService, path, fileFi
 		return nil, err
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
-	if key := callerKey(ctx); key != "" {
+	if key := auth.CallerKey(ctx); key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
 	resp, err := service.Client.Do(req)
@@ -587,7 +587,7 @@ func (h *harness) attachment(ctx context.Context, p *auth.Principal, key auth.Co
 	}
 	var descriptor *domain.Attachment
 	if threadID != "" {
-		row, err := h.loadThread(ctx, p, key, threadID)
+		row, err := h.store.LoadThread(ctx, p, key, threadID)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -604,7 +604,7 @@ func (h *harness) attachmentBytes(ctx context.Context, p *auth.Principal, a *dom
 	if a.Base64 != "" {
 		return base64.StdEncoding.DecodeString(a.Base64)
 	}
-	data, err := h.getAttachment(ctx, p, a.ID, a.StorageKey(), public)
+	data, err := h.store.GetAttachment(ctx, p, a.ID, a.StorageKey(), public)
 	// Sync moves an image that only has a legacy key into its own storage
 	// under the same id and key, after which the control plane refuses it.
 	if err != nil && api.AsError(err).HTTP == http.StatusNotFound && !public && a.EncryptionKey == "" && a.Key != "" {

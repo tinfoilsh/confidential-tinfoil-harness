@@ -72,7 +72,7 @@ func (h *harness) handleSpeech(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, api.Err(503, "TOOL_UNAVAILABLE", "Speech is unavailable"))
 		return
 	}
-	ctx := context.WithValue(r.Context(), apiKeyKey{}, string(credential.Key))
+	ctx := auth.WithCallerKey(r.Context(), string(credential.Key))
 	if err := streamSpeech(ctx, w, router, pieces); err != nil {
 		api.Respond(w, nil, h.withQuota(p, credential.Limit, err))
 	}
@@ -98,7 +98,7 @@ func (h *harness) speechText(ctx context.Context, p *auth.Principal, in *speechR
 				return "", err
 			}
 			defer clear(key[:])
-			row, err := h.loadThread(ctx, p, key, in.ThreadID)
+			row, err := h.store.LoadThread(ctx, p, key, in.ThreadID)
 			clear(key[:])
 			if err != nil {
 				return "", err

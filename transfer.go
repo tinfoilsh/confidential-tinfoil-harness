@@ -26,11 +26,11 @@ func (h *harness) threadTranscript(ctx context.Context, p *auth.Principal, key a
 	if running {
 		return nil, api.Err(409, "RUN_IN_FLIGHT", "Wait for the reply to finish before moving this chat").WithAction(api.ActionRetry)
 	}
-	row, err := h.loadThread(ctx, p, key, in.ThreadID)
+	row, err := h.store.LoadThread(ctx, p, key, in.ThreadID)
 	if err != nil {
 		return nil, err
 	}
-	if err := h.applyPins(ctx, p, key, []*domain.ThreadRow{row}); err != nil {
+	if err := h.store.ApplyPins(ctx, p, key, []*domain.ThreadRow{row}); err != nil {
 		return nil, err
 	}
 	missing := 0
@@ -91,7 +91,7 @@ func (h *harness) finishTransfer(ctx context.Context, p *auth.Principal, key aut
 		h.dropIdle(s)
 		h.live.mu.Unlock()
 	}()
-	return h.removeThreadRevision(ctx, p, key, in.ID, in.Revision)
+	return h.store.RemoveThreadRevision(ctx, p, key, in.ID, in.Revision)
 }
 
 // handleThreadImport stores a chat from the device as a cloud chat under the
@@ -141,14 +141,14 @@ func (h *harness) importThread(ctx context.Context, p *auth.Principal, key auth.
 		return nil, err
 	}
 	stripInlineAttachments(&row.Thread)
-	if err := h.saveThread(ctx, p, key, row); err != nil {
+	if err := h.store.SaveThread(ctx, p, key, row); err != nil {
 		if api.AsError(err).Code == "REVISION_CONFLICT" {
 			return nil, api.Err(409, "THREAD_EXISTS", "This chat is already in the cloud")
 		}
 		return nil, err
 	}
 	if row.Pinned {
-		if err := h.setPin(ctx, p, key, id, true); err != nil {
+		if err := h.store.SetPin(ctx, p, key, id, true); err != nil {
 			return nil, err
 		}
 	}

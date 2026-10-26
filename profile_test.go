@@ -84,7 +84,7 @@ func TestAStoredProfileReadsUpgradedAndKeepsTheUpgradeOnceChanged(t *testing.T) 
 	if presets := presetsByID(get()); len(presets) != 1 || presets["user:kept"] == nil {
 		t.Fatalf("a removed migrated prompt came back: %v", presets)
 	}
-	row, _ := rows.load(context.Background(), p, key, "profile", "profile")
+	row, _ := rows.Load(context.Background(), p, key, "profile", "profile")
 	if data := rowJSON(row); data["isUsingCustomPrompt"] != false || data["themeMode"] != nil {
 		t.Fatalf("the stored profile is %v", data)
 	}
@@ -157,7 +157,7 @@ func TestTheWebSearchSettingOfAnOldProfileIsKept(t *testing.T) {
 		t.Fatalf("an unset web search setting read as %v", got["webSearchAvailable"])
 	}
 	w := postRoute(h, "/v1/profile/update", api.Object{"key": keyBase64(key), "patch": api.Object{"webSearchAvailable": true}}, "alice")
-	row, _ := rows.load(context.Background(), p, key, "profile", "profile")
+	row, _ := rows.Load(context.Background(), p, key, "profile", "profile")
 	if got := profileOf(t, w); got["webSearchAvailable"] != true || rowJSON(row)["webSearchAvailable"] != true {
 		t.Fatalf("the update answered %v and stored %v", got, rowJSON(row))
 	}

@@ -17,3 +17,7 @@ var RowIDPattern = regexp.MustCompile(`^\d{13}_[0-9a-f-]{36}$`)
 func RowID() string {
 	return fmt.Sprintf("%013d_%s", MaxReverseMillis-api.Now().UnixMilli(), uuid.NewString())
 }
+
+// EnclaveAttachmentID is the id of an attachment stored through this harness, as
+// sync names its blobs.
+var EnclaveAttachmentID = regexp.MustCompile(`^[0-9a-f]{36}$`)

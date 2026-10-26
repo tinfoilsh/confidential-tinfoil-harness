@@ -11,6 +11,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
 
 type downstreamService struct {
@@ -19,17 +20,17 @@ type downstreamService struct {
 }
 
 func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
-	auth, err := auth.New(ctx, os.Getenv("CLERK_ISSUER"), h.controlplane)
+	authenticator, err := auth.New(ctx, os.Getenv("CLERK_ISSUER"), h.controlplane)
 	if err != nil {
 		return err
 	}
-	h.auth = auth
+	h.auth = authenticator
 	gw, err := newGateway(h.gateway, h.offer.sdk)
 	if err != nil {
 		return fmt.Errorf("configure gateway %s: %w", h.gateway, err)
 	}
 	// Outermost: the SDK salts each caller's prompt cache with the key set here.
-	h.modelClient = &http.Client{Transport: &callerAuth{inner: gw.HTTPClient().Transport, usageSecret: usageSecret}}
+	h.modelClient = &http.Client{Transport: &auth.CallerTransport{Inner: gw.HTTPClient().Transport, UsageSecret: usageSecret}}
 	h.services = map[string]*downstreamService{}
 	for _, config := range []struct {
 		role, repo, variable string
@@ -59,8 +60,8 @@ func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
 		h.services[config.role] = &downstreamService{URL: "https://" + host, Client: client}
 	}
 	s := h.services["sync"]
-	h.syncAPI = &syncClient{URL: s.URL, Client: s.Client}
-	h.storeRows = h.syncAPI
+	h.store.API = &store.Client{URL: s.URL, Client: s.Client, MinimumGrant: runTimeout + commitTimeout}
+	h.store.Rows = h.store.API
 	router := h.services["router"]
 	h.autoModel = &model{name: "auto", client: router.Client, endpoint: router.URL + "/v1/chat/completions"}
 	if err := h.refreshCatalog(ctx); err != nil {
@@ -97,5 +98,5 @@ func (h *harness) serviceCall(ctx context.Context, role, path string, in, out an
 	if s == nil {
 		return api.Err(503, "TOOL_UNAVAILABLE", role+" is unavailable")
 	}
-	return api.PostJSON(ctx, s.Client, strings.TrimRight(s.URL, "/")+path, callerKey(ctx), in, out)
+	return api.PostJSON(ctx, s.Client, strings.TrimRight(s.URL, "/")+path, auth.CallerKey(ctx), in, out)
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
@@ -65,7 +66,7 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *auth.Principal
 		}
 		if !s.local {
 			// A new chat's first turn creates its row under the client's id.
-			row, err = h.loadThread(ctx, p, r.key, s.id)
+			row, err = h.store.LoadThread(ctx, p, r.key, s.id)
 			if err != nil && (api.AsError(err).HTTP != 404 || !domain.RowIDPattern.MatchString(s.id) || !create) {
 				return nil, err
 			}
@@ -77,12 +78,12 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *auth.Principal
 			}
 		}
 		if id := domain.ValueOr(row.ProjectID, ""); id != "" {
-			stored, err := h.loadProject(ctx, p, r.key, id)
+			stored, err := h.store.LoadProject(ctx, p, r.key, id)
 			if err != nil {
 				return nil, err
 			}
 			project = &stored
-			docs, err = h.projectDocuments(ctx, p, r.key, id, refuseUnreadable)
+			docs, err = h.store.ProjectDocuments(ctx, p, r.key, id, store.RefuseUnreadable)
 			if err != nil {
 				return nil, err
 			}
@@ -180,7 +181,7 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	if !s.keyless && !p.SyncExpires.After(api.Now().Add(runTimeout+commitTimeout)) {
 		fresh := *p
 		fresh.SyncToken = ""
-		grant, err := h.storeRows.authorizeRun(ctx, &fresh, r.key, r.input.ThreadID, r.input.ProjectID)
+		grant, err := h.store.Rows.AuthorizeRun(ctx, &fresh, r.key, r.input.ThreadID, r.input.ProjectID)
 		if err != nil {
 			return err
 		}
@@ -190,8 +191,8 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 		r.principal = p
 		h.live.mu.Unlock()
 	}
-	ctx = context.WithValue(ctx, apiKeyKey{}, string(r.credential.Key))
-	ctx = context.WithValue(ctx, usageContextKey{}, usageForRun(r))
+	ctx = auth.WithCallerKey(ctx, string(r.credential.Key))
+	ctx = auth.WithUsage(ctx, usageForRun(r))
 	ctx = context.WithValue(ctx, usageSinkKey{}, r.out)
 	if err := h.refuseFlagged(ctx, r, p); err != nil {
 		return err
@@ -213,11 +214,11 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 		if deleted {
 			return errThreadDeleted
 		}
-		err = h.saveThread(ctx, p, r.key, plan.row)
+		err = h.store.SaveThread(ctx, p, r.key, plan.row)
 		if err == nil {
 			break
 		}
-		if api.AsError(err).Code != "REVISION_CONFLICT" || attempt == maxCommitAttempts {
+		if api.AsError(err).Code != "REVISION_CONFLICT" || attempt == store.MaxCommitAttempts {
 			return err
 		}
 	}
@@ -264,8 +265,8 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	h.live.working.Add(1)
 	h.live.mu.Unlock()
 	runCtx, cancel := context.WithTimeout(r.stopped, runTimeout)
-	runCtx = context.WithValue(runCtx, apiKeyKey{}, string(r.credential.Key))
-	runCtx = context.WithValue(runCtx, usageContextKey{}, usageForRun(r))
+	runCtx = auth.WithCallerKey(runCtx, string(r.credential.Key))
+	runCtx = auth.WithUsage(runCtx, usageForRun(r))
 	runCtx = context.WithValue(runCtx, usageSinkKey{}, r.out)
 	r.out.mu.Lock()
 	r.out.thoughts = h.thoughtSummaries(runCtx, r.out, r.assembler)
@@ -311,7 +312,7 @@ func (h *harness) refuseFlagged(ctx context.Context, r *chatRun, p *auth.Princip
 		return nil
 	}
 	if !r.thread.local && r.input.Kind != "ask" {
-		_, err := h.mutateThread(ctx, p, r.key, chat, func(t *domain.Thread) error {
+		_, err := h.store.MutateThread(ctx, p, r.key, chat, func(t *domain.Thread) error {
 			t.Flagged = true
 			return nil
 		})

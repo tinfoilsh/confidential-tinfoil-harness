@@ -102,7 +102,7 @@ func TestRunsShowTheChatTheHarnessKeeps(t *testing.T) {
 				}
 				kept = *metadata.Thread
 			} else {
-				row, err := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
+				row, err := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
 				if err != nil {
 					t.Fatal(err)
 				}

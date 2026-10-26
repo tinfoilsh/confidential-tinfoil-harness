@@ -66,7 +66,7 @@ func (f *fakeSync) importStep(t *testing.T, h *harness, r *http.Request, in api.
 		user := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		user = strings.TrimPrefix(strings.TrimPrefix(user, "clerk-"), "sync-archive:")
 		p := &auth.Principal{ID: user}
-		counts, err := f.storeImport(h.storeRows.(*memoryRows), p, key, archive)
+		counts, err := f.storeImport(h.store.Rows.(*memoryRows), p, key, archive)
 		if err != nil {
 			t.Errorf("sync would refuse the import: %v", err)
 			job.status = api.Object{"status": "failed", "failure_reason": "invalid_archive"}
@@ -213,7 +213,7 @@ func (f *fakeSync) storeImport(rows *memoryRows, p *auth.Principal, key auth.Con
 			}
 			projects[entity.SourceID] = id
 			row := &domain.StoredRow{ID: id, Data: api.Raw(api.Object{"id": id, "name": project.Name, "description": project.Description, "systemInstructions": project.SystemInstructions, "color": project.Color, "memory": project.Memory, "_restore": marker})}
-			if _, err := rows.push(context.Background(), p, key, "project", row, ""); err != nil {
+			if _, err := rows.Push(context.Background(), p, key, "project", row, ""); err != nil {
 				return 0, err
 			}
 		case "document":
@@ -229,7 +229,7 @@ func (f *fakeSync) storeImport(rows *memoryRows, p *auth.Principal, key auth.Con
 				return 0, fmt.Errorf("document %s: %v", entity.SourceID, err)
 			}
 			row := &domain.StoredRow{ID: project + "/" + id, Data: api.Raw(api.Object{"id": id, "projectId": project, "filename": doc.Filename, "contentType": doc.ContentType, "sourceSizeBytes": doc.SourceSizeBytes, "sizeBytes": doc.SizeBytes, "content": doc.Content, "_restore": marker}), Project: &project, ProjectSet: true}
-			if _, err := rows.push(context.Background(), p, key, "project_document", row, ""); err != nil {
+			if _, err := rows.Push(context.Background(), p, key, "project_document", row, ""); err != nil {
 				return 0, err
 			}
 		case "chat":
@@ -249,7 +249,7 @@ func (f *fakeSync) storeImport(rows *memoryRows, p *auth.Principal, key auth.Con
 				delete(chat, "projectId")
 			}
 			row.Data = api.Raw(chat)
-			if _, err := rows.push(context.Background(), p, key, "chat", row, ""); err != nil {
+			if _, err := rows.Push(context.Background(), p, key, "chat", row, ""); err != nil {
 				return 0, err
 			}
 		default:

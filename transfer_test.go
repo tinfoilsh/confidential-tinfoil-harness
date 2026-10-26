@@ -12,6 +12,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
 
 func TestTranscriptInlinesAttachmentsAndDetachesKeys(t *testing.T) {
@@ -120,7 +121,7 @@ func TestTransferDeletionPreservesRepliesStartedAfterTheCopy(t *testing.T) {
 	if w := postRoute(h, "/v1/threads/delete", deletion, "alice"); w.Code != 409 || !strings.Contains(w.Body.String(), "REVISION_CONFLICT") {
 		t.Fatalf("stale transfer: %d %s", w.Code, w.Body.String())
 	}
-	row, err := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", id)
+	row, err := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", id)
 	if err != nil || len(mustRead(domain.ReadThreadRow(row)).Messages) != 4 || mustRead(domain.ReadThreadRow(row)).Messages[3].Content == "" {
 		t.Fatalf("reply lost: %v %+v", err, row)
 	}
@@ -128,7 +129,7 @@ func TestTransferDeletionPreservesRepliesStartedAfterTheCopy(t *testing.T) {
 	if w := postRoute(h, "/v1/threads/delete", deletion, "alice"); w.Code != 200 {
 		t.Fatalf("fresh transfer: %d %s", w.Code, w.Body.String())
 	}
-	if _, err := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", id); api.AsError(err).HTTP != 404 {
+	if _, err := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", id); api.AsError(err).HTTP != 404 {
 		t.Fatal("transferred chat remains in the cloud")
 	}
 }
@@ -185,13 +186,13 @@ func TestImportStoresTheDeviceChatUnderItsID(t *testing.T) {
 	if summary["id"] != "0000000000005_device" || summary["title"] != "From the device" || summary["activeRun"] != nil {
 		t.Fatalf("summary: %v", summary)
 	}
-	row, err := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "0000000000005_device")
+	row, err := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "0000000000005_device")
 	if err != nil {
 		t.Fatal(err)
 	}
 	attachments := mustRead(domain.ReadThreadRow(row)).Messages[0].Attachments
 	for _, a := range attachments {
-		if !enclaveAttachmentID.MatchString(a.ID) || a.StorageThreadID != "0000000000005_device" || a.Base64 != "" || a.TextContent != "" {
+		if !domain.EnclaveAttachmentID.MatchString(a.ID) || a.StorageThreadID != "0000000000005_device" || a.Base64 != "" || a.TextContent != "" {
 			t.Fatalf("attachment not stored under the chat: %+v", a)
 		}
 	}
@@ -223,7 +224,7 @@ func TestImportStatusReadsAsTheClientNamesIt(t *testing.T) {
 
 func TestImportMayReuseADeletedChatID(t *testing.T) {
 	var metadata api.Object
-	client := &syncClient{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
+	client := &store.Client{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
 		var in api.Object
 		json.NewDecoder(r.Body).Decode(&in)
 		metadata = api.Obj(in["metadata"])
@@ -233,7 +234,7 @@ func TestImportMayReuseADeletedChatID(t *testing.T) {
 		return syncTestResponse(200, api.Object{"ok": true, "etag": "1"})
 	})}}
 	h, _, key := testChatHarness(t, nil)
-	h.storeRows = client
+	h.store.Rows = client
 	if _, err := h.importThread(context.Background(), &auth.Principal{ID: "alice", JWT: "jwt"}, key, requestOf[threadImportRequest](api.Object{"threadId": "chat-1", "thread": api.Object{"messages": []any{}}})); err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +242,7 @@ func TestImportMayReuseADeletedChatID(t *testing.T) {
 		t.Fatalf("metadata: %v", metadata)
 	}
 	row := &domain.StoredRow{ID: "chat-1", Data: api.Raw(api.Object{"messages": []any{}})}
-	client.push(context.Background(), &auth.Principal{ID: "alice", JWT: "jwt"}, key, "chat", row, "nonce")
+	client.Push(context.Background(), &auth.Principal{ID: "alice", JWT: "jwt"}, key, "chat", row, "nonce")
 	if _, ok := metadata["restoreDeleted"]; ok {
 		t.Fatal("an ordinary push asked to restore a deleted chat")
 	}

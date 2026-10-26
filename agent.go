@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
@@ -30,7 +31,7 @@ const (
 )
 
 func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model) error {
-	apiKey := callerKey(ctx)
+	apiKey := auth.CallerKey(ctx)
 	inRun := usagereporting.Context{
 		ContextID:     req.runID,
 		RootRequestID: req.runID,
@@ -40,8 +41,8 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 	}
 	billing := inRun
 	billing.BillCustomerRequest = true
-	ctx = context.WithValue(ctx, usageContextKey{}, inRun)
-	first := context.WithValue(ctx, usageContextKey{}, billing)
+	ctx = auth.WithUsage(ctx, inRun)
+	first := auth.WithUsage(ctx, billing)
 
 	set, err := openTools(ctx, req, m.name, out.progress)
 	if err != nil {
@@ -92,12 +93,12 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 				return refreshErr
 			}
 			inRun.APIKeyHash = usagereporting.HashAPIKey(string(credential.Key))
-			ctx = context.WithValue(ctx, apiKeyKey{}, string(credential.Key))
-			ctx = context.WithValue(ctx, usageContextKey{}, inRun)
+			ctx = auth.WithCallerKey(ctx, string(credential.Key))
+			ctx = auth.WithUsage(ctx, inRun)
 			turnCtx = ctx
 			if turn == 1 {
 				billing.APIKeyHash = inRun.APIKeyHash
-				turnCtx = context.WithValue(ctx, usageContextKey{}, billing)
+				turnCtx = auth.WithUsage(ctx, billing)
 			}
 			calls, answer, err = h.turn(turnCtx, out, m, payload, set.widgets)
 		}
