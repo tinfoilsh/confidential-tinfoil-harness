@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -48,9 +49,32 @@ func newScratchSpace(dir string, size int64) *scratchSpace {
 	return &scratchSpace{dir: dir, size: size, sem: semaphore.NewWeighted(size), wait: scratchWait, idle: scratchIdle}
 }
 
-// measuredScratch budgets the temporary directory as large as it is.
+// sweepScratch removes the spool files a process that ended before releasing
+// them left in dir.
+func sweepScratch(dir string) error {
+	left, err := filepath.Glob(filepath.Join(dir, scratchPattern))
+	if err != nil {
+		return err
+	}
+	for _, name := range left {
+		if err := os.Remove(name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// scratchPattern names the spool files, so a later process can tell what
+// its predecessor left from anything else in the directory.
+const scratchPattern = "harness-archive-*"
+
+// measuredScratch budgets the temporary directory as large as it is, once
+// the spool files a previous process left in it are removed.
 func measuredScratch() (*scratchSpace, error) {
 	dir := os.TempDir()
+	if err := sweepScratch(dir); err != nil {
+		return nil, err
+	}
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(dir, &stat); err != nil {
 		return nil, err
@@ -143,7 +167,7 @@ type scratchFile struct {
 }
 
 func (l *scratchLease) create() (*scratchFile, error) {
-	f, err := os.CreateTemp(l.space.dir, "harness-archive-*")
+	f, err := os.CreateTemp(l.space.dir, scratchPattern)
 	if err != nil {
 		return nil, err
 	}

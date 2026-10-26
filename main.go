@@ -98,7 +98,7 @@ func main() {
 	attestWebSearch(ctx, usageSecret)
 	scratch, err := measuredScratch()
 	if err != nil {
-		slog.Error("measure the temporary directory", "error", err)
+		slog.Error("prepare the temporary directory", "error", err)
 		os.Exit(1)
 	}
 	h := &harness{gateway: gw,
