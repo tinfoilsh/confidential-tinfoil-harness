@@ -840,7 +840,7 @@ func (e *conversationsExport) attachment(a Attachment, image func(*Attachment) (
 		return exportAttachment{}, err
 	}
 	exported.ExportPath, exported.FileSize = exportPath, new(int64(len(data)))
-	e.manifest.Attachments = append(e.manifest.Attachments, exportedFile{ExportPath: exportPath, SHA256: hashHex(data), FileSize: len(data)})
+	e.manifest.Attachments = append(e.manifest.Attachments, exportedFile{ExportPath: exportPath, SHA256: api.HashHex(data), FileSize: len(data)})
 	return exported, nil
 }
 

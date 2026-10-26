@@ -97,8 +97,3 @@ func (a *authenticator) readFlags(ctx context.Context, p *principal) (chatFlags,
 
 // mark records on each thread whether the safeguards flagged it. A flag
 // once stored stays.
-func (f chatFlags) mark(threads ...*Thread) {
-	for _, t := range threads {
-		t.Flagged = t.Flagged || f[t.ID]
-	}
-}

@@ -55,7 +55,7 @@ func TestDeviceAndStoredChatsChangeTheSameWay(t *testing.T) {
 		{"/v1/threads/messages/update", api.Object{"threadId": "chat-1", "messageId": "a1", "content": "first, pack light"}},
 		{"/v1/threads/messages/delete", api.Object{"threadId": "chat-1", "messageId": "u2"}},
 	} {
-		cloud := api.Object{"key": key.base64()}
+		cloud := api.Object{"key": keyBase64(key)}
 		for field, value := range step.in {
 			cloud[field] = value
 		}

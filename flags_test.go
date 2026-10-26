@@ -36,7 +36,7 @@ func TestASlowFlagLookupFlagsNothing(t *testing.T) {
 		var list struct {
 			Threads []threadSummary `json:"threads"`
 		}
-		w := postRoute(h, "/v1/threads/list", api.Object{"key": key.base64()}, "alice")
+		w := postRoute(h, "/v1/threads/list", api.Object{"key": keyBase64(key)}, "alice")
 		if json.Unmarshal(w.Body.Bytes(), &list); len(list.Threads) != 1 || list.Threads[0].ID != "chat-1" || list.Threads[0].Flagged {
 			return fmt.Errorf("HTTP %d %s", w.Code, w.Body.String())
 		}
@@ -92,7 +92,7 @@ func TestAFlaggedChatTakesNoTurns(t *testing.T) {
 		Threads []threadSummary `json:"threads"`
 		Pinned  []threadSummary `json:"pinned"`
 	}
-	json.Unmarshal(postRoute(h, "/v1/threads/list", api.Object{"key": key.base64()}, "alice").Body.Bytes(), &list)
+	json.Unmarshal(postRoute(h, "/v1/threads/list", api.Object{"key": keyBase64(key)}, "alice").Body.Bytes(), &list)
 	pinned := map[string]bool{}
 	for _, summary := range list.Pinned {
 		pinned[summary.ID] = summary.Flagged
@@ -108,7 +108,7 @@ func TestAFlaggedChatTakesNoTurns(t *testing.T) {
 		t.Fatalf("the list shows %+v", list.Threads)
 	}
 	var got threadSummary
-	json.Unmarshal(postRoute(h, "/v1/threads/get", api.Object{"key": key.base64(), "id": "listed"}, "alice").Body.Bytes(), &got)
+	json.Unmarshal(postRoute(h, "/v1/threads/get", api.Object{"key": keyBase64(key), "id": "listed"}, "alice").Body.Bytes(), &got)
 	if got.ID != "listed" || !got.Flagged {
 		t.Fatalf("the chat reads as %+v", got)
 	}
@@ -137,7 +137,7 @@ func TestFlagsAreReusedOnlyForTheirCaller(t *testing.T) {
 	storedThread(rows, "bob", "chat-1")
 	flagged := func(user string) bool {
 		var got threadSummary
-		json.Unmarshal(postRoute(h, "/v1/threads/get", api.Object{"key": key.base64(), "id": "chat-1"}, user).Body.Bytes(), &got)
+		json.Unmarshal(postRoute(h, "/v1/threads/get", api.Object{"key": keyBase64(key), "id": "chat-1"}, user).Body.Bytes(), &got)
 		return got.Flagged
 	}
 	if seen := []bool{flagged("alice"), flagged("alice"), flagged("bob"), flagged("bob")}; !reflect.DeepEqual(seen, []bool{true, true, false, false}) {

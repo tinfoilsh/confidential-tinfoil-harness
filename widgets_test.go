@@ -179,11 +179,11 @@ func TestEveryViewMarksWidgetArgumentsTheDeclarationRefuses(t *testing.T) {
 		}
 		return api.Obj(decodeValue(w.Body.Bytes()))
 	}
-	marks("the thread view", body(postRoute(h, "/v1/threads/get", api.Object{"key": key.base64(), "id": "chat-1"}, "alice"))["messages"])
+	marks("the thread view", body(postRoute(h, "/v1/threads/get", api.Object{"key": keyBase64(key), "id": "chat-1"}, "alice"))["messages"])
 	events := eventsIn(t, postRoute(h, "/v1/threads/turn", continueInput(key, "chat-1"), "alice"))
 	marks("the run's snapshot", eventOfType(events, "MESSAGES_SNAPSHOT").Messages)
-	marks("the transcript", api.Obj(body(postRoute(h, "/v1/threads/transcript", api.Object{"key": key.base64(), "threadId": "chat-1"}, "alice"))["thread"])["messages"])
-	body(postRoute(h, "/v1/threads/share", api.Object{"key": key.base64(), "threadId": "chat-1"}, "alice"))
+	marks("the transcript", api.Obj(body(postRoute(h, "/v1/threads/transcript", api.Object{"key": keyBase64(key), "threadId": "chat-1"}, "alice"))["thread"])["messages"])
+	body(postRoute(h, "/v1/threads/share", api.Object{"key": keyBase64(key), "threadId": "chat-1"}, "alice"))
 	if seals := fake.requests("/v1/share/seal"); len(seals) == 1 {
 		plaintext, _ := base64.StdEncoding.DecodeString(api.Str(seals[0]["plaintext"]))
 		marks("the share", api.Obj(decodeValue(plaintext))["messages"])

@@ -160,7 +160,7 @@ func (a *authenticator) authenticate(r *http.Request, anonymous bool) (*principa
 	if anonymous && strings.HasPrefix(token, "free_") && len(token) > len("free_") && len(token) <= 256 {
 		// Possession scopes ephemeral state. The prefix is not validation:
 		// recognize checks the key with the control plane before any work.
-		return &principal{Anonymous: true, AnonymousID: hashHex([]byte(token)), InferenceKey: secret(token)}, nil
+		return &principal{Anonymous: true, AnonymousID: api.HashHex([]byte(token)), InferenceKey: secret(token)}, nil
 	}
 	id, err := a.verify(r.Context(), token)
 	if err != nil {
@@ -181,7 +181,7 @@ func (a *authenticator) recognize(ctx context.Context, p *principal) error {
 	if !p.Anonymous {
 		return nil
 	}
-	if _, ok := a.validKeys().Get(hashHex([]byte(p.InferenceKey))); ok {
+	if _, ok := a.validKeys().Get(api.HashHex([]byte(p.InferenceKey))); ok {
 		return nil
 	}
 	credential, err := a.freeKey(ctx, p)
@@ -215,7 +215,7 @@ func (a *authenticator) freeKey(ctx context.Context, p *principal) (inferenceCre
 	}
 	credential, err := a.validateFreeKey(ctx, p)
 	if err == nil {
-		a.validKeys().Add(hashHex([]byte(p.InferenceKey)), struct{}{})
+		a.validKeys().Add(api.HashHex([]byte(p.InferenceKey)), struct{}{})
 	}
 	return credential, err
 }

@@ -418,7 +418,7 @@ func TestAnImageKeepsOneFormFromUploadToView(t *testing.T) {
 	var window struct {
 		Messages []api.Object `json:"messages"`
 	}
-	json.Unmarshal(postRoute(h, "/v1/threads/get", api.Object{"key": key.base64(), "id": thread}, "alice").Body.Bytes(), &window)
+	json.Unmarshal(postRoute(h, "/v1/threads/get", api.Object{"key": keyBase64(key), "id": thread}, "alice").Body.Bytes(), &window)
 	views := []any{api.Arr(api.Obj(api.Arr(eventOfType(events, "MESSAGES_SNAPSHOT").Messages)[0])["attachments"])[0], api.Arr(window.Messages[0]["attachments"])[0]}
 	local := localInput("", nil)
 	api.Obj(local["options"])["model"] = "auto"

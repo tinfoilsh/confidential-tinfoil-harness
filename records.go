@@ -92,7 +92,7 @@ func (h *harness) listThreads(ctx context.Context, p *principal, key contentKey,
 	flags := h.auth.flaggedChats(ctx, p)
 	list := []threadSummary{}
 	for _, row := range rows {
-		flags.mark(&row.Thread)
+		markFlagged(flags, &row.Thread)
 		list = append(list, summarize(&row.Thread))
 	}
 	var pinned []threadSummary
@@ -116,7 +116,7 @@ func (h *harness) getThread(ctx context.Context, p *principal, key contentKey, i
 	if err := h.applyPins(ctx, p, key, []*threadRow{row}); err != nil {
 		return nil, err
 	}
-	h.auth.flaggedChats(ctx, p).mark(&row.Thread)
+	markFlagged(h.auth.flaggedChats(ctx, p), &row.Thread)
 	return window(row, in.Before, in.Limit), nil
 }
 func (h *harness) updateThread(ctx context.Context, p *principal, key contentKey, in *updateThreadRequest) (any, error) {
@@ -146,7 +146,7 @@ func (h *harness) updateThread(ctx context.Context, p *principal, key contentKey
 	if err != nil {
 		return nil, err
 	}
-	h.auth.flaggedChats(ctx, p).mark(&row.Thread)
+	markFlagged(h.auth.flaggedChats(ctx, p), &row.Thread)
 	if in.Local {
 		return deviceReply(row), nil
 	}
@@ -178,7 +178,7 @@ func (h *harness) pinnedThreads(ctx context.Context, p *principal, key contentKe
 			continue
 		}
 		row.Pinned = true
-		flags.mark(&row.Thread)
+		markFlagged(flags, &row.Thread)
 		threads = append(threads, summarize(&row.Thread))
 	}
 	return threads, nil
@@ -335,7 +335,7 @@ func (h *harness) changeMessages(ctx context.Context, p *principal, key contentK
 	if err != nil {
 		return nil, err
 	}
-	h.auth.flaggedChats(ctx, p).mark(&row.Thread)
+	markFlagged(h.auth.flaggedChats(ctx, p), &row.Thread)
 	if in.Local {
 		return deviceReply(row), nil
 	}
@@ -503,7 +503,7 @@ func (h *harness) searchThreads(ctx context.Context, p *principal, key contentKe
 	flags := h.auth.flaggedChats(ctx, p)
 	results := []threadSummary{}
 	for _, row := range found {
-		flags.mark(&row.Thread)
+		markFlagged(flags, &row.Thread)
 		results = append(results, summarize(&row.Thread))
 	}
 	return struct {
@@ -511,4 +511,11 @@ func (h *harness) searchThreads(ctx context.Context, p *principal, key contentKe
 		Unreadable int             `json:"unreadable"`
 		Indexing   bool            `json:"indexing"`
 	}{results, unreadable, indexing}, nil
+}
+
+// markFlagged marks the chats among threads that the safeguards flagged.
+func markFlagged(flags chatFlags, threads ...*Thread) {
+	for _, t := range threads {
+		t.Flagged = t.Flagged || flags[t.ID]
+	}
 }

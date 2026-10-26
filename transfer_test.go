@@ -25,7 +25,7 @@ func TestTranscriptInlinesAttachmentsAndDetachesKeys(t *testing.T) {
 		data["projectId"], data["harnessRequests"], data["clock"] = "project-1", api.Object{"nonce": api.Object{}}, 9
 	})
 	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat-1")] = row
-	w := postRoute(h, "/v1/threads/transcript", api.Object{"key": key.base64(), "threadId": "chat-1"}, "alice")
+	w := postRoute(h, "/v1/threads/transcript", api.Object{"key": keyBase64(key), "threadId": "chat-1"}, "alice")
 	if w.Code != 200 {
 		t.Fatalf("HTTP %d: %s", w.Code, w.Body.String())
 	}
@@ -59,7 +59,7 @@ func TestTranscriptRefusesToLoseContent(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	newFakeSync(t, h)
 	storedThread(rows, "alice", "gone", api.Object{"id": strings.Repeat("d", 36), "type": "image", "fileName": "lost.png", "encryptionKey": "gone"})
-	if w := postRoute(h, "/v1/threads/transcript", api.Object{"key": key.base64(), "threadId": "gone"}, "alice"); w.Code != 409 || !strings.Contains(w.Body.String(), "ATTACHMENTS_UNAVAILABLE") {
+	if w := postRoute(h, "/v1/threads/transcript", api.Object{"key": keyBase64(key), "threadId": "gone"}, "alice"); w.Code != 409 || !strings.Contains(w.Body.String(), "ATTACHMENTS_UNAVAILABLE") {
 		t.Fatalf("a chat with an unreadable attachment moved: %d %s", w.Code, w.Body.String())
 	}
 }
@@ -74,7 +74,7 @@ func TestTranscriptWaitsForALiveReply(t *testing.T) {
 		t.Fatal(err)
 	}
 	awaitFrame(t, run.log, "TEXT_MESSAGE_CHUNK")
-	in := api.Object{"key": key.base64(), "threadId": run.thread.id}
+	in := api.Object{"key": keyBase64(key), "threadId": run.thread.id}
 	w := postRoute(h, "/v1/threads/transcript", in, "alice")
 	if w.Code != 409 || !strings.Contains(w.Body.String(), "RUN_IN_FLIGHT") {
 		t.Fatalf("a live reply could be left behind: %d %s", w.Code, w.Body.String())
@@ -97,7 +97,7 @@ func TestTransferDeletionPreservesRepliesStartedAfterTheCopy(t *testing.T) {
 	in := sendInput(key)
 	id := api.Str(in["threadId"])
 	storedThread(rows, "alice", id)
-	copy := postRoute(h, "/v1/threads/transcript", api.Object{"key": key.base64(), "threadId": id}, "alice")
+	copy := postRoute(h, "/v1/threads/transcript", api.Object{"key": keyBase64(key), "threadId": id}, "alice")
 	var copied struct {
 		Revision string `json:"revision"`
 	}
@@ -109,7 +109,7 @@ func TestTransferDeletionPreservesRepliesStartedAfterTheCopy(t *testing.T) {
 		t.Fatal(err)
 	}
 	awaitFrame(t, run.log, "TEXT_MESSAGE_CHUNK")
-	deletion := api.Object{"key": key.base64(), "id": id, "revision": copied.Revision}
+	deletion := api.Object{"key": keyBase64(key), "id": id, "revision": copied.Revision}
 	if w := postRoute(h, "/v1/threads/delete", deletion, "alice"); w.Code != 409 || !strings.Contains(w.Body.String(), "RUN_IN_FLIGHT") {
 		t.Fatalf("active transfer: %d %s", w.Code, w.Body.String())
 	}
@@ -137,7 +137,7 @@ func TestFavoriteReturnsWithAChatMovedBackToTheCloud(t *testing.T) {
 	storedThread(rows, "alice", id)
 	profileKey := "user:alice/profile/profile"
 	rows.rows[profileKey] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(api.Object{"pinnedChatIds": []string{id}})}
-	copy := postRoute(h, "/v1/threads/transcript", api.Object{"key": key.base64(), "threadId": id}, "alice")
+	copy := postRoute(h, "/v1/threads/transcript", api.Object{"key": keyBase64(key), "threadId": id}, "alice")
 	var copied struct {
 		Thread   Thread `json:"thread"`
 		Revision string `json:"revision"`
@@ -145,16 +145,16 @@ func TestFavoriteReturnsWithAChatMovedBackToTheCloud(t *testing.T) {
 	if copy.Code != 200 || json.Unmarshal(copy.Body.Bytes(), &copied) != nil || !copied.Thread.Pinned {
 		t.Fatalf("favorite copy: %d %s", copy.Code, copy.Body.String())
 	}
-	if w := postRoute(h, "/v1/threads/delete", api.Object{"key": key.base64(), "id": id, "revision": copied.Revision}, "alice"); w.Code != 200 {
+	if w := postRoute(h, "/v1/threads/delete", api.Object{"key": keyBase64(key), "id": id, "revision": copied.Revision}, "alice"); w.Code != 200 {
 		t.Fatalf("transfer: %s", w.Body.String())
 	}
 	if len(mustRead(readProfile(rows.rows[profileKey].Data)).PinnedChatIDs) != 0 {
 		t.Fatal("device chat left in the cloud favorites index")
 	}
-	if w := postRoute(h, "/v1/threads/import", api.Object{"key": key.base64(), "threadId": id, "thread": copied.Thread}, "alice"); w.Code != 200 {
+	if w := postRoute(h, "/v1/threads/import", api.Object{"key": keyBase64(key), "threadId": id, "thread": copied.Thread}, "alice"); w.Code != 200 {
 		t.Fatalf("return to cloud: %s", w.Body.String())
 	}
-	w := postRoute(h, "/v1/threads/list", api.Object{"key": key.base64()}, "alice")
+	w := postRoute(h, "/v1/threads/list", api.Object{"key": keyBase64(key)}, "alice")
 	var page struct {
 		Pinned []threadSummary `json:"pinned"`
 	}
@@ -173,7 +173,7 @@ func TestImportStoresTheDeviceChatUnderItsID(t *testing.T) {
 		}},
 		api.Object{"id": "m2", "role": "assistant", "content": "seen"},
 	}, "activeRun": api.Object{"runId": "forged"}}
-	in := api.Object{"key": key.base64(), "threadId": "0000000000005_device", "thread": thread}
+	in := api.Object{"key": keyBase64(key), "threadId": "0000000000005_device", "thread": thread}
 	w := postRoute(h, "/v1/threads/import", in, "alice")
 	if w.Code != 200 {
 		t.Fatalf("HTTP %d: %s", w.Code, w.Body.String())

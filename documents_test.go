@@ -113,7 +113,7 @@ func newFakeSync(t *testing.T, h *harness) *fakeSync {
 func TestPublicAttachmentPropagatesMissingBlob(t *testing.T) {
 	h, _, key := testChatHarness(t, nil)
 	fake := newFakeSync(t, h)
-	w := postRoute(h, "/v1/attachments/get-public", api.Object{"id": "missing", "attKey": key.base64()}, "")
+	w := postRoute(h, "/v1/attachments/get-public", api.Object{"id": "missing", "attKey": keyBase64(key)}, "")
 	var response struct {
 		Error api.Error `json:"error"`
 	}
@@ -361,7 +361,7 @@ func TestDocumentDownloadReturnsExtractedText(t *testing.T) {
 	fake := newFakeSync(t, h)
 	id, blobKey := fake.seed("chat-1", []byte(`{"pages":[{"page":1,"text":"page one","image":"","is_scanned":false}]}`))
 	storedThread(rows, "alice", "chat-1", api.Object{"id": id, "type": "document", "fileName": "scan.pdf", "encryptionKey": blobKey})
-	w := postRoute(h, "/v1/attachments/get", api.Object{"key": key.base64(), "id": id, "threadId": "chat-1"}, "alice")
+	w := postRoute(h, "/v1/attachments/get", api.Object{"key": keyBase64(key), "id": id, "threadId": "chat-1"}, "alice")
 	if w.Code != 200 || w.Body.String() != "page one" {
 		t.Fatalf("download was not the extracted text: %d %q", w.Code, w.Body.String())
 	}
@@ -387,12 +387,12 @@ func TestForkCopiesAChatThroughItsMessage(t *testing.T) {
 		in   api.Object
 		code int
 	}{{api.Object{"threadId": "chat-1", "messageId": "m4"}, 404}, {api.Object{"threadId": "chat-1"}, 400}} {
-		tc.in["key"] = key.base64()
+		tc.in["key"] = keyBase64(key)
 		if w := postRoute(h, "/v1/threads/fork", tc.in, "alice"); w.Code != tc.code || len(fake.requests("/v1/sync/fork")) != 0 {
 			t.Fatalf("%v: HTTP %d, want %d without a fork", tc.in, w.Code, tc.code)
 		}
 	}
-	w := postRoute(h, "/v1/threads/fork", api.Object{"key": key.base64(), "threadId": "chat-1", "messageId": "m2"}, "alice")
+	w := postRoute(h, "/v1/threads/fork", api.Object{"key": keyBase64(key), "threadId": "chat-1", "messageId": "m2"}, "alice")
 	forks := fake.requests("/v1/sync/fork")
 	if w.Code != 200 || len(forks) != 1 {
 		t.Fatalf("fork: HTTP %d %s after %d sync forks", w.Code, w.Body.String(), len(forks))
@@ -402,7 +402,7 @@ func TestForkCopiesAChatThroughItsMessage(t *testing.T) {
 	if !regexp.MustCompile(`^\d{13}_[0-9a-f-]{36}$`).MatchString(target) || err != nil || time.Since(created) > time.Minute || api.Str(request["idempotency_key"]) == "" {
 		t.Fatalf("fork request: %v", request)
 	}
-	want := api.Object{"source_id": "chat-1", "target_id": target, "key": key.base64(), "message_count": float64(2), "title": "Trip (fork)", "created_at": request["created_at"], "idempotency_key": request["idempotency_key"]}
+	want := api.Object{"source_id": "chat-1", "target_id": target, "key": keyBase64(key), "message_count": float64(2), "title": "Trip (fork)", "created_at": request["created_at"], "idempotency_key": request["idempotency_key"]}
 	if !reflect.DeepEqual(request, want) {
 		t.Fatalf("fork request %v, want %v", request, want)
 	}
@@ -505,7 +505,7 @@ func TestAStoredChatIsSharedFromItsRow(t *testing.T) {
 	cp := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer cp.Close()
 	h.controlplane, h.cpClient = cp.URL, &http.Client{Transport: &callerAuth{inner: cp.Client().Transport}}
-	if _, err := h.shareThread(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, contentKey{}, requestOf[shareRequest](api.Object{"key": key.base64(), "threadId": "chat-1"})); err != nil {
+	if _, err := h.shareThread(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, contentKey{}, requestOf[shareRequest](api.Object{"key": keyBase64(key), "threadId": "chat-1"})); err != nil {
 		t.Fatal(err)
 	}
 	var shared api.Object
@@ -529,7 +529,7 @@ func TestAChatTheProfileListsReadsAsPinned(t *testing.T) {
 		var page struct {
 			Threads []api.Object `json:"threads"`
 		}
-		json.Unmarshal(postRoute(h, "/v1/threads/list", api.Object{"key": key.base64()}, "alice").Body.Bytes(), &page)
+		json.Unmarshal(postRoute(h, "/v1/threads/list", api.Object{"key": keyBase64(key)}, "alice").Body.Bytes(), &page)
 		out := map[string]any{}
 		for _, thread := range page.Threads {
 			out[api.Str(thread["id"])] = thread["pinned"]
@@ -541,7 +541,7 @@ func TestAChatTheProfileListsReadsAsPinned(t *testing.T) {
 	}
 	update := func(id string, pin bool) {
 		t.Helper()
-		if w := postRoute(h, "/v1/threads/update", api.Object{"key": key.base64(), "id": id, "pinned": pin}, "alice"); w.Code != 200 {
+		if w := postRoute(h, "/v1/threads/update", api.Object{"key": keyBase64(key), "id": id, "pinned": pin}, "alice"); w.Code != 200 {
 			t.Fatalf("pinning %s: HTTP %d %s", id, w.Code, w.Body.String())
 		}
 	}
@@ -556,11 +556,11 @@ func TestAChatTheProfileListsReadsAsPinned(t *testing.T) {
 	var page struct {
 		Pinned []threadSummary `json:"pinned"`
 	}
-	json.Unmarshal(postRoute(h, "/v1/threads/list", api.Object{"key": key.base64()}, "alice").Body.Bytes(), &page)
+	json.Unmarshal(postRoute(h, "/v1/threads/list", api.Object{"key": keyBase64(key)}, "alice").Body.Bytes(), &page)
 	if len(page.Pinned) != 1 || page.Pinned[0].ID != "chat-2" {
 		t.Fatalf("favorites: %+v", page.Pinned)
 	}
-	if w := postRoute(h, "/v1/threads/delete", api.Object{"key": key.base64(), "id": "chat-2"}, "alice"); w.Code != 200 {
+	if w := postRoute(h, "/v1/threads/delete", api.Object{"key": keyBase64(key), "id": "chat-2"}, "alice"); w.Code != 200 {
 		t.Fatalf("delete favorite: %s", w.Body.String())
 	}
 	if pins := mustRead(readProfile(rows.rows[rowMapKey(p, "profile", "profile")].Data)).PinnedChatIDs; len(pins) != 0 {
@@ -579,7 +579,7 @@ func TestAPromotedLegacyImageIsReadThroughSync(t *testing.T) {
 	defer cp.Close()
 	h.controlplane = cp.URL
 	storedThread(rows, "alice", "chat-1", api.Object{"id": "legacy-2", "type": "image", "fileName": "photo.png", "mimeType": "image/png", "key": legacyKey})
-	w := postRoute(h, "/v1/attachments/get", api.Object{"key": key.base64(), "id": "legacy-2", "threadId": "chat-1"}, "alice")
+	w := postRoute(h, "/v1/attachments/get", api.Object{"key": keyBase64(key), "id": "legacy-2", "threadId": "chat-1"}, "alice")
 	if w.Code != 200 || w.Body.String() != "promoted photo" {
 		t.Fatalf("a promoted legacy image: HTTP %d %s", w.Code, w.Body.String())
 	}

@@ -43,7 +43,7 @@ func (f *fakeSync) importStep(t *testing.T, h *harness, r *http.Request, in api.
 	case "/v1/import/upload":
 		job := f.imports[api.Str(in["upload_id"])]
 		data, err := base64.StdEncoding.DecodeString(api.Str(in["data"]))
-		if job == nil || err != nil || hashHex(data) != api.Str(in["chunk_sha256"]) || len(data) > importChunk {
+		if job == nil || err != nil || api.HashHex(data) != api.Str(in["chunk_sha256"]) || len(data) > importChunk {
 			return 400, api.Object{"code": "BAD_REQUEST"}
 		}
 		job.chunks[api.Int(in["chunk_index"])] = data
@@ -58,7 +58,7 @@ func (f *fakeSync) importStep(t *testing.T, h *harness, r *http.Request, in api.
 		for i := 0; i < len(job.chunks); i++ {
 			archive = append(archive, job.chunks[i]...)
 		}
-		if int64(len(archive)) != job.total || hashHex(archive) != job.sha {
+		if int64(len(archive)) != job.total || api.HashHex(archive) != job.sha {
 			return 400, api.Object{"code": "BAD_REQUEST"}
 		}
 		user := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -180,7 +180,7 @@ func (f *fakeSync) storeImport(rows *memoryRows, p *principal, key contentKey, a
 	blobs := map[string]bool{}
 	for _, blob := range manifest.Blobs {
 		data, err := read(blob.Path)
-		if err != nil || listed[blob.Path] || len(data) != blob.SizeBytes || hashHex(data) != blob.SHA256 {
+		if err != nil || listed[blob.Path] || len(data) != blob.SizeBytes || api.HashHex(data) != blob.SHA256 {
 			return 0, errors.New("blob " + blob.Path)
 		}
 		listed[blob.Path], blobs[blob.Path] = true, true
@@ -190,7 +190,7 @@ func (f *fakeSync) storeImport(rows *memoryRows, p *principal, key contentKey, a
 	stored := 0
 	for _, entity := range manifest.Entities {
 		data, err := read(entity.Path)
-		if err != nil || listed[entity.Path] || len(data) != entity.SizeBytes || hashHex(data) != entity.SHA256 || entity.SourceID == "" || sources[entity.Kind+"\x00"+entity.SourceID] {
+		if err != nil || listed[entity.Path] || len(data) != entity.SizeBytes || api.HashHex(data) != entity.SHA256 || entity.SourceID == "" || sources[entity.Kind+"\x00"+entity.SourceID] {
 			return 0, errors.New("entity " + entity.Path)
 		}
 		listed[entity.Path], sources[entity.Kind+"\x00"+entity.SourceID] = true, true

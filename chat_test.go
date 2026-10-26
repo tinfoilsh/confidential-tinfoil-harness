@@ -52,7 +52,7 @@ func (s *memoryRows) authorizeStorage(_ context.Context, p *principal, _ content
 
 func randomKey() contentKey { var k contentKey; rand.Read(k[:]); return k }
 
-func (k contentKey) base64() string { return base64.StdEncoding.EncodeToString(k[:]) }
+func keyBase64(k contentKey) string { return base64.StdEncoding.EncodeToString(k[:]) }
 
 func rowMapKey(p *principal, scope, id string) string { return p.scope() + "/" + scope + "/" + id }
 func (s *memoryRows) opens(name string, key contentKey) bool {
@@ -407,7 +407,7 @@ func requestOf[T any](in api.Object) *T {
 
 // sendInput is the first turn of a new chat, under an id its client chose.
 func sendInput(key contentKey) api.Object {
-	return api.Object{"key": key.base64(), "threadId": rowID(), "clientRequestId": uuid.NewString(), "content": "test message", "kind": "send", "options": api.Object{"model": "kimi-k3", "webSearch": false}}
+	return api.Object{"key": keyBase64(key), "threadId": rowID(), "clientRequestId": uuid.NewString(), "content": "test message", "kind": "send", "options": api.Object{"model": "kimi-k3", "webSearch": false}}
 }
 
 // event is a frame as a test reads it: the members of every event type in
@@ -477,7 +477,7 @@ func TestManagedTurnStoresV2AndKeepsKeyOutOfEvents(t *testing.T) {
 	if events[0].Type != "RUN_STARTED" || events[len(events)-1].Type != "RUN_FINISHED" {
 		t.Fatalf("wrong lifecycle: %v", events)
 	}
-	if strings.Contains(response.Body.String(), key.base64()) {
+	if strings.Contains(response.Body.String(), keyBase64(key)) {
 		t.Fatal("secret in events")
 	}
 	row, err := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
@@ -491,7 +491,7 @@ func TestManagedTurnStoresV2AndKeepsKeyOutOfEvents(t *testing.T) {
 	if assistant := chat.Messages[1]; assistant.Content != "answer" || len(assistant.Timeline) != 2 {
 		t.Fatalf("v2 message not preserved: %+v", assistant)
 	}
-	wrong := postRoute(h, "/v1/threads/follow", api.Object{"key": key.base64(), "threadId": events[0].ThreadID, "runId": events[0].RunID}, "bob")
+	wrong := postRoute(h, "/v1/threads/follow", api.Object{"key": keyBase64(key), "threadId": events[0].ThreadID, "runId": events[0].RunID}, "bob")
 	if wrong.Code != 404 {
 		t.Fatalf("foreign user followed: %d", wrong.Code)
 	}
@@ -551,7 +551,7 @@ func TestACloudAskReadsTheChatsSettingsAndProject(t *testing.T) {
 func TestAProjectUpdateClearsItsColorWithNull(t *testing.T) {
 	h, _, key := testChatHarness(t, nil)
 	var created Project
-	json.Unmarshal(postRoute(h, "/v1/projects/create", api.Object{"key": key.base64(), "name": "Research", "color": "blue"}, "alice").Body.Bytes(), &created)
+	json.Unmarshal(postRoute(h, "/v1/projects/create", api.Object{"key": keyBase64(key), "name": "Research", "color": "blue"}, "alice").Body.Bytes(), &created)
 	stored := func() Project {
 		t.Helper()
 		project, err := h.loadProject(context.Background(), &principal{ID: "alice"}, key, created.ID)
@@ -562,7 +562,7 @@ func TestAProjectUpdateClearsItsColorWithNull(t *testing.T) {
 	}
 	update := func(patch api.Object) {
 		t.Helper()
-		patch["key"], patch["id"] = key.base64(), created.ID
+		patch["key"], patch["id"] = keyBase64(key), created.ID
 		if w := postRoute(h, "/v1/projects/update", patch, "alice"); w.Code != 200 {
 			t.Fatalf("update %v: HTTP %d %s", patch, w.Code, w.Body.String())
 		}
@@ -575,7 +575,7 @@ func TestAProjectUpdateClearsItsColorWithNull(t *testing.T) {
 	if project := stored(); project.Name != "Renamed" || project.Color != nil {
 		t.Fatalf("a null color left the project as %+v", project)
 	}
-	if w := postRoute(h, "/v1/projects/update", api.Object{"key": key.base64(), "id": created.ID, "color": 5}, "alice"); w.Code != 400 {
+	if w := postRoute(h, "/v1/projects/update", api.Object{"key": keyBase64(key), "id": created.ID, "color": 5}, "alice"); w.Code != 400 {
 		t.Fatalf("a color that is not a string: HTTP %d", w.Code)
 	}
 }
@@ -588,13 +588,13 @@ func TestNewChatsStartWithTheDefaultPromptPreset(t *testing.T) {
 	})
 	pirate := api.Object{"id": "user:pirate", "name": "Pirate", "description": "", "systemPrompt": "Answer like a pirate.", "createdAt": 1, "updatedAt": 1, "model": "kimi-k3", "webSearchEnabled": false}
 	for _, patch := range []api.Object{{"defaultPromptPresetId": 1}, {"customPromptPresets": []any{api.Object{"id": "user:x", "name": "X", "model": 3}}}, {"customPromptPresets": []any{api.Object{"id": "user:x", "name": "X", "webSearchEnabled": "no"}}}} {
-		if w := postRoute(h, "/v1/profile/update", api.Object{"key": key.base64(), "patch": patch}, "alice"); w.Code != 400 {
+		if w := postRoute(h, "/v1/profile/update", api.Object{"key": keyBase64(key), "patch": patch}, "alice"); w.Code != 400 {
 			t.Fatalf("profile accepted %v: %d", patch, w.Code)
 		}
 	}
 	update := func(patch api.Object) api.Object {
 		t.Helper()
-		w := postRoute(h, "/v1/profile/update", api.Object{"key": key.base64(), "patch": patch}, "alice")
+		w := postRoute(h, "/v1/profile/update", api.Object{"key": keyBase64(key), "patch": patch}, "alice")
 		if w.Code != 200 {
 			t.Fatalf("profile update: %d %s", w.Code, w.Body.String())
 		}
@@ -655,7 +655,7 @@ func TestDeletingAMessageRemovesOnlyThatMessage(t *testing.T) {
 	}})}
 	rows.rows[rowMapKey(p, "chat", "solo")] = storedRow{ID: "solo", ETag: "1", Data: api.Raw(api.Object{"messages": []any{api.Object{"id": "only", "role": "user", "content": "hi"}}})}
 	remove := func(thread, message string) *httptest.ResponseRecorder {
-		return postRoute(h, "/v1/threads/messages/delete", api.Object{"key": key.base64(), "threadId": thread, "messageId": message}, "alice")
+		return postRoute(h, "/v1/threads/messages/delete", api.Object{"key": keyBase64(key), "threadId": thread, "messageId": message}, "alice")
 	}
 	for _, tc := range []struct {
 		thread, message string
@@ -709,7 +709,7 @@ func TestADeadRunNeverLocksItsChat(t *testing.T) {
 	var list struct {
 		Threads []api.Object `json:"threads"`
 	}
-	json.Unmarshal(postRoute(h, "/v1/threads/list", api.Object{"key": key.base64()}, "alice").Body.Bytes(), &list)
+	json.Unmarshal(postRoute(h, "/v1/threads/list", api.Object{"key": keyBase64(key)}, "alice").Body.Bytes(), &list)
 	hints := map[string]any{}
 	for _, thread := range list.Threads {
 		hints[api.Str(thread["id"])] = thread["activeRun"]
@@ -718,14 +718,14 @@ func TestADeadRunNeverLocksItsChat(t *testing.T) {
 		t.Fatalf("summaries report %v", hints)
 	}
 	for _, id := range []string{"stale", "recent"} {
-		in := api.Object{"key": key.base64(), "threadId": id, "messageId": "m2"}
-		if w := postRoute(h, "/v1/threads/messages/update", api.Object{"key": key.base64(), "threadId": id, "messageId": "m2", "content": "edited"}, "alice"); w.Code != 200 {
+		in := api.Object{"key": keyBase64(key), "threadId": id, "messageId": "m2"}
+		if w := postRoute(h, "/v1/threads/messages/update", api.Object{"key": keyBase64(key), "threadId": id, "messageId": "m2", "content": "edited"}, "alice"); w.Code != 200 {
 			t.Fatalf("%s: editing a reply: HTTP %d %s", id, w.Code, w.Body.String())
 		}
 		if w := postRoute(h, "/v1/threads/fork", in, "alice"); w.Code != 200 {
 			t.Fatalf("%s: forking: HTTP %d %s", id, w.Code, w.Body.String())
 		}
-		if w := postRoute(h, "/v1/threads/transcript", api.Object{"key": key.base64(), "threadId": id}, "alice"); w.Code != 200 {
+		if w := postRoute(h, "/v1/threads/transcript", api.Object{"key": keyBase64(key), "threadId": id}, "alice"); w.Code != 200 {
 			t.Fatalf("%s: moving to the device: HTTP %d %s", id, w.Code, w.Body.String())
 		}
 		edit := continueInput(key, id)
@@ -736,7 +736,7 @@ func TestADeadRunNeverLocksItsChat(t *testing.T) {
 			t.Fatalf("%s: the turn stored %s", id, row.Data)
 		}
 		finishedRun(t, h, "/v1/threads/turn", continueInput(key, id))
-		if w := postRoute(h, "/v1/threads/delete", api.Object{"key": key.base64(), "id": id}, "alice"); w.Code != 200 {
+		if w := postRoute(h, "/v1/threads/delete", api.Object{"key": keyBase64(key), "id": id}, "alice"); w.Code != 200 {
 			t.Fatalf("%s: deleting: HTTP %d %s", id, w.Code, w.Body.String())
 		}
 		if _, err := rows.load(context.Background(), p, key, "chat", id); api.AsError(err).HTTP != 404 {
@@ -761,7 +761,7 @@ func TestEditingAReplyCollapsesItsText(t *testing.T) {
 		api.Object{"id": "a2", "role": "assistant", "content": "Sunny.", "thoughts": "look it up", "thinkingDuration": 3, "webSearch": search, "codeExecCalls": []any{code}, "toolCalls": []any{widget}},
 	}})}
 	update := func(message string, content any) *httptest.ResponseRecorder {
-		return postRoute(h, "/v1/threads/messages/update", api.Object{"key": key.base64(), "threadId": "chat-1", "messageId": message, "content": content}, "alice")
+		return postRoute(h, "/v1/threads/messages/update", api.Object{"key": keyBase64(key), "threadId": "chat-1", "messageId": message, "content": content}, "alice")
 	}
 	if w := update("u1", "edited question"); w.Code != 400 {
 		t.Fatalf("a question was edited in place: %d", w.Code)
@@ -1056,7 +1056,7 @@ func TestCancelCommitsPartialAndEndsQueue(t *testing.T) {
 		return next
 	}
 	next, after := queue(), queue()
-	_, err = h.cancelThread(context.Background(), p, key, requestOf[runRequest](api.Object{"key": key.base64(), "threadId": run.thread.id, "runId": run.log.id}))
+	_, err = h.cancelThread(context.Background(), p, key, requestOf[runRequest](api.Object{"key": keyBase64(key), "threadId": run.thread.id, "runId": run.log.id}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1099,7 +1099,7 @@ func TestCancelCommitsPartialAndEndsQueue(t *testing.T) {
 	if m := messages[1]; m.Content != "partial" || !valueOr(m.IsInterrupted, false) {
 		t.Fatalf("partial output not kept and marked interrupted: %v", m)
 	}
-	ended := api.Object{"key": key.base64(), "threadId": run.thread.id, "queueId": next.log.id}
+	ended := api.Object{"key": keyBase64(key), "threadId": run.thread.id, "queueId": next.log.id}
 	if _, err := h.sendQueued(context.Background(), p, key, requestOf[runRequest](ended)); api.AsError(err).Code != "RUN_NOT_FOUND" {
 		t.Fatalf("sending the ended turn: %v", err)
 	}
@@ -1190,12 +1190,12 @@ func prioritySend(t *testing.T, when string) {
 		}
 	}
 	if when == whileCommitting {
-		if _, err := h.cancelThread(context.Background(), p, key, requestOf[runRequest](api.Object{"key": key.base64(), "threadId": run.thread.id, "runId": run.log.id})); err != nil {
+		if _, err := h.cancelThread(context.Background(), p, key, requestOf[runRequest](api.Object{"key": keyBase64(key), "threadId": run.thread.id, "runId": run.log.id})); err != nil {
 			t.Fatal(err)
 		}
 		<-committing
 	}
-	if _, err := h.sendQueued(context.Background(), p, key, requestOf[runRequest](api.Object{"key": key.base64(), "threadId": run.thread.id, "queueId": second.log.id})); err != nil {
+	if _, err := h.sendQueued(context.Background(), p, key, requestOf[runRequest](api.Object{"key": keyBase64(key), "threadId": run.thread.id, "queueId": second.log.id})); err != nil {
 		t.Fatal(err)
 	}
 	release()
@@ -1242,7 +1242,7 @@ func TestSyncWireCarriesJWTProtocolAndBase64(t *testing.T) {
 		}
 		var in api.Object
 		json.NewDecoder(r.Body).Decode(&in)
-		if in["key"] != key.base64() {
+		if in["key"] != keyBase64(key) {
 			t.Error("wrong key")
 		}
 		plaintext, err := base64.StdEncoding.DecodeString(api.Str(in["plaintext"]))
@@ -1977,7 +1977,7 @@ func TestAnswersAnnotateTheSourcesTheyCite(t *testing.T) {
 		t.Fatalf("the run committed annotations %v", got)
 	}
 	var stored api.Object
-	json.Unmarshal(postRoute(h, "/v1/threads/get", api.Object{"key": key.base64(), "id": events[0].ThreadID}, "alice").Body.Bytes(), &stored)
+	json.Unmarshal(postRoute(h, "/v1/threads/get", api.Object{"key": keyBase64(key), "id": events[0].ThreadID}, "alice").Body.Bytes(), &stored)
 	if got := api.Obj(api.Arr(stored["messages"])[1])["annotations"]; !reflect.DeepEqual(got, any(want)) {
 		t.Fatalf("the stored chat shows annotations %v", got)
 	}

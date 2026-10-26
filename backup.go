@@ -2,7 +2,6 @@ package main
 
 import (
 	"archive/zip"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -188,8 +187,6 @@ func backupDocumentPath(projectID, id string) string {
 
 func backupImagePath(id, extension string) string { return "images/" + idComponent(id) + extension }
 
-func hashHex(data []byte) string { d := sha256.Sum256(data); return hex.EncodeToString(d[:]) }
-
 // backupPaths are the entries a native backup may hold.
 var backupPaths = regexp.MustCompile(`^(manifest\.json|relationships\.json|(projects|cloud_chats|local_chats)/id-[0-9a-f]+\.json|project_documents/id-[0-9a-f]+/id-[0-9a-f]+\.json|images/id-[0-9a-f]+\.(json|bin))$`)
 
@@ -248,7 +245,7 @@ func (b *backupWriter) add(kind, name string, data []byte) error {
 	if err := b.write(name, data, backupEntryLimit(name), kind != "images" || path.Ext(name) == ".json"); err != nil {
 		return err
 	}
-	b.manifest.Files = append(b.manifest.Files, backupFile{Path: name, Kind: kind, SHA256: hashHex(data), SizeBytes: int64(len(data))})
+	b.manifest.Files = append(b.manifest.Files, backupFile{Path: name, Kind: kind, SHA256: api.HashHex(data), SizeBytes: int64(len(data))})
 	return nil
 }
 

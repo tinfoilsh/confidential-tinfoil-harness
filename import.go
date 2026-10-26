@@ -790,7 +790,7 @@ func (c *cloudArchive) entity(kind, sourceID, projectSourceID string, payload an
 	if err := writeEntry(c.zip, name, data, true); err != nil {
 		return err
 	}
-	c.manifest.Entities = append(c.manifest.Entities, cloudEntity{Kind: kind, SourceID: sourceID, ProjectSourceID: projectSourceID, Path: name, SHA256: hashHex(data), SizeBytes: len(data)})
+	c.manifest.Entities = append(c.manifest.Entities, cloudEntity{Kind: kind, SourceID: sourceID, ProjectSourceID: projectSourceID, Path: name, SHA256: api.HashHex(data), SizeBytes: len(data)})
 	switch kind {
 	case "project":
 		c.manifest.Counts.Projects++
@@ -819,7 +819,7 @@ func (c *cloudArchive) chat(sourceID, projectSourceID string, t *Thread) error {
 				if err := writeEntry(c.zip, name, data, false); err != nil {
 					return err
 				}
-				c.manifest.Blobs = append(c.manifest.Blobs, cloudBlob{Path: name, SHA256: hashHex(data), SizeBytes: len(data)})
+				c.manifest.Blobs = append(c.manifest.Blobs, cloudBlob{Path: name, SHA256: api.HashHex(data), SizeBytes: len(data)})
 				c.manifest.Counts.Blobs++
 				attachment.Type, attachment.ArchivePath, attachment.Base64 = "image", name, ""
 			}
@@ -876,7 +876,7 @@ func (h *harness) stageImport(ctx context.Context, p *principal, key contentKey,
 		if _, err := archive.ReadAt(data, i*importChunk); err != nil && err != io.EOF {
 			return "", err
 		}
-		err := h.syncImport(ctx, p, "upload", importChunkUpload{UploadID: created.UploadID, ChunkIndex: i, ChunkSHA256: hashHex(data), Data: base64.StdEncoding.EncodeToString(data)}, nil)
+		err := h.syncImport(ctx, p, "upload", importChunkUpload{UploadID: created.UploadID, ChunkIndex: i, ChunkSHA256: api.HashHex(data), Data: base64.StdEncoding.EncodeToString(data)}, nil)
 		clear(data)
 		if err != nil {
 			return "", err

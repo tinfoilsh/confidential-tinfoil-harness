@@ -74,7 +74,7 @@ func TestSpeechRefusesWhatTheClientWouldNotSend(t *testing.T) {
 		{api.Object{}, 400},
 		{api.Object{"text": 42}, 400},
 		{api.Object{"messageId": "m1"}, 400},
-		{api.Object{"threadId": "chat-1", "messageId": "m1", "key": randomKey().base64()}, 401},
+		{api.Object{"threadId": "chat-1", "messageId": "m1", "key": keyBase64(randomKey())}, 401},
 		{api.Object{"threadId": "chat-1", "messageId": "m1", "local": true}, 400},
 		{api.Object{"threadId": "chat-1", "messageId": "m9", "local": true, "thread": priorThread()}, 404},
 		{api.Object{"threadId": "chat-1", "messageId": "m2", "local": true, "thread": api.Object{"messages": []any{api.Object{"id": "m2", "role": "assistant", "content": "```\ncode\n```"}}}}, 400},
@@ -179,13 +179,13 @@ func TestAMessageIsReadAloudInOrderWithoutItsCode(t *testing.T) {
 	for _, tc := range []struct {
 		in   api.Object
 		user string
-	}{{api.Object{"key": key.base64(), "threadId": "chat-1", "messageId": "short"}, "alice"}, {api.Object{"text": reply}, ""}} {
+	}{{api.Object{"key": keyBase64(key), "threadId": "chat-1", "messageId": "short"}, "alice"}, {api.Object{"text": reply}, ""}} {
 		audio, pieces := read(tc.in, tc.user)
 		if want := "Trip plan\nPack light, see the guide and . More at . Use rsync and compute x^2 steps."; len(pieces) != 1 || pieces[0] != want || audio != "<"+want+">" {
 			t.Fatalf("%v was read as %q", tc.in, pieces)
 		}
 	}
-	for _, in := range []api.Object{{"key": key.base64(), "threadId": "chat-1", "messageId": "long"}, {"text": long.String()}} {
+	for _, in := range []api.Object{{"key": keyBase64(key), "threadId": "chat-1", "messageId": "long"}, {"text": long.String()}} {
 		audio, pieces := read(in, "alice")
 		slices.SortFunc(pieces, func(a, b string) int { return cmp.Compare(leadingNumber(a), leadingNumber(b)) })
 		inOrder := ""

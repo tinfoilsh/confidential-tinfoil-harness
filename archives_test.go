@@ -235,7 +235,7 @@ func withBackupEntries(t *testing.T, archive []byte, replaced map[string][]byte)
 	}
 	for i, file := range manifest.Files {
 		if data, ok := replaced[file.Path]; ok {
-			manifest.Files[i].SHA256, manifest.Files[i].SizeBytes = hashHex(data), int64(len(data))
+			manifest.Files[i].SHA256, manifest.Files[i].SizeBytes = api.HashHex(data), int64(len(data))
 		}
 	}
 	replaced[manifestPath] = api.Raw(manifest)
@@ -275,7 +275,7 @@ func TestNativeBackupRoundTrips(t *testing.T) {
 		}},
 		api.Object{"id": "d2", "role": "assistant", "createdAt": "2026-02-01T00:00:01Z", "content": "Seen", "timeline": []any{api.Object{"id": "d2-content", "type": "content", "content": "Seen"}}},
 	}}
-	w := archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "native", "key": key.base64()}), threadPart(device), formPart{name: "file", filename: "att_photo", data: original})
+	w := archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "native", "key": keyBase64(key)}), threadPart(device), formPart{name: "file", filename: "att_photo", data: original})
 	if w.Code != 200 || w.Header().Get("Content-Type") != "application/zip" {
 		t.Fatalf("export: HTTP %d: %s", w.Code, w.Body.String())
 	}
@@ -283,7 +283,7 @@ func TestNativeBackupRoundTrips(t *testing.T) {
 	var manifest backupManifest
 	json.Unmarshal(files[manifestPath], &manifest)
 	for _, file := range manifest.Files {
-		if data, ok := files[file.Path]; !ok || hashHex(data) != file.SHA256 || int64(len(data)) != file.SizeBytes || backupKind(file.Path) != file.Kind {
+		if data, ok := files[file.Path]; !ok || api.HashHex(data) != file.SHA256 || int64(len(data)) != file.SizeBytes || backupKind(file.Path) != file.Kind {
 			t.Fatalf("the manifest does not describe %s", file.Path)
 		}
 	}
@@ -295,7 +295,7 @@ func TestNativeBackupRoundTrips(t *testing.T) {
 
 	restored, restoredRows, _ := testChatHarness(t, nil)
 	restoredSync := newFakeSync(t, restored)
-	result := importOf(t, restored, "alice", w.Body.Bytes(), "tinfoil-backup.zip", api.Object{"target": "cloud", "key": key.base64()})
+	result := importOf(t, restored, "alice", w.Body.Bytes(), "tinfoil-backup.zip", api.Object{"target": "cloud", "key": keyBase64(key)})
 	if result.done.JobID == nil || len(result.threads) != 1 || !reflect.DeepEqual(result.done.Warnings, []string{"The backup left out 1 items when it was made."}) {
 		t.Fatalf("restore: %+v %v", result.done, result.threads)
 	}
@@ -375,7 +375,7 @@ func TestARestoreReadsDeviceChatsBeforeStoringTheCloud(t *testing.T) {
 	newFakeSync(t, h)
 	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: api.Raw(api.Object{"title": "Stored", "messages": []any{api.Object{"id": "m", "role": "user", "content": "hi"}}})}
 	device := api.Object{"id": "local-chat", "title": "On my device", "messages": []any{api.Object{"id": "d", "role": "user", "content": "hello"}}}
-	w := archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "native", "key": key.base64()}), threadPart(device))
+	w := archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "native", "key": keyBase64(key)}), threadPart(device))
 	if w.Code != 200 {
 		t.Fatalf("export: HTTP %d %s", w.Code, w.Body.String())
 	}
@@ -383,7 +383,7 @@ func TestARestoreReadsDeviceChatsBeforeStoringTheCloud(t *testing.T) {
 
 	restored, restoredRows, _ := testChatHarness(t, nil)
 	newFakeSync(t, restored)
-	r := archiveRoute(restored, "/v1/import", "alice", optionsPart(api.Object{"target": "cloud", "key": key.base64()}), formPart{name: "file", filename: "backup.zip", data: archive})
+	r := archiveRoute(restored, "/v1/import", "alice", optionsPart(api.Object{"target": "cloud", "key": keyBase64(key)}), formPart{name: "file", filename: "backup.zip", data: archive})
 	if r.Code != 400 || !strings.Contains(r.Body.String(), "a chat is filed under another id") {
 		t.Fatalf("restore: HTTP %d %s", r.Code, r.Body.String())
 	}
@@ -453,7 +453,7 @@ func TestWebAppBackupsRestore(t *testing.T) {
 		t.Run(tc.fixture, func(t *testing.T) {
 			h, rows, key := testChatHarness(t, nil)
 			fake := newFakeSync(t, h)
-			result := importOf(t, h, "alice", fixture(t, tc.fixture), tc.fixture, api.Object{"target": "cloud", "key": key.base64()})
+			result := importOf(t, h, "alice", fixture(t, tc.fixture), tc.fixture, api.Object{"target": "cloud", "key": keyBase64(key)})
 			if result.done.JobID == nil || !reflect.DeepEqual(result.done.Warnings, tc.warnings) || len(result.threads) != 2 {
 				t.Fatalf("restore: %+v, %d device chats", result.done, len(result.threads))
 			}
@@ -576,7 +576,7 @@ func TestExportsImportAlikeToCloudAndDevice(t *testing.T) {
 			fake := newFakeSync(t, h)
 			archive := withEntries(t, fixture(t, tc.fixture), tc.images)
 			onDevice := importOf(t, h, "alice", archive, tc.fixture, api.Object{"target": "device"})
-			inCloud := importOf(t, h, "alice", archive, tc.fixture, api.Object{"target": "cloud", "key": key.base64()})
+			inCloud := importOf(t, h, "alice", archive, tc.fixture, api.Object{"target": "cloud", "key": keyBase64(key)})
 			if len(onDevice.threads) != tc.chats || inCloud.threads != nil || onDevice.done.JobID != nil || inCloud.done.JobID == nil || !reflect.DeepEqual(onDevice.done.Warnings, tc.onDevice) || !reflect.DeepEqual(inCloud.done.Warnings, tc.inCloud) {
 				t.Fatalf("device %d chats %+v, cloud %+v", len(onDevice.threads), onDevice.done, inCloud.done)
 			}
@@ -667,7 +667,7 @@ func TestClaudeProjectsRequireTheCloud(t *testing.T) {
 	if w.Code != 400 || !strings.Contains(w.Body.String(), "PROJECTS_REQUIRE_CLOUD") {
 		t.Fatalf("projects imported to the device: HTTP %d %s", w.Code, w.Body.String())
 	}
-	result := importOf(t, h, "alice", projects, "projects.json", api.Object{"target": "cloud", "key": key.base64()})
+	result := importOf(t, h, "alice", projects, "projects.json", api.Object{"target": "cloud", "key": keyBase64(key)})
 	stored, _ := rows.list(context.Background(), &principal{ID: "alice"}, key, "project", "", "", 0)
 	if result.done.JobID == nil || len(stored.Rows) != 1 {
 		t.Fatalf("projects: %d stored, done %+v", len(stored.Rows), result.done)
@@ -680,7 +680,7 @@ func TestClaudeProjectsRequireTheCloud(t *testing.T) {
 	// Claude's newer exports hold each project in a file of its own.
 	var split []json.RawMessage
 	json.Unmarshal(projects, &split)
-	one := importOf(t, h, "bob", split[0], "release-notes.json", api.Object{"target": "cloud", "key": key.base64()})
+	one := importOf(t, h, "bob", split[0], "release-notes.json", api.Object{"target": "cloud", "key": keyBase64(key)})
 	if stored, _ := rows.list(context.Background(), &principal{ID: "bob"}, key, "project", "", "", 0); one.done.JobID == nil || len(stored.Rows) != 1 {
 		t.Fatalf("a project file of its own was not imported: %+v", one.done)
 	}
@@ -713,7 +713,7 @@ func TestConversationsExportMatchesTheWebApp(t *testing.T) {
 	}
 	project := valueOr(stored.ProjectID, "")
 	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", stored.ID)] = storedRow{ID: stored.ID, ETag: "1", Data: api.Raw(stored), project: &project, projectSet: true}
-	parts := []formPart{optionsPart(api.Object{"format": "conversations", "key": key.base64()})}
+	parts := []formPart{optionsPart(api.Object{"format": "conversations", "key": keyBase64(key)})}
 	for _, thread := range threads.Device {
 		parts = append(parts, formPart{name: "thread", data: thread})
 	}
@@ -783,13 +783,13 @@ func TestArchivesNeedNoChatAccess(t *testing.T) {
 				r.Header.Set(inferenceKeyHeader, credential)
 			}
 		}
-		export := archiveRequest(h, "/v1/export", signedIn, optionsPart(api.Object{"format": "native", "key": key.base64()}))
+		export := archiveRequest(h, "/v1/export", signedIn, optionsPart(api.Object{"format": "native", "key": keyBase64(key)}))
 		if export.Code != 200 {
 			t.Fatalf("%s exported: HTTP %d %s", name, export.Code, export.Body.String())
 		}
 		restored, restoredRows, _ := testChatHarness(t, nil)
 		newFakeSync(t, restored)
-		result := importLines(t, archiveRequest(restored, "/v1/import", signedIn, optionsPart(api.Object{"target": "cloud", "key": key.base64()}), formPart{name: "file", filename: "tinfoil-backup.zip", data: export.Body.Bytes()}))
+		result := importLines(t, archiveRequest(restored, "/v1/import", signedIn, optionsPart(api.Object{"target": "cloud", "key": keyBase64(key)}), formPart{name: "file", filename: "tinfoil-backup.zip", data: export.Body.Bytes()}))
 		chats := storedChats(restoredRows, "alice")
 		if chat := chats["Stored"]; result.done.JobID == nil || len(chats) != 1 || len(chat.Messages) != 1 || chat.Messages[0].Role != "user" || chat.Messages[0].Content != "hi" {
 			t.Fatalf("%s restored %+v: %+v", name, result.done, chats)

@@ -49,24 +49,24 @@ func TestMergingDeviceSettingsPreservesBothPromptLibraries(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	p := &principal{ID: "alice"}
 	local := api.Object{"nickname": "Sam", "themeMode": "light", "customPromptPresets": []any{api.Object{"id": "user:same", "name": "Editor", "systemPrompt": "Local editing rules"}, api.Object{"id": "user:local", "name": "Research", "systemPrompt": "Local research rules"}}, "defaultPromptPresetId": "user:same", "favoritePromptPresetIds": []string{"user:same"}}
-	first := profileOf(t, postRoute(h, "/v1/profile/merge", api.Object{"key": key.base64(), "profile": local}, "alice"))
+	first := profileOf(t, postRoute(h, "/v1/profile/merge", api.Object{"key": keyBase64(key), "profile": local}, "alice"))
 	if first["nickname"] != "Sam" || len(presetsByID(first)) != 2 || first["defaultPromptPresetId"] != "user:same" {
 		t.Fatalf("first cloud settings: %v", first)
 	}
 	remote := api.Object{"nickname": "Cloud Sam", "themeMode": "dark", "customPromptPresets": []any{api.Object{"id": "user:same", "name": "Editor", "systemPrompt": "Cloud editing rules"}}}
 	rows.rows[rowMapKey(p, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(remote)}
-	merged := profileOf(t, postRoute(h, "/v1/profile/merge", api.Object{"key": key.base64(), "profile": local, "changedFields": []string{"nickname"}}, "alice"))
+	merged := profileOf(t, postRoute(h, "/v1/profile/merge", api.Object{"key": keyBase64(key), "profile": local, "changedFields": []string{"nickname"}}, "alice"))
 	presets := presetsByID(merged)
 	if merged["themeMode"] != "dark" || merged["nickname"] != "Sam" || len(presets) != 3 || presets["user:same"]["systemPrompt"] != "Cloud editing rules" || presets[api.Str(merged["defaultPromptPresetId"])]["systemPrompt"] != "Local editing rules" {
 		t.Fatalf("merged settings: %v", merged)
 	}
-	again := profileOf(t, postRoute(h, "/v1/profile/merge", api.Object{"key": key.base64(), "profile": local}, "alice"))
+	again := profileOf(t, postRoute(h, "/v1/profile/merge", api.Object{"key": keyBase64(key), "profile": local}, "alice"))
 	if !reflect.DeepEqual(presetsByID(again), presets) {
 		t.Fatalf("a retry duplicated prompts: %v", again)
 	}
 	local["defaultPromptPresetId"] = nil
 	local["favoritePromptPresetIds"] = []string{}
-	cleared := profileOf(t, postRoute(h, "/v1/profile/merge", api.Object{"key": key.base64(), "profile": local, "changedFields": []string{"defaultPromptPresetId", "favoritePromptPresetIds"}}, "alice"))
+	cleared := profileOf(t, postRoute(h, "/v1/profile/merge", api.Object{"key": keyBase64(key), "profile": local, "changedFields": []string{"defaultPromptPresetId", "favoritePromptPresetIds"}}, "alice"))
 	if len(api.Arr(cleared["favoritePromptPresetIds"])) != 0 {
 		t.Fatal("the device's un-favorite was lost")
 	}
@@ -129,7 +129,7 @@ func TestAProjectImageBecomesContextForItsChats(t *testing.T) {
 	if err := png.Encode(&encodedImage, image.NewRGBA(image.Rect(0, 0, 20, 10))); err != nil {
 		t.Fatal(err)
 	}
-	w := uploadRoute(h, "/v1/projects/documents/upload", "plan.png", encodedImage.Bytes(), map[string]string{"key": key.base64(), "projectId": "plan"}, "alice")
+	w := uploadRoute(h, "/v1/projects/documents/upload", "plan.png", encodedImage.Bytes(), map[string]string{"key": keyBase64(key), "projectId": "plan"}, "alice")
 	var document ProjectDocument
 	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &document) != nil || document.Content != "A red plan with three labeled rooms." {
 		t.Fatalf("project image: %d %s", w.Code, w.Body.String())
@@ -152,7 +152,7 @@ func TestACloudRunUsesItsStorageCredentialForTheFinalSave(t *testing.T) {
 		var in api.Object
 		json.NewDecoder(r.Body).Decode(&in)
 		if r.URL.Path == "/v1/runs/authorize" {
-			if r.Header.Get("Authorization") != "Bearer clerk-alice" || in["key"] != key.base64() || api.Str(in["thread_id"]) == "" {
+			if r.Header.Get("Authorization") != "Bearer clerk-alice" || in["key"] != keyBase64(key) || api.Str(in["thread_id"]) == "" {
 				t.Errorf("invalid delegation request")
 			}
 			grantCalls.Add(1)
@@ -260,7 +260,7 @@ func TestRemoteChangesReadOnlyStorageMetadata(t *testing.T) {
 func TestRenamingAChatPreservesItsConversationActivity(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	rows.rows["user:alice/chat/activity"] = storedRow{ID: "activity", ETag: "1", Data: api.Raw(Thread{ID: "activity", CreatedAt: "2026-01-01T00:00:00Z", Messages: []Message{{ID: "latest", Role: "user", CreatedAt: "2026-03-01T00:00:00Z", Content: "Latest"}, {ID: "older", Role: "assistant", CreatedAt: "2026-02-01T00:00:00Z", Content: "Older"}}})}
-	w := postRoute(h, "/v1/threads/update", api.Object{"id": "activity", "key": key.base64(), "title": "Renamed"}, "alice")
+	w := postRoute(h, "/v1/threads/update", api.Object{"id": "activity", "key": keyBase64(key), "title": "Renamed"}, "alice")
 	var summary threadSummary
 	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &summary) != nil || summary.Title != "Renamed" || summary.ActivityAt != "2026-03-01T00:00:00Z" || summary.UpdatedAt == nil || *summary.UpdatedAt == summary.ActivityAt {
 		t.Fatalf("rename activity: %d %s", w.Code, w.Body.String())

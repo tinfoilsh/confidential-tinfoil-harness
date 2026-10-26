@@ -29,13 +29,13 @@ func TestInvalidKeyEncodingNamesTheKey(t *testing.T) {
 // The streaming handler must not retain the encoded key after decoding it.
 func TestRequestKeysAreClearedAfterDecoding(t *testing.T) {
 	key := randomKey()
-	body := api.Raw(api.Object{"key": key.base64(), "threadId": "chat-1"})
+	body := api.Raw(api.Object{"key": keyBase64(key), "threadId": "chat-1"})
 	var received *runRequest
 	handle := decoded(func(_ context.Context, _ *principal, _ contentKey, in *runRequest) (any, error) {
 		received = in
 		var wire api.Object
 		json.Unmarshal(api.Raw(in), &wire)
-		if wire["key"] != key.base64() || in.ThreadID != "chat-1" {
+		if wire["key"] != keyBase64(key) || in.ThreadID != "chat-1" {
 			t.Fatal("the decoded request lost its key or thread")
 		}
 		if !bytes.Equal(body, make([]byte, len(body))) {
@@ -96,7 +96,7 @@ func TestSyncRequestKeyReadersAreCleared(t *testing.T) {
 					t.Fatal(err)
 				}
 				var in api.Object
-				if json.Unmarshal(first, &in) != nil || in["key"] != key.base64() || in["id"] != "chat-1" || in["scope"] != "chat" {
+				if json.Unmarshal(first, &in) != nil || in["key"] != keyBase64(key) || in["id"] != "chat-1" || in["scope"] != "chat" {
 					t.Fatal("sync did not receive the requested key and row")
 				}
 				replay, err := r.GetBody()

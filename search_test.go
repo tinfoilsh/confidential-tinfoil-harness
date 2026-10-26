@@ -54,7 +54,7 @@ func TestSearchRefreshesResultsAfterACompletedRebuild(t *testing.T) {
 				switch r.URL.Path {
 				case queryPath:
 					queries++
-					if want := (api.Object{"key": key.base64(), "query": "needle", "limit": float64(limit)}); !reflect.DeepEqual(in, want) {
+					if want := (api.Object{"key": keyBase64(key), "query": "needle", "limit": float64(limit)}); !reflect.DeepEqual(in, want) {
 						t.Errorf("search payload: %v, want %v", in, want)
 					}
 					ids, indexing := tc.initialIDs, tc.needsReindex
@@ -67,7 +67,7 @@ func TestSearchRefreshesResultsAfterACompletedRebuild(t *testing.T) {
 					}
 					return syncTestResponse(http.StatusOK, api.Object{"results": results, "needs_reindex": indexing})
 				case reindexPath:
-					if want := decodeValue(api.Raw(api.Object{"keys": []api.Object{{"key": key.base64()}}})); !reflect.DeepEqual(decodeValue(api.Raw(in)), want) {
+					if want := decodeValue(api.Raw(api.Object{"keys": []api.Object{{"key": keyBase64(key)}}})); !reflect.DeepEqual(decodeValue(api.Raw(in)), want) {
 						t.Errorf("rebuild payload: %v, want %v", in, want)
 					}
 					return syncTestResponse(http.StatusOK, tc.job)
@@ -76,7 +76,7 @@ func TestSearchRefreshesResultsAfterACompletedRebuild(t *testing.T) {
 					return syncTestResponse(http.StatusNotFound, api.Object{"code": "NOT_FOUND"})
 				}
 			})}}
-			w := postRoute(h, "/v1/threads/search", api.Object{"key": key.base64(), "query": "needle", "limit": limit}, "alice")
+			w := postRoute(h, "/v1/threads/search", api.Object{"key": keyBase64(key), "query": "needle", "limit": limit}, "alice")
 			if w.Code != http.StatusOK {
 				t.Fatalf("search: HTTP %d: %s", w.Code, w.Body.String())
 			}
@@ -129,7 +129,7 @@ func TestSearchReportsRebuildAndRefreshFailures(t *testing.T) {
 					return syncTestResponse(http.StatusNotFound, api.Object{"code": "NOT_FOUND"})
 				}
 			})}}
-			w := postRoute(h, "/v1/threads/search", api.Object{"key": key.base64(), "query": "needle"}, "alice")
+			w := postRoute(h, "/v1/threads/search", api.Object{"key": keyBase64(key), "query": "needle"}, "alice")
 			var got api.Object
 			if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 				t.Fatal(err)
@@ -194,7 +194,7 @@ func TestSearchCountsTheChatsItCannotOpen(t *testing.T) {
 				return syncTestResponse(http.StatusOK, api.Object{"items": items})
 			})}}
 			h.storeRows = h.syncAPI
-			w := postRoute(h, "/v1/threads/search", api.Object{"key": key.base64(), "query": "needle"}, "alice")
+			w := postRoute(h, "/v1/threads/search", api.Object{"key": keyBase64(key), "query": "needle"}, "alice")
 			var got struct {
 				Results    []threadSummary `json:"results"`
 				Unreadable int             `json:"unreadable"`

@@ -481,7 +481,7 @@ func (a *sentAttachment) whole() bool { return a.Kind != "" }
 func (in *turnRequest) digest() string {
 	copy := *in
 	copy.Key = nil
-	return hashHex(api.Raw(copy))
+	return api.HashHex(api.Raw(copy))
 }
 
 // threadInput is what a client's copy of a thread must hold before the
