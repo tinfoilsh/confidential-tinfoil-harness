@@ -1,4 +1,4 @@
-package main
+package archives
 
 import (
 	"archive/zip"
@@ -20,9 +20,19 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
 
-func (h *harness) shareThread(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *shareRequest) (any, error) {
+type Service struct {
+	CPClient     *http.Client
+	Scratch      *Scratch
+	Attachments  *attach.Service
+	Auth         *auth.Authenticator
+	Controlplane string
+	Store        *store.Store
+}
+
+func (ar *Service) ShareThread(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *ShareRequest) (any, error) {
 	defer in.ClearKey()
 	id := in.ThreadID
 	var t domain.Thread
@@ -38,7 +48,7 @@ func (h *harness) shareThread(ctx context.Context, p *auth.Principal, _ auth.Con
 			return nil, err
 		}
 		defer clear(key[:])
-		row, err := h.store.LoadThread(ctx, p, key, id)
+		row, err := ar.Store.LoadThread(ctx, p, key, id)
 		clear(key[:])
 		if err != nil {
 			return nil, err
@@ -55,13 +65,13 @@ func (h *harness) shareThread(ctx context.Context, p *auth.Principal, _ auth.Con
 		}
 		payload.Messages = append(payload.Messages, shared)
 	}
-	ciphertext, shareKey, err := h.store.SealShare(ctx, p, api.Raw(payload))
+	ciphertext, shareKey, err := ar.Store.SealShare(ctx, p, api.Raw(payload))
 	if err != nil {
 		return nil, err
 	}
 	// A share is keyed by its chat, like the web client's: sync keeps a shared
 	// chat's blobs, and the owner can revoke the link by chat.
-	if _, err := h.shareRequest(ctx, p, http.MethodPut, id, ciphertext); err != nil {
+	if _, err := ar.shareRequest(ctx, p, http.MethodPut, id, ciphertext); err != nil {
 		return nil, err
 	}
 	return struct {
@@ -70,9 +80,9 @@ func (h *harness) shareThread(ctx context.Context, p *auth.Principal, _ auth.Con
 }
 
 // The share endpoints authenticate the owner's Clerk session.
-func (h *harness) shareRequest(ctx context.Context, p *auth.Principal, method, id string, body []byte) ([]byte, error) {
+func (ar *Service) shareRequest(ctx context.Context, p *auth.Principal, method, id string, body []byte) ([]byte, error) {
 	ctx = auth.WithCallerKey(ctx, string(p.JWT))
-	path := h.controlplane + "/api/shares/" + url.PathEscape(id)
+	path := ar.Controlplane + "/api/shares/" + url.PathEscape(id)
 	if method == http.MethodGet {
 		path += "/status"
 	}
@@ -84,7 +94,7 @@ func (h *harness) shareRequest(ctx context.Context, p *auth.Principal, method, i
 		req.Header.Set("Content-Type", "application/octet-stream")
 		req.Header.Set("X-Format-Version", "1")
 	}
-	resp, err := h.cpClient.Do(req)
+	resp, err := ar.CPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -96,15 +106,15 @@ func (h *harness) shareRequest(ctx context.Context, p *auth.Principal, method, i
 	return b, nil
 }
 
-func (h *harness) revokeShare(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *threadRequest) (any, error) {
-	if _, err := h.shareRequest(ctx, p, http.MethodDelete, in.ThreadID, nil); err != nil && api.AsError(err).HTTP != 404 {
+func (ar *Service) RevokeShare(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *api.ThreadRequest) (any, error) {
+	if _, err := ar.shareRequest(ctx, p, http.MethodDelete, in.ThreadID, nil); err != nil && api.AsError(err).HTTP != 404 {
 		return nil, err
 	}
 	return struct{}{}, nil
 }
 
-func (h *harness) shareStatus(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *threadRequest) (any, error) {
-	b, err := h.shareRequest(ctx, p, http.MethodGet, in.ThreadID, nil)
+func (ar *Service) ShareStatus(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *api.ThreadRequest) (any, error) {
+	b, err := ar.shareRequest(ctx, p, http.MethodGet, in.ThreadID, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -119,8 +129,8 @@ func (h *harness) shareStatus(ctx context.Context, p *auth.Principal, _ auth.Con
 	}{*status.Shared}, nil
 }
 
-// sharedThreadView is an opened share's payload, read like any old chat.
-func sharedThreadView(id string, payload []byte) (domain.SharedThread, error) {
+// SharedThreadView is an opened share's payload, read like any old chat.
+func SharedThreadView(id string, payload []byte) (domain.SharedThread, error) {
 	t, err := domain.ReadThread(id, payload)
 	if err != nil {
 		return domain.SharedThread{}, err
@@ -137,14 +147,14 @@ func sharedThreadView(id string, payload []byte) (domain.SharedThread, error) {
 	return shared, nil
 }
 
-func (h *harness) openShare(ctx context.Context, _ *auth.Principal, _ auth.ContentKey, in *openShareRequest) (any, error) {
+func (ar *Service) OpenShare(ctx context.Context, _ *auth.Principal, _ auth.ContentKey, in *openShareRequest) (any, error) {
 	id := in.ShareID
 	fragment, ok := strings.CutPrefix(in.Fragment, "v2:")
 	if !ok {
 		return nil, api.Err(400, "BAD_REQUEST", "A v2 share fragment is required")
 	}
-	req, _ := http.NewRequestWithContext(ctx, "GET", h.controlplane+"/api/shares/"+url.PathEscape(id), nil)
-	resp, err := h.cpClient.Do(req)
+	req, _ := http.NewRequestWithContext(ctx, "GET", ar.Controlplane+"/api/shares/"+url.PathEscape(id), nil)
+	resp, err := ar.CPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +166,7 @@ func (h *harness) openShare(ctx context.Context, _ *auth.Principal, _ auth.Conte
 	if resp.StatusCode/100 != 2 {
 		return nil, api.DownstreamError(resp.StatusCode, ciphertext)
 	}
-	plain, err := h.store.OpenSealedShare(ctx, fragment, ciphertext)
+	plain, err := ar.Store.OpenSealedShare(ctx, fragment, ciphertext)
 	if err != nil {
 		return nil, err
 	}
@@ -167,7 +177,7 @@ func (h *harness) openShare(ctx context.Context, _ *auth.Principal, _ auth.Conte
 	if trimmed := bytes.TrimSpace(plain); len(trimmed) == 0 || trimmed[0] != '{' || json.Unmarshal(trimmed, &version) != nil || int(version.V) != 1 {
 		return nil, api.Err(400, "BAD_REQUEST", "Invalid shared thread")
 	}
-	return sharedThreadView(id, plain)
+	return SharedThreadView(id, plain)
 }
 
 // An export is one streamed ZIP archive of the chats a client keeps on its
@@ -203,10 +213,10 @@ type spooledPart struct {
 	offset, size int64
 }
 
-func (h *harness) handleExport(w http.ResponseWriter, r *http.Request) {
+func (ar *Service) HandleExport(w http.ResponseWriter, r *http.Request) {
 	// An archive calls no model, so any signed-in caller may make one,
 	// with or without chat access.
-	p, err := h.auth.Authenticate(r, false)
+	p, err := ar.Auth.Authenticate(r, false)
 	if err != nil {
 		api.Respond(w, nil, err)
 		return
@@ -216,16 +226,16 @@ func (h *harness) handleExport(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, err)
 		return
 	}
-	lease, err := h.scratch.lease(r.Context(), size)
+	lease, err := ar.Scratch.Lease(r.Context(), size)
 	if err != nil {
 		api.Respond(w, nil, err)
 		return
 	}
-	defer lease.release()
-	lift := h.scratch.idleBody(w, r)
+	defer lease.Release()
+	lift := ar.Scratch.idleBody(w, r)
 	r.Body = http.MaxBytesReader(w, r.Body, maxExportBody)
 	form, err := readExportForm(r, lease, func(options exportOptions) error {
-		return h.store.AuthorizeArchive(r.Context(), p, options.Key, "export")
+		return ar.Store.AuthorizeArchive(r.Context(), p, options.Key, "export")
 	})
 	if err != nil {
 		api.Respond(w, nil, err)
@@ -247,15 +257,15 @@ func (h *harness) handleExport(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	switch form.options.Format {
 	case "native":
-		streamArchive(w, "tinfoil-backup.zip", func(out io.Writer) error { return h.writeBackup(ctx, p, key, form, out) })
+		streamArchive(w, "tinfoil-backup.zip", func(out io.Writer) error { return ar.writeBackup(ctx, p, key, form, out) })
 	case "conversations":
-		streamArchive(w, "tinfoil-chats.zip", func(out io.Writer) error { return h.writeConversations(ctx, p, key, form, lease, out) })
+		streamArchive(w, "tinfoil-chats.zip", func(out io.Writer) error { return ar.writeConversations(ctx, p, key, form, lease, out) })
 	case "claude-projects":
 		if key == nil {
 			api.Respond(w, nil, api.Err(401, "KEY_REQUIRED", "A content key is required"))
 			return
 		}
-		projects, err := h.claudeProjects(ctx, p, *key)
+		projects, err := ar.claudeProjects(ctx, p, *key)
 		if err == nil {
 			w.Header().Set("Content-Disposition", `attachment; filename="projects.json"`)
 		}
@@ -265,7 +275,7 @@ func (h *harness) handleExport(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func readExportForm(r *http.Request, lease *scratchLease, authorize func(exportOptions) error) (_ *exportForm, err error) {
+func readExportForm(r *http.Request, lease *Lease, authorize func(exportOptions) error) (_ *exportForm, err error) {
 	reader, err := r.MultipartReader()
 	if err != nil {
 		return nil, api.Err(400, "BAD_REQUEST", "Expected multipart form data")
@@ -315,7 +325,7 @@ func readExportForm(r *http.Request, lease *scratchLease, authorize func(exportO
 			if !api.IsObject(data) {
 				return nil, api.Err(400, "BAD_REQUEST", "Each thread must be an object")
 			}
-			var named idRequest
+			var named api.IDRequest
 			json.Unmarshal(data, &named)
 			if err := named.Validate(); err != nil {
 				return nil, err
@@ -381,7 +391,7 @@ func (f *exportForm) thread(i int) (domain.Thread, error) {
 	if err != nil {
 		return domain.Thread{}, err
 	}
-	var named idRequest
+	var named api.IDRequest
 	json.Unmarshal(data, &named)
 	return domain.ReadDeviceThread(named.ID, data)
 }
@@ -406,12 +416,12 @@ func (f *exportForm) deviceImage(a *domain.Attachment) ([]byte, error) {
 func noDocument(*domain.Attachment) error { return errAttachmentMissing }
 
 // cloudImage is a stored image's bytes; one sync no longer holds is missing.
-func (h *harness) cloudImage(ctx context.Context, p *auth.Principal) func(*domain.Attachment) ([]byte, error) {
+func (ar *Service) cloudImage(ctx context.Context, p *auth.Principal) func(*domain.Attachment) ([]byte, error) {
 	return func(a *domain.Attachment) ([]byte, error) {
 		if a.Base64 == "" && a.StorageKey() == "" {
 			return nil, errAttachmentMissing
 		}
-		data, err := h.attachments.Bytes(ctx, p, a, false)
+		data, err := ar.Attachments.Bytes(ctx, p, a, false)
 		if attach.Unreachable(err) {
 			return nil, errAttachmentMissing
 		}
@@ -419,9 +429,9 @@ func (h *harness) cloudImage(ctx context.Context, p *auth.Principal) func(*domai
 	}
 }
 
-func (h *harness) cloudDocument(ctx context.Context, p *auth.Principal) func(*domain.Attachment) error {
+func (ar *Service) cloudDocument(ctx context.Context, p *auth.Principal) func(*domain.Attachment) error {
 	return func(a *domain.Attachment) error {
-		err := h.attachments.InflateDocument(ctx, p, a)
+		err := ar.Attachments.InflateDocument(ctx, p, a)
 		if attach.Unreachable(err) {
 			return errAttachmentMissing
 		}
@@ -464,33 +474,33 @@ func (a *archiveResponse) Write(p []byte) (int, error) {
 
 // writeBackup writes a native backup: the cloud's projects, documents and
 // chats when the key is given, then the device's chats.
-func (h *harness) writeBackup(ctx context.Context, p *auth.Principal, key *auth.ContentKey, form *exportForm, out io.Writer) error {
-	b := newBackupWriter(out)
+func (ar *Service) writeBackup(ctx context.Context, p *auth.Principal, key *auth.ContentKey, form *exportForm, out io.Writer) error {
+	b := NewBackupWriter(out)
 	rel := backupRelationships{ProjectChats: []projectChatLink{}, ProjectDocuments: []projectDocumentLink{}, ChatImages: []chatImageLink{}}
 	cloudChats := map[string]bool{}
 	if key != nil {
 		projects := map[string]bool{}
-		err := h.store.EachRowOrUnreadable(ctx, p, *key, "project", "", func(row *domain.StoredRow) error {
+		err := ar.Store.EachRowOrUnreadable(ctx, p, *key, "project", "", func(row *domain.StoredRow) error {
 			project, err := domain.ReadProject(row)
 			if err != nil {
-				b.omit(backupOmission{Kind: "project", SourceID: row.ID, Category: "invalid", Reason: "row_unreadable"})
+				b.omit(BackupOmission{Kind: "project", SourceID: row.ID, Category: "invalid", Reason: "row_unreadable"})
 				return nil
 			}
-			if err := b.addJSON("projects", backupEntityPath("projects", project.ID), project); err != nil {
+			if err := b.addJSON("projects", BackupEntityPath("projects", project.ID), project); err != nil {
 				return err
 			}
 			b.manifest.Counts.Projects++
 			projects[project.ID] = true
-			docs, err := h.store.ProjectDocuments(ctx, p, *key, project.ID, func(row string, _ error) error {
-				b.omit(backupOmission{Kind: "project_document", SourceID: strings.TrimPrefix(row, project.ID+"/"), ParentSourceID: project.ID, Category: "invalid", Reason: "row_unreadable"})
+			docs, err := ar.Store.ProjectDocuments(ctx, p, *key, project.ID, func(row string, _ error) error {
+				b.omit(BackupOmission{Kind: "project_document", SourceID: strings.TrimPrefix(row, project.ID+"/"), ParentSourceID: project.ID, Category: "invalid", Reason: "row_unreadable"})
 				return nil
 			})
 			if err != nil {
 				return err
 			}
 			for _, doc := range docs {
-				entry := backupDocument{ID: doc.ID, ProjectID: project.ID, Filename: doc.Filename, ContentType: doc.ContentType, SizeBytes: doc.SizeBytes, ExtractedText: doc.Content, CreatedAt: domain.LooseTime(doc.CreatedAt), UpdatedAt: domain.LooseTime(doc.UpdatedAt)}
-				if err := b.addJSON("project_documents", backupDocumentPath(project.ID, doc.ID), entry); err != nil {
+				entry := BackupDocument{ID: doc.ID, ProjectID: project.ID, Filename: doc.Filename, ContentType: doc.ContentType, SizeBytes: doc.SizeBytes, ExtractedText: doc.Content, CreatedAt: domain.LooseTime(doc.CreatedAt), UpdatedAt: domain.LooseTime(doc.UpdatedAt)}
+				if err := b.addJSON("project_documents", BackupDocumentPath(project.ID, doc.ID), entry); err != nil {
 					return err
 				}
 				b.manifest.Counts.ProjectDocuments++
@@ -498,15 +508,15 @@ func (h *harness) writeBackup(ctx context.Context, p *auth.Principal, key *auth.
 			}
 			return nil
 		}, func(id string) {
-			b.omit(backupOmission{Kind: "project", SourceID: id, Category: "invalid", Reason: "row_unreadable"})
+			b.omit(BackupOmission{Kind: "project", SourceID: id, Category: "invalid", Reason: "row_unreadable"})
 		})
 		if err != nil {
 			return err
 		}
-		err = h.store.EachRowOrUnreadable(ctx, p, *key, "chat", "", func(row *domain.StoredRow) error {
+		err = ar.Store.EachRowOrUnreadable(ctx, p, *key, "chat", "", func(row *domain.StoredRow) error {
 			read, err := domain.ReadThreadRow(row)
 			if err != nil {
-				b.omit(backupOmission{Kind: "cloud_chat", SourceID: row.ID, Category: "invalid", Reason: "row_unreadable"})
+				b.omit(BackupOmission{Kind: "cloud_chat", SourceID: row.ID, Category: "invalid", Reason: "row_unreadable"})
 				return nil
 			}
 			t := read.Thread
@@ -516,12 +526,12 @@ func (h *harness) writeBackup(ctx context.Context, p *auth.Principal, key *auth.
 					rel.ProjectChats = append(rel.ProjectChats, projectChatLink{project, t.ID})
 				} else {
 					t.ProjectID = nil
-					b.omit(backupOmission{Kind: "relationship", SourceID: t.ID, ParentSourceID: project, Category: "unavailable", Reason: "project_reference_unavailable"})
+					b.omit(BackupOmission{Kind: "relationship", SourceID: t.ID, ParentSourceID: project, Category: "unavailable", Reason: "project_reference_unavailable"})
 				}
 			}
-			return backupChat(b, &rel, "cloud_chats", &t, h.cloudImage(ctx, p), h.cloudDocument(ctx, p))
+			return backupChat(b, &rel, "cloud_chats", &t, ar.cloudImage(ctx, p), ar.cloudDocument(ctx, p))
 		}, func(id string) {
-			b.omit(backupOmission{Kind: "cloud_chat", SourceID: id, Category: "invalid", Reason: "row_unreadable"})
+			b.omit(BackupOmission{Kind: "cloud_chat", SourceID: id, Category: "invalid", Reason: "row_unreadable"})
 		})
 		if err != nil {
 			return err
@@ -534,7 +544,7 @@ func (h *harness) writeBackup(ctx context.Context, p *auth.Principal, key *auth.
 		}
 		// A chat moved to the cloud whose device copy remains is kept once.
 		if cloudChats[t.ID] {
-			b.omit(backupOmission{Kind: "local_chat", SourceID: t.ID, Category: "invalid", Reason: "duplicate_chat_id"})
+			b.omit(BackupOmission{Kind: "local_chat", SourceID: t.ID, Category: "invalid", Reason: "duplicate_chat_id"})
 			continue
 		}
 		if err := backupChat(b, &rel, "local_chats", &t, form.deviceImage, noDocument); err != nil {
@@ -550,18 +560,18 @@ func (h *harness) writeBackup(ctx context.Context, p *auth.Principal, key *auth.
 
 // backupChat writes a chat with each of its images beside it. An image or
 // document whose content cannot be read is left out and listed as omitted.
-func backupChat(b *backupWriter, rel *backupRelationships, kind string, t *domain.Thread, image func(*domain.Attachment) ([]byte, error), document func(*domain.Attachment) error) error {
+func backupChat(b *BackupWriter, rel *backupRelationships, kind string, t *domain.Thread, image func(*domain.Attachment) ([]byte, error), document func(*domain.Attachment) error) error {
 	entry := backupThread{Thread: *t, Messages: make([]backupMessage, 0, len(t.Messages))}
 	entry.ActiveRun, entry.LastRequestID, entry.LastRequestKind, entry.Flagged, entry.HiddenCount, entry.RecordVersion = nil, "", "", false, 0, 0
 	omit := func(id string) {
-		b.omit(backupOmission{Kind: "attachment", SourceID: id, ParentSourceID: t.ID, Category: "unavailable", Reason: "attachment_not_found"})
+		b.omit(BackupOmission{Kind: "attachment", SourceID: id, ParentSourceID: t.ID, Category: "unavailable", Reason: "attachment_not_found"})
 	}
 	addImage := func(meta backupImage, data []byte) error {
 		meta.MimeType, meta.SizeBytes = http.DetectContentType(data), new(int64(len(data)))
-		if err := b.addJSON("images", backupImagePath(meta.ID, ".json"), meta); err != nil {
+		if err := b.addJSON("images", BackupImagePath(meta.ID, ".json"), meta); err != nil {
 			return err
 		}
-		if err := b.add("images", backupImagePath(meta.ID, ".bin"), data); err != nil {
+		if err := b.Add("images", BackupImagePath(meta.ID, ".bin"), data); err != nil {
 			return err
 		}
 		b.manifest.Counts.Images++
@@ -619,7 +629,7 @@ func backupChat(b *backupWriter, rel *backupRelationships, kind string, t *domai
 		}
 		entry.Messages = append(entry.Messages, message)
 	}
-	if err := b.addJSON(kind, backupEntityPath(kind, t.ID), entry); err != nil {
+	if err := b.addJSON(kind, BackupEntityPath(kind, t.ID), entry); err != nil {
 		return err
 	}
 	if kind == "cloud_chats" {
@@ -667,7 +677,7 @@ type exportAttachment struct {
 	TextContent string `json:"textContent,omitempty"`
 }
 
-type conversationsManifest struct {
+type ConversationsManifest struct {
 	Version         int            `json:"version"`
 	CreatedAt       string         `json:"created_at"`
 	ChatCount       int            `json:"chat_count"`
@@ -688,15 +698,15 @@ type conversationsExport struct {
 	zip           *zip.Writer
 	conversations *scratchFile
 	used          map[string]bool
-	manifest      conversationsManifest
+	manifest      ConversationsManifest
 }
 
-func (h *harness) writeConversations(ctx context.Context, p *auth.Principal, key *auth.ContentKey, form *exportForm, lease *scratchLease, out io.Writer) error {
+func (ar *Service) writeConversations(ctx context.Context, p *auth.Principal, key *auth.ContentKey, form *exportForm, lease *Lease, out io.Writer) error {
 	text, err := lease.create()
 	if err != nil {
 		return err
 	}
-	e := &conversationsExport{zip: zip.NewWriter(out), conversations: text, used: map[string]bool{}, manifest: conversationsManifest{Version: 1, Attachments: []exportedFile{}, Warnings: []string{}}}
+	e := &conversationsExport{zip: zip.NewWriter(out), conversations: text, used: map[string]bool{}, manifest: ConversationsManifest{Version: 1, Attachments: []exportedFile{}, Warnings: []string{}}}
 	device := map[string]bool{}
 	for i := range form.threads {
 		t, err := form.thread(i)
@@ -709,7 +719,7 @@ func (h *harness) writeConversations(ctx context.Context, p *auth.Principal, key
 		}
 	}
 	if key != nil {
-		err := h.store.EachRow(ctx, p, *key, "chat", "", func(row *domain.StoredRow) error {
+		err := ar.Store.EachRow(ctx, p, *key, "chat", "", func(row *domain.StoredRow) error {
 			// A chat this harness cannot read is left out, as one sync cannot
 			// open is.
 			read, err := domain.ReadThreadRow(row)
@@ -720,7 +730,7 @@ func (h *harness) writeConversations(ctx context.Context, p *auth.Principal, key
 			if device[t.ID] {
 				return nil
 			}
-			return e.chat(&t, domain.ValueOr(t.ProjectID, ""), h.cloudImage(ctx, p), h.cloudDocument(ctx, p))
+			return e.chat(&t, domain.ValueOr(t.ProjectID, ""), ar.cloudImage(ctx, p), ar.cloudDocument(ctx, p))
 		})
 		if err != nil {
 			return err
@@ -746,7 +756,7 @@ func (h *harness) writeConversations(ctx context.Context, p *auth.Principal, key
 	if err != nil {
 		return err
 	}
-	if err := writeEntry(e.zip, manifestPath, manifest, true); err != nil {
+	if err := writeEntry(e.zip, ManifestPath, manifest, true); err != nil {
 		return err
 	}
 	return e.zip.Close()
@@ -774,8 +784,8 @@ func (e *conversationsExport) chat(t *domain.Thread, projectID string, image fun
 		}
 		message := exportMessage{UUID: fmt.Sprintf("%s_msg_%d", t.ID, index), Text: m.Content, Sender: sender, CreatedAt: exportTime(m.CreatedAt, t.CreatedAt)}
 		if m.Role == "assistant" {
-			message.Text = cmp.Or(m.Content, timelineText(m.Timeline, "content"))
-			if thoughts := timelineText(m.Timeline, "thinking"); thoughts != "" {
+			message.Text = cmp.Or(m.Content, TimelineText(m.Timeline, "content"))
+			if thoughts := TimelineText(m.Timeline, "thinking"); thoughts != "" {
 				message.Content = []exportThinking{{Type: "thinking", Thinking: thoughts}}
 			}
 		}
@@ -900,8 +910,8 @@ func exportDocumentText(text string, pages []domain.DocumentPage) string {
 	return joined
 }
 
-// timelineText joins the text of a reply's blocks of one type.
-func timelineText(timeline []domain.Block, kind string) string {
+// TimelineText joins the text of a reply's blocks of one type.
+func TimelineText(timeline []domain.Block, kind string) string {
 	var b strings.Builder
 	for _, block := range timeline {
 		if block.Type == kind {
@@ -941,12 +951,12 @@ type claudeDocument struct {
 	CreatedAt string `json:"created_at"`
 }
 
-func (h *harness) claudeProjects(ctx context.Context, p *auth.Principal, key auth.ContentKey) ([]claudeProject, error) {
+func (ar *Service) claudeProjects(ctx context.Context, p *auth.Principal, key auth.ContentKey) ([]claudeProject, error) {
 	projects := []claudeProject{}
 	total := 0
-	err := h.store.EachRow(ctx, p, key, "project", "", func(row *domain.StoredRow) error {
+	err := ar.Store.EachRow(ctx, p, key, "project", "", func(row *domain.StoredRow) error {
 		// A document this harness cannot read is left out, as a chat is.
-		docs, err := h.store.ProjectDocuments(ctx, p, key, row.ID, func(string, error) error { return nil })
+		docs, err := ar.Store.ProjectDocuments(ctx, p, key, row.ID, func(string, error) error { return nil })
 		if err != nil {
 			return err
 		}

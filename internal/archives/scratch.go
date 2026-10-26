@@ -1,4 +1,4 @@
-package main
+package archives
 
 import (
 	"context"
@@ -37,23 +37,35 @@ var (
 	errScratchBusy     = &api.Error{HTTP: 503, Code: "TEMP_SPACE_BUSY", Message: "Other archives are using this service's temporary space; retry shortly", Action: api.ActionRetry, RetryAfter: 30}
 )
 
-type scratchSpace struct {
-	dir        string
+type Scratch struct {
+	Dir        string
 	size       int64
 	sem        *semaphore.Weighted
-	wait, idle time.Duration
-	// waiting counts requests waiting for space.
-	waiting atomic.Int32
+	Wait, Idle time.Duration
+	// waiters counts requests waiting for space.
+	waiters atomic.Int32
 }
 
-func newScratchSpace(dir string, size int64) *scratchSpace {
-	return &scratchSpace{dir: dir, size: size, sem: semaphore.NewWeighted(size), wait: scratchWait, idle: scratchIdle}
+// Waiting is how many requests are waiting for space.
+func (s *Scratch) Waiting() int32 { return s.waiters.Load() }
+
+// Empty reports whether no request holds any of the space.
+func (s *Scratch) Empty() bool {
+	if !s.sem.TryAcquire(s.size) {
+		return false
+	}
+	s.sem.Release(s.size)
+	return true
+}
+
+func NewScratch(dir string, size int64) *Scratch {
+	return &Scratch{Dir: dir, size: size, sem: semaphore.NewWeighted(size), Wait: scratchWait, Idle: scratchIdle}
 }
 
 // sweepScratch removes the spool files a process that ended before releasing
 // them left in dir.
 func sweepScratch(dir string) error {
-	left, err := filepath.Glob(filepath.Join(dir, scratchPattern))
+	left, err := filepath.Glob(filepath.Join(dir, ScratchPattern))
 	if err != nil {
 		return err
 	}
@@ -65,13 +77,13 @@ func sweepScratch(dir string) error {
 	return nil
 }
 
-// scratchPattern names the spool files, so a later process can tell what
+// ScratchPattern names the spool files, so a later process can tell what
 // its predecessor left from anything else in the directory.
-const scratchPattern = "harness-archive-*"
+const ScratchPattern = "harness-archive-*"
 
-// measuredScratch budgets the temporary directory as large as it is, once
+// MeasuredScratch budgets the temporary directory as large as it is, once
 // the spool files a previous process left in it are removed.
-func measuredScratch() (*scratchSpace, error) {
+func MeasuredScratch() (*Scratch, error) {
 	dir := os.TempDir()
 	if err := sweepScratch(dir); err != nil {
 		return nil, err
@@ -80,27 +92,27 @@ func measuredScratch() (*scratchSpace, error) {
 	if err := syscall.Statfs(dir, &stat); err != nil {
 		return nil, err
 	}
-	return newScratchSpace(dir, int64(stat.Blocks)*int64(stat.Bsize)), nil
+	return NewScratch(dir, int64(stat.Blocks)*int64(stat.Bsize)), nil
 }
 
-// scratchLease is the space one request holds: what its files take.
-type scratchLease struct {
+// Lease is the space one request holds: what its files take.
+type Lease struct {
 	ctx   context.Context
-	space *scratchSpace
+	space *Scratch
 	held  int64
 	files []*os.File
 }
 
-// lease starts a request's lease, which holds nothing until its files are
+// Lease starts a request's lease, which holds nothing until its files are
 // written. A request expected to need more than the whole space is refused.
-func (s *scratchSpace) lease(ctx context.Context, expected int64) (*scratchLease, error) {
+func (s *Scratch) Lease(ctx context.Context, expected int64) (*Lease, error) {
 	if expected > s.size {
 		return nil, errArchiveTooLarge
 	}
-	return &scratchLease{ctx: ctx, space: s}, nil
+	return &Lease{ctx: ctx, space: s}, nil
 }
 
-func (l *scratchLease) take(n int64) error {
+func (l *Lease) Take(n int64) error {
 	if l.held+n > l.space.size {
 		return errArchiveTooLarge
 	}
@@ -111,11 +123,11 @@ func (l *scratchLease) take(n int64) error {
 	if l.held > 0 {
 		return errScratchBusy
 	}
-	waitCtx, cancel := context.WithTimeout(l.ctx, l.space.wait)
+	waitCtx, cancel := context.WithTimeout(l.ctx, l.space.Wait)
 	defer cancel()
-	l.space.waiting.Add(1)
+	l.space.waiters.Add(1)
 	err := l.space.sem.Acquire(waitCtx, n)
-	l.space.waiting.Add(-1)
+	l.space.waiters.Add(-1)
 	if err != nil {
 		if l.ctx.Err() != nil {
 			return l.ctx.Err()
@@ -130,9 +142,9 @@ func (l *scratchLease) take(n int64) error {
 // time. The returned func lifts the limit once the body is read, so it
 // cannot end the request after; left in place, it also bounds the server
 // reading what a refused request still sends.
-func (s *scratchSpace) idleBody(w http.ResponseWriter, r *http.Request) func() {
+func (s *Scratch) idleBody(w http.ResponseWriter, r *http.Request) func() {
 	rc := http.NewResponseController(w)
-	r.Body = &idleReader{ReadCloser: r.Body, rc: rc, idle: s.idle}
+	r.Body = &idleReader{ReadCloser: r.Body, rc: rc, idle: s.Idle}
 	return func() { rc.SetReadDeadline(time.Time{}) }
 }
 
@@ -148,8 +160,8 @@ func (r *idleReader) Read(p []byte) (int, error) {
 	return r.ReadCloser.Read(p)
 }
 
-// release deletes the lease's files and frees its space.
-func (l *scratchLease) release() {
+// Release deletes the lease's files and frees its space.
+func (l *Lease) Release() {
 	for _, f := range l.files {
 		f.Close()
 		os.Remove(f.Name())
@@ -163,12 +175,12 @@ func (l *scratchLease) release() {
 // back at offsets.
 type scratchFile struct {
 	file  *os.File
-	lease *scratchLease
+	lease *Lease
 	size  int64
 }
 
-func (l *scratchLease) create() (*scratchFile, error) {
-	f, err := os.CreateTemp(l.space.dir, scratchPattern)
+func (l *Lease) create() (*scratchFile, error) {
+	f, err := os.CreateTemp(l.space.Dir, ScratchPattern)
 	if err != nil {
 		return nil, err
 	}
@@ -177,7 +189,7 @@ func (l *scratchLease) create() (*scratchFile, error) {
 }
 
 func (f *scratchFile) Write(p []byte) (int, error) {
-	if err := f.lease.take(int64(len(p))); err != nil {
+	if err := f.lease.Take(int64(len(p))); err != nil {
 		return 0, err
 	}
 	n, err := f.file.Write(p)

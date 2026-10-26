@@ -68,8 +68,8 @@ func (h *harness) handlers() map[string]http.HandlerFunc {
 		"POST /v1/attachments/upload":        boundedHandler(uploadSlots, h.attachments.HandleUpload),
 		"POST /v1/projects/documents/upload": boundedHandler(uploadSlots, h.attachments.HandleUpload),
 		"POST /v1/transcriptions":            boundedHandler(uploadSlots, h.attachments.HandleUpload),
-		"POST /v1/import":                    h.handleImport,
-		"POST /v1/export":                    h.handleExport,
+		"POST /v1/import":                    h.archives.HandleImport,
+		"POST /v1/export":                    h.archives.HandleExport,
 		"POST /v1/attachments/get":           h.attachments.HandleAttachmentGet,
 		"POST /v1/attachments/get-public":    h.attachments.HandleAttachmentGet,
 	}

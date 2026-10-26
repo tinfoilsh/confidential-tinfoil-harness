@@ -22,16 +22,16 @@ func (h *harness) apiRoutes() []routeSpec {
 		{"/v1/threads/list", false, true, decoded(h.listThreads)}, {"/v1/threads/get", false, true, decoded(h.getThread)},
 		{"/v1/threads/delete", false, true, decoded(h.deleteThread)},
 		{"/v1/threads/search", false, true, decoded(h.searchThreads)}, {"/v1/threads/cancel", true, false, decoded(h.cancelThread)},
-		{"/v1/threads/queue/send", true, false, decoded(h.sendQueued)}, {"/v1/threads/queue/remove", true, false, decoded(h.removeQueued)}, {"/v1/threads/share", false, false, decoded(h.shareThread)},
-		{"/v1/threads/share/revoke", false, false, decoded(h.revokeShare)}, {"/v1/threads/share/status", false, false, decoded(h.shareStatus)},
+		{"/v1/threads/queue/send", true, false, decoded(h.sendQueued)}, {"/v1/threads/queue/remove", true, false, decoded(h.removeQueued)}, {"/v1/threads/share", false, false, decoded(h.archives.ShareThread)},
+		{"/v1/threads/share/revoke", false, false, decoded(h.archives.RevokeShare)}, {"/v1/threads/share/status", false, false, decoded(h.archives.ShareStatus)},
 		{"/v1/threads/transcript", false, true, decoded(h.threadTranscript)},
 		{"/v1/profile/get", false, true, h.getProfile}, {"/v1/profile/update", false, true, decoded(h.updateProfile)}, {"/v1/profile/upgrade", true, false, decoded(h.upgradeDeviceProfile)},
 		{"/v1/profile/merge", false, true, decoded(h.mergeDeviceProfile)},
 		{"/v1/projects/list", false, true, decoded(h.listProjects)}, {"/v1/projects/get", false, true, decoded(h.getProject)},
 		{"/v1/projects/create", false, true, decoded(h.createProject)}, {"/v1/projects/update", false, true, decoded(h.updateProject)},
 		{"/v1/projects/delete", false, true, decoded(h.deleteProject)}, {"/v1/projects/documents/delete", false, true, decoded(h.deleteDocument)},
-		{"/v1/shares/open", true, false, decoded(h.openShare)},
-		{"/v1/import/status", false, false, decoded(h.importStatus)},
+		{"/v1/shares/open", true, false, decoded(h.archives.OpenShare)},
+		{"/v1/import/status", false, false, decoded(h.archives.ImportStatus)},
 		{"/v1/threads/delete-all", false, true, decoded(h.deleteAllThreads)},
 		{"/v1/projects/delete-all", false, true, h.deleteAllProjects},
 		{"/v1/metadata/favicon", true, false, decoded(h.attachments.Favicon)}, {"/v1/metadata/link", true, false, decoded(h.attachments.LinkPreview)},
@@ -353,7 +353,7 @@ func (h *harness) deleteAllThreads(ctx context.Context, p *auth.Principal, key a
 		return nil, err
 	}
 	for _, id := range ids {
-		if _, err := h.deleteThread(ctx, p, key, &deleteThreadRequest{idRequest: idRequest{ID: id}}); err != nil {
+		if _, err := h.deleteThread(ctx, p, key, &deleteThreadRequest{IDRequest: api.IDRequest{ID: id}}); err != nil {
 			return nil, err
 		}
 	}
@@ -435,7 +435,7 @@ func (h *harness) listProjects(ctx context.Context, p *auth.Principal, key auth.
 		NextCursor string           `json:"nextCursor"`
 	}{projects, next}, nil
 }
-func (h *harness) getProject(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *idRequest) (any, error) {
+func (h *harness) getProject(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *api.IDRequest) (any, error) {
 	project, err := h.store.LoadProject(ctx, p, key, in.ID)
 	if err != nil {
 		return nil, err
@@ -470,7 +470,7 @@ func (h *harness) updateProject(ctx context.Context, p *auth.Principal, key auth
 		}
 	})
 }
-func (h *harness) deleteProject(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *idRequest) (any, error) {
+func (h *harness) deleteProject(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *api.IDRequest) (any, error) {
 	return struct{}{}, h.store.RemoveRow(ctx, p, key, "project", in.ID)
 }
 

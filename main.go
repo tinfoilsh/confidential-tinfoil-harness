@@ -14,6 +14,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/archives"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
@@ -22,14 +23,13 @@ import (
 
 type harness struct {
 	controlplane string
-	cpClient     *http.Client
 	auth         *auth.Authenticator
 	safeguards   *submitter // nil unless SAFEGUARDS_URL names the sidecar
 	live         liveRuns
-	scratch      *scratchSpace
 	store        *store.Store
 	models       *inference.Models
 	attachments  *attach.Service
+	archives     *archives.Service
 }
 
 // listenAddr is the shim's upstream port in tinfoil-config.yml, which also
@@ -51,16 +51,14 @@ func main() {
 	ctx, shutdown := context.WithCancel(context.Background())
 	defer shutdown()
 	attestWebSearch(ctx, usageSecret)
-	scratch, err := measuredScratch()
+	scratch, err := archives.MeasuredScratch()
 	if err != nil {
 		slog.Error("prepare the temporary directory", "error", err)
 		os.Exit(1)
 	}
 	h := &harness{models: &inference.Models{Gateway: gw, Controlplane: controlplane},
 		controlplane: controlplane,
-		cpClient:     &http.Client{Transport: &auth.CallerTransport{Inner: http.DefaultTransport}},
 		safeguards:   newSubmitter(os.Getenv("SAFEGUARDS_URL")),
-		scratch:      scratch,
 		store:        &store.Store{}}
 
 	if err := h.bootChat(ctx, usageSecret); err != nil {
@@ -69,6 +67,7 @@ func main() {
 	}
 	h.attachments = &attach.Service{Auth: h.auth, Controlplane: h.controlplane, Models: h.models, Store: h.store}
 	h.store.Repair = h.attachments
+	h.archives = &archives.Service{Scratch: scratch, CPClient: &http.Client{Transport: &auth.CallerTransport{Inner: http.DefaultTransport}}, Store: h.store, Attachments: h.attachments, Auth: h.auth, Controlplane: h.controlplane}
 
 	srv := &http.Server{Addr: listenAddr, Handler: h.routes(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: time.Minute}
 	stop := make(chan os.Signal, 1)

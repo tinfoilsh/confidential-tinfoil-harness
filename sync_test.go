@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/archives"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
@@ -415,9 +416,9 @@ func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 	}
 	w := archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "native", "key": keyBase64(key)}))
 	files, _ := unzipped(t, w.Body.Bytes())
-	var manifest backupManifest
-	json.Unmarshal(files[manifestPath], &manifest)
-	if left := (backupOmission{Kind: "project_document", SourceID: "later", ParentSourceID: trip, Category: "invalid", Reason: "row_unreadable"}); w.Code != http.StatusOK || manifest.Counts.ProjectDocuments != 1 || !slices.Contains(manifest.Omissions, left) {
+	var manifest archives.BackupManifest
+	json.Unmarshal(files[archives.ManifestPath], &manifest)
+	if left := (archives.BackupOmission{Kind: "project_document", SourceID: "later", ParentSourceID: trip, Category: "invalid", Reason: "row_unreadable"}); w.Code != http.StatusOK || manifest.Counts.ProjectDocuments != 1 || !slices.Contains(manifest.Omissions, left) {
 		t.Errorf("backing up a project with a document in a later format: HTTP %d %+v", w.Code, manifest)
 	}
 	rows.rows[rowMapKey(p, "profile", "profile")] = domain.StoredRow{ID: "profile", ETag: "1", Data: api.Raw(api.Object{"nickname": "Sam", "recordVersion": domain.RecordVersion + 1})}
@@ -462,12 +463,12 @@ func TestADocumentSyncCannotOpenIsNeverLeftOutUnsaid(t *testing.T) {
 	}
 	w = archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "native", "key": keyBase64(key)}))
 	files, _ := unzipped(t, w.Body.Bytes())
-	var manifest backupManifest
-	json.Unmarshal(files[manifestPath], &manifest)
-	var notes backupDocument
-	json.Unmarshal(files[backupDocumentPath(trip, "notes")], &notes)
-	left := backupOmission{Kind: "project_document", SourceID: "map", ParentSourceID: trip, Category: "invalid", Reason: "row_unreadable"}
-	if manifest.Counts.ProjectDocuments != 1 || notes.Filename != "notes.md" || !reflect.DeepEqual(manifest.Omissions, []backupOmission{left}) {
+	var manifest archives.BackupManifest
+	json.Unmarshal(files[archives.ManifestPath], &manifest)
+	var notes archives.BackupDocument
+	json.Unmarshal(files[archives.BackupDocumentPath(trip, "notes")], &notes)
+	left := archives.BackupOmission{Kind: "project_document", SourceID: "map", ParentSourceID: trip, Category: "invalid", Reason: "row_unreadable"}
+	if manifest.Counts.ProjectDocuments != 1 || notes.Filename != "notes.md" || !reflect.DeepEqual(manifest.Omissions, []archives.BackupOmission{left}) {
 		t.Errorf("backup: %+v, notes %+v", manifest, notes)
 	}
 }

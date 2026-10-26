@@ -18,22 +18,10 @@ import (
 // type refuses the request; a field the route does not read is ignored,
 // except in a profile patch.
 
-type idRequest struct {
-	ID string `json:"id"`
-}
-
 type deleteThreadRequest struct {
-	idRequest
+	api.IDRequest
 	Revision string `json:"revision,omitempty"`
 }
-
-func (in *idRequest) Validate() error { return api.RequireID("id", in.ID) }
-
-type threadRequest struct {
-	ThreadID string `json:"threadId"`
-}
-
-func (in *threadRequest) Validate() error { return api.RequireID("threadId", in.ThreadID) }
 
 type listRequest struct {
 	Cursor    string `json:"cursor"`
@@ -182,41 +170,6 @@ func (in *projectDocumentRequest) Validate() error {
 	}
 	return api.RequireID("documentId", in.DocumentID)
 }
-
-// shareRequest shares a stored chat by its key, or a device chat by the
-// thread its client sends.
-type shareRequest struct {
-	api.KeyRequest
-	ThreadID string          `json:"threadId"`
-	Local    bool            `json:"local"`
-	Thread   json.RawMessage `json:"thread"`
-}
-
-func (in *shareRequest) Validate() error {
-	if err := api.RequireID("threadId", in.ThreadID); err != nil {
-		return err
-	}
-	if !in.Local {
-		return nil
-	}
-	if !api.IsObject(in.Thread) {
-		return api.Err(400, "BAD_REQUEST", "A local thread requires its transcript")
-	}
-	return domain.ValidateLocalThread(in.Thread)
-}
-
-type openShareRequest struct {
-	ShareID  string `json:"shareId"`
-	Fragment string `json:"fragment"`
-}
-
-func (in *openShareRequest) Validate() error { return api.RequireID("shareId", in.ShareID) }
-
-type importStatusRequest struct {
-	JobID string `json:"jobId"`
-}
-
-func (in *importStatusRequest) Validate() error { return api.RequireID("jobId", in.JobID) }
 
 // threadImportRequest stores a device chat in the cloud under its id.
 type threadImportRequest struct {

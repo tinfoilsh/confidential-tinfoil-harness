@@ -1,4 +1,4 @@
-package main
+package archives
 
 import (
 	"archive/zip"
@@ -22,9 +22,9 @@ import (
 // version 3 holds them in the thread format. The legacy reader reads both.
 
 const (
-	nativeBackupFormat  = "tinfoil-native-backup"
+	NativeBackupFormat  = "tinfoil-native-backup"
 	nativeBackupVersion = 3
-	manifestPath        = "manifest.json"
+	ManifestPath        = "manifest.json"
 	relationshipsPath   = "relationships.json"
 )
 
@@ -32,7 +32,7 @@ const (
 // uploads take.
 const (
 	maxArchiveEntries      = 50_000
-	maxArchiveExpansion    = 2 << 30
+	MaxArchiveExpansion    = 2 << 30
 	maxArchiveJSONEntry    = 256 << 20
 	maxArchiveImage        = attach.MaxUploadBytes
 	maxBackupManifestBytes = 32 << 20
@@ -46,20 +46,20 @@ func backupEntryLimit(name string) uint64 {
 	return maxArchiveJSONEntry
 }
 
-type backupManifest struct {
+type BackupManifest struct {
 	Format    string           `json:"format"`
 	Version   int              `json:"version"`
 	BackupID  string           `json:"backup_id"`
 	CreatedAt string           `json:"created_at"`
 	Complete  bool             `json:"complete"`
-	Counts    backupCounts     `json:"counts"`
+	Counts    BackupCounts     `json:"counts"`
 	Notices   backupNotices    `json:"notices"`
 	Files     []backupFile     `json:"files"`
-	Omissions []backupOmission `json:"omissions"`
+	Omissions []BackupOmission `json:"omissions"`
 	Warnings  []backupWarning  `json:"warnings"`
 }
 
-type backupCounts struct {
+type BackupCounts struct {
 	Projects         int `json:"projects"`
 	ProjectDocuments int `json:"project_documents"`
 	CloudChats       int `json:"cloud_chats"`
@@ -81,8 +81,8 @@ type backupFile struct {
 	SizeBytes int64  `json:"size_bytes"`
 }
 
-// backupOmission names an item a backup could not include.
-type backupOmission struct {
+// BackupOmission names an item a backup could not include.
+type BackupOmission struct {
 	Kind           string `json:"kind"`
 	SourceID       string `json:"source_id"`
 	ParentSourceID string `json:"parent_source_id,omitempty"`
@@ -142,8 +142,8 @@ type backupProject struct {
 	UpdatedAt domain.LooseTime `json:"updatedAt"`
 }
 
-// backupDocument is a project document; its text is extractedText.
-type backupDocument struct {
+// BackupDocument is a project document; its text is extractedText.
+type BackupDocument struct {
 	ID            string           `json:"id"`
 	ProjectID     string           `json:"projectId"`
 	Filename      string           `json:"filename"`
@@ -181,19 +181,19 @@ type backupPage struct {
 
 func idComponent(id string) string { return "id-" + hex.EncodeToString([]byte(id)) }
 
-func backupEntityPath(kind, id string) string { return kind + "/" + idComponent(id) + ".json" }
+func BackupEntityPath(kind, id string) string { return kind + "/" + idComponent(id) + ".json" }
 
-func backupDocumentPath(projectID, id string) string {
+func BackupDocumentPath(projectID, id string) string {
 	return "project_documents/" + idComponent(projectID) + "/" + idComponent(id) + ".json"
 }
 
-func backupImagePath(id, extension string) string { return "images/" + idComponent(id) + extension }
+func BackupImagePath(id, extension string) string { return "images/" + idComponent(id) + extension }
 
 // backupPaths are the entries a native backup may hold.
 var backupPaths = regexp.MustCompile(`^(manifest\.json|relationships\.json|(projects|cloud_chats|local_chats)/id-[0-9a-f]+\.json|project_documents/id-[0-9a-f]+/id-[0-9a-f]+\.json|images/id-[0-9a-f]+\.(json|bin))$`)
 
-// backupKind is the kind the manifest must list an entry under.
-func backupKind(name string) string {
+// BackupKind is the kind the manifest must list an entry under.
+func BackupKind(name string) string {
 	if name == relationshipsPath {
 		return "relationships"
 	}
@@ -229,18 +229,18 @@ func readEntry(f *zip.File, limit int64) ([]byte, error) {
 // archiveTime is a time as the web app wrote it in archives.
 func archiveTime(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z") }
 
-// backupWriter writes a backup's entries and lists them in its manifest.
-type backupWriter struct {
+// BackupWriter writes a backup's entries and lists them in its manifest.
+type BackupWriter struct {
 	zip      *zip.Writer
-	manifest backupManifest
+	manifest BackupManifest
 	expanded uint64
 }
 
-func newBackupWriter(w io.Writer) *backupWriter {
-	return &backupWriter{zip: zip.NewWriter(w), manifest: backupManifest{Format: nativeBackupFormat, Version: nativeBackupVersion, Notices: backupNotices{true, true}, Files: []backupFile{}, Omissions: []backupOmission{}}}
+func NewBackupWriter(w io.Writer) *BackupWriter {
+	return &BackupWriter{zip: zip.NewWriter(w), manifest: BackupManifest{Format: NativeBackupFormat, Version: nativeBackupVersion, Notices: backupNotices{true, true}, Files: []backupFile{}, Omissions: []BackupOmission{}}}
 }
 
-func (b *backupWriter) add(kind, name string, data []byte) error {
+func (b *BackupWriter) Add(kind, name string, data []byte) error {
 	if len(b.manifest.Files)+1 >= maxArchiveEntries {
 		return api.Err(413, "ARCHIVE_TOO_LARGE", "The backup holds too many items")
 	}
@@ -253,24 +253,24 @@ func (b *backupWriter) add(kind, name string, data []byte) error {
 
 // write adds an entry, refusing one a restore would refuse: one past its
 // limit, or one that expands the backup past the limit.
-func (b *backupWriter) write(name string, data []byte, limit uint64, compress bool) error {
+func (b *BackupWriter) write(name string, data []byte, limit uint64, compress bool) error {
 	b.expanded += uint64(len(data))
-	if uint64(len(data)) > limit || b.expanded > maxArchiveExpansion {
+	if uint64(len(data)) > limit || b.expanded > MaxArchiveExpansion {
 		return api.Err(413, "ARCHIVE_TOO_LARGE", "The backup exceeds the size a restore takes")
 	}
 	return writeEntry(b.zip, name, data, compress)
 }
 
-func (b *backupWriter) addJSON(kind, name string, value any) error {
-	return b.add(kind, name, api.Raw(value))
+func (b *BackupWriter) addJSON(kind, name string, value any) error {
+	return b.Add(kind, name, api.Raw(value))
 }
 
-func (b *backupWriter) omit(omission backupOmission) {
+func (b *BackupWriter) omit(omission BackupOmission) {
 	b.manifest.Omissions = append(b.manifest.Omissions, omission)
 }
 
 // close writes the manifest last, once every entry is listed.
-func (b *backupWriter) close(id string, created time.Time) error {
+func (b *BackupWriter) close(id string, created time.Time) error {
 	m := &b.manifest
 	m.BackupID, m.CreatedAt, m.Complete, m.Counts.Files = id, archiveTime(created), len(m.Omissions) == 0, len(m.Files)
 	m.Warnings = []backupWarning{}
@@ -288,7 +288,7 @@ func (b *backupWriter) close(id string, created time.Time) error {
 	if detached > 0 {
 		m.Warnings = append(m.Warnings, backupWarning{Code: "chats_detached_from_omitted_projects", Category: "relationship_adjustment", Count: detached})
 	}
-	if err := b.write(manifestPath, api.Raw(m), maxBackupManifestBytes, true); err != nil {
+	if err := b.write(ManifestPath, api.Raw(m), maxBackupManifestBytes, true); err != nil {
 		return err
 	}
 	return b.zip.Close()
