@@ -11,7 +11,6 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
-	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
 type usageSinkKey struct{}
@@ -42,7 +41,7 @@ func (h *harness) completion(ctx context.Context, m *model, payload api.Object) 
 		return "", api.WithRetryAfter(api.DownstreamError(resp.StatusCode, b), resp.Header)
 	}
 	if sink, ok := ctx.Value(usageSinkKey{}).(*stream); ok {
-		if usage, ok := ctx.Value(usageContextKey{}).(usagereporting.Context); ok && usage.BillCustomerRequest {
+		if usage, ok := auth.Usage(ctx); ok && usage.BillCustomerRequest {
 			sink.mu.Lock()
 			sink.modelAccepted = true
 			sink.mu.Unlock()

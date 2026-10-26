@@ -222,8 +222,9 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 	t.Cleanup(cp.Close)
 	rows := &memoryRows{rows: map[string]domain.StoredRow{}, sealed: map[string]auth.ContentKey{}}
 	h := &harness{gateway: server.URL, controlplane: cp.URL, cpClient: cp.Client(), storeRows: rows, services: map[string]*downstreamService{}, scratch: newScratchSpace(t.TempDir(), 1<<30)}
+	h.repairs = h
 	h.auth = testAuth(cp)
-	m := &model{name: "kimi-k3", context: 8192, client: &http.Client{Transport: &callerAuth{inner: server.Client().Transport, usageSecret: "test-usage-secret"}}}
+	m := &model{name: "kimi-k3", context: 8192, client: &http.Client{Transport: &auth.CallerTransport{Inner: server.Client().Transport, UsageSecret: "test-usage-secret"}}}
 	h.offer.models = []*model{m}
 	h.autoModel = m
 	h.catalog.set(&domain.Catalog{Models: []api.Object{{"modelName": "kimi-k3", "name": "Kimi K3", "budgetWindow": 8192, "multimodal": false, "chatConfig": api.Object{}}}, Prompt: "You are {MODEL_NAME}. {USER_PREFERENCES}", Presets: domain.BuiltInPresets()})
@@ -1246,7 +1247,7 @@ func TestSyncWireCarriesJWTProtocolAndBase64(t *testing.T) {
 		io.WriteString(w, `{"ok":true,"etag":"5"}`)
 	}))
 	defer server.Close()
-	client := &syncClient{URL: server.URL, Client: &http.Client{Transport: &callerAuth{inner: server.Client().Transport}}}
+	client := &syncClient{URL: server.URL, Client: &http.Client{Transport: &auth.CallerTransport{Inner: server.Client().Transport}}}
 	etag, err := client.push(caller("inference-key"), p, key, "profile", &domain.StoredRow{ID: "profile", ETag: "4", Data: api.Raw(api.Object{"nickname": "hello"})}, uuid.NewString())
 	if err != nil || etag != "5" {
 		t.Fatal(etag, err)
@@ -1350,7 +1351,7 @@ func serveWebsearch(t *testing.T, respond func(name string, args map[string]any)
 	saved := *f
 	t.Cleanup(func() { *f = saved })
 	f.enclave = strings.TrimPrefix(server.URL, "https://")
-	f.client = &http.Client{Transport: &callerAuth{inner: server.Client().Transport, usageSecret: "test-usage-secret"}}
+	f.client = &http.Client{Transport: &auth.CallerTransport{Inner: server.Client().Transport, UsageSecret: "test-usage-secret"}}
 	return recorded
 }
 

@@ -249,7 +249,7 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "A nonempty file is required"))
 		return
 	}
-	ctx := context.WithValue(r.Context(), apiKeyKey{}, string(cred.Key))
+	ctx := auth.WithCallerKey(r.Context(), string(cred.Key))
 	if r.URL.Path == "/v1/transcriptions" {
 		text, err := h.transcribe(ctx, filename, file)
 		api.Respond(w, api.Object{"text": text}, h.withQuota(p, cred.Limit, err))
@@ -532,7 +532,7 @@ func multipartCall(ctx context.Context, service *downstreamService, path, fileFi
 		return nil, err
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
-	if key := callerKey(ctx); key != "" {
+	if key := auth.CallerKey(ctx); key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
 	resp, err := service.Client.Do(req)

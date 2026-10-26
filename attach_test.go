@@ -31,7 +31,7 @@ func routerHarness(t *testing.T, router http.HandlerFunc) *harness {
 	h, _, _ := testChatHarness(t, nil)
 	server := httptest.NewServer(router)
 	t.Cleanup(server.Close)
-	h.services["router"] = &downstreamService{URL: server.URL, Client: &http.Client{Transport: &callerAuth{inner: server.Client().Transport}}}
+	h.services["router"] = &downstreamService{URL: server.URL, Client: &http.Client{Transport: &auth.CallerTransport{Inner: server.Client().Transport}}}
 	return h
 }
 
@@ -45,7 +45,7 @@ func TestDocumentsConvertThroughTheRouter(t *testing.T) {
 		}
 		io.WriteString(w, reply.Load().(string))
 	})
-	ctx := context.WithValue(context.Background(), apiKeyKey{}, "free_anonymous-key")
+	ctx := auth.WithCallerKey(context.Background(), "free_anonymous-key")
 	for _, tc := range []struct {
 		name, reply string
 		text        any
@@ -127,7 +127,7 @@ func TestDocumentConversionStopsWaitingWithItsCaller(t *testing.T) {
 		w.WriteHeader(http.StatusTooManyRequests)
 		io.WriteString(w, `{"error":{"message":"parser busy","type":"rate_limit_error","param":null,"code":"document_parser_busy"}}`)
 	})
-	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), apiKeyKey{}, "free_anonymous-key"))
+	ctx, cancel := context.WithCancel(auth.WithCallerKey(context.Background(), "free_anonymous-key"))
 	defer cancel()
 	time.AfterFunc(100*time.Millisecond, cancel)
 	began := time.Now()

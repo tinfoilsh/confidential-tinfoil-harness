@@ -9,11 +9,12 @@ import (
 	"testing"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 // caller is a request context carrying one API key.
 func caller(apiKey string) context.Context {
-	return context.WithValue(context.Background(), apiKeyKey{}, apiKey)
+	return auth.WithCallerKey(context.Background(), apiKey)
 }
 
 func TestOutgrowingTheLogStopsTheRun(t *testing.T) {

@@ -41,6 +41,9 @@ type rowStore interface {
 type syncClient struct {
 	URL    string
 	Client *http.Client
+	// MinimumGrant is how long a storage grant must still last to be
+	// accepted: a run and its commit.
+	MinimumGrant time.Duration
 }
 
 const (
@@ -66,8 +69,8 @@ func (s *syncClient) call(ctx context.Context, p *auth.Principal, path string, i
 	}
 	ctx, cancel := context.WithTimeout(ctx, syncTimeout)
 	defer cancel()
-	ctx = context.WithValue(ctx, apiKeyKey{}, "")
-	ctx = context.WithValue(ctx, usageContextKey{}, false)
+	ctx = auth.WithCallerKey(ctx, "")
+	ctx = auth.WithoutUsage(ctx)
 	return api.PostJSONWithHeaders(ctx, s.Client, s.URL+path, string(cmp.Or(p.SyncToken, p.JWT)), map[string]string{"X-Sync-Protocol": syncProtocol}, in, out)
 }
 
@@ -127,7 +130,7 @@ func (s *syncClient) storageCredential(ctx context.Context, p *auth.Principal, p
 	if err != nil {
 		return storageGrant{}, err
 	}
-	if out.Token == "" || !out.ExpiresAt.After(api.Now().Add(runTimeout+commitTimeout)) {
+	if out.Token == "" || !out.ExpiresAt.After(api.Now().Add(s.MinimumGrant)) {
 		return storageGrant{}, api.Err(502, "UPSTREAM_REFUSED", "The storage service returned an invalid run credential")
 	}
 	return out, nil

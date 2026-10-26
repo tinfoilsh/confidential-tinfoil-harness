@@ -13,7 +13,7 @@ func (h *harness) favicon(ctx context.Context, p *auth.Principal, _ auth.Content
 	if err != nil {
 		return nil, err
 	}
-	ctx = context.WithValue(ctx, apiKeyKey{}, string(credential.Key))
+	ctx = auth.WithCallerKey(ctx, string(credential.Key))
 	var result json.RawMessage
 	err = h.serviceCall(ctx, "metadata", "/favicon", pageRequest{URL: in.URL}, &result)
 	return result, err
@@ -26,7 +26,7 @@ func (h *harness) linkPreview(ctx context.Context, p *auth.Principal, _ auth.Con
 	if err != nil {
 		return nil, err
 	}
-	return h.linkDetails(context.WithValue(ctx, apiKeyKey{}, string(credential.Key)), in.URL)
+	return h.linkDetails(auth.WithCallerKey(ctx, string(credential.Key)), in.URL)
 }
 
 // linkDetails are a page's details, read by the metadata service, as a link

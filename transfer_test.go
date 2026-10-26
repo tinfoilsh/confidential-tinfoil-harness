@@ -191,7 +191,7 @@ func TestImportStoresTheDeviceChatUnderItsID(t *testing.T) {
 	}
 	attachments := mustRead(domain.ReadThreadRow(row)).Messages[0].Attachments
 	for _, a := range attachments {
-		if !enclaveAttachmentID.MatchString(a.ID) || a.StorageThreadID != "0000000000005_device" || a.Base64 != "" || a.TextContent != "" {
+		if !domain.EnclaveAttachmentID.MatchString(a.ID) || a.StorageThreadID != "0000000000005_device" || a.Base64 != "" || a.TextContent != "" {
 			t.Fatalf("attachment not stored under the chat: %+v", a)
 		}
 	}

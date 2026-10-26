@@ -153,6 +153,12 @@ func (h *harness) threadPage(ctx context.Context, p *auth.Principal, key auth.Co
 	return threads, page.Next, nil
 }
 
+// attachmentRepairer places the attachments a pushed chat names that sync
+// does not hold under it.
+type attachmentRepairer interface {
+	repairAttachments(context.Context, *auth.Principal, *domain.Thread, []string) error
+}
+
 // saveThread pushes a chat at the revision it was read at. A chat naming
 // attachments sync does not hold under it is repaired once and pushed again.
 func (h *harness) saveThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, row *domain.ThreadRow) error {
@@ -167,7 +173,7 @@ func (h *harness) saveThread(ctx context.Context, p *auth.Principal, key auth.Co
 		}
 		if e := api.AsError(err); e.Code != "MISSING_ATTACHMENT" || repaired {
 			return err
-		} else if err := h.repairAttachments(ctx, p, &row.Thread, e.Missing); err != nil {
+		} else if err := h.repairs.repairAttachments(ctx, p, &row.Thread, e.Missing); err != nil {
 			return err
 		}
 	}
@@ -499,7 +505,7 @@ func (h *harness) putAttachment(ctx context.Context, p *auth.Principal, chatID, 
 	if err != nil {
 		return "", "", err
 	}
-	if !enclaveAttachmentID.MatchString(stored.ID) || stored.Key == "" {
+	if !domain.EnclaveAttachmentID.MatchString(stored.ID) || stored.Key == "" {
 		return "", "", api.Err(502, "UPSTREAM_REFUSED", "The sync service returned an invalid attachment")
 	}
 	return stored.ID, stored.Key, nil

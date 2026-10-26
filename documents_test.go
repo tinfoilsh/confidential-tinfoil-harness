@@ -190,7 +190,7 @@ func TestStoredUploadIsOffloadedUnderItsThread(t *testing.T) {
 	}
 	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", thread)
 	stored := api.Obj(api.Arr(api.Obj(api.Arr(rowJSON(row)["messages"])[0])["attachments"])[0])
-	if !enclaveAttachmentID.MatchString(api.Str(stored["id"])) || api.Str(stored["encryptionKey"]) == "" || stored["storageThreadId"] != thread {
+	if !domain.EnclaveAttachmentID.MatchString(api.Str(stored["id"])) || api.Str(stored["encryptionKey"]) == "" || stored["storageThreadId"] != thread {
 		t.Fatalf("row does not reference the stored blob: %v", stored)
 	}
 	for _, field := range []string{"textContent", "pages", "base64", "legacyId"} {
@@ -279,7 +279,7 @@ func TestInlineDocumentIsOffloadedUnderItsThread(t *testing.T) {
 	}
 	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
 	stored := api.Obj(api.Arr(api.Obj(api.Arr(rowJSON(row)["messages"])[0])["attachments"])[0])
-	if !enclaveAttachmentID.MatchString(api.Str(stored["id"])) || api.Str(stored["encryptionKey"]) == "" || stored["storageThreadId"] != "chat-1" || stored["textContent"] != nil {
+	if !domain.EnclaveAttachmentID.MatchString(api.Str(stored["id"])) || api.Str(stored["encryptionKey"]) == "" || stored["storageThreadId"] != "chat-1" || stored["textContent"] != nil {
 		t.Fatalf("row does not reference the stored blob: %v", stored)
 	}
 	if _, ok := stored["pages"]; ok {
@@ -353,7 +353,7 @@ func TestLegacyKeyedAttachmentIsReadFromTheControlPlane(t *testing.T) {
 	}
 	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
 	stored := mustRead(domain.ReadThreadRow(row)).Messages[0].Attachments[0]
-	if stored.Key != "" || !enclaveAttachmentID.MatchString(stored.ID) {
+	if stored.Key != "" || !domain.EnclaveAttachmentID.MatchString(stored.ID) {
 		t.Fatalf("legacy reference kept: %+v", stored)
 	}
 }
@@ -440,7 +440,7 @@ func TestALocalChatIsSharedFromItsTranscript(t *testing.T) {
 		uploads <- upload{r.Method, r.URL.Path, r.Header.Get("Authorization"), r.Header.Get("X-Format-Version"), string(body)}
 	}))
 	defer cp.Close()
-	h.controlplane, h.cpClient = cp.URL, &http.Client{Transport: &callerAuth{inner: cp.Client().Transport}}
+	h.controlplane, h.cpClient = cp.URL, &http.Client{Transport: &auth.CallerTransport{Inner: cp.Client().Transport}}
 	citations := []any{api.Object{"type": "url_citation", "url_citation": api.Object{"url": "https://photos.example/", "title": "Photos", "start_index": 2, "end_index": 7}}}
 	thread := api.Object{"title": "Local chat", "createdAt": "2026-01-01T00:00:00Z", "messages": []any{
 		api.Object{"id": "m1", "role": "user", "content": "what is this?", "createdAt": "2026-01-01T00:00:01Z", "quote": "earlier", "attachments": []any{
@@ -506,7 +506,7 @@ func TestAStoredChatIsSharedFromItsRow(t *testing.T) {
 	storedThread(rows, "alice", "chat-1")
 	cp := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer cp.Close()
-	h.controlplane, h.cpClient = cp.URL, &http.Client{Transport: &callerAuth{inner: cp.Client().Transport}}
+	h.controlplane, h.cpClient = cp.URL, &http.Client{Transport: &auth.CallerTransport{Inner: cp.Client().Transport}}
 	if _, err := h.shareThread(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, auth.ContentKey{}, requestOf[shareRequest](api.Object{"key": keyBase64(key), "threadId": "chat-1"})); err != nil {
 		t.Fatal(err)
 	}

@@ -190,8 +190,8 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 		r.principal = p
 		h.live.mu.Unlock()
 	}
-	ctx = context.WithValue(ctx, apiKeyKey{}, string(r.credential.Key))
-	ctx = context.WithValue(ctx, usageContextKey{}, usageForRun(r))
+	ctx = auth.WithCallerKey(ctx, string(r.credential.Key))
+	ctx = auth.WithUsage(ctx, usageForRun(r))
 	ctx = context.WithValue(ctx, usageSinkKey{}, r.out)
 	if err := h.refuseFlagged(ctx, r, p); err != nil {
 		return err
@@ -264,8 +264,8 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	h.live.working.Add(1)
 	h.live.mu.Unlock()
 	runCtx, cancel := context.WithTimeout(r.stopped, runTimeout)
-	runCtx = context.WithValue(runCtx, apiKeyKey{}, string(r.credential.Key))
-	runCtx = context.WithValue(runCtx, usageContextKey{}, usageForRun(r))
+	runCtx = auth.WithCallerKey(runCtx, string(r.credential.Key))
+	runCtx = auth.WithUsage(runCtx, usageForRun(r))
 	runCtx = context.WithValue(runCtx, usageSinkKey{}, r.out)
 	r.out.mu.Lock()
 	r.out.thoughts = h.thoughtSummaries(runCtx, r.out, r.assembler)

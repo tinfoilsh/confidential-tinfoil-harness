@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"regexp"
 	"slices"
 	"strings"
 
@@ -19,7 +18,6 @@ import (
 // as JSON, and the chat row keeps only metadata and the blob key. Sync deletes
 // any blob a chat stops referencing, so every attachment a row names must be
 // stored under that row's chat. Every client reads and writes this format.
-var enclaveAttachmentID = regexp.MustCompile(`^[0-9a-f]{36}$`)
 
 // documentBlob is a document's extracted content, as its blob holds it.
 type documentBlob struct {
@@ -89,7 +87,7 @@ func (h *harness) placeAttachments(ctx context.Context, p *auth.Principal, threa
 
 func (h *harness) placeAttachment(ctx context.Context, p *auth.Principal, threadID string, a *domain.Attachment) error {
 	keyed := a.StorageKey() != ""
-	elsewhere := !enclaveAttachmentID.MatchString(a.ID) || cmp.Or(a.StorageThreadID, threadID) != threadID
+	elsewhere := !domain.EnclaveAttachmentID.MatchString(a.ID) || cmp.Or(a.StorageThreadID, threadID) != threadID
 	var data []byte
 	switch {
 	case !a.IsImage() && a.HasContent():
@@ -120,7 +118,7 @@ func (h *harness) placeAttachment(ctx context.Context, p *auth.Principal, thread
 			// Sync rejects a push naming an id that is not an enclave id, so
 			// such a reference is retired now. Any other unavailable one fails
 			// the push as missing, and repairAttachments then retires it.
-			if !enclaveAttachmentID.MatchString(a.ID) {
+			if !domain.EnclaveAttachmentID.MatchString(a.ID) {
 				retireAttachment(a)
 			}
 			return nil

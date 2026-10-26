@@ -70,7 +70,7 @@ func (h *harness) shareThread(ctx context.Context, p *auth.Principal, _ auth.Con
 
 // The share endpoints authenticate the owner's Clerk session.
 func (h *harness) shareRequest(ctx context.Context, p *auth.Principal, method, id string, body []byte) ([]byte, error) {
-	ctx = context.WithValue(ctx, apiKeyKey{}, string(p.JWT))
+	ctx = auth.WithCallerKey(ctx, string(p.JWT))
 	path := h.controlplane + "/api/shares/" + url.PathEscape(id)
 	if method == http.MethodGet {
 		path += "/status"

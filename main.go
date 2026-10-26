@@ -22,7 +22,6 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	tinfoil "github.com/tinfoilsh/tinfoil-go"
-	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
 // The pinned repo is the trust anchor; the gateway's catalog supplies the rest.
@@ -75,6 +74,7 @@ type harness struct {
 	services     map[string]*downstreamService
 	safeguards   *submitter // nil unless SAFEGUARDS_URL names the sidecar
 	live         liveRuns
+	repairs      attachmentRepairer
 	scratch      *scratchSpace
 }
 
@@ -104,9 +104,10 @@ func main() {
 	}
 	h := &harness{gateway: gw,
 		controlplane: controlplane,
-		cpClient:     &http.Client{Transport: &callerAuth{inner: http.DefaultTransport}},
+		cpClient:     &http.Client{Transport: &auth.CallerTransport{Inner: http.DefaultTransport}},
 		safeguards:   newSubmitter(os.Getenv("SAFEGUARDS_URL")),
 		scratch:      scratch}
+	h.repairs = h
 
 	if err := h.bootChat(ctx, usageSecret); err != nil {
 		slog.Error("initialize chat service", "error", err)
@@ -147,7 +148,7 @@ func attest(ctx context.Context, enclave, repo, usageSecret string) (*http.Clien
 			return nil, err
 		}
 		client := verified.HTTPClient()
-		client.Transport = &callerAuth{inner: client.Transport, usageSecret: usageSecret}
+		client.Transport = &auth.CallerTransport{Inner: client.Transport, UsageSecret: usageSecret}
 		return client, nil
 	})
 }
@@ -271,36 +272,6 @@ func served(models []*model) string {
 		names[i] = m.name
 	}
 	return strings.Join(names, ", ")
-}
-
-type apiKeyKey struct{}
-
-// callerKey is the key the request was signed with; the harness has none of its own.
-func callerKey(ctx context.Context) string {
-	key, _ := ctx.Value(apiKeyKey{}).(string)
-	return key
-}
-
-type usageContextKey struct{}
-
-// callerAuth signs every request with the caller's key; the harness has none.
-type callerAuth struct {
-	inner       http.RoundTripper
-	usageSecret string
-}
-
-func (t *callerAuth) RoundTrip(r *http.Request) (*http.Response, error) {
-	r = r.Clone(r.Context())
-	if key := callerKey(r.Context()); key != "" {
-		r.Header.Set("Authorization", "Bearer "+key)
-	}
-	if usage, ok := r.Context().Value(usageContextKey{}).(usagereporting.Context); ok {
-		usage.IssuedAt = time.Now().UTC()
-		if err := usagereporting.SetHeaders(r.Header, usage, t.usageSecret); err != nil {
-			return nil, err
-		}
-	}
-	return t.inner.RoundTrip(r)
 }
 
 func token() string {

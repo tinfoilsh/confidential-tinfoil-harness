@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
@@ -39,7 +40,7 @@ func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *
 	}
 	usage := usageForRun(r)
 	usage.BillCustomerRequest = true
-	content, err := h.completion(context.WithValue(ctx, usageContextKey{}, usage), m, payload)
+	content, err := h.completion(auth.WithUsage(ctx, usage), m, payload)
 	if err != nil {
 		return err
 	}
