@@ -38,7 +38,7 @@ func (h *harness) threadTranscript(ctx context.Context, p *auth.Principal, key a
 		if a.StorageKey() == "" {
 			return nil
 		}
-		data, err := h.attachmentBytes(ctx, p, a, false)
+		data, err := h.attachments.attachmentBytes(ctx, p, a, false)
 		if err == nil && a.IsImage() {
 			a.Base64 = base64.StdEncoding.EncodeToString(data)
 		} else if err == nil {
@@ -137,7 +137,7 @@ func (h *harness) importThread(ctx context.Context, p *auth.Principal, key auth.
 		return nil, err
 	}
 	row := &domain.ThreadRow{Thread: thread, Restore: true}
-	if err := h.placeAttachments(ctx, p, id, &row.Thread); err != nil {
+	if err := h.attachments.placeAttachments(ctx, p, id, &row.Thread); err != nil {
 		return nil, err
 	}
 	stripInlineAttachments(&row.Thread)

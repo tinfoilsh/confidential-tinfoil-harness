@@ -57,7 +57,7 @@ func TestDocumentsConvertThroughTheRouter(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			reply.Store(tc.reply)
-			descriptor, err := h.preprocess(ctx, "report.pdf", []byte("%PDF-1.7 report"))
+			descriptor, err := h.attachments.preprocess(ctx, "report.pdf", []byte("%PDF-1.7 report"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -132,7 +132,7 @@ func TestDocumentConversionStopsWaitingWithItsCaller(t *testing.T) {
 	defer cancel()
 	time.AfterFunc(100*time.Millisecond, cancel)
 	began := time.Now()
-	_, err := h.convert(ctx, "report.pdf", []byte("%PDF-1.7 report"))
+	_, err := h.attachments.convert(ctx, "report.pdf", []byte("%PDF-1.7 report"))
 	if api.AsError(err).Code != "RATE_LIMITED" || calls.Load() != 1 || time.Since(began) < 100*time.Millisecond || time.Since(began) > 2*time.Second {
 		t.Fatalf("waited %v after its caller left: calls=%d err=%v", time.Since(began), calls.Load(), err)
 	}

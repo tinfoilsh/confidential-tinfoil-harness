@@ -81,11 +81,11 @@ func unreachable(err error) bool {
 // placeAttachments stores every attachment of a thread under the thread, in
 // the protocol 3 format, before the thread is pushed. It keeps the content
 // inline in the given copy, which is the one a prompt is built from.
-func (h *harness) placeAttachments(ctx context.Context, p *auth.Principal, threadID string, t *domain.Thread) error {
-	return t.EachAttachment(func(a *domain.Attachment) error { return h.placeAttachment(ctx, p, threadID, a) })
+func (at *attachments) placeAttachments(ctx context.Context, p *auth.Principal, threadID string, t *domain.Thread) error {
+	return t.EachAttachment(func(a *domain.Attachment) error { return at.placeAttachment(ctx, p, threadID, a) })
 }
 
-func (h *harness) placeAttachment(ctx context.Context, p *auth.Principal, threadID string, a *domain.Attachment) error {
+func (at *attachments) placeAttachment(ctx context.Context, p *auth.Principal, threadID string, a *domain.Attachment) error {
 	keyed := a.StorageKey() != ""
 	elsewhere := !domain.EnclaveAttachmentID.MatchString(a.ID) || cmp.Or(a.StorageThreadID, threadID) != threadID
 	var data []byte
@@ -105,7 +105,7 @@ func (h *harness) placeAttachment(ctx context.Context, p *auth.Principal, thread
 		}
 		data = decoded
 	case keyed && elsewhere:
-		stored, err := h.attachmentBytes(ctx, p, a, false)
+		stored, err := at.attachmentBytes(ctx, p, a, false)
 		if err == nil && !a.IsImage() {
 			var content documentBlob
 			content, err = decodeDocument(stored)
@@ -131,7 +131,7 @@ func (h *harness) placeAttachment(ctx context.Context, p *auth.Principal, thread
 		return nil
 	}
 	defer clear(data)
-	storedID, key, err := h.store.PutAttachment(ctx, p, threadID, a.ID, data)
+	storedID, key, err := at.store.PutAttachment(ctx, p, threadID, a.ID, data)
 	if err != nil {
 		return err
 	}
@@ -146,7 +146,7 @@ func unavailableDocument(a *domain.Attachment) string {
 // hydrateDocuments reads offloaded documents into a working copy of a thread.
 // A document whose blob is gone is described as unavailable rather than
 // failing every later turn in its chat.
-func (h *harness) hydrateDocuments(ctx context.Context, p *auth.Principal, t *domain.Thread) error {
+func (at *attachments) hydrateDocuments(ctx context.Context, p *auth.Principal, t *domain.Thread) error {
 	return t.EachAttachment(func(a *domain.Attachment) error {
 		if a.IsImage() || a.HasContent() {
 			return nil
@@ -155,7 +155,7 @@ func (h *harness) hydrateDocuments(ctx context.Context, p *auth.Principal, t *do
 			a.TextContent = unavailableDocument(a)
 			return nil
 		}
-		if err := h.inflateDocument(ctx, p, a); err != nil {
+		if err := at.inflateDocument(ctx, p, a); err != nil {
 			if !unreachable(err) {
 				return err
 			}
@@ -166,8 +166,8 @@ func (h *harness) hydrateDocuments(ctx context.Context, p *auth.Principal, t *do
 }
 
 // inflateDocument reads a document's content from its blob into it.
-func (h *harness) inflateDocument(ctx context.Context, p *auth.Principal, a *domain.Attachment) error {
-	data, err := h.attachmentBytes(ctx, p, a, false)
+func (at *attachments) inflateDocument(ctx context.Context, p *auth.Principal, a *domain.Attachment) error {
+	data, err := at.attachmentBytes(ctx, p, a, false)
 	if err != nil {
 		return err
 	}
@@ -184,13 +184,13 @@ func (h *harness) inflateDocument(ctx context.Context, p *auth.Principal, a *dom
 // not hold under the row's chat: a row the web or iOS app wrote before sync
 // checked references may point at blobs filed under another chat or deleted
 // since.
-func (h *harness) RepairAttachments(ctx context.Context, p *auth.Principal, t *domain.Thread, missing []string) error {
+func (at *attachments) RepairAttachments(ctx context.Context, p *auth.Principal, t *domain.Thread, missing []string) error {
 	return t.EachAttachment(func(a *domain.Attachment) error {
 		if !slices.Contains(missing, a.ID) {
 			return nil
 		}
 		a.StorageThreadID = "elsewhere"
-		if err := h.placeAttachment(ctx, p, t.ID, a); err != nil {
+		if err := at.placeAttachment(ctx, p, t.ID, a); err != nil {
 			return err
 		}
 		if a.StorageThreadID != t.ID {

@@ -126,17 +126,17 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *auth.Principal
 	// chat. An ask's stored source has attachments in sync; a keyless thread
 	// carries its own. Image descriptions are stored, image bytes are not.
 	if !s.local {
-		if err := h.placeAttachments(ctx, p, s.id, t); err != nil {
+		if err := h.attachments.placeAttachments(ctx, p, s.id, t); err != nil {
 			return nil, err
 		}
 	}
-	if err := h.hydrateContext(ctx, p, t, s.keyless); err != nil {
+	if err := h.attachments.hydrateContext(ctx, p, t, s.keyless); err != nil {
 		return nil, err
 	}
 	// Offloaded documents are read back for the prompt alone.
 	working := t.Clone()
 	if !s.keyless {
-		if err := h.hydrateDocuments(ctx, p, &working); err != nil {
+		if err := h.attachments.hydrateDocuments(ctx, p, &working); err != nil {
 			return nil, err
 		}
 	}

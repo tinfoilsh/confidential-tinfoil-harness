@@ -81,7 +81,7 @@ func TestSessionReadsFreeQuotaOncePerRequest(t *testing.T) {
 		json.NewEncoder(w).Encode(api.Object{"ok": true, "rate_limit": api.Object{"max_requests": 10, "remaining": 10 - calls.Add(1)}})
 	}))
 	defer cp.Close()
-	h.auth = testAuth(cp)
+	h.useAuth(testAuth(cp))
 	for _, remaining := range []int{9, 8} {
 		w := postRoute(h, "/v1/session", api.Object{}, "")
 		var session struct {
@@ -159,7 +159,7 @@ func TestAnonymousKeyValidationRefusesWorkBeforeAllocatingThreads(t *testing.T) 
 				io.WriteString(w, tc.body)
 			}))
 			defer cp.Close()
-			h.auth = testAuth(cp)
+			h.useAuth(testAuth(cp))
 			response := postRoute(h, "/v1/threads/turn", localInput("", api.Object{}), "")
 			var refused struct {
 				Error api.Error `json:"error"`
@@ -393,7 +393,7 @@ func TestASignedOutCallersQuotaComesFromItsKey(t *testing.T) {
 	}))
 	defer cp.Close()
 	for _, harness := range []*harness{h, router} {
-		harness.auth = testAuth(cp)
+		harness.useAuth(testAuth(cp))
 	}
 	var session struct {
 		RateLimit json.RawMessage `json:"rateLimit"`

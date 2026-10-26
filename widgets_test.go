@@ -157,7 +157,8 @@ func TestEveryViewMarksWidgetArgumentsTheDeclarationRefuses(t *testing.T) {
 	fake := newFakeSync(t, h)
 	cp := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer cp.Close()
-	h.controlplane, h.cpClient = cp.URL, &http.Client{Transport: &auth.CallerTransport{Inner: cp.Client().Transport}}
+	h.atControlplane(cp.URL)
+	h.cpClient = &http.Client{Transport: &auth.CallerTransport{Inner: cp.Client().Transport}}
 	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat-1")] = domain.StoredRow{ID: "chat-1", ETag: "1", Data: api.Raw(statsThread())}
 	marks := func(view string, messages any) {
 		t.Helper()

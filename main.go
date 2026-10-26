@@ -28,6 +28,7 @@ type harness struct {
 	scratch      *scratchSpace
 	store        *store.Store
 	models       *inference.Models
+	attachments  *attachments
 }
 
 // listenAddr is the shim's upstream port in tinfoil-config.yml, which also
@@ -60,12 +61,13 @@ func main() {
 		safeguards:   newSubmitter(os.Getenv("SAFEGUARDS_URL")),
 		scratch:      scratch,
 		store:        &store.Store{}}
-	h.store.Repair = h
 
 	if err := h.bootChat(ctx, usageSecret); err != nil {
 		slog.Error("initialize chat service", "error", err)
 		os.Exit(1)
 	}
+	h.attachments = &attachments{auth: h.auth, controlplane: h.controlplane, models: h.models, store: h.store}
+	h.store.Repair = h.attachments
 
 	srv := &http.Server{Addr: listenAddr, Handler: h.routes(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: time.Minute}
 	stop := make(chan os.Signal, 1)

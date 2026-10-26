@@ -342,7 +342,7 @@ func TestLegacyKeyedAttachmentIsReadFromTheControlPlane(t *testing.T) {
 		w.Write(sealed)
 	}))
 	defer cp.Close()
-	h.controlplane = cp.URL
+	h.atControlplane(cp.URL)
 	// The web and iOS apps stored images at the control plane before the sync enclave.
 	storedThread(rows, "alice", "chat-1", api.Object{"id": "legacy-1", "type": "image", "fileName": "photo.png", "description": "a photo", "key": base64.StdEncoding.EncodeToString(legacyKey)})
 	eventsIn(t, postRoute(h, "/v1/threads/turn", continueInput(key, "chat-1"), "alice"))
@@ -441,7 +441,8 @@ func TestALocalChatIsSharedFromItsTranscript(t *testing.T) {
 		uploads <- upload{r.Method, r.URL.Path, r.Header.Get("Authorization"), r.Header.Get("X-Format-Version"), string(body)}
 	}))
 	defer cp.Close()
-	h.controlplane, h.cpClient = cp.URL, &http.Client{Transport: &auth.CallerTransport{Inner: cp.Client().Transport}}
+	h.atControlplane(cp.URL)
+	h.cpClient = &http.Client{Transport: &auth.CallerTransport{Inner: cp.Client().Transport}}
 	citations := []any{api.Object{"type": "url_citation", "url_citation": api.Object{"url": "https://photos.example/", "title": "Photos", "start_index": 2, "end_index": 7}}}
 	thread := api.Object{"title": "Local chat", "createdAt": "2026-01-01T00:00:00Z", "messages": []any{
 		api.Object{"id": "m1", "role": "user", "content": "what is this?", "createdAt": "2026-01-01T00:00:01Z", "quote": "earlier", "attachments": []any{
@@ -507,7 +508,8 @@ func TestAStoredChatIsSharedFromItsRow(t *testing.T) {
 	storedThread(rows, "alice", "chat-1")
 	cp := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer cp.Close()
-	h.controlplane, h.cpClient = cp.URL, &http.Client{Transport: &auth.CallerTransport{Inner: cp.Client().Transport}}
+	h.atControlplane(cp.URL)
+	h.cpClient = &http.Client{Transport: &auth.CallerTransport{Inner: cp.Client().Transport}}
 	if _, err := h.shareThread(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, auth.ContentKey{}, requestOf[shareRequest](api.Object{"key": keyBase64(key), "threadId": "chat-1"})); err != nil {
 		t.Fatal(err)
 	}
@@ -580,7 +582,7 @@ func TestAPromotedLegacyImageIsReadThroughSync(t *testing.T) {
 	fake.blobs["legacy-2"] = fakeBlob{chat: "chat-1", key: legacyKey, data: []byte("promoted photo")}
 	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusGone) }))
 	defer cp.Close()
-	h.controlplane = cp.URL
+	h.atControlplane(cp.URL)
 	storedThread(rows, "alice", "chat-1", api.Object{"id": "legacy-2", "type": "image", "fileName": "photo.png", "mimeType": "image/png", "key": legacyKey})
 	w := postRoute(h, "/v1/attachments/get", api.Object{"key": keyBase64(key), "id": "legacy-2", "threadId": "chat-1"}, "alice")
 	if w.Code != 200 || w.Body.String() != "promoted photo" {
@@ -616,7 +618,8 @@ func TestOpeningAShareNamesOnlyThatShare(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer cp.Close()
-	h.controlplane, h.cpClient = cp.URL, cp.Client()
+	h.atControlplane(cp.URL)
+	h.cpClient = cp.Client()
 	fragment := "v2:" + strings.Repeat("ab", 32)
 	if w := postRoute(h, "/v1/shares/open", api.Object{"shareId": "..", "fragment": fragment}, ""); w.Code != 400 {
 		t.Fatalf("a dot segment share id: HTTP %d", w.Code)

@@ -410,7 +410,7 @@ func (h *harness) cloudImage(ctx context.Context, p *auth.Principal) func(*domai
 		if a.Base64 == "" && a.StorageKey() == "" {
 			return nil, errAttachmentMissing
 		}
-		data, err := h.attachmentBytes(ctx, p, a, false)
+		data, err := h.attachments.attachmentBytes(ctx, p, a, false)
 		if unreachable(err) {
 			return nil, errAttachmentMissing
 		}
@@ -420,7 +420,7 @@ func (h *harness) cloudImage(ctx context.Context, p *auth.Principal) func(*domai
 
 func (h *harness) cloudDocument(ctx context.Context, p *auth.Principal) func(*domain.Attachment) error {
 	return func(a *domain.Attachment) error {
-		err := h.inflateDocument(ctx, p, a)
+		err := h.attachments.inflateDocument(ctx, p, a)
 		if unreachable(err) {
 			return errAttachmentMissing
 		}

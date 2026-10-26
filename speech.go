@@ -30,13 +30,13 @@ const (
 	speechReadSize     = 32 << 10
 )
 
-func (h *harness) handleSpeech(w http.ResponseWriter, r *http.Request) {
-	p, err := h.auth.Authenticate(r, true)
+func (at *attachments) handleSpeech(w http.ResponseWriter, r *http.Request) {
+	p, err := at.auth.Authenticate(r, true)
 	if err != nil {
 		api.Respond(w, nil, err)
 		return
 	}
-	credential, err := h.auth.Inference(r.Context(), p)
+	credential, err := at.auth.Inference(r.Context(), p)
 	if err != nil {
 		api.Respond(w, nil, auth.WithQuota(p, credential.Limit, err))
 		return
@@ -57,7 +57,7 @@ func (h *harness) handleSpeech(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, err)
 		return
 	}
-	text, err := h.speechText(r.Context(), p, in)
+	text, err := at.speechText(r.Context(), p, in)
 	in.ClearKey()
 	if err != nil {
 		api.Respond(w, nil, err)
@@ -68,7 +68,7 @@ func (h *harness) handleSpeech(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "There is nothing to read aloud"))
 		return
 	}
-	router := h.models.Services["router"]
+	router := at.models.Services["router"]
 	if router == nil {
 		api.Respond(w, nil, api.Err(503, "TOOL_UNAVAILABLE", "Speech is unavailable"))
 		return
@@ -81,7 +81,7 @@ func (h *harness) handleSpeech(w http.ResponseWriter, r *http.Request) {
 
 // speechText is what a request reads aloud: a message's markdown, or text
 // a client selected, as it is spoken.
-func (h *harness) speechText(ctx context.Context, p *auth.Principal, in *speechRequest) (string, error) {
+func (at *attachments) speechText(ctx context.Context, p *auth.Principal, in *speechRequest) (string, error) {
 	source := domain.ValueOr(in.Text, "")
 	if in.MessageID != "" {
 		var thread domain.Thread
@@ -99,7 +99,7 @@ func (h *harness) speechText(ctx context.Context, p *auth.Principal, in *speechR
 				return "", err
 			}
 			defer clear(key[:])
-			row, err := h.store.LoadThread(ctx, p, key, in.ThreadID)
+			row, err := at.store.LoadThread(ctx, p, key, in.ThreadID)
 			clear(key[:])
 			if err != nil {
 				return "", err

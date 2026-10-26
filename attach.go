@@ -29,11 +29,19 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 	_ "golang.org/x/image/bmp"
 	"golang.org/x/image/draw"
 	_ "golang.org/x/image/tiff"
 	_ "golang.org/x/image/webp"
 )
+
+type attachments struct {
+	auth         *auth.Authenticator
+	controlplane string
+	models       *inference.Models
+	store        *store.Store
+}
 
 // Text is read whole into a chat, so a text file may be larger than the
 // files the harness converts. No upload is read past maxTextBytes.
@@ -165,13 +173,13 @@ func composer() composerView {
 
 func randomBytes(n int) []byte { b := make([]byte, n); rand.Read(b); return b }
 
-func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
-	p, err := h.auth.Authenticate(r, r.URL.Path == "/v1/transcriptions" || r.URL.Path == "/v1/attachments/upload")
+func (at *attachments) handleUpload(w http.ResponseWriter, r *http.Request) {
+	p, err := at.auth.Authenticate(r, r.URL.Path == "/v1/transcriptions" || r.URL.Path == "/v1/attachments/upload")
 	if err != nil {
 		api.Respond(w, nil, err)
 		return
 	}
-	cred, err := h.auth.Inference(r.Context(), p)
+	cred, err := at.auth.Inference(r.Context(), p)
 	if err != nil {
 		api.Respond(w, nil, auth.WithQuota(p, cred.Limit, err))
 		return
@@ -211,7 +219,7 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 					api.Respond(w, nil, err)
 					return
 				}
-				p.SyncToken, err = h.store.Rows.AuthorizeStorage(r.Context(), p, key, "project-upload", fields["projectId"])
+				p.SyncToken, err = at.store.Rows.AuthorizeStorage(r.Context(), p, key, "project-upload", fields["projectId"])
 				if err != nil {
 					api.Respond(w, nil, err)
 					return
@@ -252,11 +260,11 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := auth.WithCallerKey(r.Context(), string(cred.Key))
 	if r.URL.Path == "/v1/transcriptions" {
-		text, err := h.transcribe(ctx, filename, file)
+		text, err := at.transcribe(ctx, filename, file)
 		api.Respond(w, api.Object{"text": text}, auth.WithQuota(p, cred.Limit, err))
 		return
 	}
-	descriptor, err := h.preprocess(ctx, filename, file)
+	descriptor, err := at.preprocess(ctx, filename, file)
 	if err != nil {
 		api.Respond(w, nil, auth.WithQuota(p, cred.Limit, err))
 		return
@@ -276,12 +284,12 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 			api.Respond(w, nil, err)
 			return
 		}
-		if _, err := h.store.LoadProject(ctx, p, key, projectID); err != nil {
+		if _, err := at.store.LoadProject(ctx, p, key, projectID); err != nil {
 			api.Respond(w, nil, err)
 			return
 		}
 		if descriptor.IsImage() {
-			descriptor.TextContent, err = h.describeImage(ctx, descriptor.Base64)
+			descriptor.TextContent, err = at.describeImage(ctx, descriptor.Base64)
 			if err != nil {
 				api.Respond(w, nil, auth.WithQuota(p, cred.Limit, err))
 				return
@@ -291,7 +299,7 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 			api.Respond(w, nil, api.Err(415, "ATTACHMENT_UNSUPPORTED", "Project documents require extracted text"))
 			return
 		}
-		doc, err := h.store.CreateProjectDocument(ctx, p, key, domain.ProjectDocument{ID: domain.RowID(), ProjectID: projectID, Filename: filename, ContentType: descriptor.MimeType, SizeBytes: len(file), Content: descriptor.TextContent})
+		doc, err := at.store.CreateProjectDocument(ctx, p, key, domain.ProjectDocument{ID: domain.RowID(), ProjectID: projectID, Filename: filename, ContentType: descriptor.MimeType, SizeBytes: len(file), Content: descriptor.TextContent})
 		api.Respond(w, doc, err)
 		return
 	}
@@ -366,7 +374,7 @@ func (d *sentAttachment) resizePixels() int64 {
 	return int64(cfg.Width) * int64(cfg.Height)
 }
 
-func (h *harness) preprocess(ctx context.Context, filename string, data []byte) (domain.Attachment, error) {
+func (at *attachments) preprocess(ctx context.Context, filename string, data []byte) (domain.Attachment, error) {
 	ext := strings.ToLower(filepath.Ext(filename))
 	group := attachmentGroup(filename)
 	if group == nil && sniffsAsText(data) {
@@ -403,7 +411,7 @@ func (h *harness) preprocess(ctx context.Context, filename string, data []byte) 
 		if ext == ".pdf" && !bytes.HasPrefix(data, []byte("%PDF-")) || ext != ".pdf" && !bytes.HasPrefix(data, []byte("PK\x03\x04")) {
 			return domain.Attachment{}, api.Err(415, "ATTACHMENT_UNSUPPORTED", "The file contents do not match the document type")
 		}
-		result, err := h.convert(ctx, filename, data)
+		result, err := at.convert(ctx, filename, data)
 		if err != nil {
 			return domain.Attachment{}, err
 		}
@@ -429,7 +437,7 @@ func (h *harness) preprocess(ctx context.Context, filename string, data []byte) 
 			descriptor.Pages = document.Pages
 		}
 	case &audioUploads:
-		text, err := h.transcribe(ctx, filename, data)
+		text, err := at.transcribe(ctx, filename, data)
 		if err != nil {
 			return domain.Attachment{}, err
 		}
@@ -476,8 +484,8 @@ func resizeImage(data []byte) ([]byte, []byte, error) {
 // with a delay, which a conversion waits out while it fits the deadline.
 var conversionDeadline = 10 * time.Minute
 
-func (h *harness) convert(ctx context.Context, filename string, data []byte) ([]byte, error) {
-	router := h.models.Services["router"]
+func (at *attachments) convert(ctx context.Context, filename string, data []byte) ([]byte, error) {
+	router := at.models.Services["router"]
 	if router == nil {
 		return nil, api.Err(503, "TOOL_UNAVAILABLE", "Document conversion is unavailable")
 	}
@@ -553,7 +561,7 @@ func multipartCall(ctx context.Context, service *inference.Service, path, fileFi
 	}
 	return b, nil
 }
-func (h *harness) transcribe(ctx context.Context, filename string, data []byte) (string, error) {
+func (at *attachments) transcribe(ctx context.Context, filename string, data []byte) (string, error) {
 	if len(data) > audioUploads.MaxBytes {
 		return "", api.Err(413, "ATTACHMENT_TOO_LARGE", "The recording exceeds the size limit")
 	}
@@ -561,7 +569,7 @@ func (h *harness) transcribe(ctx context.Context, filename string, data []byte) 
 		return "", api.Err(415, "ATTACHMENT_UNSUPPORTED", "Unsupported recording type")
 	}
 	// The router reads the model from the form, as the web client's SDK sends it.
-	router := h.models.Services["router"]
+	router := at.models.Services["router"]
 	if router == nil {
 		return "", api.Err(503, "TOOL_UNAVAILABLE", "Transcription is unavailable")
 	}
@@ -579,7 +587,7 @@ func (h *harness) transcribe(ctx context.Context, filename string, data []byte) 
 }
 
 // attachment finds an attachment of the named thread for its client to download.
-func (h *harness) attachment(ctx context.Context, p *auth.Principal, key auth.ContentKey, id, threadID string) (*domain.Attachment, []byte, error) {
+func (at *attachments) attachment(ctx context.Context, p *auth.Principal, key auth.ContentKey, id, threadID string) (*domain.Attachment, []byte, error) {
 	if p.Anonymous {
 		return nil, nil, api.Err(404, "THREAD_NOT_FOUND", "The attachment was not found")
 	}
@@ -588,7 +596,7 @@ func (h *harness) attachment(ctx context.Context, p *auth.Principal, key auth.Co
 	}
 	var descriptor *domain.Attachment
 	if threadID != "" {
-		row, err := h.store.LoadThread(ctx, p, key, threadID)
+		row, err := at.store.LoadThread(ctx, p, key, threadID)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -597,19 +605,19 @@ func (h *harness) attachment(ctx context.Context, p *auth.Principal, key auth.Co
 	if descriptor == nil {
 		return nil, nil, api.Err(404, "THREAD_NOT_FOUND", "The attachment was not found")
 	}
-	b, err := h.attachmentBytes(ctx, p, descriptor, false)
+	b, err := at.attachmentBytes(ctx, p, descriptor, false)
 	return descriptor, b, err
 }
 
-func (h *harness) attachmentBytes(ctx context.Context, p *auth.Principal, a *domain.Attachment, public bool) ([]byte, error) {
+func (at *attachments) attachmentBytes(ctx context.Context, p *auth.Principal, a *domain.Attachment, public bool) ([]byte, error) {
 	if a.Base64 != "" {
 		return base64.StdEncoding.DecodeString(a.Base64)
 	}
-	data, err := h.store.GetAttachment(ctx, p, a.ID, a.StorageKey(), public)
+	data, err := at.store.GetAttachment(ctx, p, a.ID, a.StorageKey(), public)
 	// Sync moves an image that only has a legacy key into its own storage
 	// under the same id and key, after which the control plane refuses it.
 	if err != nil && api.AsError(err).HTTP == http.StatusNotFound && !public && a.EncryptionKey == "" && a.Key != "" {
-		return h.legacyAttachmentBytes(ctx, a.ID, a.Key)
+		return at.legacyAttachmentBytes(ctx, a.ID, a.Key)
 	}
 	return data, err
 }
@@ -619,13 +627,13 @@ var legacyAttachments = &http.Client{Timeout: 5 * time.Minute}
 // Images the web and iOS apps stored before the sync enclave existed carry
 // only a `key` and live encrypted at the control plane, as a 12-byte IV and
 // AES-256-GCM ciphertext. The web client reads them the same way.
-func (h *harness) legacyAttachmentBytes(ctx context.Context, id, encodedKey string) ([]byte, error) {
+func (at *attachments) legacyAttachmentBytes(ctx context.Context, id, encodedKey string) ([]byte, error) {
 	key, err := base64.StdEncoding.DecodeString(encodedKey)
 	if err != nil || len(key) != 32 {
 		return nil, api.Err(422, "ATTACHMENT_UNSUPPORTED", "An old attachment key is invalid")
 	}
 	defer clear(key)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, h.controlplane+"/api/storage/attachment/"+url.PathEscape(id), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, at.controlplane+"/api/storage/attachment/"+url.PathEscape(id), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -665,8 +673,8 @@ func (h *harness) legacyAttachmentBytes(ctx context.Context, id, encodedKey stri
 // opaqueContentType is the type every downloaded attachment is sent as.
 const opaqueContentType = "application/octet-stream"
 
-func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
-	p, err := h.auth.Caller(r, true)
+func (at *attachments) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
+	p, err := at.auth.Caller(r, true)
 	if err != nil {
 		api.Respond(w, nil, err)
 		return
@@ -701,7 +709,7 @@ func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 		}
 		// A share's client names the attachment and the key its link carries.
 		descriptor = &domain.Attachment{ID: in.ID, EncryptionKey: in.AttKey, Kind: cmp.Or(in.Kind, in.Type), FileName: in.FileName, MimeType: in.MimeType, TextContent: in.TextContent, Pages: in.Pages}
-		data, err = h.attachmentBytes(r.Context(), &auth.Principal{Anonymous: true}, descriptor, true)
+		data, err = at.attachmentBytes(r.Context(), &auth.Principal{Anonymous: true}, descriptor, true)
 	} else {
 		key, keyErr := auth.RequestKey(in.Key)
 		in.ClearKey()
@@ -710,7 +718,7 @@ func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer clear(key[:])
-		descriptor, data, err = h.attachment(r.Context(), p, key, in.ID, in.ThreadID)
+		descriptor, data, err = at.attachment(r.Context(), p, key, in.ID, in.ThreadID)
 		clear(key[:])
 	}
 	if err != nil {
@@ -776,8 +784,8 @@ func turnAttachments(attachments []sentAttachment, t *domain.Thread) ([]domain.A
 
 // A local transcript may omit older images' bytes to stay small. The model
 // then reads such an image through its description, or not at all.
-func (h *harness) hydrateContext(ctx context.Context, p *auth.Principal, t *domain.Thread, keyless bool) error {
-	vision := h.models.Catalog.Get().Vision(t.Model)
+func (at *attachments) hydrateContext(ctx context.Context, p *auth.Principal, t *domain.Thread, keyless bool) error {
+	vision := at.models.Catalog.Get().Vision(t.Model)
 	return t.EachAttachment(func(a *domain.Attachment) error {
 		if !a.IsImage() || !vision && a.Description != "" {
 			return nil
@@ -786,7 +794,7 @@ func (h *harness) hydrateContext(ctx context.Context, p *auth.Principal, t *doma
 		if a.Base64 == "" && (keyless || a.StorageKey() == "") {
 			return nil
 		}
-		data, err := h.attachmentBytes(ctx, p, a, false)
+		data, err := at.attachmentBytes(ctx, p, a, false)
 		if unreachable(err) {
 			return nil
 		}
@@ -804,7 +812,7 @@ func (h *harness) hydrateContext(ctx context.Context, p *auth.Principal, t *doma
 			a.Base64, a.InferenceMimeType = encoded, "image/jpeg"
 			return nil
 		}
-		response, err := h.describeImage(ctx, encoded)
+		response, err := at.describeImage(ctx, encoded)
 		if err != nil {
 			return err
 		}
@@ -815,10 +823,10 @@ func (h *harness) hydrateContext(ctx context.Context, p *auth.Principal, t *doma
 
 const imageDescriptionTokens = 2048
 
-func (h *harness) describeImage(ctx context.Context, encoded string) (string, error) {
-	for _, m := range h.models.Offer.Get() {
+func (at *attachments) describeImage(ctx context.Context, encoded string) (string, error) {
+	for _, m := range at.models.Offer.Get() {
 		if m.Vision {
-			return h.models.Completion(ctx, m, api.Object{"model": m.Name, "messages": []api.Object{{"role": "user", "content": []api.Object{{"type": "text", "text": "Describe this image faithfully for a text-only assistant. Include visible text and details relevant to understanding it."}, {"type": "image_url", "image_url": api.Object{"url": "data:image/jpeg;base64," + encoded}}}}}, "max_tokens": imageDescriptionTokens})
+			return at.models.Completion(ctx, m, api.Object{"model": m.Name, "messages": []api.Object{{"role": "user", "content": []api.Object{{"type": "text", "text": "Describe this image faithfully for a text-only assistant. Include visible text and details relevant to understanding it."}, {"type": "image_url", "image_url": api.Object{"url": "data:image/jpeg;base64," + encoded}}}}}, "max_tokens": imageDescriptionTokens})
 		}
 	}
 	return "", api.Err(404, "MODEL_UNAVAILABLE", "No vision model can describe the image")

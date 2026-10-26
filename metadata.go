@@ -8,32 +8,32 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
-func (h *harness) favicon(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *pageRequest) (any, error) {
-	credential, err := h.auth.Inference(ctx, p)
+func (at *attachments) favicon(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *pageRequest) (any, error) {
+	credential, err := at.auth.Inference(ctx, p)
 	if err != nil {
 		return nil, err
 	}
 	ctx = auth.WithCallerKey(ctx, string(credential.Key))
 	var result json.RawMessage
-	err = h.models.ServiceCall(ctx, "metadata", "/favicon", pageRequest{URL: in.URL}, &result)
+	err = at.models.ServiceCall(ctx, "metadata", "/favicon", pageRequest{URL: in.URL}, &result)
 	return result, err
 }
 
 // linkPreview reads a page's details for a link preview that holds none, as
 // the previous web client's did.
-func (h *harness) linkPreview(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *pageRequest) (any, error) {
-	credential, err := h.auth.Inference(ctx, p)
+func (at *attachments) linkPreview(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *pageRequest) (any, error) {
+	credential, err := at.auth.Inference(ctx, p)
 	if err != nil {
 		return nil, err
 	}
-	return h.linkDetails(auth.WithCallerKey(ctx, string(credential.Key)), in.URL)
+	return at.linkDetails(auth.WithCallerKey(ctx, string(credential.Key)), in.URL)
 }
 
 // linkDetails are a page's details, read by the metadata service, as a link
 // preview shows them.
-func (h *harness) linkDetails(ctx context.Context, url string) (any, error) {
+func (at *attachments) linkDetails(ctx context.Context, url string) (any, error) {
 	var response api.Object
-	if err := h.models.ServiceCall(ctx, "metadata", "/metadata", api.Object{"url": url}, &response); err != nil {
+	if err := at.models.ServiceCall(ctx, "metadata", "/metadata", api.Object{"url": url}, &response); err != nil {
 		return nil, err
 	}
 	result := api.Obj(response["result"])

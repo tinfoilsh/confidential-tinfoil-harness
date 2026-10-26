@@ -19,7 +19,7 @@ func (h *harness) widgetResult(ctx context.Context, call toolCall) (any, error) 
 	if json.Unmarshal([]byte(call.args), &args) != nil {
 		return nil, api.Err(400, "BAD_REQUEST", "Invalid widget arguments")
 	}
-	return h.linkDetails(ctx, api.Str(args["url"]))
+	return h.attachments.linkDetails(ctx, api.Str(args["url"]))
 }
 
 func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *inference.Model) error {
