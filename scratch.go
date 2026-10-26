@@ -42,8 +42,20 @@ type scratchSpace struct {
 	size       int64
 	sem        *semaphore.Weighted
 	wait, idle time.Duration
-	// waiting counts requests waiting for space.
-	waiting atomic.Int32
+	// waiters counts requests waiting for space.
+	waiters atomic.Int32
+}
+
+// waiting is how many requests are waiting for space.
+func (s *scratchSpace) waiting() int32 { return s.waiters.Load() }
+
+// empty reports whether no request holds any of the space.
+func (s *scratchSpace) empty() bool {
+	if !s.sem.TryAcquire(s.size) {
+		return false
+	}
+	s.sem.Release(s.size)
+	return true
 }
 
 func newScratchSpace(dir string, size int64) *scratchSpace {
@@ -113,9 +125,9 @@ func (l *scratchLease) take(n int64) error {
 	}
 	waitCtx, cancel := context.WithTimeout(l.ctx, l.space.wait)
 	defer cancel()
-	l.space.waiting.Add(1)
+	l.space.waiters.Add(1)
 	err := l.space.sem.Acquire(waitCtx, n)
-	l.space.waiting.Add(-1)
+	l.space.waiters.Add(-1)
 	if err != nil {
 		if l.ctx.Err() != nil {
 			return l.ctx.Err()

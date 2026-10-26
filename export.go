@@ -96,14 +96,14 @@ func (h *harness) shareRequest(ctx context.Context, p *auth.Principal, method, i
 	return b, nil
 }
 
-func (h *harness) revokeShare(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *threadRequest) (any, error) {
+func (h *harness) revokeShare(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *api.ThreadRequest) (any, error) {
 	if _, err := h.shareRequest(ctx, p, http.MethodDelete, in.ThreadID, nil); err != nil && api.AsError(err).HTTP != 404 {
 		return nil, err
 	}
 	return struct{}{}, nil
 }
 
-func (h *harness) shareStatus(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *threadRequest) (any, error) {
+func (h *harness) shareStatus(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *api.ThreadRequest) (any, error) {
 	b, err := h.shareRequest(ctx, p, http.MethodGet, in.ThreadID, nil)
 	if err != nil {
 		return nil, err
@@ -315,7 +315,7 @@ func readExportForm(r *http.Request, lease *scratchLease, authorize func(exportO
 			if !api.IsObject(data) {
 				return nil, api.Err(400, "BAD_REQUEST", "Each thread must be an object")
 			}
-			var named idRequest
+			var named api.IDRequest
 			json.Unmarshal(data, &named)
 			if err := named.Validate(); err != nil {
 				return nil, err
@@ -381,7 +381,7 @@ func (f *exportForm) thread(i int) (domain.Thread, error) {
 	if err != nil {
 		return domain.Thread{}, err
 	}
-	var named idRequest
+	var named api.IDRequest
 	json.Unmarshal(data, &named)
 	return domain.ReadDeviceThread(named.ID, data)
 }

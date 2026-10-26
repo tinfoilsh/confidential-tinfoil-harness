@@ -19,7 +19,7 @@ import (
 // threadTranscript is a stored chat in the form the device keeps: every
 // attachment's content inline and no server bookkeeping. It refuses when any
 // attachment cannot be read, so moving the chat never loses content.
-func (h *harness) threadTranscript(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *threadRequest) (any, error) {
+func (h *harness) threadTranscript(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *api.ThreadRequest) (any, error) {
 	h.live.mu.Lock()
 	live := h.live.threads[liveKey(p, in.ThreadID)]
 	running := live != nil && (live.active != nil || len(live.queue) > 0)

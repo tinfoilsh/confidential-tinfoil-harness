@@ -37,7 +37,7 @@ func (h *harness) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 			api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "Each thread must be an object"))
 			return
 		}
-		var named idRequest
+		var named api.IDRequest
 		json.Unmarshal(item, &named)
 		if err := named.Validate(); err != nil {
 			api.Respond(w, nil, err)

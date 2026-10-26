@@ -353,7 +353,7 @@ func (h *harness) deleteAllThreads(ctx context.Context, p *auth.Principal, key a
 		return nil, err
 	}
 	for _, id := range ids {
-		if _, err := h.deleteThread(ctx, p, key, &deleteThreadRequest{idRequest: idRequest{ID: id}}); err != nil {
+		if _, err := h.deleteThread(ctx, p, key, &deleteThreadRequest{IDRequest: api.IDRequest{ID: id}}); err != nil {
 			return nil, err
 		}
 	}
@@ -435,7 +435,7 @@ func (h *harness) listProjects(ctx context.Context, p *auth.Principal, key auth.
 		NextCursor string           `json:"nextCursor"`
 	}{projects, next}, nil
 }
-func (h *harness) getProject(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *idRequest) (any, error) {
+func (h *harness) getProject(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *api.IDRequest) (any, error) {
 	project, err := h.store.LoadProject(ctx, p, key, in.ID)
 	if err != nil {
 		return nil, err
@@ -470,7 +470,7 @@ func (h *harness) updateProject(ctx context.Context, p *auth.Principal, key auth
 		}
 	})
 }
-func (h *harness) deleteProject(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *idRequest) (any, error) {
+func (h *harness) deleteProject(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *api.IDRequest) (any, error) {
 	return struct{}{}, h.store.RemoveRow(ctx, p, key, "project", in.ID)
 }
 

@@ -821,7 +821,7 @@ func TestArchivesWaitForScratchSpace(t *testing.T) {
 	go func() {
 		done <- archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "conversations"}), thread)
 	}()
-	for h.scratch.waiting.Load() == 0 {
+	for h.scratch.waiting() == 0 {
 		select {
 		case w := <-done:
 			t.Fatalf("an export ran without space: HTTP %d", w.Code)
@@ -919,7 +919,7 @@ func TestStalledArchivesFreeTheirSpace(t *testing.T) {
 	if r, body := rawResponse(t, slow); r.StatusCode != 200 || !strings.Contains(body, `"title":"Slow"`) || !strings.Contains(body, `"done"`) {
 		t.Fatalf("an import whose body kept arriving: HTTP %d %s", r.StatusCode, body)
 	}
-	for start := time.Now(); !h.scratch.sem.TryAcquire(h.scratch.size); time.Sleep(time.Millisecond) {
+	for start := time.Now(); !h.scratch.empty(); time.Sleep(time.Millisecond) {
 		if time.Since(start) > 10*time.Second {
 			t.Fatal("the stalled import kept its space")
 		}
