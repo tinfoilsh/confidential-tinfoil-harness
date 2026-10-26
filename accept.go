@@ -6,6 +6,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 // errAlreadyApplied answers a retried request whose turn its chat holds, once
@@ -124,16 +125,16 @@ func (h *harness) withQuota(p *auth.Principal, held api.RateLimit, err error) er
 }
 
 // newThread is a chat's first form, filed under a project and preset.
-func newThread(id string, projectID, presetID *string) Thread {
-	return Thread{ID: id, Title: "New Chat", TitleState: "placeholder", CreatedAt: api.Timestamp(), UpdatedAt: api.Timestamp(), Model: "auto", ProjectID: projectID, PresetID: presetID, WebSearchEnabled: true, Messages: []Message{}}
+func newThread(id string, projectID, presetID *string) domain.Thread {
+	return domain.Thread{ID: id, Title: "New Chat", TitleState: "placeholder", CreatedAt: api.Timestamp(), UpdatedAt: api.Timestamp(), Model: "auto", ProjectID: projectID, PresetID: presetID, WebSearchEnabled: true, Messages: []domain.Message{}}
 }
 
 // askThread is an ask's thread: it starts from the conversation it asks
 // about and hides it from its client.
-func askThread(id string, source *Thread) *threadRow {
+func askThread(id string, source *domain.Thread) *domain.ThreadRow {
 	t := newThread(id, source.ProjectID, source.PresetID)
 	t.Messages, t.HiddenCount = source.Messages, len(source.Messages)
-	return &threadRow{Thread: t}
+	return &domain.ThreadRow{Thread: t}
 }
 
 // admit gives a turn its chat: it starts now if the chat has no running
@@ -154,10 +155,10 @@ func (h *harness) admit(ctx context.Context, p *auth.Principal, credential auth.
 		copy.SyncToken, copy.SyncExpires = granted.Token, granted.ExpiresAt
 		p = &copy
 	}
-	var source *Thread
+	var source *domain.Thread
 	if in.Kind == "ask" {
 		if local {
-			t, err := readDeviceThread(id, in.Thread)
+			t, err := domain.ReadDeviceThread(id, in.Thread)
 			if err != nil {
 				return err
 			}
@@ -172,36 +173,36 @@ func (h *harness) admit(ctx context.Context, p *auth.Principal, credential auth.
 		id = ""
 	}
 	// A stored chat's project is read as its first turn starts.
-	if project := valueOr(in.ProjectID, ""); source == nil && project != "" {
+	if project := domain.ValueOr(in.ProjectID, ""); source == nil && project != "" {
 		if err := api.RequireID("projectId", project); err != nil {
 			return err
 		}
 	}
 	if id == "" {
-		id = rowID()
+		id = domain.RowID()
 	}
 	// An idle local thread starts from the client's copy, which may have been
 	// edited since the last turn. A queued turn continues the active run's row.
 	// An ask is a new thread that hides the copy it starts from. A device
 	// chat's first turn sends no thread and starts the chat under its
 	// client's id.
-	var seed *threadRow
+	var seed *domain.ThreadRow
 	switch {
 	case !local || source != nil:
 	case in.Thread != nil:
-		t, err := readDeviceThread(id, in.Thread)
+		t, err := domain.ReadDeviceThread(id, in.Thread)
 		if err != nil {
 			return err
 		}
-		seed = &threadRow{Thread: t}
+		seed = &domain.ThreadRow{Thread: t}
 		if seed.LastRequestID == r.nonce {
 			return errAlreadyApplied
 		}
-	case rowIDPattern.MatchString(id):
-		seed = &threadRow{Thread: newThread(id, nil, nil)}
+	case domain.RowIDPattern.MatchString(id):
+		seed = &domain.ThreadRow{Thread: newThread(id, nil, nil)}
 	}
 	if local {
-		r.profile = localProfile(in.Profile)
+		r.profile = domain.LocalProfile(in.Profile)
 	}
 	clean := *in
 	// The transcript seeds the row; holding it again per run would double a
@@ -211,7 +212,7 @@ func (h *harness) admit(ctx context.Context, p *auth.Principal, credential auth.
 	r.log = newRun(token())
 	r.log.stop = stop
 	// The user message a turn adds is named by the client's request.
-	r.stopped, r.input, r.received, r.principal, r.key, r.messageID, r.credential, r.assembler = stopped, &clean, api.Timestamp(), p, key, r.nonce, credential, newMessageAssembler()
+	r.stopped, r.input, r.received, r.principal, r.key, r.messageID, r.credential, r.assembler = stopped, &clean, api.Timestamp(), p, key, r.nonce, credential, domain.NewMessageAssembler()
 	if keyless {
 		clear(r.key[:])
 	}
@@ -245,7 +246,7 @@ func (h *harness) admit(ctx context.Context, p *auth.Principal, credential auth.
 	if s.active != nil {
 		r.queued = true
 		s.queue = append(s.queue, r)
-		r.out.emit(stateDelta{ThreadID: id, RunID: r.log.id, Delta: []statePatch{{"add", "/queue/-", r.queueItem()}}})
+		r.out.emit(domain.StateDelta{ThreadID: id, RunID: r.log.id, Delta: []domain.StatePatch{{Op: "add", Path: "/queue/-", Value: r.queueItem()}}})
 		queueChanged(s)
 		// A queued turn is accepted as it is registered, so a stop that
 		// ends it cannot come between the two, and a retried request finds

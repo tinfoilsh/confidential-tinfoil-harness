@@ -12,6 +12,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 // Since sync protocol 3 a stored document's blob holds its extracted content
@@ -22,25 +23,25 @@ var enclaveAttachmentID = regexp.MustCompile(`^[0-9a-f]{36}$`)
 
 // documentBlob is a document's extracted content, as its blob holds it.
 type documentBlob struct {
-	Pages       []DocumentPage `json:"pages,omitempty"`
-	TextContent string         `json:"textContent,omitempty"`
+	Pages       []domain.DocumentPage `json:"pages,omitempty"`
+	TextContent string                `json:"textContent,omitempty"`
 }
 
 // content is the extracted content an attachment holds inline.
-func attachmentContent(a *Attachment) documentBlob {
+func attachmentContent(a *domain.Attachment) documentBlob {
 	return documentBlob{TextContent: a.TextContent, Pages: a.Pages}
 }
 
 func (d documentBlob) empty() bool { return d.TextContent == "" && len(d.Pages) == 0 }
 
-func encodeDocument(a *Attachment) ([]byte, error) {
+func encodeDocument(a *domain.Attachment) ([]byte, error) {
 	payload := documentBlob{TextContent: a.TextContent}
 	for _, page := range a.Pages {
 		image := page.Image
 		if strings.HasPrefix(image, "data:") {
 			_, image, _ = strings.Cut(image, ",")
 		}
-		payload.Pages = append(payload.Pages, DocumentPage{Page: max(0, page.Page), Text: page.Text, Image: image, IsScanned: page.IsScanned})
+		payload.Pages = append(payload.Pages, domain.DocumentPage{Page: max(0, page.Page), Text: page.Text, Image: image, IsScanned: page.IsScanned})
 	}
 	if payload.empty() {
 		return nil, api.Err(415, "ATTACHMENT_UNSUPPORTED", "The document has no extracted content")
@@ -51,11 +52,11 @@ func encodeDocument(a *Attachment) ([]byte, error) {
 func decodeDocument(data []byte) (documentBlob, error) {
 	if trimmed := bytes.TrimSpace(data); len(trimmed) > 0 && trimmed[0] == '{' {
 		var payload struct {
-			TextContent *string         `json:"textContent"`
-			Pages       *[]DocumentPage `json:"pages"`
+			TextContent *string                `json:"textContent"`
+			Pages       *[]domain.DocumentPage `json:"pages"`
 		}
 		if json.Unmarshal(trimmed, &payload) == nil && (payload.TextContent != nil || payload.Pages != nil) {
-			return documentBlob{TextContent: valueOr(payload.TextContent, ""), Pages: valueOr(payload.Pages, []DocumentPage{})}, nil
+			return documentBlob{TextContent: domain.ValueOr(payload.TextContent, ""), Pages: domain.ValueOr(payload.Pages, []domain.DocumentPage{})}, nil
 		}
 	}
 	return documentBlob{}, api.Err(422, "ATTACHMENT_UNSUPPORTED", "The stored document cannot be read")
@@ -82,16 +83,16 @@ func unreachable(err error) bool {
 // placeAttachments stores every attachment of a thread under the thread, in
 // the protocol 3 format, before the thread is pushed. It keeps the content
 // inline in the given copy, which is the one a prompt is built from.
-func (h *harness) placeAttachments(ctx context.Context, p *auth.Principal, threadID string, t *Thread) error {
-	return t.eachAttachment(func(a *Attachment) error { return h.placeAttachment(ctx, p, threadID, a) })
+func (h *harness) placeAttachments(ctx context.Context, p *auth.Principal, threadID string, t *domain.Thread) error {
+	return t.EachAttachment(func(a *domain.Attachment) error { return h.placeAttachment(ctx, p, threadID, a) })
 }
 
-func (h *harness) placeAttachment(ctx context.Context, p *auth.Principal, threadID string, a *Attachment) error {
-	keyed := a.storageKey() != ""
+func (h *harness) placeAttachment(ctx context.Context, p *auth.Principal, threadID string, a *domain.Attachment) error {
+	keyed := a.StorageKey() != ""
 	elsewhere := !enclaveAttachmentID.MatchString(a.ID) || cmp.Or(a.StorageThreadID, threadID) != threadID
 	var data []byte
 	switch {
-	case !a.isImage() && a.hasContent():
+	case !a.IsImage() && a.HasContent():
 		// A new upload, or a row the web or iOS app wrote before it stored
 		// documents as blobs, keeps the content inline.
 		payload, err := encodeDocument(a)
@@ -99,7 +100,7 @@ func (h *harness) placeAttachment(ctx context.Context, p *auth.Principal, thread
 			return err
 		}
 		data = payload
-	case a.isImage() && a.Base64 != "" && (!keyed || elsewhere):
+	case a.IsImage() && a.Base64 != "" && (!keyed || elsewhere):
 		decoded, err := base64.StdEncoding.DecodeString(a.Base64)
 		if err != nil {
 			return api.Err(400, "ATTACHMENT_UNSUPPORTED", "An image is not valid base64")
@@ -107,12 +108,12 @@ func (h *harness) placeAttachment(ctx context.Context, p *auth.Principal, thread
 		data = decoded
 	case keyed && elsewhere:
 		stored, err := h.attachmentBytes(ctx, p, a, false)
-		if err == nil && !a.isImage() {
+		if err == nil && !a.IsImage() {
 			var content documentBlob
 			content, err = decodeDocument(stored)
 			clear(stored)
 			if err == nil {
-				stored, err = encodeDocument(&Attachment{TextContent: content.TextContent, Pages: content.Pages})
+				stored, err = encodeDocument(&domain.Attachment{TextContent: content.TextContent, Pages: content.Pages})
 			}
 		}
 		if unreachable(err) {
@@ -140,19 +141,19 @@ func (h *harness) placeAttachment(ctx context.Context, p *auth.Principal, thread
 	return nil
 }
 
-func unavailableDocument(a *Attachment) string {
+func unavailableDocument(a *domain.Attachment) string {
 	return "[The document " + cmp.Or(a.FileName, "attachment") + " is no longer available.]"
 }
 
 // hydrateDocuments reads offloaded documents into a working copy of a thread.
 // A document whose blob is gone is described as unavailable rather than
 // failing every later turn in its chat.
-func (h *harness) hydrateDocuments(ctx context.Context, p *auth.Principal, t *Thread) error {
-	return t.eachAttachment(func(a *Attachment) error {
-		if a.isImage() || a.hasContent() {
+func (h *harness) hydrateDocuments(ctx context.Context, p *auth.Principal, t *domain.Thread) error {
+	return t.EachAttachment(func(a *domain.Attachment) error {
+		if a.IsImage() || a.HasContent() {
 			return nil
 		}
-		if a.storageKey() == "" {
+		if a.StorageKey() == "" {
 			a.TextContent = unavailableDocument(a)
 			return nil
 		}
@@ -167,7 +168,7 @@ func (h *harness) hydrateDocuments(ctx context.Context, p *auth.Principal, t *Th
 }
 
 // inflateDocument reads a document's content from its blob into it.
-func (h *harness) inflateDocument(ctx context.Context, p *auth.Principal, a *Attachment) error {
+func (h *harness) inflateDocument(ctx context.Context, p *auth.Principal, a *domain.Attachment) error {
 	data, err := h.attachmentBytes(ctx, p, a, false)
 	if err != nil {
 		return err
@@ -185,8 +186,8 @@ func (h *harness) inflateDocument(ctx context.Context, p *auth.Principal, a *Att
 // not hold under the row's chat: a row the web or iOS app wrote before sync
 // checked references may point at blobs filed under another chat or deleted
 // since.
-func (h *harness) repairAttachments(ctx context.Context, p *auth.Principal, t *Thread, missing []string) error {
-	return t.eachAttachment(func(a *Attachment) error {
+func (h *harness) repairAttachments(ctx context.Context, p *auth.Principal, t *domain.Thread, missing []string) error {
+	return t.EachAttachment(func(a *domain.Attachment) error {
 		if !slices.Contains(missing, a.ID) {
 			return nil
 		}
@@ -203,21 +204,21 @@ func (h *harness) repairAttachments(ctx context.Context, p *auth.Principal, t *T
 
 // An attachment without its blob keeps its metadata, and an image its
 // thumbnail.
-func retireAttachment(a *Attachment) {
+func retireAttachment(a *domain.Attachment) {
 	a.EncryptionKey, a.Key, a.StorageThreadID = "", "", ""
 }
 
 // stripInlineAttachments keeps only metadata and keys in a thread that is
 // about to be stored. Content stays inline only for attachments without a
 // blob.
-func stripInlineAttachments(t *Thread) {
-	t.eachAttachment(func(a *Attachment) error {
-		a.inferenceMimeType = ""
-		if a.storageKey() == "" {
+func stripInlineAttachments(t *domain.Thread) {
+	t.EachAttachment(func(a *domain.Attachment) error {
+		a.InferenceMimeType = ""
+		if a.StorageKey() == "" {
 			return nil
 		}
 		a.Base64 = ""
-		if !a.isImage() {
+		if !a.IsImage() {
 			a.TextContent, a.Pages = "", nil
 		}
 		return nil

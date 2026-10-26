@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 // Each route decodes its JSON body into one of these. A field of the wrong
@@ -102,15 +103,15 @@ func (in *updateThreadRequest) validate() error {
 
 // apply makes the settings change a chat's client asks for. Choosing another
 // preset takes the settings it chooses, except those the request sets.
-func (in *updateThreadRequest) apply(t *Thread, c *chatCatalog, profile *Profile) {
+func (in *updateThreadRequest) apply(t *domain.Thread, c *domain.Catalog, profile *domain.Profile) {
 	if in.Title != nil {
 		t.Title, t.TitleState = *in.Title, "manual"
 	}
-	if in.PresetID.Set && valueOr(in.PresetID.Value, "") != valueOr(t.PresetID, "") {
-		c.applyPreset(t, profile, in.PresetID.Value)
+	if in.PresetID.Set && domain.ValueOr(in.PresetID.Value, "") != domain.ValueOr(t.PresetID, "") {
+		c.ApplyPreset(t, profile, in.PresetID.Value)
 	}
-	t.Model = valueOr(in.Model, t.Model)
-	t.WebSearchEnabled = valueOr(in.WebSearchEnabled, t.WebSearchEnabled)
+	t.Model = domain.ValueOr(in.Model, t.Model)
+	t.WebSearchEnabled = domain.ValueOr(in.WebSearchEnabled, t.WebSearchEnabled)
 }
 
 // messageRequest names a message of a chat; an edit sends its text.
@@ -154,21 +155,21 @@ type profileUpdateRequest struct {
 
 // patch is the profile fields a request sets, and whether it clears the
 // default prompt by setting it to null.
-func (in *profileUpdateRequest) patch() (Profile, bool, error) {
+func (in *profileUpdateRequest) patch() (domain.Profile, bool, error) {
 	if !api.IsObject(in.Patch) {
-		return Profile{}, false, api.Err(400, "BAD_REQUEST", "patch must be an object")
+		return domain.Profile{}, false, api.Err(400, "BAD_REQUEST", "patch must be an object")
 	}
-	var patch Profile
+	var patch domain.Profile
 	decoder := json.NewDecoder(bytes.NewReader(in.Patch))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&patch); err != nil {
 		if field, unknown := strings.CutPrefix(err.Error(), "json: unknown field "); unknown {
-			return Profile{}, false, api.Err(400, "BAD_REQUEST", "Unknown profile field: "+strings.Trim(field, `"`))
+			return domain.Profile{}, false, api.Err(400, "BAD_REQUEST", "Unknown profile field: "+strings.Trim(field, `"`))
 		}
-		return Profile{}, false, api.RequestError(err)
+		return domain.Profile{}, false, api.RequestError(err)
 	}
-	if err := patch.validate(); err != nil {
-		return Profile{}, false, err
+	if err := patch.Validate(); err != nil {
+		return domain.Profile{}, false, err
 	}
 	var preset struct {
 		DefaultPromptPresetID api.Nullable[string] `json:"defaultPromptPresetId"`
@@ -276,7 +277,7 @@ type speechRequest struct {
 
 func (in *speechRequest) validate() error {
 	if in.MessageID == "" {
-		if strings.TrimSpace(valueOr(in.Text, "")) == "" {
+		if strings.TrimSpace(domain.ValueOr(in.Text, "")) == "" {
 			return api.Err(400, "BAD_REQUEST", "A message or text is required")
 		}
 		return nil
@@ -315,15 +316,15 @@ type upgradeRequest struct {
 // names by the key its link carries.
 type attachmentRequest struct {
 	api.KeyRequest
-	ID          string         `json:"id"`
-	ThreadID    string         `json:"threadId"`
-	AttKey      string         `json:"attKey"`
-	Type        string         `json:"type"`
-	Kind        string         `json:"kind"`
-	FileName    string         `json:"fileName"`
-	MimeType    string         `json:"mimeType"`
-	TextContent string         `json:"textContent"`
-	Pages       []DocumentPage `json:"pages"`
+	ID          string                `json:"id"`
+	ThreadID    string                `json:"threadId"`
+	AttKey      string                `json:"attKey"`
+	Type        string                `json:"type"`
+	Kind        string                `json:"kind"`
+	FileName    string                `json:"fileName"`
+	MimeType    string                `json:"mimeType"`
+	TextContent string                `json:"textContent"`
+	Pages       []domain.DocumentPage `json:"pages"`
 }
 
 func (in *attachmentRequest) validate() error {
@@ -377,16 +378,16 @@ var cacheSecretPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // sentAttachment is an upload's descriptor as a turn sends it back, or the
 // id alone of an attachment the thread already holds.
 type sentAttachment struct {
-	ID          string         `json:"id"`
-	Kind        string         `json:"kind,omitempty"`
-	FileName    string         `json:"fileName,omitempty"`
-	MimeType    string         `json:"mimeType,omitempty"`
-	Size        *int64         `json:"size,omitempty"`
-	Thumbnail   *string        `json:"thumbnail,omitempty"`
-	TextContent string         `json:"textContent,omitempty"`
-	Description string         `json:"description,omitempty"`
-	Pages       []DocumentPage `json:"pages,omitempty"`
-	Base64      string         `json:"base64,omitempty"`
+	ID          string                `json:"id"`
+	Kind        string                `json:"kind,omitempty"`
+	FileName    string                `json:"fileName,omitempty"`
+	MimeType    string                `json:"mimeType,omitempty"`
+	Size        *int64                `json:"size,omitempty"`
+	Thumbnail   *string               `json:"thumbnail,omitempty"`
+	TextContent string                `json:"textContent,omitempty"`
+	Description string                `json:"description,omitempty"`
+	Pages       []domain.DocumentPage `json:"pages,omitempty"`
+	Base64      string                `json:"base64,omitempty"`
 }
 
 var (
@@ -453,7 +454,7 @@ func (in *turnRequest) validateContent() error {
 	if pixels > maxTurnResizePixels {
 		return api.Err(413, "ATTACHMENT_TOO_LARGE", "The turn's images hold more pixels than one turn can resize")
 	}
-	if in.Kind == "send" && strings.TrimSpace(valueOr(in.Content, "")) == "" && strings.TrimSpace(valueOr(in.Quote, "")) == "" && len(in.Attachments) == 0 {
+	if in.Kind == "send" && strings.TrimSpace(domain.ValueOr(in.Content, "")) == "" && strings.TrimSpace(domain.ValueOr(in.Quote, "")) == "" && len(in.Attachments) == 0 {
 		return api.Err(400, "BAD_REQUEST", "A message or attachment is required")
 	}
 	return nil
@@ -463,7 +464,7 @@ func (a *sentAttachment) validate() error {
 	if err := api.RequireID("id", a.ID); err != nil {
 		return err
 	}
-	if a.Kind != "" && !slices.Contains(attachmentKinds, a.Kind) {
+	if a.Kind != "" && !slices.Contains(domain.AttachmentKinds, a.Kind) {
 		return api.Err(400, "BAD_REQUEST", "An attachment kind must be image, document, or audio")
 	}
 	if a.whole() {

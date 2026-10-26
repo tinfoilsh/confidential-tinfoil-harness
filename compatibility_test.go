@@ -21,6 +21,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 func TestImagePreprocessingBoundsAndTransparency(t *testing.T) {
@@ -115,7 +116,7 @@ func TestManagedModelRetriesARejectedChatTokenOnce(t *testing.T) {
 				t.Fatal("unexpected run result", last)
 			}
 			row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
-			if !rejectAgain && len(mustRead(readThreadRow(row)).Messages) != 2 {
+			if !rejectAgain && len(mustRead(domain.ReadThreadRow(row)).Messages) != 2 {
 				t.Fatal("credential retry duplicated the turn")
 			}
 		})
@@ -156,7 +157,7 @@ func TestTruncatedModelStreamPreservesPartialAnswer(t *testing.T) {
 		t.Fatalf("a failed chat was screened: %+v", got)
 	}
 	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
-	if last := mustRead(readThreadRow(row)).Messages[1]; last.Content != "partial" || !valueOr(last.IsError, false) {
+	if last := mustRead(domain.ReadThreadRow(row)).Messages[1]; last.Content != "partial" || !domain.ValueOr(last.IsError, false) {
 		t.Fatal("partial answer lost")
 	}
 }
@@ -190,7 +191,7 @@ func TestTitleRunsBeforeAnswerFinishes(t *testing.T) {
 	close(release)
 	<-run.finished
 	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", run.thread.id)
-	if mustRead(readThreadRow(row)).Title != "A generated title" {
+	if mustRead(domain.ReadThreadRow(row)).Title != "A generated title" {
 		t.Fatal("title did not commit")
 	}
 }
@@ -199,10 +200,10 @@ func TestWidgetSchemaBounds(t *testing.T) {
 	if !ok {
 		t.Fatal("render_clock is not in the widget catalog")
 	}
-	if err := clock.schema.Validate(api.Object{"durationSeconds": float64(1)}); err != nil {
+	if err := clock.Resolved.Validate(api.Object{"durationSeconds": float64(1)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := clock.schema.Validate(api.Object{"durationSeconds": float64(0)}); err == nil {
+	if err := clock.Resolved.Validate(api.Object{"durationSeconds": float64(0)}); err == nil {
 		t.Fatal("exclusive lower bound ignored")
 	}
 }
@@ -220,7 +221,7 @@ func TestWidgetRetryReplacesOnlyTheArguments(t *testing.T) {
 	catalog := h.catalog.get()
 	catalog.EnabledWidgets = []string{"render_stat_cards"}
 	original := `{"stats":[{"label":"Count","value":1}]}`
-	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat")] = storedRow{ID: "chat", ETag: "1", Data: api.Raw(api.Object{"createdAt": api.Timestamp(), "title": "Title", "titleState": "manual", "model": "kimi-k3", "messages": []any{api.Object{"id": "user", "role": "user", "content": "show a stat", "timestamp": api.Timestamp()}, api.Object{"id": "assistant", "role": "assistant", "content": "keep this text", "timestamp": api.Timestamp(), "timeline": []any{api.Object{"type": "content", "id": "text", "content": "keep this text"}, api.Object{"type": "tool_call", "id": "call", "toolCallId": "call", "name": "render_stat_cards", "arguments": original}}}}})}
+	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat")] = domain.StoredRow{ID: "chat", ETag: "1", Data: api.Raw(api.Object{"createdAt": api.Timestamp(), "title": "Title", "titleState": "manual", "model": "kimi-k3", "messages": []any{api.Object{"id": "user", "role": "user", "content": "show a stat", "timestamp": api.Timestamp()}, api.Object{"id": "assistant", "role": "assistant", "content": "keep this text", "timestamp": api.Timestamp(), "timeline": []any{api.Object{"type": "content", "id": "text", "content": "keep this text"}, api.Object{"type": "tool_call", "id": "call", "toolCallId": "call", "name": "render_stat_cards", "arguments": original}}}}})}
 	in := sendInput(key)
 	in["threadId"] = "chat"
 	in["kind"] = "retryToolCall"
@@ -233,14 +234,14 @@ func TestWidgetRetryReplacesOnlyTheArguments(t *testing.T) {
 		t.Fatalf("retry failed: %+v", last)
 	}
 	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat")
-	messages := mustRead(readThreadRow(row)).Messages
+	messages := mustRead(domain.ReadThreadRow(row)).Messages
 	if len(messages) != 2 || len(messages[1].Timeline) != 2 || messages[1].Timeline[1].Arguments != replacement {
 		t.Fatal("retry changed message structure")
 	}
 	// The reply keeps the model and state it was committed with, which a
 	// client merges from the run's report of its replies.
 	var finished struct {
-		Messages []committedReply `json:"messages"`
+		Messages []domain.CommittedReply `json:"messages"`
 	}
 	if err := json.Unmarshal(last.Metadata, &finished); err != nil || len(finished.Messages) != 0 {
 		t.Fatalf("the retry reported its replies as %s", last.Metadata)
@@ -273,7 +274,7 @@ func TestManagedToolLoopKeepsReasoningAndOneAssistantMessage(t *testing.T) {
 		t.Fatal(events[len(events)-1])
 	}
 	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
-	stored := mustRead(readThreadRow(row))
+	stored := mustRead(domain.ReadThreadRow(row))
 	if len(stored.Messages) != 2 || len(stored.Messages[1].Timeline) != 3 {
 		t.Fatal("tool loop did not make one ordered assistant timeline")
 	}
@@ -302,7 +303,7 @@ func TestShutdownCommitsPartialOutput(t *testing.T) {
 		t.Fatal("shutdown did not finish the run")
 	}
 	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", run.thread.id)
-	if mustRead(readThreadRow(row)).ActiveRun != nil {
+	if mustRead(domain.ReadThreadRow(row)).ActiveRun != nil {
 		t.Fatal("shutdown left an active marker")
 	}
 	if _, err := h.acceptTurn(context.Background(), &auth.Principal{ID: "alice"}, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key))); err == nil {

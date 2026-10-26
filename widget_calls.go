@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 func (h *harness) widgetResult(ctx context.Context, call toolCall) (any, error) {
@@ -20,8 +21,8 @@ func (h *harness) widgetResult(ctx context.Context, call toolCall) (any, error) 
 }
 
 func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *model) error {
-	var declaration widget
-	for _, w := range widgetCatalog() {
+	var declaration domain.Widget
+	for _, w := range domain.WidgetCatalog() {
 		if w.Name == r.retryTarget.block.Name {
 			declaration = w
 			break
@@ -42,9 +43,9 @@ func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *
 	if err != nil {
 		return err
 	}
-	content = widgetArguments(strings.TrimSpace(content))
+	content = domain.WidgetArguments(strings.TrimSpace(content))
 	var value any
-	if json.Unmarshal([]byte(content), &value) != nil || declaration.schema.Validate(value) != nil {
+	if json.Unmarshal([]byte(content), &value) != nil || declaration.Resolved.Validate(value) != nil {
 		return api.Err(502, "UPSTREAM_REFUSED", "The replacement widget arguments do not match the schema")
 	}
 	id := r.input.ToolCallID
@@ -56,8 +57,8 @@ func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *
 	if err != nil {
 		result = api.Object{"error": api.AsError(err).Message}
 	}
-	r.replacement = replacedWidget{arguments: content, result: api.Raw(result)}
-	r.out.emit(toolCallResult{MessageID: "msg_" + token(), ToolCallID: id, Role: "tool", Content: r.replacement.result})
+	r.replacement = domain.ReplacedWidget{Arguments: content, Result: api.Raw(result)}
+	r.out.emit(domain.ToolCallResult{MessageID: "msg_" + token(), ToolCallID: id, Role: "tool", Content: r.replacement.Result})
 	return nil
 }
 

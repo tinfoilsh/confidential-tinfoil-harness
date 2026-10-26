@@ -1,4 +1,4 @@
-package main
+package domain
 
 import (
 	"encoding/json"
@@ -14,15 +14,15 @@ import (
 // Models routinely send tool arguments whose JSON types differ from the tool's
 // published schema (Llama stringifies every number), and the enclave's
 // validator then rejects the call with an error the model cannot act on.
-// coerceArgumentsToSchema converts such values before the call leaves, but
+// CoerceArgumentsToSchema converts such values before the call leaves, but
 // only when the result clearly satisfies the schema; anything else is left for
 // the enclave to reject. Ported from the model router (toolruntime/coerce.go).
 
 // coerceMaxIntFromFloat keeps "1e100" from saturating into an int64.
 const coerceMaxIntFromFloat = float64(1 << 53)
 
-// schemaLookup parses each published InputSchema by tool name, omitting any that do not parse.
-func schemaLookup(tools []*mcp.Tool) map[string]*jsonschema.Schema {
+// SchemaLookup parses each published InputSchema by tool name, omitting any that do not parse.
+func SchemaLookup(tools []*mcp.Tool) map[string]*jsonschema.Schema {
 	if len(tools) == 0 {
 		return nil
 	}
@@ -56,9 +56,9 @@ func parseInputSchema(raw any) (*jsonschema.Schema, error) {
 	return &schema, nil
 }
 
-// coerceArgumentsToSchema rewrites arguments in place so each field matches its
+// CoerceArgumentsToSchema rewrites arguments in place so each field matches its
 // declared type, leaving any field whose coerced value would break the schema.
-func coerceArgumentsToSchema(toolName string, arguments map[string]any, schemas map[string]*jsonschema.Schema) {
+func CoerceArgumentsToSchema(toolName string, arguments map[string]any, schemas map[string]*jsonschema.Schema) {
 	if len(arguments) == 0 || len(schemas) == 0 {
 		return
 	}
@@ -433,9 +433,9 @@ func looksLikeCSV(s string) bool {
 	return strings.Contains(s, ",") && len(splitCSV(s)) >= 2
 }
 
-// humanizeToolArgError turns a validator error into one sentence naming the
+// HumanizeToolArgError turns a validator error into one sentence naming the
 // field, which a model can correct on its next turn.
-func humanizeToolArgError(toolName string, err error, arguments map[string]any) string {
+func HumanizeToolArgError(toolName string, err error, arguments map[string]any) string {
 	if err == nil {
 		return ""
 	}

@@ -10,6 +10,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
@@ -55,7 +56,7 @@ func (h *harness) completion(ctx context.Context, m *model, payload api.Object) 
 			} `json:"message"`
 		} `json:"choices"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxShownOutput)).Decode(&result); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, domain.MaxShownOutput)).Decode(&result); err != nil {
 		return "", err
 	}
 	if len(result.Choices) == 0 {
@@ -70,7 +71,7 @@ func (h *harness) completion(ctx context.Context, m *model, payload api.Object) 
 // titleSource is the text a title summarizes: the first user message, or the
 // content of its documents. It is read from the prompt's copy of the thread,
 // since a stored row keeps no document content.
-func titleSource(t *Thread) string {
+func titleSource(t *domain.Thread) string {
 	for _, m := range t.Messages {
 		if m.Role != "user" {
 			continue
@@ -108,7 +109,7 @@ func (h *harness) generateTitle(ctx context.Context, r *chatRun, p *auth.Princip
 	if title == "" {
 		return
 	}
-	name := func(t *Thread) error {
+	name := func(t *domain.Thread) error {
 		if t.TitleState == "placeholder" {
 			t.Title, t.TitleState = title, "generated"
 		}
@@ -120,16 +121,16 @@ func (h *harness) generateTitle(ctx context.Context, r *chatRun, p *auth.Princip
 		h.live.mu.Lock()
 		defer h.live.mu.Unlock()
 		name(&r.row.Thread)
-		r.out.emit(stateDelta{Delta: titleDelta(&r.row.Thread)})
+		r.out.emit(domain.StateDelta{Delta: titleDelta(&r.row.Thread)})
 		return
 	}
 	updated, err := h.mutateThread(ctx, p, r.key, r.thread.id, name)
 	if err != nil {
 		return
 	}
-	r.out.emit(stateDelta{Delta: titleDelta(&updated.Thread)})
+	r.out.emit(domain.StateDelta{Delta: titleDelta(&updated.Thread)})
 }
 
-func titleDelta(t *Thread) []statePatch {
-	return []statePatch{{"replace", "/thread/title", t.Title}, {"replace", "/thread/titleState", t.TitleState}}
+func titleDelta(t *domain.Thread) []domain.StatePatch {
+	return []domain.StatePatch{{Op: "replace", Path: "/thread/title", Value: t.Title}, {Op: "replace", Path: "/thread/titleState", Value: t.TitleState}}
 }

@@ -7,6 +7,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 // tripThread is a chat with an image, two questions and two replies.
@@ -36,8 +37,8 @@ func deviceOperation(t *testing.T, h *harness, path string, thread api.Object, i
 }
 
 // comparable is a thread as a device stores it, without its save time.
-func comparable(t Thread) any {
-	device := deviceThread(&t)
+func comparable(t domain.Thread) any {
+	device := domain.DeviceThread(&t)
 	device.UpdatedAt = ""
 	return api.Parsed(api.Raw(device))
 }
@@ -45,8 +46,8 @@ func comparable(t Thread) any {
 func TestDeviceAndStoredChatsChangeTheSameWay(t *testing.T) {
 	h, rows, key, _ := presetHarness(t)
 	p := &auth.Principal{ID: "alice"}
-	rows.rows[rowMapKey(p, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(presetProfile())}
-	rows.rows[rowMapKey(p, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: api.Raw(tripThread())}
+	rows.rows[rowMapKey(p, "profile", "profile")] = domain.StoredRow{ID: "profile", ETag: "1", Data: api.Raw(presetProfile())}
+	rows.rows[rowMapKey(p, "chat", "chat-1")] = domain.StoredRow{ID: "chat-1", ETag: "1", Data: api.Raw(tripThread())}
 	device := tripThread()
 	for _, step := range []struct {
 		path string
@@ -65,7 +66,7 @@ func TestDeviceAndStoredChatsChangeTheSameWay(t *testing.T) {
 		}
 		step.in["profile"] = presetProfile()
 		device = deviceOperation(t, h, step.path, device, step.in, "")
-		var changed Thread
+		var changed domain.Thread
 		json.Unmarshal(api.Raw(device), &changed)
 		stored := storedChat(t, rows, key, "chat-1")
 		if got, want := comparable(changed), comparable(stored); !reflect.DeepEqual(got, want) {
@@ -82,7 +83,7 @@ func TestDeviceAndStoredChatsChangeTheSameWay(t *testing.T) {
 	source["flagged"], source["lastRequestId"], source["lastRequestKind"] = true, "6f1c4a8e-0d55-4b8f-9a8e-2f0c7b9d1e11", "continue"
 	fork := deviceOperation(t, h, "/v1/threads/fork", source, api.Object{"threadId": "chat-1", "messageId": "a1"}, "")
 	forked := api.Arr(fork["messages"])
-	if id := api.Str(fork["id"]); !rowIDPattern.MatchString(id) || fork["title"] != "Trip (fork)" || len(forked) != 2 || fork["flagged"] != nil || fork["lastRequestKind"] != nil || api.Obj(api.Arr(api.Obj(forked[0])["attachments"])[0])["id"] != "img" || api.Obj(api.Arr(api.Obj(forked[0])["attachments"])[0])["base64"] != nil {
+	if id := api.Str(fork["id"]); !domain.RowIDPattern.MatchString(id) || fork["title"] != "Trip (fork)" || len(forked) != 2 || fork["flagged"] != nil || fork["lastRequestKind"] != nil || api.Obj(api.Arr(api.Obj(forked[0])["attachments"])[0])["id"] != "img" || api.Obj(api.Arr(api.Obj(forked[0])["attachments"])[0])["base64"] != nil {
 		t.Fatalf("the device fork is %v", fork)
 	}
 	// Signing in again would not let a signed-out caller have one.

@@ -15,6 +15,7 @@ import (
 	"github.com/tiktoken-go/tokenizer"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"golang.org/x/text/language"
 	"golang.org/x/text/language/display"
 )
@@ -32,7 +33,7 @@ type request struct {
 	runID                      string
 	model                      string
 	cacheScope                 string            // partitions the enclave's prompt cache per caller; a namespace, not a credential
-	widgets                    []widget          // what the caller draws: advertised, never dialled
+	widgets                    []domain.Widget   // what the caller draws: advertised, never dialled
 	rendered                   []json.RawMessage // their declarations
 	webSearch, piiCheck        bool
 }
@@ -61,8 +62,8 @@ const promptLanguage = "English"
 
 const askInstruction = "The user highlighted a snippet from the prior conversation and wants you to elaborate on, clarify, or expand on that specific snippet. Use the prior conversation only as background context and focus your answer on the selected snippet."
 
-func responseLanguage(profile *Profile, locale string) string {
-	if selected := valueOr(profile.Language, ""); selected != "" && selected != defaultLanguage {
+func responseLanguage(profile *domain.Profile, locale string) string {
+	if selected := domain.ValueOr(profile.Language, ""); selected != "" && selected != domain.DefaultLanguage {
 		return selected
 	}
 	tags, _, err := language.ParseAcceptLanguage(locale)
@@ -93,8 +94,8 @@ func tokenCount(s string) int {
 func escapePrompt(s string) string {
 	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(s)
 }
-func preferences(profile *Profile) string {
-	if !profile.personalized() {
+func preferences(profile *domain.Profile) string {
+	if !profile.Personalized() {
 		return ""
 	}
 	var content strings.Builder
@@ -102,7 +103,7 @@ func preferences(profile *Profile) string {
 		name  string
 		value *string
 	}{{"nickname", profile.Nickname}, {"profession", profile.Profession}} {
-		if value := strings.TrimSpace(valueOr(field.value, "")); value != "" {
+		if value := strings.TrimSpace(domain.ValueOr(field.value, "")); value != "" {
 			fmt.Fprintf(&content, "\n  <%s>%s</%s>", field.name, escapePrompt(value), field.name)
 		}
 	}
@@ -113,7 +114,7 @@ func preferences(profile *Profile) string {
 		}
 		content.WriteString("\n  </traits>")
 	}
-	if value := strings.TrimSpace(valueOr(profile.AdditionalContext, "")); value != "" {
+	if value := strings.TrimSpace(domain.ValueOr(profile.AdditionalContext, "")); value != "" {
 		fmt.Fprintf(&content, "\n  <additional_context>\n    %s\n  </additional_context>", escapePrompt(value))
 	}
 	if content.Len() == 0 {
@@ -121,7 +122,7 @@ func preferences(profile *Profile) string {
 	}
 	return "The user has provided personal preferences for this conversation. Adapt your responses according to these settings while maintaining accuracy and helpfulness.\n\n<user_preferences>" + content.String() + "\n</user_preferences>"
 }
-func projectPrompt(project *Project, documents []ProjectDocument) string {
+func projectPrompt(project *domain.Project, documents []domain.ProjectDocument) string {
 	if project == nil {
 		return ""
 	}
@@ -142,7 +143,7 @@ func projectPrompt(project *Project, documents []ProjectDocument) string {
 	}
 	return "\n\n<project_context>\n" + content + "\n</project_context>"
 }
-func systemPrompt(c *chatCatalog, thread *Thread, profile *Profile, project *Project, documents []ProjectDocument, displayName, timezone, locale string) string {
+func systemPrompt(c *domain.Catalog, thread *domain.Thread, profile *domain.Profile, project *domain.Project, documents []domain.ProjectDocument, displayName, timezone, locale string) string {
 	base, rules := c.Prompt, c.Rules
 	preset := ""
 	if id := thread.PresetID; id != nil {
@@ -151,14 +152,14 @@ func systemPrompt(c *chatCatalog, thread *Thread, profile *Profile, project *Pro
 				preset = item.SystemPrompt
 			}
 		}
-		if saved := profile.preset(*id); saved != nil {
-			preset = valueOr(saved.SystemPrompt, "")
+		if saved := profile.Preset(*id); saved != nil {
+			preset = domain.ValueOr(saved.SystemPrompt, "")
 		}
 	}
 	if strings.TrimSpace(preset) != "" {
 		base = preset
-	} else if valueOr(profile.IsUsingCustomPrompt, false) {
-		base = valueOr(profile.CustomSystemPrompt, "")
+	} else if domain.ValueOr(profile.IsUsingCustomPrompt, false) {
+		base = domain.ValueOr(profile.CustomSystemPrompt, "")
 		if strings.TrimSpace(base) == "" {
 			rules = ""
 		}
@@ -181,7 +182,7 @@ func timeReminder(now time.Time, zone string) (string, error) {
 	return "<system-reminder>Current time: " + englishTime(now.In(loc), zone) + " (" + zone + ")</system-reminder>", nil
 }
 
-func (h *harness) buildRequest(thread *Thread, profile *Profile, project *Project, documents []ProjectDocument, in *turnRequest, runID string) (*request, *model, error) {
+func (h *harness) buildRequest(thread *domain.Thread, profile *domain.Profile, project *domain.Project, documents []domain.ProjectDocument, in *turnRequest, runID string) (*request, *model, error) {
 	c := h.catalog.get()
 	options := in.Options
 	name := cmp.Or(thread.Model, "auto")
@@ -190,7 +191,7 @@ func (h *harness) buildRequest(thread *Thread, profile *Profile, project *Projec
 	if in.Kind == "ask" {
 		req.conversation = in.ThreadID
 	}
-	def, display, policy, window := c.definition(name), "Auto", "none", 0
+	def, display, policy, window := c.Definition(name), "Auto", "none", 0
 	var picked *model
 	for _, m := range h.offer.get() {
 		if m.name == name {
@@ -212,7 +213,7 @@ func (h *harness) buildRequest(thread *Thread, profile *Profile, project *Projec
 		if window == 0 {
 			window = c.Fallback
 		}
-		level, err := intelligence(cmp.Or(options.AutoIntelligence, valueOr(profile.AutoIntelligence, ""), "high"))
+		level, err := domain.Intelligence(cmp.Or(options.AutoIntelligence, domain.ValueOr(profile.AutoIntelligence, ""), "high"))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -224,11 +225,11 @@ func (h *harness) buildRequest(thread *Thread, profile *Profile, project *Projec
 		display, window = pinnedName(name), api.Int(def["budgetWindow"])
 		reason := api.Obj(api.Obj(def["chatConfig"])["reasoningConfig"])
 		policy = api.FirstString(reason["reasoningHistoryPolicy"], "none")
-		effort := cmp.Or(options.ReasoningEffort, valueOr(profile.ReasoningEffort, ""), "medium")
-		if !slices.Contains(reasoningEfforts, effort) {
+		effort := cmp.Or(options.ReasoningEffort, domain.ValueOr(profile.ReasoningEffort, ""), "medium")
+		if !slices.Contains(domain.ReasoningEfforts, effort) {
 			return nil, nil, api.Err(400, "BAD_REQUEST", "Unknown reasoning effort")
 		}
-		req.params = modelParams(def, valueOr(options.Thinking, valueOr(profile.ThinkingEnabled, api.Bool(reason["defaultEnabled"], true))), effort)
+		req.params = domain.ModelParams(def, domain.ValueOr(options.Thinking, domain.ValueOr(profile.ThinkingEnabled, api.Bool(reason["defaultEnabled"], true))), effort)
 	}
 	if picked == nil || picked.client == nil {
 		return nil, nil, api.Err(404, "MODEL_UNAVAILABLE", "The selected model has no attested transport")
@@ -248,21 +249,21 @@ func (h *harness) buildRequest(thread *Thread, profile *Profile, project *Projec
 		req.system += "\n\n" + askInstruction
 	}
 	req.window, req.policy = window, policy
-	req.piiCheck = valueOr(options.PIICheck, valueOr(profile.PIICheckEnabled, true))
+	req.piiCheck = domain.ValueOr(options.PIICheck, domain.ValueOr(profile.PIICheckEnabled, true))
 	// Turning web search off in the settings leaves each chat's own setting.
-	req.webSearch = valueOr(profile.WebSearchAvailable, true) && valueOr(options.WebSearch, thread.WebSearchEnabled)
+	req.webSearch = domain.ValueOr(profile.WebSearchAvailable, true) && domain.ValueOr(options.WebSearch, thread.WebSearchEnabled)
 	if req.webSearch && webSearch.client == nil {
 		return nil, nil, api.Err(503, "TOOL_UNAVAILABLE", "webSearch is unavailable")
 	}
-	widgets := c.selectedWidgets(in.Widgets, valueOr(options.GenUI, valueOr(profile.GenUIEnabled, true)))
+	widgets := c.SelectedWidgets(in.Widgets, domain.ValueOr(options.GenUI, domain.ValueOr(profile.GenUIEnabled, true)))
 	if len(widgets) > 0 {
 		req.widgetHint = c.WidgetHeader
 		for _, w := range widgets {
-			req.widgets, req.rendered = append(req.widgets, w), append(req.rendered, w.declaration())
+			req.widgets, req.rendered = append(req.widgets, w), append(req.rendered, w.Declaration())
 			req.widgetHint += "\n- " + w.Name + ": " + w.Hint
 		}
 	}
-	vision := c.vision(name)
+	vision := c.Vision(name)
 	for i := range thread.Messages {
 		req.groups = append(req.groups, renderMessage(&thread.Messages[i], vision, policy))
 	}
@@ -270,7 +271,7 @@ func (h *harness) buildRequest(thread *Thread, profile *Profile, project *Projec
 	return req, picked, nil
 }
 
-func renderMessage(message *Message, vision bool, policy string) []json.RawMessage {
+func renderMessage(message *domain.Message, vision bool, policy string) []json.RawMessage {
 	if message.Role == "user" {
 		return []json.RawMessage{api.Raw(api.Object{"role": "user", "content": userContent(message, vision)})}
 	}
@@ -283,8 +284,8 @@ func renderMessage(message *Message, vision bool, policy string) []json.RawMessa
 		case "thinking":
 			reasoning += block.Content
 		case "tool_call":
-			id := block.callID()
-			calls = append(calls, api.Object{"id": id, "type": "function", "function": api.Object{"name": block.Name, "arguments": historyArgs(cmp.Or(block.Arguments, "{}"))}})
+			id := block.CallID()
+			calls = append(calls, api.Object{"id": id, "type": "function", "function": api.Object{"name": block.Name, "arguments": domain.HistoryArgs(cmp.Or(block.Arguments, "{}"))}})
 			result := "executed"
 			if block.Result != nil && !strings.HasPrefix(block.Name, "render_") {
 				// Results are replayed as the harness has always written them.
@@ -311,7 +312,7 @@ func renderMessage(message *Message, vision bool, policy string) []json.RawMessa
 	return append([]json.RawMessage{api.Raw(assistant)}, results...)
 }
 
-func userContent(message *Message, vision bool) any {
+func userContent(message *domain.Message, vision bool) any {
 	text := message.Content
 	if quote := message.Quote; quote != "" {
 		prefix := "In reply to:\n> " + strings.ReplaceAll(quote, "\n", "\n> ")
@@ -324,9 +325,9 @@ func userContent(message *Message, vision bool) any {
 	parts, images := []api.Object{}, []api.Object{}
 	for i := range message.Attachments {
 		a := &message.Attachments[i]
-		if a.isImage() {
+		if a.IsImage() {
 			if vision && a.Base64 != "" {
-				images = append(images, api.Object{"type": "image_url", "image_url": api.Object{"url": "data:" + cmp.Or(a.inferenceMimeType, a.MimeType) + ";base64," + a.Base64}})
+				images = append(images, api.Object{"type": "image_url", "image_url": api.Object{"url": "data:" + cmp.Or(a.InferenceMimeType, a.MimeType) + ";base64," + a.Base64}})
 			} else if a.Description != "" {
 				descriptions = append(descriptions, "Image: "+a.FileName+"\nDescription:\n"+a.Description)
 			}
@@ -506,7 +507,7 @@ func preflightBudget(request *request) error {
 }
 
 // Report the full requested history so the UI can show when older turns are omitted.
-func requestContextUsage(req *request) *ContextUsage {
+func requestContextUsage(req *request) *domain.ContextUsage {
 	system := req.system + "\n\n" + req.widgetHint
 	if req.webSearch {
 		system += "\n\n" + searchInstructions
@@ -516,5 +517,5 @@ func requestContextUsage(req *request) *ContextUsage {
 		used += cost
 	}
 	limit := req.window * 4 / 5
-	return &ContextUsage{UsedTokens: used, LimitTokens: limit, Percentage: float64(used) * 100 / float64(max(1, limit))}
+	return &domain.ContextUsage{UsedTokens: used, LimitTokens: limit, Percentage: float64(used) * 100 / float64(max(1, limit))}
 }

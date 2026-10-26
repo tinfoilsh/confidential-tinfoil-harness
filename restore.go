@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 // nativeBackup is a native backup whose every entry was found listed in
@@ -167,25 +168,25 @@ func chatData(f *zip.File) (string, []byte, error) {
 // that is not a supported image. It counts those a page or an old message
 // shows, which leave nothing behind; an attachment left without its image
 // is counted when the chat is prepared.
-func (b *nativeBackup) chat(f *zip.File, warnings *importWarnings) (string, Thread, error) {
+func (b *nativeBackup) chat(f *zip.File, warnings *importWarnings) (string, domain.Thread, error) {
 	chatID, data, err := chatData(f)
 	if err != nil {
-		return "", Thread{}, err
+		return "", domain.Thread{}, err
 	}
-	images := backupImages{}
+	images := domain.BackupImages{}
 	for _, id := range b.chatImages[chatID] {
 		bytes, err := readEntry(b.entries[backupImagePath(id, ".bin")], maxArchiveImage)
 		if err != nil {
-			return "", Thread{}, err
+			return "", domain.Thread{}, err
 		}
 		meta := b.images[id]
 		if kind := http.DetectContentType(bytes); slices.Contains(sniffedImages, kind) {
-			images[id] = heldImage{FileName: meta.FileName, MimeType: kind, Description: meta.Description, Size: int64(len(bytes)), Base64: base64.StdEncoding.EncodeToString(bytes)}
+			images[id] = domain.HeldImage{FileName: meta.FileName, MimeType: kind, Description: meta.Description, Size: int64(len(bytes)), Base64: base64.StdEncoding.EncodeToString(bytes)}
 		} else if meta.Page != nil || meta.LegacyIndex != nil {
 			warnings.imagesLeftOut++
 		}
 	}
-	return chatID, readBackupThread(chatID, data, images), nil
+	return chatID, domain.ReadBackupThread(chatID, data, images), nil
 }
 
 // native restores a backup. With cloud storage its projects, documents and
@@ -248,7 +249,7 @@ func (j *importRun) nativeCloud(b *nativeBackup) error {
 			return err
 		}
 		projects[project.ID] = true
-		if err := cloud.entity("project", project.ID, "", cloudProject{Name: cmp.Or(strings.TrimSpace(project.Name), "Imported Project"), Description: project.Description, SystemInstructions: project.SystemInstructions, Color: valueOr(project.Color, ""), Memory: []json.RawMessage{}}); err != nil {
+		if err := cloud.entity("project", project.ID, "", cloudProject{Name: cmp.Or(strings.TrimSpace(project.Name), "Imported Project"), Description: project.Description, SystemInstructions: project.SystemInstructions, Color: domain.ValueOr(project.Color, ""), Memory: []json.RawMessage{}}); err != nil {
 			return err
 		}
 	}
@@ -270,7 +271,7 @@ func (j *importRun) nativeCloud(b *nativeBackup) error {
 		if err != nil {
 			return err
 		}
-		project := valueOr(t.ProjectID, "")
+		project := domain.ValueOr(t.ProjectID, "")
 		if project != "" && !projects[project] {
 			j.warnings.projectLinksDropped++
 			project = ""

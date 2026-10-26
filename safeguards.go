@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 // Completed first-party chat conversations are submitted to the safeguards
@@ -171,7 +172,7 @@ func (h *harness) screening(req *request) *screening {
 
 // screen submits a run that completed with a reply, under a first-party chat
 // credential, for classification.
-func (h *harness) screen(r *chatRun, reply []Message, runErr error) {
+func (h *harness) screen(r *chatRun, reply []domain.Message, runErr error) {
 	h.live.mu.Lock()
 	deleted := r.thread.deleted
 	h.live.mu.Unlock()

@@ -7,6 +7,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 // finishRun commits what the run produced and frames its end, then hands the
@@ -29,7 +30,7 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 	ctx = context.WithValue(ctx, usageContextKey{}, usageForRun(r))
 	ctx = context.WithValue(ctx, usageSinkKey{}, r.out)
 	r.out.mu.Lock()
-	messages := r.assembler.messages()
+	messages := r.assembler.Messages()
 	spend, sources, reply := r.out.spend, r.out.sources, r.out.replyID
 	r.out.observe, r.out.sources = nil, nil
 	if r.out.thoughts != nil {
@@ -38,16 +39,16 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 	}
 	r.out.mu.Unlock()
 	continued := r.turn.Kind == "continue"
-	committed := []committedReply{}
+	committed := []domain.CommittedReply{}
 	for i := range messages {
 		m := &messages[i]
 		m.IsInterrupted, m.IsError = new(cancelled), new(runErr != nil && !cancelled)
 		m.Model = cmp.Or(r.out.concreteModel, r.row.Model)
-		m.ModelDisplayName = h.catalog.get().displayName(m.Model)
-		m.Usage = api.Raw(messageUsage{PromptTokens: spend.Prompt, CompletionTokens: spend.Completion})
+		m.ModelDisplayName = h.catalog.get().DisplayName(m.Model)
+		m.Usage = api.Raw(domain.MessageUsage{PromptTokens: spend.Prompt, CompletionTokens: spend.Completion})
 		// A continued reply keeps the citations it already had.
 		for _, annotation := range citationAnnotations(m.Content, sources) {
-			if !slices.ContainsFunc(m.Annotations, func(kept Annotation) bool { return citedFrom(kept) == citedFrom(annotation) }) {
+			if !slices.ContainsFunc(m.Annotations, func(kept domain.Annotation) bool { return citedFrom(kept) == citedFrom(annotation) }) {
 				m.Annotations = append(m.Annotations, annotation)
 			}
 		}
@@ -55,17 +56,17 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 		// client that stores the thread itself stores the same messages. A
 		// widget retry commits only its call, so its reply keeps its own.
 		if r.retryTarget == nil {
-			committed = append(committed, committedReply{ID: m.ID, Model: m.Model, ModelDisplayName: m.ModelDisplayName, Usage: m.Usage, IsError: m.IsError, IsInterrupted: m.IsInterrupted, Annotations: m.Annotations})
+			committed = append(committed, domain.CommittedReply{ID: m.ID, Model: m.Model, ModelDisplayName: m.ModelDisplayName, Usage: m.Usage, IsError: m.IsError, IsInterrupted: m.IsInterrupted, Annotations: m.Annotations})
 		}
 	}
-	commit := func(t *Thread) error {
-		if r.retryTarget != nil && r.replacement.arguments != "" {
-			if err := replaceWidget(t, r.retryTarget.parentID, r.input.ToolCallID, r.retryTarget.block.Arguments, r.replacement); err != nil {
+	commit := func(t *domain.Thread) error {
+		if r.retryTarget != nil && r.replacement.Arguments != "" {
+			if err := domain.ReplaceWidget(t, r.retryTarget.parentID, r.input.ToolCallID, r.retryTarget.block.Arguments, r.replacement); err != nil {
 				return err
 			}
 		} else {
 			for _, m := range messages {
-				index := t.messageIndex(m.ID)
+				index := t.MessageIndex(m.ID)
 				if index < 0 {
 					t.Messages = append(t.Messages, m)
 				} else if continued && m.ID == reply {
@@ -100,11 +101,11 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 	if runErr != nil && api.AsError(runErr).Code == "QUOTA_EXHAUSTED" {
 		limit = auth.Exhausted(p, held)
 	}
-	summary := summarize(&r.row.Thread)
-	metadata := runMetadata{Messages: committed}
+	summary := domain.Summarize(&r.row.Thread)
+	metadata := domain.RunMetadata{Messages: committed}
 	// A device chat's client stores the thread the run leaves as it is.
 	if s.local && r.input.Kind != "ask" {
-		metadata.Thread = new(deviceThread(&r.row.Thread))
+		metadata.Thread = new(domain.DeviceThread(&r.row.Thread))
 	}
 	h.live.mu.Lock()
 	if s.local {
@@ -114,13 +115,13 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 	queue := queueItems(s)
 	deleted = s.deleted
 	h.live.mu.Unlock()
-	r.out.emit(stateSnapshotEvent{stateSnapshot{summary, queue, limit}})
+	r.out.emit(domain.StateSnapshotEvent{Snapshot: domain.StateSnapshot{Thread: summary, Queue: queue, RateLimit: limit}})
 	metadata.RateLimit = &limit
 	if runErr != nil && !cancelled {
-		r.out.emit(failedRun(s.id, r.log.id, api.AsError(runErr), &metadata))
+		r.out.emit(domain.FailedRun(s.id, r.log.id, api.AsError(runErr), &metadata))
 	} else {
 		metadata.Usage, metadata.Cancelled = &spend, &cancelled
-		r.out.emit(runFinished{ThreadID: s.id, RunID: r.log.id, Metadata: metadata})
+		r.out.emit(domain.RunFinished{ThreadID: s.id, RunID: r.log.id, Metadata: metadata})
 	}
 	r.log.log.close(errDone)
 	if next != nil {
@@ -131,7 +132,7 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 }
 
 // citedFrom is where in its reply an annotation's link starts.
-func citedFrom(a Annotation) int {
+func citedFrom(a domain.Annotation) int {
 	if a.URLCitation == nil {
 		return 0
 	}

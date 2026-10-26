@@ -12,6 +12,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 func TestModelRefusalsReachTheRunWithTheirMeaning(t *testing.T) {
@@ -47,7 +48,7 @@ func TestModelRefusalsReachTheRunWithTheirMeaning(t *testing.T) {
 			}
 			if tc.status == 200 {
 				row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
-				if reply := mustRead(readThreadRow(row)).Messages[1]; reply.Content != "partial" || !valueOr(reply.IsError, false) {
+				if reply := mustRead(domain.ReadThreadRow(row)).Messages[1]; reply.Content != "partial" || !domain.ValueOr(reply.IsError, false) {
 					t.Fatalf("the streamed answer was lost: %+v", reply)
 				}
 			}

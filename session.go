@@ -1,6 +1,9 @@
 package main
 
-import "github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+import (
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+)
 
 // The version of protocol/openapi.yaml this harness speaks, and the oldest
 // whose clients it still serves.
@@ -16,17 +19,17 @@ type protocolView struct {
 
 // sessionView is what a client opens the app with.
 type sessionView struct {
-	Protocol        protocolView    `json:"protocol"`
-	User            sessionUser     `json:"user"`
-	RateLimit       api.RateLimit   `json:"rateLimit"`
-	Models          []sessionModel  `json:"models"`
-	Auto            autoView        `json:"auto"`
-	DefaultModel    string          `json:"defaultModel"`
-	Widgets         []string        `json:"widgets"`
-	ProfileDefaults Profile         `json:"profileDefaults"`
-	Composer        composerView    `json:"composer"`
-	Presets         []preset        `json:"presets"`
-	Features        map[string]bool `json:"features"`
+	Protocol        protocolView          `json:"protocol"`
+	User            sessionUser           `json:"user"`
+	RateLimit       api.RateLimit         `json:"rateLimit"`
+	Models          []domain.SessionModel `json:"models"`
+	Auto            autoView              `json:"auto"`
+	DefaultModel    string                `json:"defaultModel"`
+	Widgets         []string              `json:"widgets"`
+	ProfileDefaults domain.Profile        `json:"profileDefaults"`
+	Composer        composerView          `json:"composer"`
+	Presets         []domain.Preset       `json:"presets"`
+	Features        map[string]bool       `json:"features"`
 }
 
 type sessionUser struct {
@@ -37,6 +40,6 @@ type sessionUser struct {
 // autoView is how hard Auto works: its default level, and each level's
 // labels.
 type autoView struct {
-	Default string              `json:"default"`
-	Levels  []intelligenceLevel `json:"levels"`
+	Default string                     `json:"default"`
+	Levels  []domain.IntelligenceLevel `json:"levels"`
 }

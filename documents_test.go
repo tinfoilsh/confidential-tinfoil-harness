@@ -23,6 +23,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 type fakeBlob struct {
@@ -74,7 +75,7 @@ func newFakeSync(t *testing.T, h *harness) *fakeSync {
 			}
 			data["messages"] = api.Arr(data["messages"])[:api.Int(in["message_count"])]
 			data["id"], data["title"], data["titleState"], data["createdAt"], data["updatedAt"], data["isLocalOnly"] = in["target_id"], in["title"], "manual", in["created_at"], in["created_at"], false
-			rows.rows[rowMapKey(p, "chat", api.Str(in["target_id"]))] = storedRow{ID: api.Str(in["target_id"]), ETag: "1", Data: api.Raw(data), project: source.project, projectSet: source.projectSet}
+			rows.rows[rowMapKey(p, "chat", api.Str(in["target_id"]))] = domain.StoredRow{ID: api.Str(in["target_id"]), ETag: "1", Data: api.Raw(data), Project: source.Project, ProjectSet: source.ProjectSet}
 			json.NewEncoder(w).Encode(api.Object{"ok": true, "id": in["target_id"], "etag": "1", "key_id": "key-id"})
 		case "/v1/attachment/put":
 			data, _ := base64.StdEncoding.DecodeString(api.Str(in["plaintext"]))
@@ -199,7 +200,7 @@ func TestStoredUploadIsOffloadedUnderItsThread(t *testing.T) {
 	}
 	// An edit names the attachment the chat stores by its id alone.
 	edit := continueInput(key, thread)
-	edit["kind"], edit["messageId"], edit["content"] = "edit", mustRead(readThreadRow(row)).Messages[0].ID, "look again"
+	edit["kind"], edit["messageId"], edit["content"] = "edit", mustRead(domain.ReadThreadRow(row)).Messages[0].ID, "look again"
 	edit["attachments"] = []any{api.Object{"id": "att_unknown"}}
 	if w := postRoute(h, "/v1/threads/turn", edit, "alice"); w.Code != 404 {
 		t.Fatalf("an edit naming an unknown attachment: HTTP %d", w.Code)
@@ -207,7 +208,7 @@ func TestStoredUploadIsOffloadedUnderItsThread(t *testing.T) {
 	edit["clientRequestId"], edit["attachments"] = uuid.NewString(), []any{api.Object{"id": stored["id"]}}
 	finishedRun(t, h, "/v1/threads/turn", edit)
 	row, _ = rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", thread)
-	kept := mustRead(readThreadRow(row)).Messages[0].Attachments[0]
+	kept := mustRead(domain.ReadThreadRow(row)).Messages[0].Attachments[0]
 	if kept.ID != stored["id"] || kept.EncryptionKey != stored["encryptionKey"] || fake.putCount() != 1 {
 		t.Fatalf("the edit did not keep the stored attachment: %+v after %d blobs", kept, fake.putCount())
 	}
@@ -218,7 +219,7 @@ func storedThread(rows *memoryRows, user, id string, attachments ...api.Object) 
 	for _, a := range attachments {
 		values = append(values, a)
 	}
-	rows.rows[rowMapKey(&auth.Principal{ID: user}, "chat", id)] = storedRow{ID: id, ETag: "1", Data: api.Raw(api.Object{"title": "Old", "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z", "messages": []any{
+	rows.rows[rowMapKey(&auth.Principal{ID: user}, "chat", id)] = domain.StoredRow{ID: id, ETag: "1", Data: api.Raw(api.Object{"title": "Old", "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z", "messages": []any{
 		api.Object{"id": "m1", "role": "user", "content": "look at this", "attachments": values},
 		api.Object{"id": "m2", "role": "assistant", "content": "ok", "timeline": []any{api.Object{"id": "b1", "type": "content", "content": "ok"}}},
 	}})}
@@ -244,7 +245,7 @@ func TestOffloadedDocumentIsReadBackForEachTurn(t *testing.T) {
 		t.Fatal("a document already stored under its thread was stored again")
 	}
 	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
-	stored := mustRead(readThreadRow(row)).Messages[0].Attachments[0]
+	stored := mustRead(domain.ReadThreadRow(row)).Messages[0].Attachments[0]
 	if stored.ID != id || stored.TextContent != "" {
 		t.Fatalf("the stored reference changed: %+v", stored)
 	}
@@ -298,8 +299,8 @@ func TestMissingAttachmentsAreRepairedBeforeRetrying(t *testing.T) {
 		api.Object{"id": docID, "type": "document", "fileName": "notes.md", "encryptionKey": docKey},
 		api.Object{"id": imageID, "type": "image", "fileName": "photo.png", "encryptionKey": "gone", "thumbnailBase64": "thumb"})
 	refused := 0
-	rows.refuse = func(row *storedRow) error {
-		for _, a := range mustRead(readThreadRow(row)).Messages[0].Attachments {
+	rows.refuse = func(row *domain.StoredRow) error {
+		for _, a := range mustRead(domain.ReadThreadRow(row)).Messages[0].Attachments {
 			if a.ID == docID || a.ID == imageID && a.EncryptionKey != "" {
 				refused++
 				return api.DownstreamError(409, []byte(`{"ok":false,"code":"MISSING_ATTACHMENT","missing_attachments":["`+docID+`","`+imageID+`"]}`))
@@ -314,7 +315,7 @@ func TestMissingAttachmentsAreRepairedBeforeRetrying(t *testing.T) {
 		t.Fatalf("expected one refused push, got %d", refused)
 	}
 	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
-	chat := mustRead(readThreadRow(row))
+	chat := mustRead(domain.ReadThreadRow(row))
 	doc, image := chat.Messages[0].Attachments[0], chat.Messages[0].Attachments[1]
 	if doc.ID == docID || doc.StorageThreadID != "chat-1" || fake.blobs[doc.ID].chat != "chat-1" {
 		t.Fatalf("the document was not stored under its chat: %+v", doc)
@@ -351,7 +352,7 @@ func TestLegacyKeyedAttachmentIsReadFromTheControlPlane(t *testing.T) {
 		t.Fatalf("stored %q under %v", payload, fake.puts[0]["chat_id"])
 	}
 	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
-	stored := mustRead(readThreadRow(row)).Messages[0].Attachments[0]
+	stored := mustRead(domain.ReadThreadRow(row)).Messages[0].Attachments[0]
 	if stored.Key != "" || !enclaveAttachmentID.MatchString(stored.ID) {
 		t.Fatalf("legacy reference kept: %+v", stored)
 	}
@@ -382,7 +383,7 @@ func TestForkCopiesAChatThroughItsMessage(t *testing.T) {
 	fake := newFakeSync(t, h)
 	p := &auth.Principal{ID: "alice"}
 	messages := []any{api.Object{"id": "m1", "role": "user", "content": "plan a trip"}, api.Object{"id": "m2", "role": "assistant", "content": "first, pack"}, api.Object{"id": "m3", "role": "user", "content": "go on"}}
-	rows.rows[rowMapKey(p, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "4", Data: api.Raw(api.Object{"title": "Trip", "titleState": "generated", "createdAt": "2026-01-01T00:00:00Z", "presetId": "builtin:tutor", "model": "kimi-k3", "webSearchEnabled": false,
+	rows.rows[rowMapKey(p, "chat", "chat-1")] = domain.StoredRow{ID: "chat-1", ETag: "4", Data: api.Raw(api.Object{"title": "Trip", "titleState": "generated", "createdAt": "2026-01-01T00:00:00Z", "presetId": "builtin:tutor", "model": "kimi-k3", "webSearchEnabled": false,
 		"pinned": true, "contextUsage": api.Object{"usedTokens": 900}, "harnessRequests": api.Object{"nonce": api.Object{"runId": "run", "digest": "digest"}}, "messages": messages})}
 	for _, tc := range []struct {
 		in   api.Object
@@ -409,14 +410,14 @@ func TestForkCopiesAChatThroughItsMessage(t *testing.T) {
 	}
 	var summary api.Object
 	json.Unmarshal(w.Body.Bytes(), &summary)
-	if summary["id"] != target || summary["title"] != "Trip (fork)" || summary["createdAt"] != isoTime(request["created_at"]) || summary["pinned"] != false || summary["activeRun"] != nil || summary["contextUsage"] != nil {
+	if summary["id"] != target || summary["title"] != "Trip (fork)" || summary["createdAt"] != domain.ISOTime(request["created_at"]) || summary["pinned"] != false || summary["activeRun"] != nil || summary["contextUsage"] != nil {
 		t.Fatalf("fork summary: %v", summary)
 	}
 	row, _ := rows.load(context.Background(), p, key, "chat", target)
-	if fork := mustRead(readThreadRow(row)); fork.Pinned || fork.ContextUsage != nil || fork.ActiveRun != nil || rowJSON(row)["harnessRequests"] != nil {
+	if fork := mustRead(domain.ReadThreadRow(row)); fork.Pinned || fork.ContextUsage != nil || fork.ActiveRun != nil || rowJSON(row)["harnessRequests"] != nil {
 		t.Fatalf("the fork kept the source's bookkeeping: %s", row.Data)
 	}
-	if fork := mustRead(readThreadRow(row)); valueOr(fork.PresetID, "") != "builtin:tutor" || len(fork.Messages) != 2 || fork.Messages[0].ID != "m1" || fork.Messages[1].ID != "m2" {
+	if fork := mustRead(domain.ReadThreadRow(row)); domain.ValueOr(fork.PresetID, "") != "builtin:tutor" || len(fork.Messages) != 2 || fork.Messages[0].ID != "m1" || fork.Messages[1].ID != "m2" {
 		t.Fatalf("the fork lost the conversation: %v", row.Data)
 	}
 }
@@ -524,7 +525,7 @@ func TestAChatTheProfileListsReadsAsPinned(t *testing.T) {
 	p := &auth.Principal{ID: "alice"}
 	storedThread(rows, "alice", "chat-1")
 	storedThread(rows, "alice", "chat-2")
-	rows.rows[rowMapKey(p, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(api.Object{"pinnedChatIds": []any{"chat-1"}})}
+	rows.rows[rowMapKey(p, "profile", "profile")] = domain.StoredRow{ID: "profile", ETag: "1", Data: api.Raw(api.Object{"pinnedChatIds": []any{"chat-1"}})}
 	pinned := func() map[string]any {
 		t.Helper()
 		var page struct {
@@ -547,7 +548,7 @@ func TestAChatTheProfileListsReadsAsPinned(t *testing.T) {
 		}
 	}
 	update("chat-2", true)
-	if pins := mustRead(readProfile(rows.rows[rowMapKey(p, "profile", "profile")].Data)).PinnedChatIDs; !slices.Contains(pins, "chat-2") {
+	if pins := mustRead(domain.ReadProfile(rows.rows[rowMapKey(p, "profile", "profile")].Data)).PinnedChatIDs; !slices.Contains(pins, "chat-2") {
 		t.Fatal("pinning a chat did not update the complete favorites index")
 	}
 	update("chat-1", false)
@@ -555,7 +556,7 @@ func TestAChatTheProfileListsReadsAsPinned(t *testing.T) {
 		t.Fatalf("after pinning chat-2 and unpinning chat-1 the list shows %v", got)
 	}
 	var page struct {
-		Pinned []threadSummary `json:"pinned"`
+		Pinned []domain.ThreadSummary `json:"pinned"`
 	}
 	json.Unmarshal(postRoute(h, "/v1/threads/list", api.Object{"key": keyBase64(key)}, "alice").Body.Bytes(), &page)
 	if len(page.Pinned) != 1 || page.Pinned[0].ID != "chat-2" {
@@ -564,7 +565,7 @@ func TestAChatTheProfileListsReadsAsPinned(t *testing.T) {
 	if w := postRoute(h, "/v1/threads/delete", api.Object{"key": keyBase64(key), "id": "chat-2"}, "alice"); w.Code != 200 {
 		t.Fatalf("delete favorite: %s", w.Body.String())
 	}
-	if pins := mustRead(readProfile(rows.rows[rowMapKey(p, "profile", "profile")].Data)).PinnedChatIDs; len(pins) != 0 {
+	if pins := mustRead(domain.ReadProfile(rows.rows[rowMapKey(p, "profile", "profile")].Data)).PinnedChatIDs; len(pins) != 0 {
 		t.Fatalf("deleted favorite still indexed: %v", pins)
 	}
 }
@@ -598,7 +599,7 @@ func TestARetiredDocumentIsDescribedOnlyToTheModel(t *testing.T) {
 		t.Fatalf("the model was not told the document is gone: %s", prompt)
 	}
 	row, _ := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
-	stored := mustRead(readThreadRow(row)).Messages[0].Attachments[0]
+	stored := mustRead(domain.ReadThreadRow(row)).Messages[0].Attachments[0]
 	if stored.EncryptionKey != "" || stored.TextContent != "" || stored.FileName != "old.pdf" {
 		t.Fatalf("the retired document was stored as %+v", stored)
 	}

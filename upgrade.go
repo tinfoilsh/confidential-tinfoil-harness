@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 // handleUpgrade reads chats the previous web client kept on a device, or in
@@ -18,7 +19,7 @@ func (h *harness) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, err)
 		return
 	}
-	body, err := api.ReadBody(w, r, maxTurnBody)
+	body, err := api.ReadBody(w, r, domain.MaxTurnBody)
 	defer clear(body)
 	if err != nil {
 		api.Respond(w, nil, err)
@@ -29,7 +30,7 @@ func (h *harness) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "threads must be an array"))
 		return
 	}
-	threads := make([]Thread, 0, len(*in.Threads))
+	threads := make([]domain.Thread, 0, len(*in.Threads))
 	for _, item := range *in.Threads {
 		if !api.IsObject(item) {
 			api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "Each thread must be an object"))
@@ -46,17 +47,17 @@ func (h *harness) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// The thread is one its client can send back with a turn.
-		thread, err := readDeviceThread(named.ID, item)
+		thread, err := domain.ReadDeviceThread(named.ID, item)
 		if err != nil {
 			api.Respond(w, nil, err)
 			return
 		}
 		modelCopies(&thread)
-		thread.checkWidgets()
-		thread.RecordVersion = recordVersion
+		thread.CheckWidgets()
+		thread.RecordVersion = domain.RecordVersion
 		threads = append(threads, thread)
 	}
 	api.Respond(w, struct {
-		Threads []Thread `json:"threads"`
+		Threads []domain.Thread `json:"threads"`
 	}{threads}, nil)
 }

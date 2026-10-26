@@ -1,4 +1,4 @@
-package main
+package domain
 
 import (
 	"encoding/json"
@@ -10,8 +10,9 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
-// apply runs under stream.mu, so tool goroutines and model deltas use one order.
-type messageAssembler struct {
+// MessageAssembler builds a reply's messages from the events of its run.
+// Apply runs under stream.mu, so tool goroutines and model deltas use one order.
+type MessageAssembler struct {
 	ordered []*Message
 	byID    map[string]*Message
 	calls   map[string]blockRef
@@ -26,13 +27,13 @@ type blockRef struct {
 
 func (r blockRef) block() *Block { return &r.message.Timeline[r.index] }
 
-func newMessageAssembler() *messageAssembler {
-	return &messageAssembler{byID: map[string]*Message{}, calls: map[string]blockRef{}, sealed: map[string]int{}}
+func NewMessageAssembler() *MessageAssembler {
+	return &MessageAssembler{byID: map[string]*Message{}, calls: map[string]blockRef{}, sealed: map[string]int{}}
 }
 
-// seed starts from a reply that a continuation extends. As on the web
+// Seed starts from a reply that a continuation extends. As on the web
 // client, only a trailing content block takes the new text.
-func (a *messageAssembler) seed(reply Message) {
+func (a *MessageAssembler) Seed(reply Message) {
 	m := reply.clone()
 	if m.Timeline == nil {
 		m.Timeline = []Block{}
@@ -44,7 +45,7 @@ func (a *messageAssembler) seed(reply Message) {
 	a.byID[m.ID], a.sealed[m.ID] = &m, sealed
 	a.ordered = append(a.ordered, &m)
 }
-func (a *messageAssembler) message(id string) *Message {
+func (a *MessageAssembler) message(id string) *Message {
 	if id == "" {
 		id = "msg_orphan"
 	}
@@ -58,17 +59,17 @@ func (a *messageAssembler) message(id string) *Message {
 }
 
 // stamp dates a reply by its first event; a continued reply keeps its date.
-func (a *messageAssembler) stamp(id string, m *Message, at string) {
+func (a *MessageAssembler) stamp(id string, m *Message, at string) {
 	if _, seeded := a.sealed[id]; at != "" && !seeded && len(m.Timeline) == 0 {
 		m.CreatedAt = at
 	}
 }
 
 // streamed adds text or reasoning a reply streamed to its timeline.
-func (a *messageAssembler) streamed(id, kind, delta, emitted string) {
+func (a *MessageAssembler) streamed(id, kind, delta, emitted string) {
 	m := a.message(id)
 	a.stamp(id, m, emitted)
-	at := float64(millis(emitted))
+	at := float64(Millis(emitted))
 	blocks := m.Timeline
 	if kind == "thinking" {
 		// Reasoning that arrives after the reply's text began is the tail
@@ -93,13 +94,13 @@ func (a *messageAssembler) streamed(id, kind, delta, emitted string) {
 		last.EndedAt, last.Duration = at, (at-last.StartedAt)/1000
 	}
 }
-func (a *messageAssembler) apply(e runEvent, at string) {
+func (a *MessageAssembler) Apply(e Event, at string) {
 	switch e := e.(type) {
-	case textChunk:
+	case TextChunk:
 		a.streamed(e.MessageID, "content", e.Delta, at)
-	case reasoningChunk:
-		a.streamed(strings.TrimSuffix(e.MessageID, reasoningSuffix), "thinking", e.Delta, at)
-	case toolCallStart:
+	case ReasoningChunk:
+		a.streamed(strings.TrimSuffix(e.MessageID, ReasoningSuffix), "thinking", e.Delta, at)
+	case ToolCallStart:
 		parent := e.ParentMessageID
 		if parent == "" && len(a.ordered) > 0 {
 			parent = a.ordered[len(a.ordered)-1].ID
@@ -110,20 +111,20 @@ func (a *messageAssembler) apply(e runEvent, at string) {
 		m := a.message(parent)
 		a.stamp(parent, m, at)
 		a.calls[e.ToolCallID] = blockRef{m, len(m.Timeline)}
-		m.Timeline = append(m.Timeline, Block{ID: e.ToolCallID, Type: "tool_call", ToolCallID: e.ToolCallID, Name: e.ToolCallName, Progress: []json.RawMessage{}, StartedAt: float64(millis(at))})
-	case toolCallArgs:
+		m.Timeline = append(m.Timeline, Block{ID: e.ToolCallID, Type: "tool_call", ToolCallID: e.ToolCallID, Name: e.ToolCallName, Progress: []json.RawMessage{}, StartedAt: float64(Millis(at))})
+	case ToolCallArgs:
 		if call, ok := a.calls[e.ToolCallID]; ok {
 			call.block().Arguments += e.Delta
 		}
-	case toolCallEnd:
+	case ToolCallEnd:
 		if call, ok := a.calls[e.ToolCallID]; ok {
 			call.block().Complete = true
 		}
-	case toolCallResult:
+	case ToolCallResult:
 		if call, ok := a.calls[e.ToolCallID]; ok {
 			b := call.block()
 			b.Result = e.Content
-			if at := float64(millis(at)); at >= b.StartedAt {
+			if at := float64(Millis(at)); at >= b.StartedAt {
 				b.EndedAt = at
 			}
 			if len(e.Metadata) > 0 {
@@ -133,12 +134,12 @@ func (a *messageAssembler) apply(e runEvent, at string) {
 				b.Display = e.Display
 			}
 		}
-	case activitySnapshot:
-		if call, ok := a.calls[strings.TrimPrefix(e.MessageID, activityPrefix)]; ok && e.Display != nil {
+	case ActivitySnapshot:
+		if call, ok := a.calls[strings.TrimPrefix(e.MessageID, ActivityPrefix)]; ok && e.Display != nil {
 			call.block().Display = e.Display
 		}
-	case activityDelta:
-		if call, ok := a.calls[strings.TrimPrefix(e.MessageID, activityPrefix)]; ok {
+	case ActivityDelta:
+		if call, ok := a.calls[strings.TrimPrefix(e.MessageID, ActivityPrefix)]; ok {
 			for _, op := range e.Patch {
 				if op.Path == "/output/-" {
 					b := call.block()
@@ -149,9 +150,9 @@ func (a *messageAssembler) apply(e runEvent, at string) {
 	}
 }
 
-// replaceReplyText rewrites a reply's text as the web client does: its
+// ReplaceReplyText rewrites a reply's text as the web client does: its
 // content blocks collapse into one holding the text, where the first was.
-func replaceReplyText(message *Message, text string) {
+func ReplaceReplyText(message *Message, text string) {
 	timeline := message.Timeline
 	first := slices.IndexFunc(timeline, func(block Block) bool { return block.Type == "content" })
 	edited := Block{Type: "content", ID: "edited-content", Content: text}
@@ -176,8 +177,8 @@ func replaceReplyText(message *Message, text string) {
 	}
 }
 
-// lastBlock is the block a reply streams into now, if any.
-func (a *messageAssembler) lastBlock(id string) *Block {
+// LastBlock is the block a reply streams into now, if any.
+func (a *MessageAssembler) LastBlock(id string) *Block {
 	m := a.byID[id]
 	if m == nil || len(m.Timeline) == 0 {
 		return nil
@@ -185,7 +186,7 @@ func (a *messageAssembler) lastBlock(id string) *Block {
 	return &m.Timeline[len(m.Timeline)-1]
 }
 
-func (a *messageAssembler) messages() []Message {
+func (a *MessageAssembler) Messages() []Message {
 	out := []Message{}
 	for _, m := range a.ordered {
 		out = append(out, m.clone())
@@ -193,15 +194,15 @@ func (a *messageAssembler) messages() []Message {
 	return out
 }
 
-func millis(value string) int64 {
+func Millis(value string) int64 {
 	if t, err := time.Parse(time.RFC3339Nano, value); err == nil {
 		return t.UnixMilli()
 	}
 	return 0
 }
 
-// chatURL is where a share link opens.
-const chatURL = "https://chat.tinfoil.sh"
+// ChatURL is where a share link opens.
+const ChatURL = "https://chat.tinfoil.sh"
 
 // A signed-in client can also share a chat it keeps itself by sending the
 // transcript, with no content key. As from the web client, that share holds

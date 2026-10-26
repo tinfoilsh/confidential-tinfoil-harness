@@ -12,6 +12,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 // Read-aloud audio is mono 16-bit 24 kHz PCM. Each piece of a message is
@@ -39,7 +40,7 @@ func (h *harness) handleSpeech(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, h.withQuota(p, credential.Limit, err))
 		return
 	}
-	body, err := api.ReadBody(w, r, maxTurnBody)
+	body, err := api.ReadBody(w, r, domain.MaxTurnBody)
 	defer clear(body)
 	if err != nil {
 		api.Respond(w, nil, err)
@@ -80,13 +81,13 @@ func (h *harness) handleSpeech(w http.ResponseWriter, r *http.Request) {
 // speechText is what a request reads aloud: a message's markdown, or text
 // a client selected, as it is spoken.
 func (h *harness) speechText(ctx context.Context, p *auth.Principal, in *speechRequest) (string, error) {
-	source := valueOr(in.Text, "")
+	source := domain.ValueOr(in.Text, "")
 	if in.MessageID != "" {
-		var thread Thread
+		var thread domain.Thread
 		switch {
 		case in.Local:
 			var err error
-			if thread, err = readDeviceThread(in.ThreadID, in.Thread); err != nil {
+			if thread, err = domain.ReadDeviceThread(in.ThreadID, in.Thread); err != nil {
 				return "", err
 			}
 		case p.Anonymous:
@@ -104,7 +105,7 @@ func (h *harness) speechText(ctx context.Context, p *auth.Principal, in *speechR
 			}
 			thread = row.Thread
 		}
-		index := thread.messageIndex(in.MessageID)
+		index := thread.MessageIndex(in.MessageID)
 		if index < 0 {
 			return "", api.Err(404, "THREAD_NOT_FOUND", "The message was not found")
 		}

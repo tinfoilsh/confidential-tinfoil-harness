@@ -7,6 +7,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 type jsonEndpoint func(context.Context, *auth.Principal, auth.ContentKey, json.RawMessage) (any, error)
@@ -142,7 +143,7 @@ func (h *harness) threadOperation(handler jsonEndpoint) http.HandlerFunc {
 			api.Respond(w, nil, err)
 			return
 		}
-		body, err := api.ReadBody(w, r, maxTurnBody)
+		body, err := api.ReadBody(w, r, domain.MaxTurnBody)
 		defer clear(body)
 		if err != nil {
 			api.Respond(w, nil, err)

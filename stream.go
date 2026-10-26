@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 type stream struct {
@@ -22,7 +23,7 @@ type stream struct {
 	// mu serializes writes against the tool goroutines.
 	mu       sync.Mutex
 	spend    api.Usage
-	observe  func(e runEvent, at string)
+	observe  func(e domain.Event, at string)
 	thoughts *thoughtSummaries // nil unless a summarizer summarizes the run's reasoning
 	sources  []citationSource  // pages the run's tools showed the model
 }
@@ -33,44 +34,44 @@ func (s *stream) cite(sources []citationSource) {
 	s.sources = append(s.sources, sources...)
 }
 
-func (s *stream) emit(e runEvent) {
+func (s *stream) emit(e domain.Event) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.frame(e, api.Timestamp())
 }
 
 func (s *stream) text(message, delta string) {
-	s.emit(textChunk{MessageID: message, Role: "assistant", Delta: delta})
+	s.emit(domain.TextChunk{MessageID: message, Role: "assistant", Delta: delta})
 }
 
 func (s *stream) reasoning(message, delta string) {
-	s.emit(reasoningChunk{MessageID: message + reasoningSuffix, Delta: delta})
+	s.emit(domain.ReasoningChunk{MessageID: message + domain.ReasoningSuffix, Delta: delta})
 }
 
 func (s *stream) callStart(id, name, parent string) {
-	s.emit(toolCallStart{ToolCallID: id, ToolCallName: name, ParentMessageID: parent})
+	s.emit(domain.ToolCallStart{ToolCallID: id, ToolCallName: name, ParentMessageID: parent})
 }
 
 func (s *stream) callArgs(id, delta string) {
-	s.emit(toolCallArgs{ToolCallID: id, Delta: delta})
+	s.emit(domain.ToolCallArgs{ToolCallID: id, Delta: delta})
 }
 
 func (s *stream) callEnd(id string) {
-	s.emit(toolCallEnd{ToolCallID: id})
+	s.emit(domain.ToolCallEnd{ToolCallID: id})
 }
 
 // activity opens one call's output under an id derived from the call itself.
 func (s *stream) activity(call toolCall) {
-	s.emit(activitySnapshot{MessageID: activityPrefix + call.id, ActivityType: activityTool, Content: toolActivity{ToolCallID: call.id, Tool: call.name, Output: []string{}}, Display: searchDisplay(call.name, call.args, nil)})
+	s.emit(domain.ActivitySnapshot{MessageID: domain.ActivityPrefix + call.id, ActivityType: activityTool, Content: domain.ToolActivity{ToolCallID: call.id, Tool: call.name, Output: []string{}}, Display: domain.SearchDisplay(call.name, call.args, nil)})
 }
 
 // output is a list because RFC 6902 cannot grow a string.
 func (s *stream) progress(call, note string, done float64) {
-	patch := []activityPatch{{"replace", "/progress", done}}
+	patch := []domain.ActivityPatch{{Op: "replace", Path: "/progress", Value: done}}
 	if note != "" {
-		patch = append(patch, activityPatch{"add", "/output/-", note})
+		patch = append(patch, domain.ActivityPatch{Op: "add", Path: "/output/-", Value: note})
 	}
-	s.emit(activityDelta{MessageID: activityPrefix + call, ActivityType: activityTool, Patch: patch})
+	s.emit(domain.ActivityDelta{MessageID: domain.ActivityPrefix + call, ActivityType: activityTool, Patch: patch})
 }
 
 const activityTool = "TOOL"
@@ -87,8 +88,8 @@ func (s *stream) meter(raw json.RawMessage) {
 	s.spend.Total += turn.Total
 }
 
-func (s *stream) frame(e runEvent, at string) {
-	encoded, err := encodeEvent(e, at)
+func (s *stream) frame(e domain.Event, at string) {
+	encoded, err := domain.EncodeEvent(e, at)
 	if err != nil {
 		return
 	}
@@ -138,7 +139,7 @@ func follow(w http.ResponseWriter, r *http.Request, rn *run, from int) {
 			if closed != errDone {
 				e := *api.AsError(closed)
 				e.Message = closed.Error()
-				encoded, _ := encodeEvent(runError{Error: &e}, "")
+				encoded, _ := domain.EncodeEvent(domain.RunError{Error: &e}, "")
 				fmt.Fprintf(w, "id: %d\ndata: %s\n\n", from, encoded)
 				flush.Flush()
 			}

@@ -1,4 +1,4 @@
-package main
+package domain
 
 // Project groups chats under shared instructions and documents.
 type Project struct {
@@ -25,13 +25,13 @@ type ProjectDocument struct {
 	UpdatedAt       string `json:"updatedAt,omitempty"`
 }
 
-// storedProject and storedDocument are the rows this harness writes.
-type storedProject struct {
+// StoredProject and storedDocument are the rows this harness writes.
+type StoredProject struct {
 	Project
 	RecordVersion int `json:"recordVersion"`
 }
 
-type storedDocument struct {
+type StoredDocument struct {
 	ProjectDocument
 	RecordVersion int `json:"recordVersion"`
 }

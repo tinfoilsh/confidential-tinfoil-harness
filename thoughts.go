@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 // A reply's reasoning is summarized while it thinks, as the web client did:
@@ -24,7 +25,7 @@ const (
 type thoughtSummaries struct {
 	ctx       context.Context
 	out       *stream
-	assembler *messageAssembler
+	assembler *domain.MessageAssembler
 	summarize func(context.Context, string) (string, error)
 
 	message, block, trace string
@@ -38,7 +39,7 @@ type thoughtSummaries struct {
 
 // thoughtSummaries starts following a run's reasoning, unless no summarizer
 // verified.
-func (h *harness) thoughtSummaries(ctx context.Context, out *stream, assembler *messageAssembler) *thoughtSummaries {
+func (h *harness) thoughtSummaries(ctx context.Context, out *stream, assembler *domain.MessageAssembler) *thoughtSummaries {
 	if !h.serviceReady("summarizer") {
 		return nil
 	}
@@ -54,12 +55,12 @@ func (h *harness) thoughtSummaries(ctx context.Context, out *stream, assembler *
 }
 
 // follow reads a frame the run's reply was built from.
-func (s *thoughtSummaries) follow(e runEvent) {
+func (s *thoughtSummaries) follow(e domain.Event) {
 	switch e := e.(type) {
-	case reasoningChunk:
-		message := strings.TrimSuffix(e.MessageID, reasoningSuffix)
+	case domain.ReasoningChunk:
+		message := strings.TrimSuffix(e.MessageID, domain.ReasoningSuffix)
 		// A late tail of reasoning the reply's text closed is not followed.
-		block := s.assembler.lastBlock(message)
+		block := s.assembler.LastBlock(message)
 		if block == nil || block.Type != "thinking" {
 			return
 		}
@@ -69,7 +70,7 @@ func (s *thoughtSummaries) follow(e runEvent) {
 		}
 		s.trace = block.Content
 		s.consider()
-	case textChunk, toolCallStart:
+	case domain.TextChunk, domain.ToolCallStart:
 		s.close()
 	}
 }
@@ -123,7 +124,7 @@ func (s *thoughtSummaries) fire() {
 		}
 		s.inFlight = false
 		if summary = strings.TrimSpace(summary); err == nil && summary != "" {
-			s.out.frame(reasoningSummary{MessageID: message, BlockID: block, Content: summary}, api.Timestamp())
+			s.out.frame(domain.ReasoningSummary{MessageID: message, BlockID: block, Content: summary}, api.Timestamp())
 		}
 	}()
 }

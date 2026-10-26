@@ -10,6 +10,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 func (h *harness) apiRoutes() []routeSpec {
@@ -61,7 +62,7 @@ func (h *harness) session(ctx context.Context, p *auth.Principal, _ auth.Content
 	}
 	presets := c.Presets
 	if presets == nil {
-		presets = []preset{}
+		presets = []domain.Preset{}
 	}
 	widgets := c.EnabledWidgets
 	if widgets == nil {
@@ -71,11 +72,11 @@ func (h *harness) session(ctx context.Context, p *auth.Principal, _ auth.Content
 		Protocol:        protocolView{Version: protocolVersion, Minimum: minimumProtocolVersion},
 		User:            sessionUser{ID: p.ID, Anonymous: p.Anonymous},
 		RateLimit:       credential.Limit,
-		Models:          c.displayModels(),
-		Auto:            autoView{Default: defaultIntelligence, Levels: autoLevels()},
-		DefaultModel:    autoModelName,
+		Models:          c.DisplayModels(),
+		Auto:            autoView{Default: domain.DefaultIntelligence, Levels: domain.AutoLevels()},
+		DefaultModel:    domain.AutoModelName,
 		Widgets:         widgets,
-		ProfileDefaults: defaultProfile(),
+		ProfileDefaults: domain.DefaultProfile(),
 		Composer:        composer(),
 		Presets:         presets,
 		Features:        map[string]bool{"webSearch": webSearch.client != nil, "transcription": h.serviceReady("router"), "speech": h.serviceReady("router")},
@@ -91,12 +92,12 @@ func (h *harness) listThreads(ctx context.Context, p *auth.Principal, key auth.C
 		return nil, err
 	}
 	flags := h.auth.FlaggedChats(ctx, p)
-	list := []threadSummary{}
+	list := []domain.ThreadSummary{}
 	for _, row := range rows {
 		markFlagged(flags, &row.Thread)
-		list = append(list, summarize(&row.Thread))
+		list = append(list, domain.Summarize(&row.Thread))
 	}
-	var pinned []threadSummary
+	var pinned []domain.ThreadSummary
 	if in.Cursor == "" {
 		pinned, err = h.pinnedThreads(ctx, p, key, flags)
 		if err != nil {
@@ -104,9 +105,9 @@ func (h *harness) listThreads(ctx context.Context, p *auth.Principal, key auth.C
 		}
 	}
 	return struct {
-		Threads    []threadSummary `json:"threads"`
-		NextCursor string          `json:"nextCursor"`
-		Pinned     []threadSummary `json:"pinned"`
+		Threads    []domain.ThreadSummary `json:"threads"`
+		NextCursor string                 `json:"nextCursor"`
+		Pinned     []domain.ThreadSummary `json:"pinned"`
 	}{list, next, pinned}, nil
 }
 func (h *harness) getThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *windowRequest) (any, error) {
@@ -114,31 +115,31 @@ func (h *harness) getThread(ctx context.Context, p *auth.Principal, key auth.Con
 	if err != nil {
 		return nil, err
 	}
-	if err := h.applyPins(ctx, p, key, []*threadRow{row}); err != nil {
+	if err := h.applyPins(ctx, p, key, []*domain.ThreadRow{row}); err != nil {
 		return nil, err
 	}
 	markFlagged(h.auth.FlaggedChats(ctx, p), &row.Thread)
-	return window(row, in.Before, in.Limit), nil
+	return domain.Window(row, in.Before, in.Limit), nil
 }
 func (h *harness) updateThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *updateThreadRequest) (any, error) {
-	if in.Model != nil && !h.catalog.get().offers(*in.Model) {
+	if in.Model != nil && !h.catalog.get().Offers(*in.Model) {
 		return nil, api.Err(404, "MODEL_UNAVAILABLE", "Unknown model")
 	}
-	if project := valueOr(in.ProjectID.Value, ""); project != "" {
+	if project := domain.ValueOr(in.ProjectID.Value, ""); project != "" {
 		if _, err := h.loadProject(ctx, p, key, project); err != nil {
 			return nil, err
 		}
 	}
-	var profile Profile
+	var profile domain.Profile
 	if in.PresetID.Value != nil {
 		var err error
 		if profile, err = h.sourceProfile(ctx, p, key, in.threadSource); err != nil {
 			return nil, err
 		}
 	}
-	row, err := h.changeThread(ctx, p, key, in.threadSource, in.ID, func(t *Thread) error {
+	row, err := h.changeThread(ctx, p, key, in.threadSource, in.ID, func(t *domain.Thread) error {
 		in.apply(t, h.catalog.get(), &profile)
-		t.Pinned = valueOr(in.Pinned, t.Pinned)
+		t.Pinned = domain.ValueOr(in.Pinned, t.Pinned)
 		if in.ProjectID.Set {
 			t.ProjectID = in.ProjectID.Value
 		}
@@ -156,20 +157,20 @@ func (h *harness) updateThread(ctx context.Context, p *auth.Principal, key auth.
 			return nil, err
 		}
 	}
-	return summarize(&row.Thread), nil
+	return domain.Summarize(&row.Thread), nil
 }
 
-func (h *harness) pinnedThreads(ctx context.Context, p *auth.Principal, key auth.ContentKey, flags auth.ChatFlags) ([]threadSummary, error) {
+func (h *harness) pinnedThreads(ctx context.Context, p *auth.Principal, key auth.ContentKey, flags auth.ChatFlags) ([]domain.ThreadSummary, error) {
 	ids, err := h.pinnedIDs(ctx, p, key)
 	if err != nil {
 		return nil, err
 	}
-	threads := []threadSummary{}
+	threads := []domain.ThreadSummary{}
 	rows, err := h.threadBatch(ctx, p, key, ids)
 	if err != nil {
 		return nil, err
 	}
-	byID := make(map[string]*threadRow, len(rows))
+	byID := make(map[string]*domain.ThreadRow, len(rows))
 	for _, row := range rows {
 		byID[row.ID] = row
 	}
@@ -180,22 +181,22 @@ func (h *harness) pinnedThreads(ctx context.Context, p *auth.Principal, key auth
 		}
 		row.Pinned = true
 		markFlagged(flags, &row.Thread)
-		threads = append(threads, summarize(&row.Thread))
+		threads = append(threads, domain.Summarize(&row.Thread))
 	}
 	return threads, nil
 }
 
 // changeThread applies change to a chat: a stored one as read now, saved
 // once changed, or the device chat its client sent.
-func (h *harness) changeThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, source threadSource, id string, change func(*Thread) error) (*threadRow, error) {
+func (h *harness) changeThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, source threadSource, id string, change func(*domain.Thread) error) (*domain.ThreadRow, error) {
 	if !source.Local {
 		return h.mutateThread(ctx, p, key, id, change)
 	}
-	t, err := readDeviceThread(id, source.Thread)
+	t, err := domain.ReadDeviceThread(id, source.Thread)
 	if err != nil {
 		return nil, err
 	}
-	row := &threadRow{Thread: t}
+	row := &domain.ThreadRow{Thread: t}
 	if err := change(&row.Thread); err != nil {
 		return nil, err
 	}
@@ -205,19 +206,19 @@ func (h *harness) changeThread(ctx context.Context, p *auth.Principal, key auth.
 
 // sourceProfile is the settings a chat's prompt reads: the stored profile,
 // or the one a device chat's client sends.
-func (h *harness) sourceProfile(ctx context.Context, p *auth.Principal, key auth.ContentKey, source threadSource) (Profile, error) {
+func (h *harness) sourceProfile(ctx context.Context, p *auth.Principal, key auth.ContentKey, source threadSource) (domain.Profile, error) {
 	if !source.Local {
 		return h.profile(ctx, p, key)
 	}
-	return *localProfile(source.Profile), nil
+	return *domain.LocalProfile(source.Profile), nil
 }
 
 // deviceReply answers an operation on a device chat with the chat its client
 // stores, which leaves out the images the client holds.
-func deviceReply(row *threadRow) any {
+func deviceReply(row *domain.ThreadRow) any {
 	return struct {
-		Thread Thread `json:"thread"`
-	}{deviceThread(&row.Thread)}
+		Thread domain.Thread `json:"thread"`
+	}{domain.DeviceThread(&row.Thread)}
 }
 
 func (h *harness) deleteThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *deleteThreadRequest) (any, error) {
@@ -246,8 +247,8 @@ func forkTitle(title string) string {
 
 // forkedCount is how many leading messages of a chat a fork through the
 // given one copies.
-func forkedCount(t *Thread, messageID string) (int, error) {
-	count := 1 + t.messageIndex(messageID)
+func forkedCount(t *domain.Thread, messageID string) (int, error) {
+	count := 1 + t.MessageIndex(messageID)
 	if count == 0 {
 		return 0, api.Err(404, "THREAD_NOT_FOUND", "The message was not found")
 	}
@@ -256,7 +257,7 @@ func forkedCount(t *Thread, messageID string) (int, error) {
 
 // startFork leaves out of a fork what belongs to the chat it was copied
 // from. Its title is the one it was given.
-func startFork(t *Thread) {
+func startFork(t *domain.Thread) {
 	t.ActiveRun, t.ContextUsage, t.Pinned, t.Flagged, t.TitleState = nil, nil, false, false, "manual"
 	t.LastRequestID, t.LastRequestKind = "", ""
 }
@@ -266,7 +267,7 @@ func startFork(t *Thread) {
 // copies of the attachments; a device chat's fork keeps their ids.
 func (h *harness) forkThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *messageRequest) (any, error) {
 	if in.Local {
-		source, err := readDeviceThread(in.ThreadID, in.Thread)
+		source, err := domain.ReadDeviceThread(in.ThreadID, in.Thread)
 		if err != nil {
 			return nil, err
 		}
@@ -274,10 +275,10 @@ func (h *harness) forkThread(ctx context.Context, p *auth.Principal, key auth.Co
 		if err != nil {
 			return nil, err
 		}
-		fork := source.clone()
-		fork.ID, fork.Title, fork.Messages, fork.CreatedAt, fork.UpdatedAt = rowID(), forkTitle(source.Title), fork.Messages[:count], api.Timestamp(), api.Timestamp()
+		fork := source.Clone()
+		fork.ID, fork.Title, fork.Messages, fork.CreatedAt, fork.UpdatedAt = domain.RowID(), forkTitle(source.Title), fork.Messages[:count], api.Timestamp(), api.Timestamp()
 		startFork(&fork)
-		return deviceReply(&threadRow{Thread: fork}), nil
+		return deviceReply(&domain.ThreadRow{Thread: fork}), nil
 	}
 	row, err := h.loadThread(ctx, p, key, in.ThreadID)
 	if err != nil {
@@ -287,24 +288,24 @@ func (h *harness) forkThread(ctx context.Context, p *auth.Principal, key auth.Co
 	if err != nil {
 		return nil, err
 	}
-	target := rowID()
+	target := domain.RowID()
 	if err := h.forkStored(ctx, p, key, in.ThreadID, target, forkTitle(row.Title), count); err != nil {
 		return nil, err
 	}
 	// Sync leaves out the web client's bookkeeping, not the harness's.
-	forked, err := h.mutateThread(ctx, p, key, target, func(t *Thread) error {
+	forked, err := h.mutateThread(ctx, p, key, target, func(t *domain.Thread) error {
 		startFork(t)
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return summarize(&forked.Thread), nil
+	return domain.Summarize(&forked.Thread), nil
 }
 
 // Message actions change a chat's transcript.
 func (h *harness) deleteMessage(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *messageRequest) (any, error) {
-	return h.changeMessages(ctx, p, key, in, func(t *Thread, index int) error {
+	return h.changeMessages(ctx, p, key, in, func(t *domain.Thread, index int) error {
 		// As on the web client, a chat keeps its last message.
 		if len(t.Messages) == 1 {
 			return api.Err(400, "BAD_REQUEST", "A chat keeps its last message")
@@ -317,17 +318,17 @@ func (h *harness) updateMessage(ctx context.Context, p *auth.Principal, key auth
 	if in.Content == nil {
 		return nil, api.Err(400, "BAD_REQUEST", "content must be a string")
 	}
-	return h.changeMessages(ctx, p, key, in, func(t *Thread, index int) error {
+	return h.changeMessages(ctx, p, key, in, func(t *domain.Thread, index int) error {
 		if t.Messages[index].Role != "assistant" {
 			return api.Err(400, "BAD_REQUEST", "Only a reply is edited in place")
 		}
-		replaceReplyText(&t.Messages[index], *in.Content)
+		domain.ReplaceReplyText(&t.Messages[index], *in.Content)
 		return nil
 	})
 }
-func (h *harness) changeMessages(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *messageRequest, change func(*Thread, int) error) (any, error) {
-	row, err := h.changeThread(ctx, p, key, in.threadSource, in.ThreadID, func(t *Thread) error {
-		index := t.messageIndex(in.MessageID)
+func (h *harness) changeMessages(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *messageRequest, change func(*domain.Thread, int) error) (any, error) {
+	row, err := h.changeThread(ctx, p, key, in.threadSource, in.ThreadID, func(t *domain.Thread) error {
+		index := t.MessageIndex(in.MessageID)
 		if index < 0 {
 			return api.Err(404, "THREAD_NOT_FOUND", "The message was not found")
 		}
@@ -340,12 +341,12 @@ func (h *harness) changeMessages(ctx context.Context, p *auth.Principal, key aut
 	if in.Local {
 		return deviceReply(row), nil
 	}
-	return window(row, "", messageWindow), nil
+	return domain.Window(row, "", domain.MessageWindow), nil
 }
 func (h *harness) deleteAllThreads(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *deleteAllRequest) (any, error) {
 	// Every id is listed before any is deleted, so a shrinking list cannot
 	// skip a page, and rows this key cannot open are deleted too.
-	ids, err := h.chatIDs(ctx, p, valueOr(in.ProjectID, ""))
+	ids, err := h.chatIDs(ctx, p, domain.ValueOr(in.ProjectID, ""))
 	if err != nil {
 		return nil, err
 	}
@@ -363,17 +364,17 @@ type deletedCount struct {
 }
 
 // profile is a user's settings as a prompt reads them.
-func (h *harness) profile(ctx context.Context, p *auth.Principal, key auth.ContentKey) (Profile, error) {
+func (h *harness) profile(ctx context.Context, p *auth.Principal, key auth.ContentKey) (domain.Profile, error) {
 	stored, err := h.loadProfile(ctx, p, key)
 	if err != nil || stored == nil {
-		return Profile{}, err
+		return domain.Profile{}, err
 	}
 	return stored.Profile, nil
 }
 
 // viewProfile is a stored profile as its client reads it.
-func (h *harness) viewProfile(stored storedProfile) profileView {
-	return profileView{Profile: h.catalog.get().effectiveProfile(stored.Profile), UpdatedAt: stored.UpdatedAt}
+func (h *harness) viewProfile(stored domain.StoredProfile) domain.ProfileView {
+	return domain.ProfileView{Profile: h.catalog.get().EffectiveProfile(stored.Profile), UpdatedAt: stored.UpdatedAt}
 }
 func (h *harness) getProfile(ctx context.Context, p *auth.Principal, key auth.ContentKey, _ json.RawMessage) (any, error) {
 	stored, err := h.loadProfile(ctx, p, key)
@@ -381,7 +382,7 @@ func (h *harness) getProfile(ctx context.Context, p *auth.Principal, key auth.Co
 		return nil, err
 	}
 	if stored == nil {
-		stored = &storedProfile{}
+		stored = &domain.StoredProfile{}
 	}
 	return h.viewProfile(*stored), nil
 }
@@ -390,16 +391,16 @@ func (h *harness) getProfile(ctx context.Context, p *auth.Principal, key auth.Co
 // the profile a stored one reads as. It stores nothing.
 func (h *harness) upgradeDeviceProfile(_ context.Context, _ *auth.Principal, _ auth.ContentKey, in *profileUpgradeRequest) (any, error) {
 	return struct {
-		Profile Profile `json:"profile"`
-	}{h.catalog.get().effectiveProfile(*localProfile(in.Profile))}, nil
+		Profile domain.Profile `json:"profile"`
+	}{h.catalog.get().EffectiveProfile(*domain.LocalProfile(in.Profile))}, nil
 }
 func (h *harness) updateProfile(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *profileUpdateRequest) (any, error) {
 	patch, clearsDefault, err := in.patch()
 	if err != nil {
 		return nil, err
 	}
-	stored, err := h.mutateProfile(ctx, p, key, func(profile *storedProfile) error {
-		profile.apply(patch)
+	stored, err := h.mutateProfile(ctx, p, key, func(profile *domain.StoredProfile) error {
+		profile.Apply(patch)
 		if clearsDefault {
 			profile.DefaultPromptPresetID = nil
 		}
@@ -412,10 +413,10 @@ func (h *harness) updateProfile(ctx context.Context, p *auth.Principal, key auth
 }
 
 func (h *harness) mergeDeviceProfile(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *profileMergeRequest) (any, error) {
-	local := localProfile(in.Profile)
-	merged, err := h.mutateProfile(ctx, p, key, func(stored *storedProfile) error {
-		stored.Profile = mergeDeviceProfile(stored.Profile, *local, in.ChangedFields)
-		return stored.Profile.validate()
+	local := domain.LocalProfile(in.Profile)
+	merged, err := h.mutateProfile(ctx, p, key, func(stored *domain.StoredProfile) error {
+		stored.Profile = domain.MergeDeviceProfile(stored.Profile, *local, in.ChangedFields)
+		return stored.Profile.Validate()
 	})
 	if err != nil {
 		return nil, err
@@ -428,8 +429,8 @@ func (h *harness) listProjects(ctx context.Context, p *auth.Principal, key auth.
 		return nil, err
 	}
 	return struct {
-		Projects   []Project `json:"projects"`
-		NextCursor string    `json:"nextCursor"`
+		Projects   []domain.Project `json:"projects"`
+		NextCursor string           `json:"nextCursor"`
 	}{projects, next}, nil
 }
 func (h *harness) getProject(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *idRequest) (any, error) {
@@ -442,26 +443,26 @@ func (h *harness) getProject(ctx context.Context, p *auth.Principal, key auth.Co
 		return nil, err
 	}
 	return struct {
-		Project
-		Documents []ProjectDocument `json:"documents"`
+		domain.Project
+		Documents []domain.ProjectDocument `json:"documents"`
 	}{project, docs}, nil
 }
 func (h *harness) createProject(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *projectRequest) (any, error) {
-	if strings.TrimSpace(valueOr(in.Name, "")) == "" {
+	if strings.TrimSpace(domain.ValueOr(in.Name, "")) == "" {
 		return nil, api.Err(400, "BAD_REQUEST", "A project name is required")
 	}
-	return h.mutateProject(ctx, p, key, rowID(), true, func(project *Project) {
-		project.Name, project.Description, project.SystemInstructions, project.Color = *in.Name, valueOr(in.Description, ""), valueOr(in.SystemInstructions, ""), in.Color.Value
+	return h.mutateProject(ctx, p, key, domain.RowID(), true, func(project *domain.Project) {
+		project.Name, project.Description, project.SystemInstructions, project.Color = *in.Name, domain.ValueOr(in.Description, ""), domain.ValueOr(in.SystemInstructions, ""), in.Color.Value
 	})
 }
 func (h *harness) updateProject(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *projectRequest) (any, error) {
 	if err := api.RequireID("id", in.ID); err != nil {
 		return nil, err
 	}
-	return h.mutateProject(ctx, p, key, in.ID, false, func(project *Project) {
-		project.Name = valueOr(in.Name, project.Name)
-		project.Description = valueOr(in.Description, project.Description)
-		project.SystemInstructions = valueOr(in.SystemInstructions, project.SystemInstructions)
+	return h.mutateProject(ctx, p, key, in.ID, false, func(project *domain.Project) {
+		project.Name = domain.ValueOr(in.Name, project.Name)
+		project.Description = domain.ValueOr(in.Description, project.Description)
+		project.SystemInstructions = domain.ValueOr(in.SystemInstructions, project.SystemInstructions)
 		if in.Color.Set {
 			project.Color = in.Color.Value
 		}
@@ -502,20 +503,20 @@ func (h *harness) searchThreads(ctx context.Context, p *auth.Principal, key auth
 		return nil, err
 	}
 	flags := h.auth.FlaggedChats(ctx, p)
-	results := []threadSummary{}
+	results := []domain.ThreadSummary{}
 	for _, row := range found {
 		markFlagged(flags, &row.Thread)
-		results = append(results, summarize(&row.Thread))
+		results = append(results, domain.Summarize(&row.Thread))
 	}
 	return struct {
-		Results    []threadSummary `json:"results"`
-		Unreadable int             `json:"unreadable"`
-		Indexing   bool            `json:"indexing"`
+		Results    []domain.ThreadSummary `json:"results"`
+		Unreadable int                    `json:"unreadable"`
+		Indexing   bool                   `json:"indexing"`
 	}{results, unreadable, indexing}, nil
 }
 
 // markFlagged marks the chats among threads that the safeguards flagged.
-func markFlagged(flags auth.ChatFlags, threads ...*Thread) {
+func markFlagged(flags auth.ChatFlags, threads ...*domain.Thread) {
 	for _, t := range threads {
 		t.Flagged = t.Flagged || flags[t.ID]
 	}

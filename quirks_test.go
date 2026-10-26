@@ -5,25 +5,27 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 func TestStripModelControlTokens_LegitimatePipesSurvive(t *testing.T) {
 	in := "https://example.com/?x=|y|&z=a"
-	if got := stripModelControlTokens(in); got != in {
+	if got := domain.StripModelControlTokens(in); got != in {
 		t.Errorf("legit pipes got stripped: got=%q", got)
 	}
 }
 
 func TestStripModelControlTokens_LongSequenceIsNotMatched(t *testing.T) {
 	in := "<|" + strings.Repeat("x", 80) + "|>"
-	if got := stripModelControlTokens(in); got != in {
+	if got := domain.StripModelControlTokens(in); got != in {
 		t.Errorf("overlong token was eaten: got=%q", got)
 	}
 }
 
 func TestDeepStripURLTokens_AllowlistedField(t *testing.T) {
 	args := map[string]any{"url": `<|"|https://local.test/a<|"|>`, "max_results": float64(5)}
-	if !deepStripURLTokens(args) {
+	if !domain.DeepStripURLTokens(args) {
 		t.Fatal("deepStripURLTokens reported no change")
 	}
 	if args["url"] != "https://local.test/a" || args["max_results"] != float64(5) {
@@ -33,7 +35,7 @@ func TestDeepStripURLTokens_AllowlistedField(t *testing.T) {
 
 func TestDeepStripURLTokens_URLsArray(t *testing.T) {
 	args := map[string]any{"urls": []any{`<|"|https://a<|"|>`, "https://b", `<|tool_call_argument_begin|>https://c<|tool_call_end|>`}}
-	if !deepStripURLTokens(args) {
+	if !domain.DeepStripURLTokens(args) {
 		t.Fatal("array-valued url field not cleaned")
 	}
 	if want := []any{"https://a", "https://b", "https://c"}; !reflect.DeepEqual(args["urls"], want) {
@@ -43,7 +45,7 @@ func TestDeepStripURLTokens_URLsArray(t *testing.T) {
 
 func TestDeepStripURLTokens_NestedObject(t *testing.T) {
 	args := map[string]any{"page": map[string]any{"href": `<|"|https://deep.test/x<|"|>`, "id": float64(3)}}
-	if !deepStripURLTokens(args) {
+	if !domain.DeepStripURLTokens(args) {
 		t.Fatal("nested href not cleaned")
 	}
 	if got := args["page"].(map[string]any)["href"]; got != "https://deep.test/x" {
@@ -53,14 +55,14 @@ func TestDeepStripURLTokens_NestedObject(t *testing.T) {
 
 func TestDeepStripURLTokens_NonURLFieldLeftAlone(t *testing.T) {
 	args := map[string]any{"query": "find <|maybe|> a restaurant"}
-	if deepStripURLTokens(args) || args["query"] != "find <|maybe|> a restaurant" {
+	if domain.DeepStripURLTokens(args) || args["query"] != "find <|maybe|> a restaurant" {
 		t.Fatalf("non-URL field was stripped: %v", args)
 	}
 }
 
 func TestDeepStripURLTokens_LeakedURLInUnknownField(t *testing.T) {
 	args := map[string]any{"target": `<|"|https://local.test/almanac<|"|>`}
-	if !deepStripURLTokens(args) || args["target"] != "https://local.test/almanac" {
+	if !domain.DeepStripURLTokens(args) || args["target"] != "https://local.test/almanac" {
 		t.Fatalf("unknown field with leaked URL was not cleaned: %v", args)
 	}
 }
@@ -76,7 +78,7 @@ func TestExtractFirstJSONObject(t *testing.T) {
 		`[1,2,3]`:                                                          "",
 		``:                                                                 "",
 	} {
-		if got, ok := extractFirstJSONObject(in); got != want || ok != (want != "") {
+		if got, ok := domain.ExtractFirstJSONObject(in); got != want || ok != (want != "") {
 			t.Errorf("extractFirstJSONObject(%q) = %q, %v; want %q", in, got, ok, want)
 		}
 	}
@@ -93,7 +95,7 @@ func TestHistoryArgs(t *testing.T) {
 		`not json at all`:      "{}",
 		`{"query":"cats","max_results":5} Now searching...`: `{"query":"cats","max_results":5}`,
 	} {
-		if got := historyArgs(in); got != want {
+		if got := domain.HistoryArgs(in); got != want {
 			t.Errorf("historyArgs(%q) = %q, want %q", in, got, want)
 		}
 	}
@@ -107,7 +109,7 @@ func TestContinuationReplaysRepairedArguments(t *testing.T) {
 }
 
 func TestStoredToolCallsReplayWithRepairedArguments(t *testing.T) {
-	message := &Message{Role: "assistant", Timeline: []Block{
+	message := &domain.Message{Role: "assistant", Timeline: []domain.Block{
 		{Type: "tool_call", ToolCallID: "call_1", Name: "web_search", Arguments: `{"query":"cats"}`},
 		{Type: "tool_call", ToolCallID: "call_2", Name: "web_search", Arguments: `{"query":"`},
 		{Type: "tool_call", ToolCallID: "call_3", Name: "web_fetch", Arguments: `{"urls":["https://a.test"]} Now fetching`},

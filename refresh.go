@@ -15,15 +15,16 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 type catalogCache struct {
 	mu    sync.RWMutex
-	value *chatCatalog
+	value *domain.Catalog
 }
 
-func (c *catalogCache) get() *chatCatalog      { c.mu.RLock(); defer c.mu.RUnlock(); return c.value }
-func (c *catalogCache) set(value *chatCatalog) { c.mu.Lock(); defer c.mu.Unlock(); c.value = value }
+func (c *catalogCache) get() *domain.Catalog      { c.mu.RLock(); defer c.mu.RUnlock(); return c.value }
+func (c *catalogCache) set(value *domain.Catalog) { c.mu.Lock(); defer c.mu.Unlock(); c.value = value }
 
 func fetchConfig(ctx context.Context, client *http.Client, base, path string, out any) error {
 	req, _ := http.NewRequestWithContext(ctx, "GET", base+path, nil)
@@ -52,9 +53,9 @@ func (h *harness) refreshCatalog(ctx context.Context) error {
 	h.catalog.set(c)
 	return nil
 }
-func buildCatalog(config []api.Object, models []*model) *chatCatalog {
-	prompt := builtInPrompt()
-	c := &chatCatalog{Prompt: prompt.SystemPrompt, Rules: prompt.Rules, WidgetHeader: prompt.GenUI.Header, EnabledWidgets: slices.Clone(prompt.GenUI.EnabledWidgets), Models: []api.Object{}, Presets: builtInPresets()}
+func buildCatalog(config []api.Object, models []*model) *domain.Catalog {
+	prompt := domain.BuiltInPrompt()
+	c := &domain.Catalog{Prompt: prompt.SystemPrompt, Rules: prompt.Rules, WidgetHeader: prompt.GenUI.Header, EnabledWidgets: slices.Clone(prompt.GenUI.EnabledWidgets), Models: []api.Object{}, Presets: domain.BuiltInPresets()}
 	var unpinned []string
 	for _, definition := range config {
 		if !api.Bool(definition["chat"], false) || api.Str(definition["type"]) != "chat" {

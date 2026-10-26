@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 // Search and fetch results as the model reads them, ported from the model
@@ -53,7 +54,7 @@ var markdownLinkPattern = regexp.MustCompile(`\[([^\]]+)\]\((https?://(?:[^\s()]
 // tools showed the model, as chat completions url_citation annotations over
 // the link's label, in code points. A source without a title is named by its
 // URL; the model's own spelling of the URL is kept.
-func citationAnnotations(text string, sources []citationSource) []Annotation {
+func citationAnnotations(text string, sources []citationSource) []domain.Annotation {
 	byURL := map[string]citationSource{}
 	for _, source := range sources {
 		key := normalizeURL(source.url)
@@ -61,7 +62,7 @@ func citationAnnotations(text string, sources []citationSource) []Annotation {
 			byURL[key] = source
 		}
 	}
-	var annotations []Annotation
+	var annotations []domain.Annotation
 	for _, match := range markdownLinkPattern.FindAllStringSubmatchIndex(text, -1) {
 		link := text[match[4]:match[5]]
 		source, ok := byURL[normalizeURL(link)]
@@ -72,7 +73,7 @@ func citationAnnotations(text string, sources []citationSource) []Annotation {
 		if strings.TrimSpace(title) == "" {
 			title = link
 		}
-		annotations = append(annotations, Annotation{Type: "url_citation", URLCitation: &URLCitation{URL: link, Title: title,
+		annotations = append(annotations, domain.Annotation{Type: "url_citation", URLCitation: &domain.URLCitation{URL: link, Title: title,
 			StartIndex: utf8.RuneCountInString(text[:match[2]]), EndIndex: utf8.RuneCountInString(text[:match[3]])}})
 	}
 	return annotations

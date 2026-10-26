@@ -1,4 +1,4 @@
-package main
+package domain
 
 import (
 	"cmp"
@@ -13,24 +13,24 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
-// maxWidgetRetries bounds how often one run tells the model a widget's
+// MaxWidgetRetries bounds how often one run tells the model a widget's
 // arguments failed validation; two cover fixing one field surfacing another.
-const maxWidgetRetries = 2
+const MaxWidgetRetries = 2
 
-// widgetArguments is what a widget call is drawn and validated with: repaired,
+// WidgetArguments is what a widget call is drawn and validated with: repaired,
 // then canonical.
-func widgetArguments(raw string) string {
-	if repaired, ok := sanitizeToolCallArgumentsJSON([]byte(raw)); ok && json.Valid(repaired) {
+func WidgetArguments(raw string) string {
+	if repaired, ok := SanitizeToolCallArgumentsJSON([]byte(raw)); ok && json.Valid(repaired) {
 		raw = string(repaired)
 	}
-	return canonicalizeWidgetArguments(raw)
+	return CanonicalizeWidgetArguments(raw)
 }
 
-// canonicalizeWidgetArguments unwraps nested arrays and objects sent as JSON
+// CanonicalizeWidgetArguments unwraps nested arrays and objects sent as JSON
 // strings, such as DeepSeek's {"stats":"[{...}]"}, which widget schemas
 // reject. Arguments that need no unwrapping come back byte-for-byte, and
 // anything that does not parse comes back untouched.
-func canonicalizeWidgetArguments(raw string) string {
+func CanonicalizeWidgetArguments(raw string) string {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" || trimmed[0] != '{' && trimmed[0] != '[' {
 		return raw
@@ -103,13 +103,13 @@ func decodeJSONValue(raw string) (any, error) {
 	return decoded, nil
 }
 
-// widgetFailure is what a widget call whose arguments cannot be drawn
+// WidgetFailure is what a widget call whose arguments cannot be drawn
 // returns, or nil when they can.
-func widgetFailure(w widget, args string) json.RawMessage {
+func WidgetFailure(w Widget, args string) json.RawMessage {
 	var value any
 	problem := "arguments are not valid JSON"
 	if json.Unmarshal([]byte(cmp.Or(args, "{}")), &value) == nil {
-		err := w.schema.Validate(value)
+		err := w.Resolved.Validate(value)
 		if err == nil {
 			return nil
 		}
@@ -118,10 +118,10 @@ func widgetFailure(w widget, args string) json.RawMessage {
 	return api.Raw(api.Object{"status": "error", "error": fmt.Sprintf("The arguments for %s did not match the tool's parameter schema and the component was not displayed: %s. Call %s again with corrected arguments that match the schema exactly.", w.Name, problem, w.Name)})
 }
 
-// checkedWidgets is a copy of a timeline for its client, in which each widget
+// CheckedWidgets is a copy of a timeline for its client, in which each widget
 // call is marked when its stored arguments fail the check new ones pass
 // before they are sent.
-func checkedWidgets(timeline []Block) []Block {
+func CheckedWidgets(timeline []Block) []Block {
 	checked := clonedSlice(timeline)
 	for i := range checked {
 		b := &checked[i]
@@ -129,19 +129,19 @@ func checkedWidgets(timeline []Block) []Block {
 		if b.Type != "tool_call" {
 			continue
 		}
-		for _, w := range widgetCatalog() {
+		for _, w := range WidgetCatalog() {
 			if w.Name == b.Name {
-				b.InvalidArguments = widgetFailure(w, b.Arguments) != nil
+				b.InvalidArguments = WidgetFailure(w, b.Arguments) != nil
 			}
 		}
 	}
 	return checked
 }
 
-// checkWidgets marks the widget calls of a thread its client is sent.
-func (t *Thread) checkWidgets() {
+// CheckWidgets marks the widget calls of a thread its client is sent.
+func (t *Thread) CheckWidgets() {
 	for i := range t.Messages {
-		t.Messages[i].Timeline = checkedWidgets(t.Messages[i].Timeline)
+		t.Messages[i].Timeline = CheckedWidgets(t.Messages[i].Timeline)
 	}
 }
 
@@ -200,19 +200,19 @@ func normalizeSchema(value any) {
 	}
 }
 
-// normalizeToolResult is the caller's copy of a tool result. Its text shares
+// NormalizeToolResult is the caller's copy of a tool result. Its text shares
 // one budget, spent after parsing so that a large result still parses.
-func normalizeToolResult(name, arguments, content string) any {
+func NormalizeToolResult(name, arguments, content string) any {
 	var result any
 	if json.Unmarshal([]byte(content), &result) != nil {
 		result = api.Object{"output": content}
 	}
 	value := api.Obj(result)
-	args := api.Obj(api.Parsed([]byte(historyArgs(arguments))))
+	args := api.Obj(api.Parsed([]byte(HistoryArgs(arguments))))
 	if strings.HasPrefix(name, "render_") {
 		return result
 	}
-	budget := maxShownOutput
+	budget := MaxShownOutput
 	take := func(s string) string {
 		if len(s) > budget {
 			s = s[:budget] + "\n[truncated]"
@@ -309,14 +309,14 @@ func piiReport(result api.Object) api.Object {
 	return api.Object{"masked": api.Bool(result["pii_masked"], false), "redacted_query": api.Str(result["redacted_query"]), "redactions": redactions}
 }
 
-type replacedWidget struct {
-	arguments string
-	result    json.RawMessage
+type ReplacedWidget struct {
+	Arguments string          `json:"-"`
+	Result    json.RawMessage `json:"-"`
 }
 
 // A retry must not revive a deleted widget or overwrite a concurrent writer.
 // expected is the widget's arguments when the retry started.
-func replaceWidget(t *Thread, messageID, callID, expected string, replacement replacedWidget) error {
+func ReplaceWidget(t *Thread, messageID, callID, expected string, replacement ReplacedWidget) error {
 	for i := range t.Messages {
 		m := &t.Messages[i]
 		if m.ID != messageID {
@@ -324,13 +324,13 @@ func replaceWidget(t *Thread, messageID, callID, expected string, replacement re
 		}
 		for j := range m.Timeline {
 			block := &m.Timeline[j]
-			if block.callID() != callID {
+			if block.CallID() != callID {
 				continue
 			}
-			if block.Arguments != expected && block.Arguments != replacement.arguments {
+			if block.Arguments != expected && block.Arguments != replacement.Arguments {
 				return api.Err(409, "REVISION_CONFLICT", "The widget changed during its retry")
 			}
-			block.Arguments, block.Result = replacement.arguments, replacement.result
+			block.Arguments, block.Result = replacement.Arguments, replacement.Result
 			return nil
 		}
 	}
@@ -338,19 +338,19 @@ func replaceWidget(t *Thread, messageID, callID, expected string, replacement re
 }
 
 const (
-	// maxShownOutput bounds a tool result as the caller sees it.
-	maxShownOutput = 1 << 20
-	// toolError is the result of a tool call that failed.
-	toolError = `{"error":"tool_error"}`
+	// MaxShownOutput bounds a tool result as the caller sees it.
+	MaxShownOutput = 1 << 20
+	// ToolError is the result of a tool call that failed.
+	ToolError = `{"error":"tool_error"}`
 )
 
-// historyArgs is what a replayed tool call carries: one call whose arguments
+// HistoryArgs is what a replayed tool call carries: one call whose arguments
 // do not parse would otherwise fail every later request that repeats it.
-func historyArgs(s string) string {
+func HistoryArgs(s string) string {
 	if json.Valid([]byte(s)) {
 		return s
 	}
-	if repaired, ok := sanitizeToolCallArgumentsJSON([]byte(s)); ok && json.Valid(repaired) {
+	if repaired, ok := SanitizeToolCallArgumentsJSON([]byte(s)); ok && json.Valid(repaired) {
 		return string(repaired)
 	}
 	return "{}"

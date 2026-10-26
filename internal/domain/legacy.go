@@ -1,4 +1,4 @@
-package main
+package domain
 
 import (
 	"bytes"
@@ -34,10 +34,10 @@ func currentFormat(data []byte) (bool, error) {
 	var marker struct {
 		RecordVersion int `json:"recordVersion"`
 	}
-	if json.Unmarshal(data, &marker) != nil || marker.RecordVersion != 0 && marker.RecordVersion != recordVersion {
+	if json.Unmarshal(data, &marker) != nil || marker.RecordVersion != 0 && marker.RecordVersion != RecordVersion {
 		return false, errRecordUnsupported
 	}
-	return marker.RecordVersion == recordVersion, nil
+	return marker.RecordVersion == RecordVersion, nil
 }
 
 // readCurrent reads a record in the current format into v, refusing one
@@ -106,18 +106,18 @@ func readCurrentThread(data []byte, v any, t *Thread) error {
 // type. Rows reach it as valid JSON objects.
 func readLenient(data []byte, v any) { json.Unmarshal(data, v) }
 
-// looseTime is a time old clients stored as RFC 3339 text or as Unix
+// LooseTime is a time old clients stored as RFC 3339 text or as Unix
 // milliseconds, read as RFC 3339.
-type looseTime string
+type LooseTime string
 
-func (t *looseTime) UnmarshalJSON(b []byte) error {
+func (t *LooseTime) UnmarshalJSON(b []byte) error {
 	var value any
 	json.Unmarshal(b, &value)
-	*t = looseTime(isoTime(value))
+	*t = LooseTime(ISOTime(value))
 	return nil
 }
 
-func isoTime(value any) string {
+func ISOTime(value any) string {
 	switch v := value.(type) {
 	case string:
 		if parsed, err := time.Parse(time.RFC3339Nano, v); err == nil {
@@ -135,8 +135,8 @@ func isoTime(value any) string {
 // legacyThread is a chat row as any client stored it.
 type legacyThread struct {
 	Thread
-	CreatedAt        looseTime       `json:"createdAt"`
-	UpdatedAt        looseTime       `json:"updatedAt"`
+	CreatedAt        LooseTime       `json:"createdAt"`
+	UpdatedAt        LooseTime       `json:"updatedAt"`
 	WebSearchEnabled *bool           `json:"webSearchEnabled"`
 	Messages         []legacyMessage `json:"messages"`
 }
@@ -145,7 +145,7 @@ type legacyThread struct {
 // replies had timelines and attachments had their own records.
 type legacyMessage struct {
 	Message
-	Timestamp               looseTime          `json:"timestamp"`
+	Timestamp               LooseTime          `json:"timestamp"`
 	Timeline                []legacyBlock      `json:"timeline"`
 	Thoughts                string             `json:"thoughts"`
 	ThinkingDuration        float64            `json:"thinkingDuration"`
@@ -183,12 +183,12 @@ type legacyPage struct {
 	ImageID string `json:"imageId"`
 }
 
-// backupImages are the images a backup holds for one chat, by the id its
+// BackupImages are the images a backup holds for one chat, by the id its
 // messages name each with.
-type backupImages map[string]heldImage
+type BackupImages map[string]HeldImage
 
-// heldImage is an image a backup holds, its bytes base64 encoded.
-type heldImage struct {
+// HeldImage is an image a backup holds, its bytes base64 encoded.
+type HeldImage struct {
 	FileName, MimeType, Description string
 	Size                            int64
 	Base64                          string
@@ -196,10 +196,10 @@ type heldImage struct {
 
 // upgrade is the attachment in the current form. Old rows name only images
 // and documents, by type; a row the harness wrote names audio by kind too.
-func (a legacyAttachment) upgrade(images backupImages) Attachment {
+func (a legacyAttachment) upgrade(images BackupImages) Attachment {
 	upgraded := a.Attachment
 	switch {
-	case slices.Contains(attachmentKinds, a.Kind):
+	case slices.Contains(AttachmentKinds, a.Kind):
 	case a.Type == "image":
 		upgraded.Kind = "image"
 	default:
@@ -275,8 +275,8 @@ type legacyImage struct {
 	ImageID  string `json:"imageId"`
 }
 
-// readThread reads a chat row into the thread format.
-func readThread(id string, data []byte) (Thread, error) {
+// ReadThread reads a chat row into the thread format.
+func ReadThread(id string, data []byte) (Thread, error) {
 	switch current, err := currentFormat(data); {
 	case err != nil:
 		return Thread{}, err
@@ -302,13 +302,13 @@ func upgradeThread(id string, data []byte, created string) Thread {
 	return readThreadWith(id, data, created, nil)
 }
 
-// readBackupThread reads a chat of a backup, whose images the backup holds
+// ReadBackupThread reads a chat of a backup, whose images the backup holds
 // apart from it.
-func readBackupThread(id string, data []byte, images backupImages) Thread {
+func ReadBackupThread(id string, data []byte, images BackupImages) Thread {
 	return readThreadWith(id, data, api.Timestamp(), images)
 }
 
-func readThreadWith(id string, data []byte, created string, images backupImages) Thread {
+func readThreadWith(id string, data []byte, created string, images BackupImages) Thread {
 	var stored legacyThread
 	readLenient(data, &stored)
 	t := stored.Thread
@@ -321,7 +321,7 @@ func readThreadWith(id string, data []byte, created string, images backupImages)
 		}
 	}
 	t.Model = normalizeModel(t.Model)
-	t.WebSearchEnabled = valueOr(stored.WebSearchEnabled, true)
+	t.WebSearchEnabled = ValueOr(stored.WebSearchEnabled, true)
 	t.Messages = make([]Message, len(stored.Messages))
 	for i, item := range stored.Messages {
 		m := item.Message
@@ -334,22 +334,22 @@ func readThreadWith(id string, data []byte, created string, images backupImages)
 	return t
 }
 
-// readThreadRow reads a stored chat. Sync files a chat under its project
+// ReadThreadRow reads a stored chat. Sync files a chat under its project
 // apart from the sealed row, and that filing is the chat's project.
-func readThreadRow(row *storedRow) (*threadRow, error) {
-	t, err := readThread(row.ID, row.Data)
+func ReadThreadRow(row *StoredRow) (*ThreadRow, error) {
+	t, err := ReadThread(row.ID, row.Data)
 	if err != nil {
 		return nil, err
 	}
-	if row.projectSet {
-		t.ProjectID = row.project
+	if row.ProjectSet {
+		t.ProjectID = row.Project
 	}
-	return &threadRow{Thread: t, etag: row.ETag}, nil
+	return &ThreadRow{Thread: t, ETag: row.ETag}, nil
 }
 
-// readDeviceThread reads a thread a client keeps on its device. The fields
+// ReadDeviceThread reads a thread a client keeps on its device. The fields
 // the harness owns are never taken from a client's copy.
-func readDeviceThread(id string, data []byte) (Thread, error) {
+func ReadDeviceThread(id string, data []byte) (Thread, error) {
 	var t Thread
 	switch current, err := currentFormat(data); {
 	case err != nil:
@@ -414,7 +414,7 @@ func (m *legacyMessage) timeline(message Message) []Block {
 	// holds the result a failed call holds.
 	call := func(startedAt, endedAt float64, id, name, args string, result any, status string) {
 		if legacyFailed(status) {
-			result = json.RawMessage(toolError)
+			result = json.RawMessage(ToolError)
 		}
 		blocks = append(blocks, Block{Type: "tool_call", ID: id, ToolCallID: id, Name: name, Arguments: args, Result: api.Raw(result), Complete: true, StartedAt: startedAt, EndedAt: endedAt})
 	}
@@ -438,7 +438,7 @@ func (m *legacyMessage) timeline(message Message) []Block {
 		case "code_exec":
 			for i, c := range block.Calls {
 				args := c.arguments()
-				call(block.StartedAt, block.EndedAt, cmp.Or(c.ID, blockID+"-"+strconv.Itoa(i)), c.ToolName, args, normalizeToolResult(c.ToolName, args, c.Output), "")
+				call(block.StartedAt, block.EndedAt, cmp.Or(c.ID, blockID+"-"+strconv.Itoa(i)), c.ToolName, args, NormalizeToolResult(c.ToolName, args, c.Output), "")
 			}
 		default:
 			block.ID = blockID
@@ -449,7 +449,7 @@ func (m *legacyMessage) timeline(message Message) []Block {
 	// its arguments and result say.
 	for i := range blocks {
 		if b := &blocks[i]; b.Type == "tool_call" && b.Display == nil {
-			b.Display = searchDisplay(b.Name, b.Arguments, b.Result)
+			b.Display = SearchDisplay(b.Name, b.Arguments, b.Result)
 		}
 	}
 	return blocks
@@ -469,7 +469,7 @@ func (c legacyCodeCall) arguments() string {
 
 // attachments are a message's attachments, made from the document text and
 // image bytes the apps once kept on the message itself. Each has an id.
-func (m *legacyMessage) attachments(messageID string, images backupImages) []Attachment {
+func (m *legacyMessage) attachments(messageID string, images BackupImages) []Attachment {
 	var attachments []Attachment
 	if m.Attachments != nil {
 		attachments = make([]Attachment, len(m.Attachments))
@@ -494,7 +494,7 @@ func (m *legacyMessage) attachments(messageID string, images backupImages) []Att
 // descriptions apart from the documents' contents, they are the first
 // files, as the apps read them. Text no file has a section of is the only
 // document's, or else one unnamed document's.
-func (m *legacyMessage) flatAttachments(images backupImages) []Attachment {
+func (m *legacyMessage) flatAttachments(images BackupImages) []Attachment {
 	claimed := false
 	contents := func(name string) string {
 		claimed = claimed || strings.Contains(m.DocumentContent, documentHeading(name))
@@ -556,21 +556,21 @@ func legacySection(combined, heading, next string) string {
 	return strings.TrimSpace(section)
 }
 
-// readProfile reads a profile row.
-func readProfile(data []byte) (storedProfile, error) {
+// ReadProfile reads a profile row.
+func ReadProfile(data []byte) (StoredProfile, error) {
 	switch current, err := currentFormat(data); {
 	case err != nil:
-		return storedProfile{}, err
+		return StoredProfile{}, err
 	case current:
-		var profile storedProfile
+		var profile StoredProfile
 		return profile, readCurrent(data, &profile)
 	}
 	var stored struct {
-		storedProfile
-		UpdatedAt looseTime `json:"updatedAt"`
+		StoredProfile
+		UpdatedAt LooseTime `json:"updatedAt"`
 	}
 	readLenient(data, &stored)
-	profile := stored.storedProfile
+	profile := stored.StoredProfile
 	profile.UpdatedAt = string(stored.UpdatedAt)
 	// The migrated prompt is dated by the profile, or by undatedProfile for a
 	// profile without a date, so each read of a profile not yet stored again
@@ -586,9 +586,9 @@ func readProfile(data []byte) (storedProfile, error) {
 // undatedProfile is the date a profile without one is read as written.
 var undatedProfile = time.Unix(0, 0).UTC()
 
-// migratedPromptPresetID names the saved prompt an old custom default
+// MigratedPromptPresetID names the saved prompt an old custom default
 // prompt becomes, as the iOS app names it.
-const migratedPromptPresetID = "user:migrated-custom-prompt"
+const MigratedPromptPresetID = "user:migrated-custom-prompt"
 
 // systemTags are the tags old clients wrapped a custom prompt in.
 var systemTags = regexp.MustCompile(`^<system>\s*\n?|\n?</system>\s*$`)
@@ -607,29 +607,29 @@ func upgradeProfile(p *Profile, now time.Time) {
 			p.CustomPromptPresets[i].Model = new(normalizeModel(*model))
 		}
 	}
-	if !valueOr(p.IsUsingCustomPrompt, false) {
+	if !ValueOr(p.IsUsingCustomPrompt, false) {
 		return
 	}
-	prompt := valueOr(p.CustomSystemPrompt, "")
+	prompt := ValueOr(p.CustomSystemPrompt, "")
 	p.IsUsingCustomPrompt, p.CustomSystemPrompt = new(false), new("")
-	if strings.TrimSpace(systemTags.ReplaceAllString(prompt, "")) == "" || valueOr(p.DefaultPromptPresetID, "") != "" {
+	if strings.TrimSpace(systemTags.ReplaceAllString(prompt, "")) == "" || ValueOr(p.DefaultPromptPresetID, "") != "" {
 		return
 	}
-	if p.preset(migratedPromptPresetID) == nil {
+	if p.Preset(MigratedPromptPresetID) == nil {
 		date := api.Raw(now.UnixMilli())
-		p.CustomPromptPresets = append(p.CustomPromptPresets, CustomPreset{ID: migratedPromptPresetID, Name: "My default prompt", Description: new("Migrated from the custom default prompt setting"),
+		p.CustomPromptPresets = append(p.CustomPromptPresets, CustomPreset{ID: MigratedPromptPresetID, Name: "My default prompt", Description: new("Migrated from the custom default prompt setting"),
 			SystemPrompt: &prompt, CreatedAt: date, UpdatedAt: date})
 	}
-	p.DefaultPromptPresetID = new(migratedPromptPresetID)
+	p.DefaultPromptPresetID = new(MigratedPromptPresetID)
 }
 
-// readProject reads a project row.
-func readProject(row *storedRow) (Project, error) {
+// ReadProject reads a project row.
+func ReadProject(row *StoredRow) (Project, error) {
 	switch current, err := currentFormat(row.Data); {
 	case err != nil:
 		return Project{}, err
 	case current:
-		var stored storedProject
+		var stored StoredProject
 		if err := readCurrent(row.Data, &stored, currentProject...); err != nil {
 			return Project{}, err
 		}
@@ -638,8 +638,8 @@ func readProject(row *storedRow) (Project, error) {
 	}
 	var stored struct {
 		Project
-		CreatedAt looseTime `json:"createdAt"`
-		UpdatedAt looseTime `json:"updatedAt"`
+		CreatedAt LooseTime `json:"createdAt"`
+		UpdatedAt LooseTime `json:"updatedAt"`
 	}
 	readLenient(row.Data, &stored)
 	project := stored.Project
@@ -647,15 +647,15 @@ func readProject(row *storedRow) (Project, error) {
 	return project, nil
 }
 
-// readProjectDocument reads a project document row, which sync files under
+// ReadProjectDocument reads a project document row, which sync files under
 // the project's id.
-func readProjectDocument(row *storedRow, projectID string) (ProjectDocument, error) {
+func ReadProjectDocument(row *StoredRow, projectID string) (ProjectDocument, error) {
 	var doc ProjectDocument
 	switch current, err := currentFormat(row.Data); {
 	case err != nil:
 		return ProjectDocument{}, err
 	case current:
-		var stored storedDocument
+		var stored StoredDocument
 		if err := readCurrent(row.Data, &stored, currentDocument...); err != nil {
 			return ProjectDocument{}, err
 		}
@@ -663,8 +663,8 @@ func readProjectDocument(row *storedRow, projectID string) (ProjectDocument, err
 	default:
 		var stored struct {
 			ProjectDocument
-			CreatedAt looseTime `json:"createdAt"`
-			UpdatedAt looseTime `json:"updatedAt"`
+			CreatedAt LooseTime `json:"createdAt"`
+			UpdatedAt LooseTime `json:"updatedAt"`
 		}
 		readLenient(row.Data, &stored)
 		doc = stored.ProjectDocument

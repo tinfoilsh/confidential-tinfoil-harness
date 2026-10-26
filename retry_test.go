@@ -9,6 +9,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 func TestARetryRepeatsWhatTheChatLeftUnfinished(t *testing.T) {
@@ -45,7 +46,7 @@ func TestARetryRepeatsWhatTheChatLeftUnfinished(t *testing.T) {
 		}
 	}
 	// A device chat's first turn starts it without messages.
-	w := postRoute(h, "/v1/threads/turn", api.Object{"threadId": rowID(), "clientRequestId": "6f1c4a8e-0d55-4b8f-9a8e-2f0c7b9d1e11", "kind": "retry", "local": true}, "")
+	w := postRoute(h, "/v1/threads/turn", api.Object{"threadId": domain.RowID(), "clientRequestId": "6f1c4a8e-0d55-4b8f-9a8e-2f0c7b9d1e11", "kind": "retry", "local": true}, "")
 	var refused struct {
 		Error api.Error `json:"error"`
 	}

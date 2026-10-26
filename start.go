@@ -9,6 +9,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
@@ -18,7 +19,7 @@ const commitTimeout = time.Minute
 // turnPlan is what a turn starts from: its thread with the turn applied, in
 // the form it is stored, and the request its run makes.
 type turnPlan struct {
-	row         *threadRow
+	row         *domain.ThreadRow
 	turn        *turnRequest // the turn carried out: a retry is the turn it repeats
 	request     *request
 	model       *model
@@ -28,7 +29,7 @@ type turnPlan struct {
 
 // retryTarget is the widget call a retry regenerates, and the reply it is in.
 type retryTarget struct {
-	block    Block
+	block    domain.Block
 	parentID string
 }
 
@@ -40,16 +41,16 @@ var errThreadDeleted = api.Err(404, "THREAD_NOT_FOUND", "The thread was deleted"
 // create, a new chat's missing row is made.
 func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *auth.Principal, create bool) (*turnPlan, error) {
 	s := r.thread
-	var row *threadRow
-	var profile Profile
-	var project *Project
-	var docs []ProjectDocument
+	var row *domain.ThreadRow
+	var profile domain.Profile
+	var project *domain.Project
+	var docs []domain.ProjectDocument
 	// The run holds a device chat's row and an ask's. A device chat's
 	// settings are the ones its client sends; an ask about a stored chat
 	// reads the user's and the chat's project, as the chat does.
 	if s.local {
 		h.live.mu.Lock()
-		row = &threadRow{Thread: s.row.clone()}
+		row = &domain.ThreadRow{Thread: s.row.Clone()}
 		h.live.mu.Unlock()
 	}
 	if r.input.Local {
@@ -65,17 +66,17 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *auth.Principal
 		if !s.local {
 			// A new chat's first turn creates its row under the client's id.
 			row, err = h.loadThread(ctx, p, r.key, s.id)
-			if err != nil && (api.AsError(err).HTTP != 404 || !rowIDPattern.MatchString(s.id) || !create) {
+			if err != nil && (api.AsError(err).HTTP != 404 || !domain.RowIDPattern.MatchString(s.id) || !create) {
 				return nil, err
 			}
 			if err != nil {
-				row = &threadRow{Thread: newThread(s.id, r.input.ProjectID, r.input.PresetID.Value)}
+				row = &domain.ThreadRow{Thread: newThread(s.id, r.input.ProjectID, r.input.PresetID.Value)}
 			}
 			if row.LastRequestID == r.nonce {
 				return nil, errAlreadyApplied
 			}
 		}
-		if id := valueOr(row.ProjectID, ""); id != "" {
+		if id := domain.ValueOr(row.ProjectID, ""); id != "" {
 			stored, err := h.loadProject(ctx, p, r.key, id)
 			if err != nil {
 				return nil, err
@@ -99,15 +100,15 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *auth.Principal
 	// prompt preset, whose settings it takes. A first turn naming a preset,
 	// or null, overrides the default, and the turn's own settings override
 	// the preset's.
-	if row.etag == "" && len(t.Messages) == 0 {
+	if row.ETag == "" && len(t.Messages) == 0 {
 		preset := r.input.PresetID.Value
-		if id := valueOr(profile.DefaultPromptPresetID, ""); !r.input.PresetID.Set && id != "" {
+		if id := domain.ValueOr(profile.DefaultPromptPresetID, ""); !r.input.PresetID.Set && id != "" {
 			preset = &id
 		}
 		c := h.catalog.get()
-		t.Model = c.selectedModel(&profile)
-		t.WebSearchEnabled = valueOr(profile.WebSearchEnabled, t.WebSearchEnabled)
-		c.applyPreset(t, &profile, preset)
+		t.Model = c.SelectedModel(&profile)
+		t.WebSearchEnabled = domain.ValueOr(profile.WebSearchEnabled, t.WebSearchEnabled)
+		c.ApplyPreset(t, &profile, preset)
 	}
 	attachments, err := turnAttachments(turn, t)
 	if err != nil {
@@ -117,8 +118,8 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *auth.Principal
 		return nil, err
 	}
 	options := r.input.Options
-	t.Model = cmp.Or(options.Model, t.Model, autoModelName)
-	t.WebSearchEnabled = valueOr(options.WebSearch, t.WebSearchEnabled)
+	t.Model = cmp.Or(options.Model, t.Model, domain.AutoModelName)
+	t.WebSearchEnabled = domain.ValueOr(options.WebSearch, t.WebSearchEnabled)
 	// Sync stores a chat only if every attachment it names is stored under the
 	// chat. An ask's stored source has attachments in sync; a keyless thread
 	// carries its own. Image descriptions are stored, image bytes are not.
@@ -131,7 +132,7 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *auth.Principal
 		return nil, err
 	}
 	// Offloaded documents are read back for the prompt alone.
-	working := t.clone()
+	working := t.Clone()
 	if !s.keyless {
 		if err := h.hydrateDocuments(ctx, p, &working); err != nil {
 			return nil, err
@@ -148,7 +149,7 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *auth.Principal
 	if r.input.Kind == "retryToolCall" {
 		for _, message := range t.Messages {
 			for _, block := range message.Timeline {
-				if block.callID() == r.input.ToolCallID {
+				if block.CallID() == r.input.ToolCallID {
 					plan.retryTarget = &retryTarget{block: block, parentID: message.ID}
 				}
 			}
@@ -156,7 +157,7 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *auth.Principal
 		if plan.retryTarget == nil {
 			return nil, api.Err(404, "THREAD_NOT_FOUND", "The widget call was not found")
 		}
-		if !slices.ContainsFunc(h.catalog.get().selectedWidgets(r.input.Widgets, true), func(w widget) bool { return w.Name == plan.retryTarget.block.Name }) {
+		if !slices.ContainsFunc(h.catalog.get().SelectedWidgets(r.input.Widgets, true), func(w domain.Widget) bool { return w.Name == plan.retryTarget.block.Name }) {
 			return nil, api.Err(503, "TOOL_UNAVAILABLE", "This widget is not enabled for the client").WithAction(api.ActionStop)
 		}
 	}
@@ -238,10 +239,10 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	// A continuation streams into the reply it extends, which RUN_STARTED names.
 	if r.turn.Kind == "continue" {
 		reply := row.Messages[len(row.Messages)-1]
-		r.assembler.seed(reply)
+		r.assembler.Seed(reply)
 		r.out.replyID = reply.ID
 	}
-	shown := window(row, "", messageWindow)
+	shown := domain.Window(row, "", domain.MessageWindow)
 	h.live.mu.Lock()
 	if s.deleted {
 		h.live.mu.Unlock()
@@ -253,11 +254,11 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	}
 	r.row, r.running = row, true
 	// Framed under the lock, so no queue change reaches the run before them.
-	r.out.emit(runStarted{ThreadID: s.id, RunID: r.log.id, Instance: instanceID, MessageID: r.out.replyID})
-	r.out.emit(messagesSnapshot{Messages: shown.Messages, HasOlder: shown.HasOlder})
-	r.out.emit(stateSnapshotEvent{stateSnapshot{shown.threadSummary, queueItems(s), r.credential.Limit}})
+	r.out.emit(domain.RunStarted{ThreadID: s.id, RunID: r.log.id, Instance: instanceID, MessageID: r.out.replyID})
+	r.out.emit(domain.MessagesSnapshot{Messages: shown.Messages, HasOlder: shown.HasOlder})
+	r.out.emit(domain.StateSnapshotEvent{Snapshot: domain.StateSnapshot{Thread: shown.ThreadSummary, Queue: queueItems(s), RateLimit: r.credential.Limit}})
 	r.out.mu.Lock()
-	r.out.observe = r.assembler.apply
+	r.out.observe = r.assembler.Apply
 	r.out.mu.Unlock()
 	titlePrincipal := *r.principal
 	h.live.working.Add(1)
@@ -310,7 +311,7 @@ func (h *harness) refuseFlagged(ctx context.Context, r *chatRun, p *auth.Princip
 		return nil
 	}
 	if !r.thread.local && r.input.Kind != "ask" {
-		_, err := h.mutateThread(ctx, p, r.key, chat, func(t *Thread) error {
+		_, err := h.mutateThread(ctx, p, r.key, chat, func(t *domain.Thread) error {
 			t.Flagged = true
 			return nil
 		})
@@ -322,8 +323,8 @@ func (h *harness) refuseFlagged(ctx context.Context, r *chatRun, p *auth.Princip
 }
 
 // activeRun marks a chat's reply as streaming until the run's deadline.
-func activeRun(runID string) *ActiveRun {
-	return &ActiveRun{RunID: runID, ExpiresAt: api.Now().Add(runTimeout).Format(time.RFC3339Nano), Instance: instanceID}
+func activeRun(runID string) *domain.ActiveRun {
+	return &domain.ActiveRun{RunID: runID, ExpiresAt: api.Now().Add(runTimeout).Format(time.RFC3339Nano), Instance: instanceID}
 }
 
 func usageForRun(r *chatRun) usagereporting.Context {
@@ -351,8 +352,8 @@ func (h *harness) endUnstarted(r *chatRun, err error) *chatRun {
 	next := h.advance(r, true)
 	h.live.mu.Unlock()
 	e := api.AsError(h.withQuota(r.principal, r.credential.Limit, err))
-	limit := valueOr(e.RateLimit, r.credential.Limit)
-	r.out.emit(failedRun(r.thread.id, r.log.id, e, &runMetadata{RateLimit: &limit}))
+	limit := domain.ValueOr(e.RateLimit, r.credential.Limit)
+	r.out.emit(domain.FailedRun(r.thread.id, r.log.id, e, &domain.RunMetadata{RateLimit: &limit}))
 	r.log.log.close(errDone)
 	r.release()
 	close(r.finished)

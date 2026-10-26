@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 // The store is the harness's typed view of sync: chats, the profile,
@@ -26,7 +27,7 @@ var errEveryCommitConflicted = api.Err(409, "REVISION_CONFLICT", "The row change
 // push writes a row at the revision it was read at; an empty one creates
 // it. A push whose outcome is unknown is sent again under the same
 // idempotency key, which sync answers with the first push's outcome.
-func (h *harness) push(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope string, row *storedRow) error {
+func (h *harness) push(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope string, row *domain.StoredRow) error {
 	nonce := uuid.NewString()
 	for attempt := 1; ; attempt++ {
 		etag, err := h.storeRows.push(ctx, p, key, scope, row, nonce)
@@ -43,7 +44,7 @@ func (h *harness) push(ctx context.Context, p *auth.Principal, key auth.ContentK
 // commitRow applies edit to a row as read now and pushes it at that
 // revision, again after a conflict, so a conflict never overwrites another
 // writer's change with an old copy. With create, a missing row is made.
-func (h *harness) commitRow(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, id string, create bool, edit func(row *storedRow, exists bool) error) error {
+func (h *harness) commitRow(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, id string, create bool, edit func(row *domain.StoredRow, exists bool) error) error {
 	for attempt := 0; attempt < maxCommitAttempts; attempt++ {
 		row, err := h.storeRows.load(ctx, p, key, scope, id)
 		exists := err == nil
@@ -51,7 +52,7 @@ func (h *harness) commitRow(ctx context.Context, p *auth.Principal, key auth.Con
 			if !create || api.AsError(err).HTTP != 404 {
 				return err
 			}
-			row = &storedRow{ID: id}
+			row = &domain.StoredRow{ID: id}
 		}
 		if err := edit(row, exists); err != nil {
 			return err
@@ -66,7 +67,7 @@ func (h *harness) commitRow(ctx context.Context, p *auth.Principal, key auth.Con
 
 // eachRowOrUnreadable visits every row of a scope, or of a project's chats,
 // and names each row sync holds but cannot open.
-func (h *harness) eachRowOrUnreadable(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, project string, visit func(*storedRow) error, unreadable func(string)) error {
+func (h *harness) eachRowOrUnreadable(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, project string, visit func(*domain.StoredRow) error, unreadable func(string)) error {
 	cursor := ""
 	for {
 		page, err := h.storeRows.list(ctx, p, key, scope, cursor, project, 100)
@@ -91,7 +92,7 @@ func (h *harness) eachRowOrUnreadable(ctx context.Context, p *auth.Principal, ke
 	}
 }
 
-func (h *harness) eachRow(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, project string, visit func(*storedRow) error) error {
+func (h *harness) eachRow(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, project string, visit func(*domain.StoredRow) error) error {
 	return h.eachRowOrUnreadable(ctx, p, key, scope, project, visit, func(string) {})
 }
 
@@ -102,15 +103,15 @@ func refuseUnreadable(_ string, err error) error { return err }
 
 // Chats
 
-func (h *harness) loadThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, id string) (*threadRow, error) {
+func (h *harness) loadThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, id string) (*domain.ThreadRow, error) {
 	row, err := h.storeRows.load(ctx, p, key, "chat", id)
 	if err != nil {
 		return nil, err
 	}
-	return readThreadRow(row)
+	return domain.ReadThreadRow(row)
 }
 
-func (h *harness) threadBatch(ctx context.Context, p *auth.Principal, key auth.ContentKey, ids []string) ([]*threadRow, error) {
+func (h *harness) threadBatch(ctx context.Context, p *auth.Principal, key auth.ContentKey, ids []string) ([]*domain.ThreadRow, error) {
 	rows, failed, err := h.storeRows.pull(ctx, p, key, "chat", ids)
 	if err != nil {
 		return nil, err
@@ -120,11 +121,11 @@ func (h *harness) threadBatch(ctx context.Context, p *auth.Principal, key auth.C
 			return nil, err
 		}
 	}
-	threads := make([]*threadRow, 0, len(rows))
+	threads := make([]*domain.ThreadRow, 0, len(rows))
 	for i := range rows {
 		// A chat this harness cannot read is left out, as one sync cannot
 		// open is.
-		if t, err := readThreadRow(&rows[i]); err == nil {
+		if t, err := domain.ReadThreadRow(&rows[i]); err == nil {
 			threads = append(threads, t)
 		}
 	}
@@ -136,16 +137,16 @@ func (h *harness) removeThreadRevision(ctx context.Context, p *auth.Principal, k
 }
 
 // threadPage is one page of a user's chats, newest first, or of a project's.
-func (h *harness) threadPage(ctx context.Context, p *auth.Principal, key auth.ContentKey, cursor, project string, limit int) ([]*threadRow, string, error) {
+func (h *harness) threadPage(ctx context.Context, p *auth.Principal, key auth.ContentKey, cursor, project string, limit int) ([]*domain.ThreadRow, string, error) {
 	page, err := h.storeRows.list(ctx, p, key, "chat", cursor, project, limit)
 	if err != nil {
 		return nil, "", err
 	}
-	threads := make([]*threadRow, 0, len(page.Rows))
+	threads := make([]*domain.ThreadRow, 0, len(page.Rows))
 	for i := range page.Rows {
 		// A chat this harness cannot read is left out, as one sync cannot
 		// open is.
-		if t, err := readThreadRow(&page.Rows[i]); err == nil {
+		if t, err := domain.ReadThreadRow(&page.Rows[i]); err == nil {
 			threads = append(threads, t)
 		}
 	}
@@ -154,14 +155,14 @@ func (h *harness) threadPage(ctx context.Context, p *auth.Principal, key auth.Co
 
 // saveThread pushes a chat at the revision it was read at. A chat naming
 // attachments sync does not hold under it is repaired once and pushed again.
-func (h *harness) saveThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, row *threadRow) error {
-	row.RecordVersion = recordVersion
+func (h *harness) saveThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, row *domain.ThreadRow) error {
+	row.RecordVersion = domain.RecordVersion
 	row.UpdatedAt = api.Timestamp()
 	for repaired := false; ; repaired = true {
-		stored := storedRow{ID: row.ID, ETag: row.etag, Data: api.Raw(row.Thread), project: row.ProjectID, projectSet: true, restore: row.restore}
+		stored := domain.StoredRow{ID: row.ID, ETag: row.ETag, Data: api.Raw(row.Thread), Project: row.ProjectID, ProjectSet: true, Restore: row.Restore}
 		err := h.push(ctx, p, key, "chat", &stored)
 		if err == nil {
-			row.etag = stored.ETag
+			row.ETag = stored.ETag
 			return nil
 		}
 		if e := api.AsError(err); e.Code != "MISSING_ATTACHMENT" || repaired {
@@ -174,7 +175,7 @@ func (h *harness) saveThread(ctx context.Context, p *auth.Principal, key auth.Co
 
 // mutateThread applies change to a stored chat as read now, again after a
 // conflict, so a conflict never overwrites another writer's change.
-func (h *harness) mutateThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, id string, change func(*Thread) error) (*threadRow, error) {
+func (h *harness) mutateThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, id string, change func(*domain.Thread) error) (*domain.ThreadRow, error) {
 	for attempt := 0; attempt < maxCommitAttempts; attempt++ {
 		row, err := h.loadThread(ctx, p, key, id)
 		if err != nil {
@@ -215,16 +216,16 @@ func (h *harness) forkStored(ctx context.Context, p *auth.Principal, key auth.Co
 // them sync or this harness cannot open, which are left out. A chat deleted
 // since it was indexed is not a result. One sync could not fetch in time
 // fails the search, which may find it when run again.
-func (h *harness) searchResults(ctx context.Context, p *auth.Principal, key auth.ContentKey, ids []string) ([]*threadRow, int, error) {
+func (h *harness) searchResults(ctx context.Context, p *auth.Principal, key auth.ContentKey, ids []string) ([]*domain.ThreadRow, int, error) {
 	rows, failed, err := h.storeRows.pull(ctx, p, key, "chat", ids)
 	if err != nil {
 		return nil, 0, err
 	}
-	pulled := map[string]*storedRow{}
+	pulled := map[string]*domain.StoredRow{}
 	for i := range rows {
 		pulled[rows[i].ID] = &rows[i]
 	}
-	found, unreadable := []*threadRow{}, 0
+	found, unreadable := []*domain.ThreadRow{}, 0
 	for _, id := range ids {
 		row, pulledRow := pulled[id]
 		switch err := failed[id]; {
@@ -233,7 +234,7 @@ func (h *harness) searchResults(ctx context.Context, p *auth.Principal, key auth
 		case err != nil:
 			unreadable++
 		case pulledRow:
-			if thread, err := readThreadRow(row); err != nil {
+			if thread, err := domain.ReadThreadRow(row); err != nil {
 				unreadable++
 			} else {
 				found = append(found, thread)
@@ -290,7 +291,7 @@ func (h *harness) reindexChats(ctx context.Context, p *auth.Principal, key auth.
 // Profile
 
 // loadProfile is the user's profile, or nil without one.
-func (h *harness) loadProfile(ctx context.Context, p *auth.Principal, key auth.ContentKey) (*storedProfile, error) {
+func (h *harness) loadProfile(ctx context.Context, p *auth.Principal, key auth.ContentKey) (*domain.StoredProfile, error) {
 	row, err := h.storeRows.load(ctx, p, key, "profile", "profile")
 	if err != nil {
 		if api.AsError(err).HTTP == 404 {
@@ -298,20 +299,20 @@ func (h *harness) loadProfile(ctx context.Context, p *auth.Principal, key auth.C
 		}
 		return nil, err
 	}
-	profile, err := readProfile(row.Data)
+	profile, err := domain.ReadProfile(row.Data)
 	if err != nil {
 		return nil, err
 	}
 	return &profile, nil
 }
 
-func (h *harness) mutateProfile(ctx context.Context, p *auth.Principal, key auth.ContentKey, change func(*storedProfile) error) (storedProfile, error) {
-	var profile storedProfile
-	err := h.commitRow(ctx, p, key, "profile", "profile", true, func(row *storedRow, exists bool) error {
-		profile = storedProfile{}
+func (h *harness) mutateProfile(ctx context.Context, p *auth.Principal, key auth.ContentKey, change func(*domain.StoredProfile) error) (domain.StoredProfile, error) {
+	var profile domain.StoredProfile
+	err := h.commitRow(ctx, p, key, "profile", "profile", true, func(row *domain.StoredRow, exists bool) error {
+		profile = domain.StoredProfile{}
 		if exists {
 			var err error
-			if profile, err = readProfile(row.Data); err != nil {
+			if profile, err = domain.ReadProfile(row.Data); err != nil {
 				return err
 			}
 		}
@@ -323,7 +324,7 @@ func (h *harness) mutateProfile(ctx context.Context, p *auth.Principal, key auth
 			return errProfileUnchanged
 		}
 		profile.UpdatedAt = api.Timestamp()
-		profile.RecordVersion = recordVersion
+		profile.RecordVersion = domain.RecordVersion
 		row.Data = api.Raw(profile)
 		return nil
 	})
@@ -337,24 +338,24 @@ var errProfileUnchanged = errors.New("profile unchanged")
 
 // Projects
 
-func (h *harness) loadProject(ctx context.Context, p *auth.Principal, key auth.ContentKey, id string) (Project, error) {
+func (h *harness) loadProject(ctx context.Context, p *auth.Principal, key auth.ContentKey, id string) (domain.Project, error) {
 	row, err := h.storeRows.load(ctx, p, key, "project", id)
 	if err != nil {
-		return Project{}, err
+		return domain.Project{}, err
 	}
-	return readProject(row)
+	return domain.ReadProject(row)
 }
 
-func (h *harness) projectPage(ctx context.Context, p *auth.Principal, key auth.ContentKey, cursor string, limit int) ([]Project, string, error) {
+func (h *harness) projectPage(ctx context.Context, p *auth.Principal, key auth.ContentKey, cursor string, limit int) ([]domain.Project, string, error) {
 	page, err := h.storeRows.list(ctx, p, key, "project", cursor, "", limit)
 	if err != nil {
 		return nil, "", err
 	}
-	projects := make([]Project, 0, len(page.Rows))
+	projects := make([]domain.Project, 0, len(page.Rows))
 	for i := range page.Rows {
 		// A project this harness cannot read is left out, as one sync cannot
 		// open is.
-		if project, err := readProject(&page.Rows[i]); err == nil {
+		if project, err := domain.ReadProject(&page.Rows[i]); err == nil {
 			projects = append(projects, project)
 		}
 	}
@@ -362,19 +363,19 @@ func (h *harness) projectPage(ctx context.Context, p *auth.Principal, key auth.C
 }
 
 // mutateProject applies change to a project, or with create to a new one.
-func (h *harness) mutateProject(ctx context.Context, p *auth.Principal, key auth.ContentKey, id string, create bool, change func(*Project)) (Project, error) {
-	var project Project
-	err := h.commitRow(ctx, p, key, "project", id, create, func(row *storedRow, exists bool) error {
-		project = Project{ID: id, CreatedAt: api.Timestamp()}
+func (h *harness) mutateProject(ctx context.Context, p *auth.Principal, key auth.ContentKey, id string, create bool, change func(*domain.Project)) (domain.Project, error) {
+	var project domain.Project
+	err := h.commitRow(ctx, p, key, "project", id, create, func(row *domain.StoredRow, exists bool) error {
+		project = domain.Project{ID: id, CreatedAt: api.Timestamp()}
 		if exists {
 			var err error
-			if project, err = readProject(row); err != nil {
+			if project, err = domain.ReadProject(row); err != nil {
 				return err
 			}
 		}
 		change(&project)
 		project.UpdatedAt = api.Timestamp()
-		row.Data = api.Raw(storedProject{project, recordVersion})
+		row.Data = api.Raw(domain.StoredProject{Project: project, RecordVersion: domain.RecordVersion})
 		return nil
 	})
 	return project, err
@@ -393,7 +394,7 @@ func (h *harness) removeAllProjects(ctx context.Context, p *auth.Principal, key 
 // open, or this harness cannot read, is passed to unreadable with why, which
 // fails the read by returning an error or leaves the document out by
 // returning nil.
-func (h *harness) projectDocuments(ctx context.Context, p *auth.Principal, key auth.ContentKey, id string, unreadable func(row string, err error) error) ([]ProjectDocument, error) {
+func (h *harness) projectDocuments(ctx context.Context, p *auth.Principal, key auth.ContentKey, id string, unreadable func(row string, err error) error) ([]domain.ProjectDocument, error) {
 	// Unfiltered pages can repeat a row that changed while listing; the
 	// later copy is the newer one.
 	var order []string
@@ -423,12 +424,12 @@ func (h *harness) projectDocuments(ctx context.Context, p *auth.Principal, key a
 		}
 		cursor = page.Next
 	}
-	list := []ProjectDocument{}
+	list := []domain.ProjectDocument{}
 	for _, rowID := range order {
 		listed := latest[rowID]
-		doc, err := ProjectDocument{}, listed.err
+		doc, err := domain.ProjectDocument{}, listed.err
 		if err == nil {
-			doc, err = readProjectDocument(listed.row, id)
+			doc, err = domain.ReadProjectDocument(listed.row, id)
 		}
 		if err != nil {
 			if err := unreadable(rowID, err); err != nil {
@@ -444,25 +445,25 @@ func (h *harness) projectDocuments(ctx context.Context, p *auth.Principal, key a
 // documentCopy is a document row as a page listed it, or why sync could not
 // open it.
 type documentCopy struct {
-	row *storedRow
+	row *domain.StoredRow
 	err error
 }
 
 // createProjectDocument stores a new document under its project.
-func (h *harness) createProjectDocument(ctx context.Context, p *auth.Principal, key auth.ContentKey, doc ProjectDocument) (ProjectDocument, error) {
+func (h *harness) createProjectDocument(ctx context.Context, p *auth.Principal, key auth.ContentKey, doc domain.ProjectDocument) (domain.ProjectDocument, error) {
 	id := doc.ProjectID + "/" + doc.ID
-	err := h.commitRow(ctx, p, key, "project_document", id, true, func(row *storedRow, exists bool) error {
-		row.project, row.projectSet = &doc.ProjectID, true
+	err := h.commitRow(ctx, p, key, "project_document", id, true, func(row *domain.StoredRow, exists bool) error {
+		row.Project, row.ProjectSet = &doc.ProjectID, true
 		doc.CreatedAt = api.Timestamp()
 		if exists {
-			stored, err := readProjectDocument(row, doc.ProjectID)
+			stored, err := domain.ReadProjectDocument(row, doc.ProjectID)
 			if err != nil {
 				return err
 			}
 			doc.CreatedAt = stored.CreatedAt
 		}
 		doc.UpdatedAt = api.Timestamp()
-		row.Data, row.project, row.projectSet = api.Raw(storedDocument{doc, recordVersion}), &doc.ProjectID, true
+		row.Data, row.Project, row.ProjectSet = api.Raw(domain.StoredDocument{ProjectDocument: doc, RecordVersion: domain.RecordVersion}), &doc.ProjectID, true
 		return nil
 	})
 	return doc, err

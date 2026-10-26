@@ -13,6 +13,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 // A flag lookup the control plane is slow to answer flags nothing rather
@@ -35,7 +36,7 @@ func TestASlowFlagLookupFlagsNothing(t *testing.T) {
 	storedThread(rows, "alice", "chat-1")
 	within(t, "listing", func() error {
 		var list struct {
-			Threads []threadSummary `json:"threads"`
+			Threads []domain.ThreadSummary `json:"threads"`
 		}
 		w := postRoute(h, "/v1/threads/list", api.Object{"key": keyBase64(key)}, "alice")
 		if json.Unmarshal(w.Body.Bytes(), &list); len(list.Threads) != 1 || list.Threads[0].ID != "chat-1" || list.Threads[0].Flagged {
@@ -66,7 +67,7 @@ func TestAFlaggedChatTakesNoTurns(t *testing.T) {
 	storedThread(rows, "alice", "fine")
 	// A flagged chat that takes no turn is flagged only by the control plane.
 	storedThread(rows, "alice", "listed")
-	rows.rows["user:alice/profile/profile"] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(api.Object{"pinnedChatIds": []string{"listed", "fine"}})}
+	rows.rows["user:alice/profile/profile"] = domain.StoredRow{ID: "profile", ETag: "1", Data: api.Raw(api.Object{"pinnedChatIds": []string{"listed", "fine"}})}
 	code := func(w *httptest.ResponseRecorder) string {
 		var refused struct {
 			Error api.Error `json:"error"`
@@ -90,8 +91,8 @@ func TestAFlaggedChatTakesNoTurns(t *testing.T) {
 		t.Fatal("the refused chat was not stored as flagged")
 	}
 	var list struct {
-		Threads []threadSummary `json:"threads"`
-		Pinned  []threadSummary `json:"pinned"`
+		Threads []domain.ThreadSummary `json:"threads"`
+		Pinned  []domain.ThreadSummary `json:"pinned"`
 	}
 	json.Unmarshal(postRoute(h, "/v1/threads/list", api.Object{"key": keyBase64(key)}, "alice").Body.Bytes(), &list)
 	pinned := map[string]bool{}
@@ -108,7 +109,7 @@ func TestAFlaggedChatTakesNoTurns(t *testing.T) {
 	if len(list.Threads) != 3 || !reflect.DeepEqual(listed, map[string]bool{"flagged": true, "fine": false, "listed": true}) {
 		t.Fatalf("the list shows %+v", list.Threads)
 	}
-	var got threadSummary
+	var got domain.ThreadSummary
 	json.Unmarshal(postRoute(h, "/v1/threads/get", api.Object{"key": keyBase64(key), "id": "listed"}, "alice").Body.Bytes(), &got)
 	if got.ID != "listed" || !got.Flagged {
 		t.Fatalf("the chat reads as %+v", got)
@@ -137,7 +138,7 @@ func TestFlagsAreReusedOnlyForTheirCaller(t *testing.T) {
 	storedThread(rows, "alice", "chat-1")
 	storedThread(rows, "bob", "chat-1")
 	flagged := func(user string) bool {
-		var got threadSummary
+		var got domain.ThreadSummary
 		json.Unmarshal(postRoute(h, "/v1/threads/get", api.Object{"key": keyBase64(key), "id": "chat-1"}, user).Body.Bytes(), &got)
 		return got.Flagged
 	}

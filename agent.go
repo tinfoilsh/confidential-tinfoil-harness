@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
@@ -47,7 +48,7 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 		return fmt.Errorf("tools: %w", err)
 	}
 	defer set.close()
-	set.widgets = map[string]widget{}
+	set.widgets = map[string]domain.Widget{}
 	for _, w := range req.widgets {
 		set.widgets[w.Name] = w
 	}
@@ -183,8 +184,8 @@ func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) (mess
 			return answered(call.id, `{"error":"unknown tool"}`)
 		}
 		// The caller never reports back, so only the model can be told the widget was not drawn.
-		if failure := widgetFailure(w, call.args); failure != nil {
-			out.emit(toolCallResult{MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: failure})
+		if failure := domain.WidgetFailure(w, call.args); failure != nil {
+			out.emit(domain.ToolCallResult{MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: failure})
 			if !set.retry(call.name) {
 				return answered(call.id, `{"status":"executed"}`)
 			}
@@ -194,7 +195,7 @@ func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) (mess
 		if err != nil {
 			content = api.Object{"error": api.AsError(err).Message}
 		}
-		out.emit(toolCallResult{MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: api.Raw(content)})
+		out.emit(domain.ToolCallResult{MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: api.Raw(content)})
 		return answered(call.id, "[rendered for the user]")
 	}
 	out.activity(call)
@@ -207,11 +208,11 @@ func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) (mess
 		// The model reads the failure and can retry rather than the turn dying;
 		// the caller learns only that the call failed, never the tool's own text.
 		failure, _ := json.Marshal(map[string]string{"error": err.Error()})
-		read, meta, shown = string(failure), nil, json.RawMessage(toolError)
+		read, meta, shown = string(failure), nil, json.RawMessage(domain.ToolError)
 	} else {
-		shown = normalizeToolResult(call.name, call.args, content)
+		shown = domain.NormalizeToolResult(call.name, call.args, content)
 	}
-	out.emit(toolCallResult{MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: api.Raw(shown), Metadata: meta, Display: searchDisplay(call.name, call.args, api.Raw(shown))})
+	out.emit(domain.ToolCallResult{MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: api.Raw(shown), Metadata: meta, Display: domain.SearchDisplay(call.name, call.args, api.Raw(shown))})
 	return answered(call.id, clip(read, maxToolOutput))
 }
 
@@ -225,7 +226,7 @@ func clip(out string, limit int) string {
 	return out
 }
 
-func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byte, widgets map[string]widget) ([]toolCall, string, error) {
+func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byte, widgets map[string]domain.Widget) ([]toolCall, string, error) {
 	endpoint := m.endpoint
 	if endpoint == "" {
 		endpoint = h.gateway + "/v1/chat/completions"
@@ -352,7 +353,7 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 			out.callStart(c.id, c.name, parent(message, &answer))
 		}
 		if c.held {
-			c.args = widgetArguments(c.args)
+			c.args = domain.WidgetArguments(c.args)
 		}
 		// The enclave reads absent arguments as none; the caller should too.
 		if c.args == "" {
@@ -389,7 +390,7 @@ func parent(message string, answer *strings.Builder) string {
 }
 
 // Arguments that arrive before the name are sent once the call opens.
-func announce(out *stream, message string, calls []toolCall, delta toolCallDelta, widgets map[string]widget) []toolCall {
+func announce(out *stream, message string, calls []toolCall, delta toolCallDelta, widgets map[string]domain.Widget) []toolCall {
 	for len(calls) <= delta.Index {
 		calls = append(calls, toolCall{id: "call_" + token()})
 	}
@@ -416,7 +417,7 @@ func requested(answer string, calls []toolCall) json.RawMessage {
 	made := make([]toolCallJSON, len(calls))
 	for i, call := range calls {
 		made[i].ID, made[i].Type = call.id, "function"
-		made[i].Function.Name, made[i].Function.Arguments = call.name, historyArgs(call.args)
+		made[i].Function.Name, made[i].Function.Arguments = call.name, domain.HistoryArgs(call.args)
 	}
 	message, _ := json.Marshal(outMessage{Role: "assistant", Content: quote(answer), ToolCalls: made})
 	return message

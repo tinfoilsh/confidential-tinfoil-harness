@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 func TestFormatSearchOutput(t *testing.T) {
@@ -51,9 +53,9 @@ func TestModelReadsSearchResultsAsCitedText(t *testing.T) {
 	}
 }
 
-func citationsIn(t *testing.T, text string, sources ...citationSource) []URLCitation {
+func citationsIn(t *testing.T, text string, sources ...citationSource) []domain.URLCitation {
 	t.Helper()
-	var out []URLCitation
+	var out []domain.URLCitation
 	for _, annotation := range citationAnnotations(text, sources) {
 		if annotation.Type != "url_citation" {
 			t.Fatalf("annotation type %v", annotation.Type)
@@ -99,7 +101,7 @@ func TestCitationAnnotationsMatchURLsWithParentheses(t *testing.T) {
 	const planet = "https://en.wikipedia.org/wiki/Mercury_(planet)"
 	content := "Mercury is closest to the Sun [Wikipedia](" + planet + ") (see [A](https://a.test/x))."
 	got := citationsIn(t, content, citationSource{planet, "Mercury (planet)"}, citationSource{"https://a.test/x", "A"})
-	want := []URLCitation{
+	want := []domain.URLCitation{
 		{URL: planet, Title: "Mercury (planet)", StartIndex: strings.Index(content, "Wikipedia"), EndIndex: strings.Index(content, "Wikipedia") + len("Wikipedia")},
 		{URL: "https://a.test/x", Title: "A", StartIndex: strings.Index(content, "[A]") + 1, EndIndex: strings.Index(content, "[A]") + 2},
 	}

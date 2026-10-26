@@ -26,6 +26,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 type formPart struct {
@@ -98,7 +99,7 @@ func unzipped(t *testing.T, data []byte) (map[string][]byte, []string) {
 }
 
 type imported struct {
-	threads []Thread
+	threads []domain.Thread
 	// originals are the original bytes of the threads' images by attachment
 	// id, which a client keeps apart from its threads.
 	originals map[string][]byte
@@ -122,8 +123,8 @@ func importLines(t *testing.T, w *httptest.ResponseRecorder) imported {
 	scanner.Buffer(nil, 64<<20)
 	for scanner.Scan() {
 		var line struct {
-			Thread *Thread     `json:"thread"`
-			Done   *importDone `json:"done"`
+			Thread *domain.Thread `json:"thread"`
+			Done   *importDone    `json:"done"`
 		}
 		var originals struct {
 			Thread *importThread `json:"thread"`
@@ -154,17 +155,17 @@ func importLines(t *testing.T, w *httptest.ResponseRecorder) imported {
 }
 
 // storedChats are a user's stored chats read as the harness reads them.
-func storedChats(rows *memoryRows, user string) map[string]Thread {
-	chats := map[string]Thread{}
+func storedChats(rows *memoryRows, user string) map[string]domain.Thread {
+	chats := map[string]domain.Thread{}
 	page, _ := rows.list(context.Background(), &auth.Principal{ID: user}, rows.key, "chat", "", "", 0)
 	for _, row := range page.Rows {
-		t := mustRead(readThreadRow(&row)).Thread
+		t := mustRead(domain.ReadThreadRow(&row)).Thread
 		chats[t.Title] = t
 	}
 	return chats
 }
 
-func blobOf(t *testing.T, fake *fakeSync, a Attachment) []byte {
+func blobOf(t *testing.T, fake *fakeSync, a domain.Attachment) []byte {
 	t.Helper()
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
@@ -252,12 +253,12 @@ func TestNativeBackupRoundTrips(t *testing.T) {
 	fake := newFakeSync(t, h)
 	alice := &auth.Principal{ID: "alice"}
 	project := "project-1"
-	rows.rows[rowMapKey(alice, "project", project)] = storedRow{ID: project, ETag: "1", Data: api.Raw(api.Object{"name": "Research", "description": "Notes", "systemInstructions": "Cite sources", "color": "teal", "createdAt": "2026-01-01T00:00:00Z"})}
-	rows.rows[rowMapKey(alice, "project_document", project+"/doc-1")] = storedRow{ID: project + "/doc-1", ETag: "1", Data: api.Raw(api.Object{"filename": "paper.md", "contentType": "text/markdown", "sizeBytes": 12, "content": "Paper text"}), project: &project, projectSet: true}
+	rows.rows[rowMapKey(alice, "project", project)] = domain.StoredRow{ID: project, ETag: "1", Data: api.Raw(api.Object{"name": "Research", "description": "Notes", "systemInstructions": "Cite sources", "color": "teal", "createdAt": "2026-01-01T00:00:00Z"})}
+	rows.rows[rowMapKey(alice, "project_document", project+"/doc-1")] = domain.StoredRow{ID: project + "/doc-1", ETag: "1", Data: api.Raw(api.Object{"filename": "paper.md", "contentType": "text/markdown", "sizeBytes": 12, "content": "Paper text"}), Project: &project, ProjectSet: true}
 	stored := pngFixture(t, 8, 6, 40)
 	imageID, imageKey := fake.seed("chat-1", stored)
 	docID, docKey := fake.seed("chat-1", []byte(`{"textContent":"Stored document"}`))
-	timeline := []Block{{ID: "think", Type: "thinking", Content: "Check sources"}, {ID: "call", Type: "tool_call", ToolCallID: "call", Name: "web_search", Arguments: `{"query":"growth"}`, Complete: true, Result: api.Raw(api.Object{"query": "growth", "results": []api.Object{{"url": "https://example.com", "title": "Example"}}})}, {ID: "text", Type: "content", Content: "It grew."}}
+	timeline := []domain.Block{{ID: "think", Type: "thinking", Content: "Check sources"}, {ID: "call", Type: "tool_call", ToolCallID: "call", Name: "web_search", Arguments: `{"query":"growth"}`, Complete: true, Result: api.Raw(api.Object{"query": "growth", "results": []api.Object{{"url": "https://example.com", "title": "Example"}}})}, {ID: "text", Type: "content", Content: "It grew."}}
 	cloudChat := api.Object{"title": "Evidence", "titleState": "manual", "createdAt": "2026-01-02T00:00:00Z", "updatedAt": "2026-01-02T01:00:00Z", "model": "kimi-k3", "pinned": true, "messages": []any{
 		api.Object{"id": "m1", "role": "user", "createdAt": "2026-01-02T00:00:00Z", "content": "Explain", "attachments": []any{
 			api.Object{"id": imageID, "kind": "image", "fileName": "chart.png", "mimeType": "image/png", "encryptionKey": imageKey, "thumbnail": "dGh1bWI=", "description": "A chart"},
@@ -266,7 +267,7 @@ func TestNativeBackupRoundTrips(t *testing.T) {
 		}},
 		api.Object{"id": "m2", "role": "assistant", "createdAt": "2026-01-02T00:01:00Z", "content": "It grew.", "timeline": timeline, "annotations": []any{api.Object{"type": "url_citation", "url_citation": api.Object{"url": "https://example.com", "title": "Example", "start_index": 0, "end_index": 2}}}},
 	}}
-	rows.rows[rowMapKey(alice, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: api.Raw(cloudChat), project: &project, projectSet: true}
+	rows.rows[rowMapKey(alice, "chat", "chat-1")] = domain.StoredRow{ID: "chat-1", ETag: "1", Data: api.Raw(cloudChat), Project: &project, ProjectSet: true}
 
 	modelCopy, original, page := pngFixture(t, 4, 4, 90), pngFixture(t, 2048, 1024, 90), pngFixture(t, 3, 9, 200)
 	device := api.Object{"id": "9999990000000_00000000-0000-4000-8000-00000000000d", "title": "On my device", "titleState": "generated", "createdAt": "2026-02-01T00:00:00Z", "updatedAt": "2026-02-01T00:00:00Z", "model": "auto", "webSearchEnabled": false, "messages": []any{
@@ -305,7 +306,7 @@ func TestNativeBackupRoundTrips(t *testing.T) {
 	}
 	thread := result.threads[0]
 	photo, scan := thread.Messages[0].Attachments[0], thread.Messages[0].Attachments[1]
-	if !rowIDPattern.MatchString(thread.ID) || thread.ID == device["id"] || thread.Title != "On my device" || thread.WebSearchEnabled || len(thread.Messages) != 2 || thread.Messages[1].Content != "Seen" {
+	if !domain.RowIDPattern.MatchString(thread.ID) || thread.ID == device["id"] || thread.Title != "On my device" || thread.WebSearchEnabled || len(thread.Messages) != 2 || thread.Messages[1].Content != "Seen" {
 		t.Fatalf("device chat: %+v", thread)
 	}
 	if decodedImage(photo.Base64) != "jpeg 1536x768 <nil>" || !bytes.Equal(result.originals[photo.ID], original) || photo.MimeType != "image/png" || !bytes.Equal(base64Bytes(t, scan.Pages[0].Image), page) || scan.TextContent != "Scanned" {
@@ -321,7 +322,7 @@ func TestNativeBackupRoundTrips(t *testing.T) {
 	if !ok || len(chat.Messages) != 2 || !chat.Pinned || chat.Model != "kimi-k3" || chat.TitleState != "manual" {
 		t.Fatalf("cloud chat: %+v", chats)
 	}
-	if !reflect.DeepEqual(api.Parsed(api.Raw(chat.Messages[1].Timeline)), api.Parsed(api.Raw(mustRead(readThread("chat-1", api.Raw(cloudChat))).Messages[1].Timeline))) || len(chat.Messages[1].Annotations) != 1 {
+	if !reflect.DeepEqual(api.Parsed(api.Raw(chat.Messages[1].Timeline)), api.Parsed(api.Raw(mustRead(domain.ReadThread("chat-1", api.Raw(cloudChat))).Messages[1].Timeline))) || len(chat.Messages[1].Annotations) != 1 {
 		t.Fatalf("the reply changed: %s", api.Raw(chat.Messages[1]))
 	}
 	attachments := chat.Messages[0].Attachments
@@ -329,12 +330,12 @@ func TestNativeBackupRoundTrips(t *testing.T) {
 		t.Fatalf("cloud attachments: %+v", attachments)
 	}
 	projects, _ := restoredRows.list(context.Background(), alice, key, "project", "", "", 0)
-	if len(projects.Rows) != 1 || valueOr(chat.ProjectID, "") != projects.Rows[0].ID {
+	if len(projects.Rows) != 1 || domain.ValueOr(chat.ProjectID, "") != projects.Rows[0].ID {
 		t.Fatalf("the chat lost its project: %v", chat.ProjectID)
 	}
-	restoredProject := mustRead(readProject(&projects.Rows[0]))
+	restoredProject := mustRead(domain.ReadProject(&projects.Rows[0]))
 	docs, _ := restored.projectDocuments(context.Background(), alice, key, restoredProject.ID, refuseUnreadable)
-	if restoredProject.Name != "Research" || restoredProject.SystemInstructions != "Cite sources" || valueOr(restoredProject.Color, "") != "teal" || len(docs) != 1 || docs[0].Content != "Paper text" || docs[0].Filename != "paper.md" {
+	if restoredProject.Name != "Research" || restoredProject.SystemInstructions != "Cite sources" || domain.ValueOr(restoredProject.Color, "") != "teal" || len(docs) != 1 || docs[0].Content != "Paper text" || docs[0].Filename != "paper.md" {
 		t.Fatalf("project: %+v %+v", restoredProject, docs)
 	}
 }
@@ -374,7 +375,7 @@ func TestBackupsHoldWhatRestoresTake(t *testing.T) {
 func TestARestoreReadsDeviceChatsBeforeStoringTheCloud(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	newFakeSync(t, h)
-	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: api.Raw(api.Object{"title": "Stored", "messages": []any{api.Object{"id": "m", "role": "user", "content": "hi"}}})}
+	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat-1")] = domain.StoredRow{ID: "chat-1", ETag: "1", Data: api.Raw(api.Object{"title": "Stored", "messages": []any{api.Object{"id": "m", "role": "user", "content": "hi"}}})}
 	device := api.Object{"id": "local-chat", "title": "On my device", "messages": []any{api.Object{"id": "d", "role": "user", "content": "hello"}}}
 	w := archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "native", "key": keyBase64(key)}), threadPart(device))
 	if w.Code != 200 {
@@ -492,7 +493,7 @@ func TestWebAppBackupsRestore(t *testing.T) {
 			}
 			projects, _ := rows.list(context.Background(), &auth.Principal{ID: "alice"}, key, "project", "", "", 0)
 			docs, _ := h.projectDocuments(context.Background(), &auth.Principal{ID: "alice"}, key, *chat.ProjectID, refuseUnreadable)
-			if len(projects.Rows) != 1 || mustRead(readProject(&projects.Rows[0])).Name != "Research" || len(docs) != 1 || docs[0].Content != "Extracted paper text" {
+			if len(projects.Rows) != 1 || mustRead(domain.ReadProject(&projects.Rows[0])).Name != "Research" || len(docs) != 1 || docs[0].Content != "Extracted paper text" {
 				t.Fatalf("project: %v %v", projects.Rows, docs)
 			}
 		})
@@ -508,9 +509,9 @@ func TestWebAppBackupsRestore(t *testing.T) {
 // sameForm is a thread as both destinations keep it: the cloud stores an
 // image under a blob and names it anew, a device keeps its original apart
 // from the copy and thumbnail an upload makes.
-func sameForm(t *testing.T, fake *fakeSync, originals map[string][]byte, thread Thread) string {
+func sameForm(t *testing.T, fake *fakeSync, originals map[string][]byte, thread domain.Thread) string {
 	t.Helper()
-	thread = thread.clone()
+	thread = thread.Clone()
 	for i := range thread.Messages {
 		for j := range thread.Messages[i].Attachments {
 			a := &thread.Messages[i].Attachments[j]
@@ -519,7 +520,7 @@ func sameForm(t *testing.T, fake *fakeSync, originals map[string][]byte, thread 
 			} else if original, ok := originals[a.ID]; ok {
 				a.Base64 = base64.StdEncoding.EncodeToString(original)
 			}
-			if a.isImage() {
+			if a.IsImage() {
 				a.ID, a.Thumbnail = "", ""
 			}
 			a.EncryptionKey = ""
@@ -539,9 +540,9 @@ func TestExportsImportAlikeToCloudAndDevice(t *testing.T) {
 		images            map[string][]byte
 		chats             int
 		onDevice, inCloud []string
-		check             func(t *testing.T, threads map[string]Thread, originals map[string][]byte)
+		check             func(t *testing.T, threads map[string]domain.Thread, originals map[string][]byte)
 	}{
-		{"chatgpt-export.zip", map[string][]byte{"file_00000000abc-cat.png": large}, 2, documentLeftOut, documentLeftOut, func(t *testing.T, threads map[string]Thread, originals map[string][]byte) {
+		{"chatgpt-export.zip", map[string][]byte{"file_00000000abc-cat.png": large}, 2, documentLeftOut, documentLeftOut, func(t *testing.T, threads map[string]domain.Thread, originals map[string][]byte) {
 			branch := threads["Branching"]
 			if len(branch.Messages) != 2 || branch.Messages[1].Content != "The second one." || branch.Messages[1].Timeline[0].Content != "Compare the two sizes" {
 				t.Fatalf("not the current branch: %s", api.Raw(branch.Messages))
@@ -554,13 +555,13 @@ func TestExportsImportAlikeToCloudAndDevice(t *testing.T) {
 				t.Fatalf("the photo came as %s, its original as %d bytes", decodedImage(cat.Base64), len(originals[cat.ID]))
 			}
 		}},
-		{"claude-export.zip", nil, 1, []string{"1 projects were not imported: projects are kept in the cloud."}, []string{}, func(t *testing.T, threads map[string]Thread, _ map[string][]byte) {
+		{"claude-export.zip", nil, 1, []string{"1 projects were not imported: projects are kept in the cloud."}, []string{}, func(t *testing.T, threads map[string]domain.Thread, _ map[string][]byte) {
 			messages := threads["Reading a spec"].Messages
 			if len(messages) != 2 || messages[0].Attachments[0].TextContent != "The contents" || messages[0].Attachments[1].FileName != "diagram.png" || messages[1].Timeline[0].Content != "Reading carefully" {
 				t.Fatalf("claude chat: %s", api.Raw(messages))
 			}
 		}},
-		{"tinfoil-export.zip", map[string][]byte{"attachments/tf-sketch/sketch.png": broken}, 2, []string{}, []string{}, func(t *testing.T, threads map[string]Thread, originals map[string][]byte) {
+		{"tinfoil-export.zip", map[string][]byte{"attachments/tf-sketch/sketch.png": broken}, 2, []string{}, []string{}, func(t *testing.T, threads map[string]domain.Thread, originals map[string][]byte) {
 			trip := threads["Trip plans"].Messages
 			if len(trip) != 2 || trip[0].Attachments[0].ID != "tf-photo" || trip[0].Attachments[1].TextContent != "# Packing list" || trip[1].Timeline[0].Content != "It is sunny" || trip[0].CreatedAt != "2026-04-01T08:00:00Z" {
 				t.Fatalf("tinfoil chat: %s", api.Raw(trip))
@@ -582,11 +583,11 @@ func TestExportsImportAlikeToCloudAndDevice(t *testing.T) {
 				t.Fatalf("device %d chats %+v, cloud %+v", len(onDevice.threads), onDevice.done, inCloud.done)
 			}
 			cloud := storedChats(rows, "alice")
-			byTitle := map[string]Thread{}
+			byTitle := map[string]domain.Thread{}
 			for _, thread := range onDevice.threads {
 				byTitle[thread.Title] = thread
 				stored, ok := cloud[thread.Title]
-				if !ok || !rowIDPattern.MatchString(thread.ID) || sameForm(t, fake, nil, stored) != sameForm(t, fake, onDevice.originals, thread) {
+				if !ok || !domain.RowIDPattern.MatchString(thread.ID) || sameForm(t, fake, nil, stored) != sameForm(t, fake, onDevice.originals, thread) {
 					t.Fatalf("the cloud and the device differ:\n%s\n%s", sameForm(t, fake, nil, stored), sameForm(t, fake, onDevice.originals, thread))
 				}
 			}
@@ -673,7 +674,7 @@ func TestClaudeProjectsRequireTheCloud(t *testing.T) {
 	if result.done.JobID == nil || len(stored.Rows) != 1 {
 		t.Fatalf("projects: %d stored, done %+v", len(stored.Rows), result.done)
 	}
-	project := mustRead(readProject(&stored.Rows[0]))
+	project := mustRead(domain.ReadProject(&stored.Rows[0]))
 	docs, _ := h.projectDocuments(context.Background(), &auth.Principal{ID: "alice"}, key, project.ID, refuseUnreadable)
 	if project.Name != "Release Notes" || project.SystemInstructions != "Write concise release notes." || len(docs) != 1 || docs[0].Filename != "style-guide.md" || docs[0].Content != "# Style guide" {
 		t.Fatalf("project: %+v %+v", project, docs)
@@ -697,7 +698,7 @@ func TestConversationsExportMatchesTheWebApp(t *testing.T) {
 	fake := newFakeSync(t, h)
 	var threads struct {
 		Device []json.RawMessage `json:"device"`
-		Stored Thread            `json:"stored"`
+		Stored domain.Thread     `json:"stored"`
 	}
 	if err := json.Unmarshal(fixture(t, "conversations-threads.json"), &threads); err != nil {
 		t.Fatal(err)
@@ -712,8 +713,8 @@ func TestConversationsExportMatchesTheWebApp(t *testing.T) {
 			a.Base64, a.TextContent = "", ""
 		}
 	}
-	project := valueOr(stored.ProjectID, "")
-	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", stored.ID)] = storedRow{ID: stored.ID, ETag: "1", Data: api.Raw(stored), project: &project, projectSet: true}
+	project := domain.ValueOr(stored.ProjectID, "")
+	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", stored.ID)] = domain.StoredRow{ID: stored.ID, ETag: "1", Data: api.Raw(stored), Project: &project, ProjectSet: true}
 	parts := []formPart{optionsPart(api.Object{"format": "conversations", "key": keyBase64(key)})}
 	for _, thread := range threads.Device {
 		parts = append(parts, formPart{name: "thread", data: thread})
@@ -776,7 +777,7 @@ func TestAnExportWithoutTheKeyHoldsOnlyItsDeviceChats(t *testing.T) {
 // them.
 func TestArchivesNeedNoChatAccess(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: api.Raw(api.Object{"title": "Stored", "messages": []any{api.Object{"id": "m", "role": "user", "content": "hi"}}})}
+	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat-1")] = domain.StoredRow{ID: "chat-1", ETag: "1", Data: api.Raw(api.Object{"title": "Stored", "messages": []any{api.Object{"id": "m", "role": "user", "content": "hi"}}})}
 	for name, credential := range map[string]string{"a free user": "free_anonymous-key", "a subscriber at its cap": ""} {
 		signedIn := func(r *http.Request) {
 			r.Header.Set("Authorization", "Bearer clerk-alice")

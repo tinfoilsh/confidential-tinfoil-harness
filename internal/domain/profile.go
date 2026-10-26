@@ -1,4 +1,4 @@
-package main
+package domain
 
 import (
 	"encoding/json"
@@ -55,8 +55,8 @@ type CustomPreset struct {
 	UpdatedAt        json.RawMessage `json:"updatedAt,omitempty"`
 }
 
-// storedProfile is the profile row.
-type storedProfile struct {
+// StoredProfile is the profile row.
+type StoredProfile struct {
 	Profile
 	UpdatedAt     string `json:"updatedAt,omitempty"`
 	RecordVersion int    `json:"recordVersion,omitempty"`
@@ -64,8 +64,8 @@ type storedProfile struct {
 	PinnedChatIDs []string `json:"pinnedChatIds,omitzero"`
 }
 
-// profileView is the profile a client reads.
-type profileView struct {
+// ProfileView is the profile a client reads.
+type ProfileView struct {
 	Profile
 	UpdatedAt string `json:"updatedAt,omitempty"`
 }
@@ -80,32 +80,33 @@ var (
 
 // The defaults of profile fields that hold a choice.
 const (
-	defaultLanguage     = "System"
-	defaultIntelligence = "high"
+	DefaultLanguage     = "System"
+	DefaultIntelligence = "high"
 	defaultEffort       = "medium"
 	defaultTheme        = "system"
 	defaultFont         = "system"
 )
 
-// defaultProfile holds the value of every profile field a profile leaves
+// DefaultProfile holds the value of every profile field a profile leaves
 // unset. An empty default prompt preset is none. Thinking has no default:
 // left unset, it follows each model's own.
-func defaultProfile() Profile {
-	return Profile{ThemeMode: new(defaultTheme), ChatFont: new(defaultFont), Language: new(defaultLanguage), Nickname: new(""), Profession: new(""), Traits: []string{}, AdditionalContext: new(""),
+func DefaultProfile() Profile {
+	return Profile{ThemeMode: new(defaultTheme), ChatFont: new(defaultFont), Language: new(DefaultLanguage), Nickname: new(""), Profession: new(""), Traits: []string{}, AdditionalContext: new(""),
 		IsUsingPersonalization: new(true), IsUsingCustomPrompt: new(false), CustomSystemPrompt: new(""), CustomPromptPresets: []CustomPreset{}, FavoritePromptPresetIDs: []string{}, DefaultPromptPresetID: new(""),
-		SelectedModel: new(autoModelName), AutoIntelligence: new(defaultIntelligence), ReasoningEffort: new(defaultEffort), WebSearchEnabled: new(true),
+		SelectedModel: new(AutoModelName), AutoIntelligence: new(DefaultIntelligence), ReasoningEffort: new(defaultEffort), WebSearchEnabled: new(true),
 		WebSearchAvailable: new(true), PIICheckEnabled: new(true), GenUIEnabled: new(true), PixelateSidebarChatTitlesEnabled: new(false), BrowserTabChatTitleEnabled: new(true), EnterToNewlineEnabled: new(false),
 		HasSeenOnboarding: new(false), HasSeenWebSearchIntro: new(false), Dismissed: map[string]bool{}}
 }
 
 // withDefaults is the profile with every field it leaves unset at its default.
 func (p Profile) withDefaults() Profile {
-	filled := defaultProfile()
-	filled.apply(p)
+	filled := DefaultProfile()
+	filled.Apply(p)
 	return filled
 }
 
-func (p *Profile) validate() error {
+// Validate refuses a profile with a value a client may not set.
+func (p *Profile) Validate() error {
 	checked := *p
 	if invalid := checked.dropInvalid(); invalid != nil {
 		return invalid
@@ -126,7 +127,7 @@ func (p *Profile) dropInvalid() *api.Error {
 		name    string
 		value   **string
 		choices []string
-	}{{"themeMode", &p.ThemeMode, themeModes}, {"chatFont", &p.ChatFont, chatFonts}, {"reasoningEffort", &p.ReasoningEffort, reasoningEfforts}, {"autoIntelligence", &p.AutoIntelligence, intelligenceIDs()}} {
+	}{{"themeMode", &p.ThemeMode, themeModes}, {"chatFont", &p.ChatFont, chatFonts}, {"reasoningEffort", &p.ReasoningEffort, ReasoningEfforts}, {"autoIntelligence", &p.AutoIntelligence, intelligenceIDs()}} {
 		if *choice.value != nil && !slices.Contains(choice.choices, **choice.value) {
 			refuse("Invalid " + choice.name)
 			*choice.value = nil
@@ -153,8 +154,8 @@ func (p *Profile) dropInvalid() *api.Error {
 
 func unnamedPreset(preset CustomPreset) bool { return preset.ID == "" || preset.Name == "" }
 
-// apply sets every field the patch sets.
-func (p *Profile) apply(patch Profile) {
+// Apply sets every field the patch sets.
+func (p *Profile) Apply(patch Profile) {
 	to, from := reflect.ValueOf(p).Elem(), reflect.ValueOf(patch)
 	for i := range from.NumField() {
 		if !from.Field(i).IsZero() {
@@ -163,11 +164,11 @@ func (p *Profile) apply(patch Profile) {
 	}
 }
 
-// mergeDeviceProfile imports missing settings and prompts, with explicit
+// MergeDeviceProfile imports missing settings and prompts, with explicit
 // device edits taking precedence. Conflicting prompt text gets its own copy.
-func mergeDeviceProfile(remote, local Profile, changed []string) Profile {
+func MergeDeviceProfile(remote, local Profile, changed []string) Profile {
 	merged := local
-	merged.apply(remote)
+	merged.Apply(remote)
 	if slices.Contains(changed, "defaultPromptPresetId") {
 		merged.DefaultPromptPresetID = local.DefaultPromptPresetID
 	}
@@ -218,13 +219,13 @@ func mergeDeviceProfile(remote, local Profile, changed []string) Profile {
 	return merged
 }
 
-// personalized reports whether the prompt carries the user's preferences.
-func (p *Profile) personalized() bool {
+// Personalized reports whether the prompt carries the user's preferences.
+func (p *Profile) Personalized() bool {
 	return p.IsUsingPersonalization == nil || *p.IsUsingPersonalization
 }
 
-// preset is a saved prompt by id.
-func (p *Profile) preset(id string) *CustomPreset {
+// Preset is a saved prompt by id.
+func (p *Profile) Preset(id string) *CustomPreset {
 	for i := range p.CustomPromptPresets {
 		if p.CustomPromptPresets[i].ID == id {
 			return &p.CustomPromptPresets[i]
@@ -233,9 +234,9 @@ func (p *Profile) preset(id string) *CustomPreset {
 	return nil
 }
 
-// localProfile is the settings a device chat's client sends with a request,
+// LocalProfile is the settings a device chat's client sends with a request,
 // without the fields it may not set, which never refuse the request.
-func localProfile(data []byte) *Profile {
+func LocalProfile(data []byte) *Profile {
 	var profile Profile
 	readLenient(data, &profile)
 	upgradeProfile(&profile, api.Now())
@@ -243,26 +244,26 @@ func localProfile(data []byte) *Profile {
 	return &profile
 }
 
-// effectiveProfile is a profile as its client reads it: a saved prompt
+// EffectiveProfile is a profile as its client reads it: a saved prompt
 // keeps a model only while the control plane lists it, the selected model
 // is the one new chats start on, and every field the profile leaves unset
 // reads as its default.
-func (c *chatCatalog) effectiveProfile(p Profile) Profile {
+func (c *Catalog) EffectiveProfile(p Profile) Profile {
 	p.CustomPromptPresets = slices.Clone(p.CustomPromptPresets)
 	for i := range p.CustomPromptPresets {
 		if model := p.CustomPromptPresets[i].Model; model != nil && c.retired(*model) {
 			p.CustomPromptPresets[i].Model = nil
 		}
 	}
-	p.SelectedModel = new(c.selectedModel(&p))
+	p.SelectedModel = new(c.SelectedModel(&p))
 	return p.withDefaults()
 }
 
-// selectedModel is the model new chats start on: the profile's while it is
+// SelectedModel is the model new chats start on: the profile's while it is
 // offered, and Auto otherwise.
-func (c *chatCatalog) selectedModel(p *Profile) string {
-	if model := valueOr(p.SelectedModel, ""); c.offers(model) {
+func (c *Catalog) SelectedModel(p *Profile) string {
+	if model := ValueOr(p.SelectedModel, ""); c.Offers(model) {
 		return model
 	}
-	return autoModelName
+	return AutoModelName
 }

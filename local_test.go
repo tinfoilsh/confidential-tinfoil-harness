@@ -19,12 +19,13 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 func localInput(threadID string, thread api.Object) api.Object {
 	in := api.Object{"threadId": threadID, "clientRequestId": uuid.NewString(), "kind": "send", "local": true, "content": "second question", "options": api.Object{"model": "kimi-k3", "webSearch": false}}
 	if threadID == "" {
-		in["threadId"] = rowID()
+		in["threadId"] = domain.RowID()
 	}
 	if thread != nil {
 		in["thread"] = thread
@@ -487,7 +488,7 @@ func TestChatsShareAPromptCacheOnlyThroughTheClientsSecret(t *testing.T) {
 		}
 		return slices.Clone(scopes)
 	}
-	chat := rowID()
+	chat := domain.RowID()
 	first := scopesOf(localInput(chat, nil), "")
 	again := scopesOf(localInput(chat, priorThread()), "")
 	pictured := localInput("", nil)

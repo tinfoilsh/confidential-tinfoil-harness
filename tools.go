@@ -16,6 +16,7 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 // The web search enclave's tools are named here rather than discovered, so an
@@ -43,7 +44,7 @@ const (
 )
 
 type toolset struct {
-	widgets map[string]widget
+	widgets map[string]domain.Widget
 	local   func(context.Context, toolCall) (any, error)
 	search  *session // nil unless the run searches the web
 
@@ -56,7 +57,7 @@ type toolset struct {
 func (t *toolset) retry(name string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.rejected[name] >= maxWidgetRetries {
+	if t.rejected[name] >= domain.MaxWidgetRetries {
 		return false
 	}
 	if t.rejected == nil {
@@ -116,7 +117,7 @@ func (f *toolEnclave) dial(ctx context.Context, header http.Header, progress fun
 	for _, t := range found.Tools {
 		published[t.Name] = t
 	}
-	schemas := schemaLookup(found.Tools)
+	schemas := domain.SchemaLookup(found.Tools)
 	s := &session{mcp: opened, remote: map[string]string{}, schemas: map[string]*jsonschema.Schema{}}
 	for _, t := range f.tools {
 		serves, ok := published[t.remote]
@@ -165,22 +166,22 @@ func (t *toolset) call(ctx context.Context, name, progress string, args json.Raw
 	s := t.search
 	arguments := map[string]any{}
 	if len(bytes.TrimSpace(args)) > 0 {
-		args, _ = sanitizeToolCallArgumentsJSON(args)
+		args, _ = domain.SanitizeToolCallArgumentsJSON(args)
 		if err := json.Unmarshal(args, &arguments); err != nil {
 			return "", nil, fmt.Errorf("arguments are not a JSON object: %w", err)
 		}
 	}
-	sanitizeToolCallArguments(arguments)
-	coerceArgumentsToSchema(name, arguments, s.schemas)
+	domain.SanitizeToolCallArguments(arguments)
+	domain.CoerceArgumentsToSchema(name, arguments, s.schemas)
 	params := &mcp.CallToolParams{Name: s.remote[name], Arguments: arguments}
 	params.SetProgressToken(progress)
 	result, err := s.mcp.CallTool(ctx, params)
 	if err != nil {
-		return "", nil, errors.New(humanizeToolArgError(name, err, arguments))
+		return "", nil, errors.New(domain.HumanizeToolArgError(name, err, arguments))
 	}
 	out := output(result)
 	if result.IsError {
-		return "", nil, errors.New(humanizeToolArgError(name, errors.New(cmp.Or(out, "tool call failed")), arguments))
+		return "", nil, errors.New(domain.HumanizeToolArgError(name, errors.New(cmp.Or(out, "tool call failed")), arguments))
 	}
 	var meta json.RawMessage
 	if len(result.Meta) > 0 {

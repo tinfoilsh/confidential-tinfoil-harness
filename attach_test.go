@@ -23,6 +23,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 func routerHarness(t *testing.T, router http.HandlerFunc) *harness {
@@ -234,8 +235,8 @@ func TestFilesThatReadAsTextAreTakenAsText(t *testing.T) {
 	} {
 		w := uploadRoute(h, "/v1/attachments/upload", tc.name, tc.data, nil, "alice")
 		var got struct {
-			Attachment Attachment `json:"attachment"`
-			Error      api.Error  `json:"error"`
+			Attachment domain.Attachment `json:"attachment"`
+			Error      api.Error         `json:"error"`
 		}
 		json.Unmarshal(w.Body.Bytes(), &got)
 		if got.Error.Code != tc.code || got.Attachment.TextContent != tc.text || tc.code == "" && (got.Attachment.Kind != "document" || got.Attachment.FileName != tc.name) {

@@ -6,6 +6,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 // liveRuns holds what this instance is executing: each chat's running reply
@@ -45,7 +46,7 @@ type threadSession struct {
 	// row. A keyless thread, local or anonymous, never uses the content key.
 	local, keyless bool
 	// row is a local thread's transcript, which a queued turn continues from.
-	row    *threadRow
+	row    *domain.ThreadRow
 	active *chatRun
 	queue  []*chatRun
 }
@@ -69,11 +70,11 @@ type chatRun struct {
 	refused                  error
 	finished                 chan struct{}
 	titleDone                chan struct{}
-	row                      *threadRow // the thread as the run started and committed it
-	assembler                *messageAssembler
+	row                      *domain.ThreadRow // the thread as the run started and committed it
+	assembler                *domain.MessageAssembler
 	retryTarget              *retryTarget
-	replacement              replacedWidget
-	profile                  *Profile // a local thread's settings, sent by its client
+	replacement              domain.ReplacedWidget
+	profile                  *domain.Profile // a local thread's settings, sent by its client
 	screening                *screening
 
 	// yielded marks an active run stopped so a queued turn starts now.
@@ -84,7 +85,7 @@ type chatRun struct {
 func (r *chatRun) release() {
 	clear(r.key[:])
 	r.input, r.turn, r.retryTarget, r.assembler, r.screening, r.profile = nil, nil, nil, nil, nil, nil
-	r.replacement = replacedWidget{}
+	r.replacement = domain.ReplacedWidget{}
 	r.principal = &auth.Principal{ID: r.principal.ID, AnonymousID: r.principal.AnonymousID, Anonymous: r.principal.Anonymous}
 	r.credential.Key = ""
 }
@@ -117,20 +118,20 @@ func (h *harness) makeActive(s *threadSession, r *chatRun) {
 // reply that has not started is told by its first state snapshot.
 func queueChanged(s *threadSession) {
 	if s.active != nil && s.active.running {
-		s.active.out.emit(stateDelta{Delta: []statePatch{{"replace", "/queue", queueItems(s)}}})
+		s.active.out.emit(domain.StateDelta{Delta: []domain.StatePatch{{Op: "replace", Path: "/queue", Value: queueItems(s)}}})
 	}
 }
 
-func (r *chatRun) queueItem() queueItem {
-	attachments := []queuedAttachment{}
+func (r *chatRun) queueItem() domain.QueueItem {
+	attachments := []domain.QueuedAttachment{}
 	for _, a := range r.input.Attachments {
-		attachments = append(attachments, queuedAttachment{ID: a.ID, Kind: a.Kind, FileName: a.FileName, MimeType: a.MimeType, Size: a.Size, Thumbnail: a.Thumbnail})
+		attachments = append(attachments, domain.QueuedAttachment{ID: a.ID, Kind: a.Kind, FileName: a.FileName, MimeType: a.MimeType, Size: a.Size, Thumbnail: a.Thumbnail})
 	}
-	return queueItem{QueueID: r.log.id, Kind: r.input.Kind, Content: r.input.Content, Quote: r.input.Quote, Attachments: attachments, CreatedAt: r.received}
+	return domain.QueueItem{QueueID: r.log.id, Kind: r.input.Kind, Content: r.input.Content, Quote: r.input.Quote, Attachments: attachments, CreatedAt: r.received}
 }
 
-func queueItems(s *threadSession) []queueItem {
-	out := []queueItem{}
+func queueItems(s *threadSession) []domain.QueueItem {
+	out := []domain.QueueItem{}
 	for _, r := range s.queue {
 		out = append(out, r.queueItem())
 	}
@@ -178,9 +179,9 @@ func (h *harness) dropIdle(s *threadSession) {
 func (h *harness) endQueued(r *chatRun, why error) {
 	h.live.forget(r)
 	if why == nil {
-		r.out.emit(runFinished{ThreadID: r.thread.id, RunID: r.log.id, Metadata: runMetadata{Cancelled: new(true)}})
+		r.out.emit(domain.RunFinished{ThreadID: r.thread.id, RunID: r.log.id, Metadata: domain.RunMetadata{Cancelled: new(true)}})
 	} else {
-		r.out.emit(failedRun(r.thread.id, r.log.id, api.AsError(why), nil))
+		r.out.emit(domain.FailedRun(r.thread.id, r.log.id, api.AsError(why), nil))
 	}
 	r.log.log.close(errDone)
 	r.release()

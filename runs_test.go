@@ -17,6 +17,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 // The harness holds a chat only while its reply runs: there is no limit on
@@ -177,12 +178,12 @@ func TestAChatDeletedAsItsTurnStartsStaysDeleted(t *testing.T) {
 	})
 	t.Run("elsewhere", func(t *testing.T) {
 		h, rows, key := testChatHarness(t, nil)
-		id := rowID()
+		id := domain.RowID()
 		name := rowMapKey(&auth.Principal{ID: "alice"}, "chat", id)
-		rows.rows[name] = storedRow{ID: id, ETag: "1", Data: api.Raw(api.Object{"title": "Old", "messages": []any{}})}
+		rows.rows[name] = domain.StoredRow{ID: id, ETag: "1", Data: api.Raw(api.Object{"title": "Old", "messages": []any{}})}
 		// Sync removes the chat for another instance just before the
 		// turn's write, which then conflicts.
-		rows.refuse = func(*storedRow) error {
+		rows.refuse = func(*domain.StoredRow) error {
 			delete(rows.rows, name)
 			rows.refuse = nil
 			return nil
@@ -220,8 +221,8 @@ func TestAFinishingRunsWritesBlockNothing(t *testing.T) {
 	var once, released sync.Once
 	release := func() { released.Do(func() { close(commit) }) }
 	t.Cleanup(release)
-	rows.refuse = func(row *storedRow) error {
-		if chat := mustRead(readThreadRow(row)); len(chat.Messages) == 2 && chat.ActiveRun == nil {
+	rows.refuse = func(row *domain.StoredRow) error {
+		if chat := mustRead(domain.ReadThreadRow(row)); len(chat.Messages) == 2 && chat.ActiveRun == nil {
 			once.Do(func() {
 				close(committing)
 				<-commit
@@ -370,7 +371,7 @@ func TestARetriedRequestFollowsItsRunOrIsAlreadyApplied(t *testing.T) {
 		}
 	}
 	row, _ := rows.load(context.Background(), p, key, "chat", run.thread.id)
-	chat := mustRead(readThreadRow(row))
+	chat := mustRead(domain.ReadThreadRow(row))
 	if len(chat.Messages) != 2 || chat.Messages[0].ID != in["clientRequestId"] || chat.LastRequestID != in["clientRequestId"] {
 		t.Fatalf("the chat holds %s", row.Data)
 	}
@@ -468,7 +469,7 @@ func TestAnotherCallerReachesNothingOfALiveRun(t *testing.T) {
 			t.Fatalf("%s for another account's chat answered HTTP %d %s", path, w.Code, w.Body.String())
 		}
 	}
-	events := eventsIn(t, postRoute(h, "/v1/threads/turn", api.Object{"key": keyBase64(key), "threadId": rowID(), "clientRequestId": in["clientRequestId"], "content": "mine", "kind": "send", "options": api.Object{"model": "kimi-k3", "webSearch": false}}, "bob"))
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", api.Object{"key": keyBase64(key), "threadId": domain.RowID(), "clientRequestId": in["clientRequestId"], "content": "mine", "kind": "send", "options": api.Object{"model": "kimi-k3", "webSearch": false}}, "bob"))
 	if events[0].Type != "RUN_STARTED" || events[0].RunID == run.log.id || events[0].ThreadID == run.thread.id || events[len(events)-1].Type != "RUN_FINISHED" {
 		t.Fatalf("another account's turn with the same nonce was not its own: %v", events)
 	}

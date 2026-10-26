@@ -5,6 +5,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 func (h *harness) handleTurn(w http.ResponseWriter, r *http.Request) {
@@ -18,7 +19,7 @@ func (h *harness) handleTurn(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, h.withQuota(p, credential.Limit, err))
 		return
 	}
-	body, err := api.ReadBody(w, r, maxTurnBody)
+	body, err := api.ReadBody(w, r, domain.MaxTurnBody)
 	defer clear(body)
 	if err != nil {
 		api.Respond(w, nil, err)

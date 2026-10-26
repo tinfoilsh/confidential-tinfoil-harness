@@ -18,6 +18,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 type syncTestTransport func(*http.Request) (*http.Response, error)
@@ -210,7 +211,7 @@ func TestListPullsInBatchesAndListsUnreadableRows(t *testing.T) {
 	}
 	titles := []string{}
 	for _, row := range page.Rows {
-		titles = append(titles, mustRead(readThreadRow(&row)).Title)
+		titles = append(titles, mustRead(domain.ReadThreadRow(&row)).Title)
 	}
 	if len(page.Rows) != pullBatch+4 || !slices.Contains(titles, "row-7") || slices.Contains(titles, "row-3") || !slices.Equal(slices.Sorted(maps.Keys(page.Unreadable)), []string{"row-3"}) {
 		t.Fatalf("rows %v, unreadable %v", titles, page.Unreadable)
@@ -296,7 +297,7 @@ func TestStoredRowsNameTheirFormat(t *testing.T) {
 	if w := postRoute(h, "/v1/profile/update", api.Object{"key": keyBase64(key), "patch": api.Object{"nickname": "Sam"}}, "alice"); w.Code != 200 {
 		t.Fatalf("profile: HTTP %d %s", w.Code, w.Body)
 	}
-	var project Project
+	var project domain.Project
 	if w := postRoute(h, "/v1/projects/create", api.Object{"key": keyBase64(key), "name": "Trip"}, "alice"); w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &project) != nil {
 		t.Fatalf("project: HTTP %d %s", w.Code, w.Body)
 	}
@@ -311,7 +312,7 @@ func TestStoredRowsNameTheirFormat(t *testing.T) {
 			RecordVersion int `json:"recordVersion"`
 		}
 		json.Unmarshal(row.Data, &stored)
-		if stored.RecordVersion != recordVersion {
+		if stored.RecordVersion != domain.RecordVersion {
 			t.Errorf("%s was stored in format %d", name, stored.RecordVersion)
 		}
 		written[strings.Split(name, "/")[1]] = true
@@ -334,7 +335,7 @@ func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	p := &auth.Principal{ID: "alice"}
 	current := func(data api.Object) {
-		data["recordVersion"], data["titleState"], data["model"], data["presetId"], data["pinned"], data["webSearchEnabled"] = recordVersion, "manual", "auto", nil, false, true
+		data["recordVersion"], data["titleState"], data["model"], data["presetId"], data["pinned"], data["webSearchEnabled"] = domain.RecordVersion, "manual", "auto", nil, false, true
 		for _, message := range api.Arr(data["messages"]) {
 			api.Obj(message)["createdAt"] = "2026-01-01T00:00:00Z"
 		}
@@ -342,7 +343,7 @@ func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 	formats := map[string]func(api.Object){
 		"legacy":  func(api.Object) {},
 		"current": current,
-		"later":   func(data api.Object) { data["recordVersion"] = recordVersion + 1 },
+		"later":   func(data api.Object) { data["recordVersion"] = domain.RecordVersion + 1 },
 		"extra": func(data api.Object) {
 			current(data)
 			data["mood"] = "sunny"
@@ -373,7 +374,7 @@ func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 		if readable[format] && w.Code != http.StatusOK || !readable[format] && !refused(w) {
 			t.Errorf("opening the %s chat: HTTP %d %s", format, w.Code, w.Body)
 		}
-		id := rowID()
+		id := domain.RowID()
 		thread := api.Object{"id": id, "title": "On my device", "messages": []any{api.Object{"id": "m1", "role": "user", "content": "hi"}}}
 		edit(thread)
 		w = postRoute(h, "/v1/threads/turn", localInput(id, thread), "alice")
@@ -382,7 +383,7 @@ func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 		}
 	}
 	var list struct {
-		Threads []threadSummary `json:"threads"`
+		Threads []domain.ThreadSummary `json:"threads"`
 	}
 	json.Unmarshal(postRoute(h, "/v1/threads/list", api.Object{"key": keyBase64(key)}, "alice").Body.Bytes(), &list)
 	listed := []string{}
@@ -392,21 +393,21 @@ func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 	if slices.Sort(listed); !slices.Equal(listed, []string{"current", "legacy"}) {
 		t.Errorf("the list holds %v", listed)
 	}
-	rows.rows[rowMapKey(p, "project", "later")] = storedRow{ID: "later", ETag: "1", Data: api.Raw(api.Object{"name": "Trip", "recordVersion": recordVersion + 1})}
+	rows.rows[rowMapKey(p, "project", "later")] = domain.StoredRow{ID: "later", ETag: "1", Data: api.Raw(api.Object{"name": "Trip", "recordVersion": domain.RecordVersion + 1})}
 	if w := postRoute(h, "/v1/projects/get", api.Object{"key": keyBase64(key), "id": "later"}, "alice"); !refused(w) {
 		t.Errorf("opening a project in a later format: HTTP %d %s", w.Code, w.Body)
 	}
 	trip := "trip"
-	rows.rows[rowMapKey(p, "project", trip)] = storedRow{ID: trip, ETag: "1", Data: api.Raw(api.Object{"name": "Trip"})}
-	for doc, data := range map[string]api.Object{"notes": {"filename": "notes.md"}, "later": {"filename": "later.md", "recordVersion": recordVersion + 1}} {
-		rows.rows[rowMapKey(p, "project_document", trip+"/"+doc)] = storedRow{ID: trip + "/" + doc, ETag: "1", Data: api.Raw(data), project: &trip, projectSet: true}
+	rows.rows[rowMapKey(p, "project", trip)] = domain.StoredRow{ID: trip, ETag: "1", Data: api.Raw(api.Object{"name": "Trip"})}
+	for doc, data := range map[string]api.Object{"notes": {"filename": "notes.md"}, "later": {"filename": "later.md", "recordVersion": domain.RecordVersion + 1}} {
+		rows.rows[rowMapKey(p, "project_document", trip+"/"+doc)] = domain.StoredRow{ID: trip + "/" + doc, ETag: "1", Data: api.Raw(data), Project: &trip, ProjectSet: true}
 	}
 	if w := postRoute(h, "/v1/projects/get", api.Object{"key": keyBase64(key), "id": trip}, "alice"); !refused(w) {
 		t.Errorf("opening a project with a document in a later format: HTTP %d %s", w.Code, w.Body)
 	}
 	storedThread(rows, "alice", "trip-chat")
 	row := rows.rows[rowMapKey(p, "chat", "trip-chat")]
-	row.project, row.projectSet = &trip, true
+	row.Project, row.ProjectSet = &trip, true
 	rows.rows[rowMapKey(p, "chat", "trip-chat")] = row
 	if w := postRoute(h, "/v1/threads/turn", continueInput(key, "trip-chat"), "alice"); !refused(w) {
 		t.Errorf("a turn in a project with a document in a later format: HTTP %d %s", w.Code, w.Body)
@@ -418,7 +419,7 @@ func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 	if left := (backupOmission{Kind: "project_document", SourceID: "later", ParentSourceID: trip, Category: "invalid", Reason: "row_unreadable"}); w.Code != http.StatusOK || manifest.Counts.ProjectDocuments != 1 || !slices.Contains(manifest.Omissions, left) {
 		t.Errorf("backing up a project with a document in a later format: HTTP %d %+v", w.Code, manifest)
 	}
-	rows.rows[rowMapKey(p, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(api.Object{"nickname": "Sam", "recordVersion": recordVersion + 1})}
+	rows.rows[rowMapKey(p, "profile", "profile")] = domain.StoredRow{ID: "profile", ETag: "1", Data: api.Raw(api.Object{"nickname": "Sam", "recordVersion": domain.RecordVersion + 1})}
 	if w := postRoute(h, "/v1/profile/get", api.Object{"key": keyBase64(key)}, "alice"); !refused(w) {
 		t.Errorf("opening a profile in a later format: HTTP %d %s", w.Code, w.Body)
 	}
@@ -446,13 +447,13 @@ func TestADocumentSyncCannotOpenIsNeverLeftOutUnsaid(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	p := &auth.Principal{ID: "alice"}
 	trip := "trip"
-	rows.rows[rowMapKey(p, "project", trip)] = storedRow{ID: trip, ETag: "1", Data: api.Raw(api.Object{"name": "Trip"})}
-	doc := func(id, filename string) storedRow {
-		return storedRow{ID: trip + "/" + id, ETag: "1", Data: api.Raw(api.Object{"filename": filename}), project: &trip, projectSet: true}
+	rows.rows[rowMapKey(p, "project", trip)] = domain.StoredRow{ID: trip, ETag: "1", Data: api.Raw(api.Object{"name": "Trip"})}
+	doc := func(id, filename string) domain.StoredRow {
+		return domain.StoredRow{ID: trip + "/" + id, ETag: "1", Data: api.Raw(api.Object{"filename": filename}), Project: &trip, ProjectSet: true}
 	}
 	h.storeRows = &pagedDocuments{memoryRows: rows, pages: []rowPage{
-		{Rows: []storedRow{doc("notes", "draft.md"), doc("map", "map.md")}, Next: "1"},
-		{Rows: []storedRow{doc("notes", "notes.md")}, Unreadable: map[string]error{trip + "/map": api.Err(409, "KEY_MISMATCH", "sealed to another key")}},
+		{Rows: []domain.StoredRow{doc("notes", "draft.md"), doc("map", "map.md")}, Next: "1"},
+		{Rows: []domain.StoredRow{doc("notes", "notes.md")}, Unreadable: map[string]error{trip + "/map": api.Err(409, "KEY_MISMATCH", "sealed to another key")}},
 	}}
 	w := postRoute(h, "/v1/projects/get", api.Object{"key": keyBase64(key), "id": trip}, "alice")
 	if e := api.Obj(api.Obj(api.Parsed(w.Body.Bytes()))["error"]); w.Code != http.StatusConflict || e["code"] != "KEY_MISMATCH" || e["action"] != "unlock" {

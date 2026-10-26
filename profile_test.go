@@ -12,6 +12,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 // oldProfile is settings an old client stored: a custom default prompt, an
@@ -49,14 +50,14 @@ func TestAStoredProfileReadsUpgradedAndKeepsTheUpgradeOnceChanged(t *testing.T) 
 	p := &auth.Principal{ID: "alice"}
 	stored := oldProfile()
 	stored["updatedAt"] = "2026-01-02T03:04:05Z"
-	rows.rows[rowMapKey(p, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(stored)}
+	rows.rows[rowMapKey(p, "profile", "profile")] = domain.StoredRow{ID: "profile", ETag: "1", Data: api.Raw(stored)}
 	get := func() api.Object {
 		return profileOf(t, postRoute(h, "/v1/profile/get", api.Object{"key": keyBase64(key)}, "alice"))
 	}
 	profile := get()
 	presets := presetsByID(profile)
-	migrated := presets[migratedPromptPresetID]
-	if profile["defaultPromptPresetId"] != migratedPromptPresetID || profile["isUsingCustomPrompt"] != false || profile["customSystemPrompt"] != "" || profile["selectedModel"] != "auto" ||
+	migrated := presets[domain.MigratedPromptPresetID]
+	if profile["defaultPromptPresetId"] != domain.MigratedPromptPresetID || profile["isUsingCustomPrompt"] != false || profile["customSystemPrompt"] != "" || profile["selectedModel"] != "auto" ||
 		migrated["systemPrompt"] != "<system>\nAnswer in French.\n</system>" || migrated["createdAt"] != float64(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC).UnixMilli()) {
 		t.Fatalf("the old custom prompt read as %v", profile)
 	}
@@ -70,9 +71,9 @@ func TestAStoredProfileReadsUpgradedAndKeepsTheUpgradeOnceChanged(t *testing.T) 
 		t.Fatalf("a second read upgraded differently:\n%v\n%v", again, profile)
 	}
 	// A profile without a date dates its migrated prompt the same on every read.
-	rows.rows[rowMapKey(&auth.Principal{ID: "bob"}, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(oldProfile())}
+	rows.rows[rowMapKey(&auth.Principal{ID: "bob"}, "profile", "profile")] = domain.StoredRow{ID: "profile", ETag: "1", Data: api.Raw(oldProfile())}
 	undated := profileOf(t, postRoute(h, "/v1/profile/get", api.Object{"key": keyBase64(key)}, "bob"))
-	if created := presetsByID(undated)[migratedPromptPresetID]["createdAt"]; created != float64(0) {
+	if created := presetsByID(undated)[domain.MigratedPromptPresetID]["createdAt"]; created != float64(0) {
 		t.Fatalf("an undated profile's migrated prompt is dated %v", created)
 	}
 	// Removing the migrated prompt stores the upgrade, so it does not return.
@@ -110,10 +111,10 @@ func TestADeviceProfileUpgradesAsAStoredOneReads(t *testing.T) {
 	calls := rows.calls
 	upgraded := profileOf(t, postRoute(h, "/v1/profile/upgrade", api.Object{"profile": device}, ""))
 	presets := presetsByID(upgraded)
-	if upgraded["defaultPromptPresetId"] != migratedPromptPresetID || upgraded["selectedModel"] != "auto" || upgraded["themeMode"] != "system" || len(api.Arr(upgraded["traits"])) != 0 || upgraded["nickname"] != "Sam" {
+	if upgraded["defaultPromptPresetId"] != domain.MigratedPromptPresetID || upgraded["selectedModel"] != "auto" || upgraded["themeMode"] != "system" || len(api.Arr(upgraded["traits"])) != 0 || upgraded["nickname"] != "Sam" {
 		t.Fatalf("the device profile upgraded as %v", upgraded)
 	}
-	if _, kept := presets["user:old"]["model"]; kept || presets["user:unnamed"] != nil || presets[migratedPromptPresetID]["systemPrompt"] != "<system>\nAnswer in French.\n</system>" {
+	if _, kept := presets["user:old"]["model"]; kept || presets["user:unnamed"] != nil || presets[domain.MigratedPromptPresetID]["systemPrompt"] != "<system>\nAnswer in French.\n</system>" {
 		t.Fatalf("the device's saved prompts upgraded as %v", presets)
 	}
 	if rows.calls != calls {
@@ -145,7 +146,7 @@ func TestADeviceTurnDropsInvalidProfileFields(t *testing.T) {
 func TestTheWebSearchSettingOfAnOldProfileIsKept(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	p := &auth.Principal{ID: "alice"}
-	rows.rows[rowMapKey(p, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(api.Object{"webSearchAvailable": false, "webSearchEnabled": true})}
+	rows.rows[rowMapKey(p, "profile", "profile")] = domain.StoredRow{ID: "profile", ETag: "1", Data: api.Raw(api.Object{"webSearchAvailable": false, "webSearchEnabled": true})}
 	get := func(user string) api.Object {
 		return profileOf(t, postRoute(h, "/v1/profile/get", api.Object{"key": keyBase64(key)}, user))
 	}

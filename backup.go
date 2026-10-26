@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 // A native backup is a ZIP archive: one JSON entry per project, project
@@ -135,37 +136,37 @@ type backupImage struct {
 
 // backupProject is a project as every version holds it.
 type backupProject struct {
-	Project
-	CreatedAt looseTime `json:"createdAt"`
-	UpdatedAt looseTime `json:"updatedAt"`
+	domain.Project
+	CreatedAt domain.LooseTime `json:"createdAt"`
+	UpdatedAt domain.LooseTime `json:"updatedAt"`
 }
 
 // backupDocument is a project document; its text is extractedText.
 type backupDocument struct {
-	ID            string    `json:"id"`
-	ProjectID     string    `json:"projectId"`
-	Filename      string    `json:"filename"`
-	ContentType   string    `json:"contentType"`
-	SizeBytes     int       `json:"sizeBytes"`
-	ExtractedText string    `json:"extractedText"`
-	CreatedAt     looseTime `json:"createdAt"`
-	UpdatedAt     looseTime `json:"updatedAt"`
+	ID            string           `json:"id"`
+	ProjectID     string           `json:"projectId"`
+	Filename      string           `json:"filename"`
+	ContentType   string           `json:"contentType"`
+	SizeBytes     int              `json:"sizeBytes"`
+	ExtractedText string           `json:"extractedText"`
+	CreatedAt     domain.LooseTime `json:"createdAt"`
+	UpdatedAt     domain.LooseTime `json:"updatedAt"`
 }
 
 // backupThread is a chat as version 3 holds it: the thread, with each image
 // named by the image the backup holds instead of its bytes.
 type backupThread struct {
-	Thread
+	domain.Thread
 	Messages []backupMessage `json:"messages"`
 }
 
 type backupMessage struct {
-	Message
+	domain.Message
 	Attachments []backupAttachment `json:"attachments,omitzero"`
 }
 
 type backupAttachment struct {
-	Attachment
+	domain.Attachment
 	ImageID string       `json:"imageId,omitempty"`
 	Pages   []backupPage `json:"pages,omitempty"`
 }

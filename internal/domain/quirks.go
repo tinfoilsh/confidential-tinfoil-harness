@@ -1,4 +1,4 @@
-package main
+package domain
 
 import (
 	"bytes"
@@ -18,13 +18,13 @@ var controlTokenPattern = regexp.MustCompile(`<\|[^|<>]{0,64}\|>?`)
 // urlFields hold URLs and nothing else, so stripping them cannot touch user text.
 var urlFields = map[string]bool{"url": true, "urls": true, "fetch_url": true, "page_url": true, "href": true, "link": true}
 
-// sanitizeToolCallArguments strips leaked control tokens from URL arguments in
+// SanitizeToolCallArguments strips leaked control tokens from URL arguments in
 // place.
-func sanitizeToolCallArguments(args map[string]any) {
-	deepStripURLTokens(args)
+func SanitizeToolCallArguments(args map[string]any) {
+	DeepStripURLTokens(args)
 }
 
-func stripModelControlTokens(s string) string {
+func StripModelControlTokens(s string) string {
 	if !strings.Contains(s, "<|") {
 		return s
 	}
@@ -37,14 +37,14 @@ func looksLikeLeakedURL(s string) bool {
 	if !strings.Contains(s, "<|") {
 		return false
 	}
-	stripped := stripModelControlTokens(s)
+	stripped := StripModelControlTokens(s)
 	return strings.HasPrefix(stripped, "http://") || strings.HasPrefix(stripped, "https://")
 }
 
-func deepStripURLTokens(v any) bool {
+func DeepStripURLTokens(v any) bool {
 	strip := func(s string, url bool) (string, bool) {
 		if url || looksLikeLeakedURL(s) {
-			stripped := stripModelControlTokens(s)
+			stripped := StripModelControlTokens(s)
 			return stripped, stripped != s
 		}
 		return s, false
@@ -65,40 +65,40 @@ func deepStripURLTokens(v any) bool {
 						if s, ok := strip(s, url); ok {
 							c[i], changed = s, true
 						}
-					} else if deepStripURLTokens(item) {
+					} else if DeepStripURLTokens(item) {
 						changed = true
 					}
 				}
 			case map[string]any:
-				changed = deepStripURLTokens(c) || changed
+				changed = DeepStripURLTokens(c) || changed
 			}
 		}
 	case []any:
 		for _, item := range val {
-			changed = deepStripURLTokens(item) || changed
+			changed = DeepStripURLTokens(item) || changed
 		}
 	}
 	return changed
 }
 
-// sanitizeToolCallArgumentsJSON cuts a payload such as Kimi's
+// SanitizeToolCallArgumentsJSON cuts a payload such as Kimi's
 // `{"a":1}Now I will...` down to its leading object. Valid JSON, and anything
 // that does not open with a complete object, is returned untouched.
-func sanitizeToolCallArgumentsJSON(raw []byte) ([]byte, bool) {
+func SanitizeToolCallArgumentsJSON(raw []byte) ([]byte, bool) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || trimmed[0] != '{' || json.Valid(trimmed) {
 		return raw, false
 	}
-	object, ok := extractFirstJSONObject(string(trimmed))
+	object, ok := ExtractFirstJSONObject(string(trimmed))
 	if !ok {
 		return raw, false
 	}
 	return []byte(object), true
 }
 
-// extractFirstJSONObject returns the first balanced top-level object in s,
+// ExtractFirstJSONObject returns the first balanced top-level object in s,
 // honouring strings and their escapes.
-func extractFirstJSONObject(s string) (string, bool) {
+func ExtractFirstJSONObject(s string) (string, bool) {
 	if len(s) == 0 || s[0] != '{' {
 		return "", false
 	}

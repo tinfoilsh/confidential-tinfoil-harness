@@ -1,18 +1,21 @@
 package main
 
-import "github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+import (
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+)
 
 // applyTurn makes the change a turn's kind makes to a transcript before its
 // reply: a new or edited question, or the cut a regeneration or
 // continuation starts from. An answer to the last question changes nothing.
-func applyTurn(t *Thread, in *turnRequest, messageID string, attachments []Attachment) error {
-	if t.messageIndex(messageID) >= 0 {
+func applyTurn(t *domain.Thread, in *turnRequest, messageID string, attachments []domain.Attachment) error {
+	if t.MessageIndex(messageID) >= 0 {
 		return nil
 	}
 	messages := t.Messages
-	content, quote := valueOr(in.Content, ""), valueOr(in.Quote, "")
+	content, quote := domain.ValueOr(in.Content, ""), domain.ValueOr(in.Quote, "")
 	if in.Kind == "edit" || in.Kind == "regenerate" || in.Kind == "continue" {
-		index := t.messageIndex(in.MessageID)
+		index := t.MessageIndex(in.MessageID)
 		// A continuation names its reply or extends the last message.
 		if in.Kind == "continue" && in.MessageID == "" {
 			index = len(messages) - 1
@@ -34,7 +37,7 @@ func applyTurn(t *Thread, in *turnRequest, messageID string, attachments []Attac
 			if in.Attachments == nil {
 				attachments = messages[index].Attachments
 				if attachments == nil {
-					attachments = []Attachment{}
+					attachments = []domain.Attachment{}
 				}
 			}
 			if in.Quote == nil {
@@ -48,10 +51,10 @@ func applyTurn(t *Thread, in *turnRequest, messageID string, attachments []Attac
 		messages = messages[:index]
 	}
 	if in.Kind == "ask" {
-		content, quote = valueOr(in.Quote, ""), ""
+		content, quote = domain.ValueOr(in.Quote, ""), ""
 	}
 	if in.Kind != "regenerate" && in.Kind != "retryToolCall" && in.Kind != "continue" && in.Kind != "answer" {
-		messages = append(messages, Message{ID: messageID, Role: "user", Content: content, Quote: quote, Attachments: attachments, CreatedAt: api.Timestamp()})
+		messages = append(messages, domain.Message{ID: messageID, Role: "user", Content: content, Quote: quote, Attachments: attachments, CreatedAt: api.Timestamp()})
 	}
 	t.Messages = messages
 	return nil
@@ -60,7 +63,7 @@ func applyTurn(t *Thread, in *turnRequest, messageID string, attachments []Attac
 // retried is the turn a retry carries out, which the chat decides: a failed
 // or stopped continuation continues again, any other last reply is
 // regenerated, and a last question without a reply is answered.
-func retried(t *Thread, in *turnRequest) (*turnRequest, error) {
+func retried(t *domain.Thread, in *turnRequest) (*turnRequest, error) {
 	if len(t.Messages) == 0 {
 		return nil, api.Err(400, "BAD_REQUEST", "The chat has nothing to retry")
 	}
@@ -68,7 +71,7 @@ func retried(t *Thread, in *turnRequest) (*turnRequest, error) {
 	switch {
 	case last.Role == "user":
 		turn.Kind, turn.MessageID = "answer", ""
-	case t.LastRequestKind == "continue" && (valueOr(last.IsError, false) || valueOr(last.IsInterrupted, false)):
+	case t.LastRequestKind == "continue" && (domain.ValueOr(last.IsError, false) || domain.ValueOr(last.IsInterrupted, false)):
 		turn.Kind, turn.MessageID = "continue", last.ID
 	default:
 		turn.Kind, turn.MessageID = "regenerate", last.ID

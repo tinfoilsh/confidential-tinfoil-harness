@@ -1,4 +1,4 @@
-package main
+package domain
 
 import (
 	"cmp"
@@ -33,8 +33,8 @@ type chatPrompt struct {
 	} `json:"genUI"`
 }
 
-// builtInPrompt is the compiled system prompt, read once.
-var builtInPrompt = sync.OnceValue(func() chatPrompt {
+// BuiltInPrompt is the compiled system prompt, read once.
+var BuiltInPrompt = sync.OnceValue(func() chatPrompt {
 	var prompt chatPrompt
 	if json.Unmarshal(promptJSON, &prompt) != nil || prompt.SystemPrompt == "" {
 		panic("invalid compiled system prompt")
@@ -42,8 +42,8 @@ var builtInPrompt = sync.OnceValue(func() chatPrompt {
 	return prompt
 })
 
-// preset is a built-in prompt the clients offer.
-type preset struct {
+// Preset is a built-in prompt the clients offer.
+type Preset struct {
 	ID           string `json:"id"`
 	Name         string `json:"name"`
 	Description  string `json:"description"`
@@ -52,24 +52,24 @@ type preset struct {
 	BuiltIn      bool   `json:"builtIn"`
 }
 
-func builtInPresets() []preset {
-	var presets []preset
+func BuiltInPresets() []Preset {
+	var presets []Preset
 	json.Unmarshal(presetJSON, &presets)
 	return presets
 }
 
-type widget struct {
+type Widget struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	Schema      json.RawMessage `json:"schema"`
 	Hint        string          `json:"promptHint"`
 
-	schema *jsonschema.Resolved // what a call's arguments are validated against
+	Resolved *jsonschema.Resolved // what a call's arguments are validated against
 }
 
-// widgetCatalog is the compiled widget declarations, read once.
-var widgetCatalog = sync.OnceValue(func() []widget {
-	var widgets []widget
+// WidgetCatalog is the compiled widget declarations, read once.
+var WidgetCatalog = sync.OnceValue(func() []Widget {
+	var widgets []Widget
 	if json.Unmarshal(widgetJSON, &widgets) != nil {
 		panic("invalid compiled widgets")
 	}
@@ -78,26 +78,26 @@ var widgetCatalog = sync.OnceValue(func() []widget {
 		if err != nil {
 			panic("invalid compiled widget schema: " + err.Error())
 		}
-		widgets[i].schema = resolved
+		widgets[i].Resolved = resolved
 	}
 	return widgets
 })
 
-func (w widget) declaration() json.RawMessage {
+func (w Widget) Declaration() json.RawMessage {
 	return api.Raw(api.Object{"type": "function", "function": api.Object{"name": w.Name, "description": w.Description, "parameters": w.Schema}})
 }
 
-type chatCatalog struct {
+type Catalog struct {
 	Models                      []api.Object
 	Deprecated                  []api.Object
 	Listed                      []string // every chat model the control plane lists, offered or not
 	Prompt, Rules, WidgetHeader string
 	EnabledWidgets              []string
-	Presets                     []preset
+	Presets                     []Preset
 	Fallback                    int // smallest configured window, for Auto while no model is offered
 }
 
-func (c *chatCatalog) definition(name string) api.Object {
+func (c *Catalog) Definition(name string) api.Object {
 	for _, m := range c.Models {
 		if api.Str(m["modelName"]) == name {
 			return m
@@ -106,23 +106,23 @@ func (c *chatCatalog) definition(name string) api.Object {
 	return nil
 }
 
-// displayName is what clients call a configured model, if anything.
-func (c *chatCatalog) displayName(name string) string {
-	return api.Str(c.definition(name)["name"])
+// DisplayName is what clients call a configured model, if anything.
+func (c *Catalog) DisplayName(name string) string {
+	return api.Str(c.Definition(name)["name"])
 }
 
-// vision reports whether a model reads images. The router gives an Auto turn
+// Vision reports whether a model reads images. The router gives an Auto turn
 // that carries images to a multimodal model.
-func (c *chatCatalog) vision(name string) bool {
-	return name == "auto" || api.Bool(c.definition(name)["multimodal"], false)
+func (c *Catalog) Vision(name string) bool {
+	return name == "auto" || api.Bool(c.Definition(name)["multimodal"], false)
 }
 
-// offers reports whether a chat may run on a model now.
-func (c *chatCatalog) offers(name string) bool {
-	if name == autoModelName {
+// Offers reports whether a chat may run on a model now.
+func (c *Catalog) Offers(name string) bool {
+	if name == AutoModelName {
 		return true
 	}
-	definition := c.definition(name)
+	definition := c.Definition(name)
 	return definition != nil && !autoOnly(definition)
 }
 
@@ -132,31 +132,31 @@ func autoOnly(definition api.Object) bool {
 	return !api.Bool(definition["paid"], true)
 }
 
-// applyPreset files a chat under a prompt preset, or none, and takes the
+// ApplyPreset files a chat under a prompt preset, or none, and takes the
 // model and web search setting a saved preset chooses. A model that is not
 // offered is not taken.
-func (c *chatCatalog) applyPreset(t *Thread, profile *Profile, id *string) {
+func (c *Catalog) ApplyPreset(t *Thread, profile *Profile, id *string) {
 	t.PresetID = id
 	if id == nil {
 		return
 	}
-	saved := profile.preset(*id)
+	saved := profile.Preset(*id)
 	if saved == nil {
 		return
 	}
-	if model := valueOr(saved.Model, ""); model != "" && c.offers(model) {
+	if model := ValueOr(saved.Model, ""); model != "" && c.Offers(model) {
 		t.Model = model
 	}
-	t.WebSearchEnabled = valueOr(saved.WebSearchEnabled, t.WebSearchEnabled)
+	t.WebSearchEnabled = ValueOr(saved.WebSearchEnabled, t.WebSearchEnabled)
 }
 
 // retired reports whether the control plane no longer lists a chat model.
-func (c *chatCatalog) retired(name string) bool {
-	return name != autoModelName && c.definition(name) == nil && !slices.Contains(c.Listed, name)
+func (c *Catalog) retired(name string) bool {
+	return name != AutoModelName && c.Definition(name) == nil && !slices.Contains(c.Listed, name)
 }
 
-// autoModelName is the model that has the router choose one per turn.
-const autoModelName = "auto"
+// AutoModelName is the model that has the router choose one per turn.
+const AutoModelName = "auto"
 
 // legacyAutoModels are the Auto tiers of an earlier design, which old chats
 // and settings name.
@@ -164,28 +164,28 @@ var legacyAutoModels = []string{"auto-smart", "auto-fast"}
 
 func normalizeModel(name string) string {
 	if name == "" || slices.Contains(legacyAutoModels, name) {
-		return autoModelName
+		return AutoModelName
 	}
 	return name
 }
 
-var reasoningEfforts = []string{"low", "medium", "high"}
+var ReasoningEfforts = []string{"low", "medium", "high"}
 
-// intelligenceLevel is one setting of how hard Auto works, as clients label
+// IntelligenceLevel is one setting of how hard Auto works, as clients label
 // it alone and as the model a chat runs on.
-type intelligenceLevel struct {
+type IntelligenceLevel struct {
 	ID           string `json:"id"`
 	Label        string `json:"label"`
 	DisplayLabel string `json:"displayLabel"`
 }
 
-var intelligenceLevels = []intelligenceLevel{{ID: "instant", Label: "Instant"}, {ID: "low", Label: "Low"}, {ID: "medium", Label: "Med"}, {ID: "high", Label: "High"}, {ID: "extra", Label: "Extra"}, {ID: "max", Label: "Max"}}
+var intelligenceLevels = []IntelligenceLevel{{ID: "instant", Label: "Instant"}, {ID: "low", Label: "Low"}, {ID: "medium", Label: "Med"}, {ID: "high", Label: "High"}, {ID: "extra", Label: "Extra"}, {ID: "max", Label: "Max"}}
 
 // autoLabel is what clients call Auto.
 const autoLabel = "Auto"
 
-// autoLevels are Auto's levels, each labeled as the model a chat runs on.
-func autoLevels() []intelligenceLevel {
+// AutoLevels are Auto's levels, each labeled as the model a chat runs on.
+func AutoLevels() []IntelligenceLevel {
 	levels := slices.Clone(intelligenceLevels)
 	for i := range levels {
 		levels[i].DisplayLabel = autoLabel + " · " + levels[i].Label
@@ -201,7 +201,7 @@ func intelligenceIDs() []string {
 	return ids
 }
 
-func intelligence(level string) (int, error) {
+func Intelligence(level string) (int, error) {
 	if level == "" {
 		level = "high"
 	}
@@ -232,9 +232,9 @@ type modelConfig struct {
 	} `json:"chatConfig"`
 }
 
-// sessionModel is a chat model as a client offers it, every field ready to
+// SessionModel is a chat model as a client offers it, every field ready to
 // show. Auto is the entry that has the router choose a model for each turn.
-type sessionModel struct {
+type SessionModel struct {
 	ID          string           `json:"id"`
 	Label       string           `json:"label"`
 	ShortLabel  string           `json:"shortLabel"`
@@ -260,31 +260,31 @@ type lifecycleBadge struct {
 }
 
 const (
-	experimentalTooltip   = "Support and availability are not guaranteed. This model can be deprecated at any time."
+	ExperimentalTooltip   = "Support and availability are not guaranteed. This model can be deprecated at any time."
 	deprecatedTooltip     = "This model is deprecated. An offline date has not been announced."
 	deprecatedDateTooltip = "This model will be taken offline on %s."
 )
 
-// displayModels are the models a client offers, Auto first.
-func (c *chatCatalog) displayModels() []sessionModel {
-	models := []sessionModel{{ID: autoModelName, Label: autoLabel, ShortLabel: autoLabel, Badges: []lifecycleBadge{}, Auto: true}}
+// DisplayModels are the models a client offers, Auto first.
+func (c *Catalog) DisplayModels() []SessionModel {
+	models := []SessionModel{{ID: AutoModelName, Label: autoLabel, ShortLabel: autoLabel, Badges: []lifecycleBadge{}, Auto: true}}
 	for _, m := range append(slices.Clone(c.Models), c.Deprecated...) {
 		if autoOnly(m) {
 			continue
 		}
 		var config modelConfig
 		readLenient(api.Raw(m), &config)
-		display := sessionModel{ID: config.ModelName, Label: config.Name, ShortLabel: cmp.Or(config.NameShort, config.Name), Icon: config.Image, Description: config.ChatConfig.DescriptionShort,
+		display := SessionModel{ID: config.ModelName, Label: config.Name, ShortLabel: cmp.Or(config.NameShort, config.Name), Icon: config.Image, Description: config.ChatConfig.DescriptionShort,
 			Deprecated: config.Deprecated, Badges: []lifecycleBadge{}}
 		if reason := config.ChatConfig.ReasoningConfig; reason != nil {
-			display.Reasoning = &reasoningView{Toggle: reason.SupportsToggle, Effort: reason.SupportsEffort, DefaultEnabled: valueOr(reason.DefaultEnabled, true)}
+			display.Reasoning = &reasoningView{Toggle: reason.SupportsToggle, Effort: reason.SupportsEffort, DefaultEnabled: ValueOr(reason.DefaultEnabled, true)}
 		}
 		if config.Experimental {
-			display.Badges = append(display.Badges, lifecycleBadge{"experimental", "Experimental", experimentalTooltip})
+			display.Badges = append(display.Badges, lifecycleBadge{"experimental", "Experimental", ExperimentalTooltip})
 		}
 		if config.Deprecated {
 			tooltip := deprecatedTooltip
-			if date := valueOr(config.DeprecationDate, ""); date != "" {
+			if date := ValueOr(config.DeprecationDate, ""); date != "" {
 				tooltip = fmt.Sprintf(deprecatedDateTooltip, date)
 			}
 			display.Badges = append(display.Badges, lifecycleBadge{"deprecated", "Deprecated", tooltip})
@@ -293,12 +293,12 @@ func (c *chatCatalog) displayModels() []sessionModel {
 	}
 	return models
 }
-func (c *chatCatalog) selectedWidgets(requested []string, enabled bool) []widget {
-	result := []widget{}
+func (c *Catalog) SelectedWidgets(requested []string, enabled bool) []Widget {
+	result := []Widget{}
 	if !enabled {
 		return result
 	}
-	for _, widget := range widgetCatalog() {
+	for _, widget := range WidgetCatalog() {
 		if slices.Contains(c.EnabledWidgets, widget.Name) && slices.Contains(requested, widget.Name) {
 			result = append(result, widget)
 		}
@@ -312,9 +312,9 @@ func (c *chatCatalog) selectedWidgets(requested []string, enabled bool) []widget
 // sent.
 var reasoningSetting = regexp.MustCompile(`^[a-z]{1,16}$`)
 
-// modelParams are the reasoning settings a model's configuration asks for:
+// ModelParams are the reasoning settings a model's configuration asks for:
 // whether it thinks and how hard, and nothing else.
-func modelParams(def api.Object, thinking bool, effort string) api.Object {
+func ModelParams(def api.Object, thinking bool, effort string) api.Object {
 	params := api.Object{}
 	reason := api.Obj(api.Obj(def["chatConfig"])["reasoningConfig"])
 	mode := "enable"

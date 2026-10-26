@@ -22,6 +22,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 func TestAnonymousInferenceValidatesTheClientKey(t *testing.T) {
@@ -401,9 +402,9 @@ func TestASignedOutCallersQuotaComesFromItsKey(t *testing.T) {
 		t.Fatalf("the session reports %s, want %s", session.RateLimit, want)
 	}
 	reported := func(e event) api.RateLimit {
-		var metadata runMetadata
+		var metadata domain.RunMetadata
 		json.Unmarshal(e.Metadata, &metadata)
-		return valueOr(metadata.RateLimit, api.RateLimit{})
+		return domain.ValueOr(metadata.RateLimit, api.RateLimit{})
 	}
 	events := eventsIn(t, postRoute(h, "/v1/threads/turn", localInput("", api.Object{}), ""))
 	want := `{"kind":"free_daily","maxRequests":10,"remaining":6,"inputTokens":{"max":1000,"used":112,"remaining":888},"outputTokens":{"max":500,"used":3,"remaining":497},"resetsAt":"` + resets + `"}`
