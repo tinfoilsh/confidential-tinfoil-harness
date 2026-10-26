@@ -22,6 +22,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 )
 
 func TestImagePreprocessingBoundsAndTransparency(t *testing.T) {
@@ -177,7 +178,7 @@ func TestTitleRunsBeforeAnswerFinishes(t *testing.T) {
 		close(titled)
 	}))
 	defer server.Close()
-	h.models.services["summarizer"] = &downstreamService{URL: server.URL, Client: server.Client()}
+	h.models.Services["summarizer"] = &inference.Service{URL: server.URL, Client: server.Client()}
 	run, err := h.acceptTurn(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
@@ -218,7 +219,7 @@ func TestWidgetRetryReplacesOnlyTheArguments(t *testing.T) {
 		}
 		json.NewEncoder(w).Encode(api.Object{"choices": []api.Object{{"message": api.Object{"content": `{"stats":"[{\"label\":\"Count\",\"value\":2}]"} Here are the stats.`}}}})
 	})
-	catalog := h.models.catalog.get()
+	catalog := h.models.Catalog.Get()
 	catalog.EnabledWidgets = []string{"render_stat_cards"}
 	original := `{"stats":[{"label":"Count","value":1}]}`
 	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat")] = domain.StoredRow{ID: "chat", ETag: "1", Data: api.Raw(api.Object{"createdAt": api.Timestamp(), "title": "Title", "titleState": "manual", "model": "kimi-k3", "messages": []any{api.Object{"id": "user", "role": "user", "content": "show a stat", "timestamp": api.Timestamp()}, api.Object{"id": "assistant", "role": "assistant", "content": "keep this text", "timestamp": api.Timestamp(), "timeline": []any{api.Object{"type": "content", "id": "text", "content": "keep this text"}, api.Object{"type": "tool_call", "id": "call", "toolCallId": "call", "name": "render_stat_cards", "arguments": original}}}}})}
@@ -263,7 +264,7 @@ func TestManagedToolLoopKeepsReasoningAndOneAssistantMessage(t *testing.T) {
 		}
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"the clock is ready\"}}]}\n\ndata: [DONE]\n\n")
 	})
-	catalog := h.models.catalog.get()
+	catalog := h.models.Catalog.Get()
 	catalog.EnabledWidgets = []string{"render_clock"}
 	api.Obj(catalog.Models[0]["chatConfig"])["reasoningConfig"] = api.Object{"reasoningHistoryPolicy": "tool-call-only"}
 	in := sendInput(key)

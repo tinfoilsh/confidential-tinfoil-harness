@@ -28,6 +28,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
@@ -222,13 +223,13 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 	}))
 	t.Cleanup(cp.Close)
 	rows := &memoryRows{rows: map[string]domain.StoredRow{}, sealed: map[string]auth.ContentKey{}}
-	h := &harness{models: &models{gateway: server.URL, controlplane: cp.URL, services: map[string]*downstreamService{}}, controlplane: cp.URL, cpClient: cp.Client(), store: &store.Store{Rows: rows}, scratch: newScratchSpace(t.TempDir(), 1<<30)}
+	h := &harness{models: &inference.Models{Gateway: server.URL, Controlplane: cp.URL, Services: map[string]*inference.Service{}}, controlplane: cp.URL, cpClient: cp.Client(), store: &store.Store{Rows: rows}, scratch: newScratchSpace(t.TempDir(), 1<<30)}
 	h.store.Repair = h
 	h.auth = testAuth(cp)
-	m := &model{name: "kimi-k3", context: 8192, client: &http.Client{Transport: &auth.CallerTransport{Inner: server.Client().Transport, UsageSecret: "test-usage-secret"}}}
-	h.models.offer.models = []*model{m}
-	h.models.auto = m
-	h.models.catalog.set(&domain.Catalog{Models: []api.Object{{"modelName": "kimi-k3", "name": "Kimi K3", "budgetWindow": 8192, "multimodal": false, "chatConfig": api.Object{}}}, Prompt: "You are {MODEL_NAME}. {USER_PREFERENCES}", Presets: domain.BuiltInPresets()})
+	m := &inference.Model{Name: "kimi-k3", Context: 8192, Client: &http.Client{Transport: &auth.CallerTransport{Inner: server.Client().Transport, UsageSecret: "test-usage-secret"}}}
+	h.models.Offer.Set([]*inference.Model{m}, nil)
+	h.models.Auto = m
+	h.models.Catalog.Set(&domain.Catalog{Models: []api.Object{{"modelName": "kimi-k3", "name": "Kimi K3", "budgetWindow": 8192, "multimodal": false, "chatConfig": api.Object{}}}, Prompt: "You are {MODEL_NAME}. {USER_PREFERENCES}", Presets: domain.BuiltInPresets()})
 
 	t.Cleanup(func() {
 		h.stopRuns()
@@ -1430,7 +1431,7 @@ func widgetTurn(t *testing.T, chunks ...string) []event {
 		}
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n")
 	})
-	h.models.catalog.get().EnabledWidgets = []string{"render_artifact_preview"}
+	h.models.Catalog.Get().EnabledWidgets = []string{"render_artifact_preview"}
 	in := sendInput(key)
 	in["widgets"] = []any{"render_artifact_preview"}
 	return finishedRun(t, h, "/v1/threads/turn", in)
@@ -1686,7 +1687,7 @@ func TestALargeSearchResultIsClippedNotFlattened(t *testing.T) {
 	})
 	sent := make(chan []any, 1)
 	h, _, key := testChatHarness(t, toolTurns(toolCallChunk(0, "s", "web_search", `{"query":"cats"}`), sent))
-	h.models.catalog.get().Models[0]["budgetWindow"] = 1 << 16
+	h.models.Catalog.Get().Models[0]["budgetWindow"] = 1 << 16
 	events := finishedRun(t, h, "/v1/threads/turn", searchInput(key))
 	results := api.Arr(toolResult(events, "s")["results"])
 	if len(results) != 2 || api.Obj(results[0])["title"] != "Huge" || len(api.Str(api.Obj(results[0])["snippet"])) != domain.MaxShownOutput+len("\n[truncated]") || api.Obj(results[1])["url"] != "https://next.test" || api.Obj(results[1])["snippet"] != "\n[truncated]" {
@@ -1748,7 +1749,7 @@ func TestReasoningIsEchoedInTheFieldItArrivedIn(t *testing.T) {
 		t.Run(field, func(t *testing.T) {
 			sent := make(chan []any, 1)
 			h, _, key := testChatHarness(t, toolTurns("data: "+string(api.Raw(api.Object{"choices": []api.Object{{"delta": api.Object{field: "think first"}}}}))+"\n\n"+toolCallChunk(0, "c", "lookup_order", `{}`), sent))
-			api.Obj(h.models.catalog.get().Models[0]["chatConfig"])["reasoningConfig"] = api.Object{"reasoningHistoryPolicy": "tool-call-only"}
+			api.Obj(h.models.Catalog.Get().Models[0]["chatConfig"])["reasoningConfig"] = api.Object{"reasoningHistoryPolicy": "tool-call-only"}
 			finishedRun(t, h, "/v1/threads/turn", sendInput(key))
 			messages := <-sent
 			assistant := api.Obj(messages[len(messages)-2])
@@ -1800,7 +1801,7 @@ func TestToolCapEndsWithOneTurnWithoutTools(t *testing.T) {
 				}
 				io.WriteString(w, toolCallChunk(0, "clock-"+strconv.Itoa(int(turn)), "render_clock", `{}`)+"data: [DONE]\n\n")
 			})
-			h.models.catalog.get().EnabledWidgets = []string{"render_clock"}
+			h.models.Catalog.Get().EnabledWidgets = []string{"render_clock"}
 			in := sendInput(key)
 			in["widgets"] = []any{"render_clock"}
 			events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice"))
@@ -1868,7 +1869,7 @@ func heldScreening(t *testing.T, h *harness, hold chan struct{}) func() []submis
 	t.Cleanup(sidecar.Close)
 	h.safeguards = newSubmitter(sidecar.URL)
 	// As deployed, auto is the router, not one of the gateway's models.
-	h.models.auto = &model{name: "auto", client: h.models.offer.get()[0].client}
+	h.models.Auto = &inference.Model{Name: "auto", Client: h.models.Offer.Get()[0].Client}
 	return func() []submission {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()

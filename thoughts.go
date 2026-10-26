@@ -40,7 +40,7 @@ type thoughtSummaries struct {
 // thoughtSummaries starts following a run's reasoning, unless no summarizer
 // verified.
 func (h *harness) thoughtSummaries(ctx context.Context, out *stream, assembler *domain.MessageAssembler) *thoughtSummaries {
-	if !h.models.serviceReady("summarizer") {
+	if !h.models.ServiceReady("summarizer") {
 		return nil
 	}
 	return &thoughtSummaries{ctx: ctx, out: out, assembler: assembler, summarize: func(ctx context.Context, text string) (string, error) {
@@ -49,7 +49,7 @@ func (h *harness) thoughtSummaries(ctx context.Context, out *stream, assembler *
 		var result struct {
 			Summary string `json:"summary"`
 		}
-		err := h.models.serviceCall(ctx, "summarizer", "/summarize", api.Object{"content": text, "style": thoughtsStyle}, &result)
+		err := h.models.ServiceCall(ctx, "summarizer", "/summarize", api.Object{"content": text, "style": thoughtsStyle}, &result)
 		return result.Summary, err
 	}}
 }

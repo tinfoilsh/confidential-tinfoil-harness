@@ -24,6 +24,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 )
 
 func routerHarness(t *testing.T, router http.HandlerFunc) *harness {
@@ -31,7 +32,7 @@ func routerHarness(t *testing.T, router http.HandlerFunc) *harness {
 	h, _, _ := testChatHarness(t, nil)
 	server := httptest.NewServer(router)
 	t.Cleanup(server.Close)
-	h.models.services["router"] = &downstreamService{URL: server.URL, Client: &http.Client{Transport: &auth.CallerTransport{Inner: server.Client().Transport}}}
+	h.models.Services["router"] = &inference.Service{URL: server.URL, Client: &http.Client{Transport: &auth.CallerTransport{Inner: server.Client().Transport}}}
 	return h
 }
 

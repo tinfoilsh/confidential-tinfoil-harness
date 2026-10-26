@@ -13,6 +13,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 )
 
 // Read-aloud audio is mono 16-bit 24 kHz PCM. Each piece of a message is
@@ -67,7 +68,7 @@ func (h *harness) handleSpeech(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "There is nothing to read aloud"))
 		return
 	}
-	router := h.models.services["router"]
+	router := h.models.Services["router"]
 	if router == nil {
 		api.Respond(w, nil, api.Err(503, "TOOL_UNAVAILABLE", "Speech is unavailable"))
 		return
@@ -148,7 +149,7 @@ func (a *speechAudio) from(offset int) ([]byte, bool, error, <-chan struct{}) {
 // synthesized once a slot frees up, and its slot frees up once its audio
 // is written. A failure before any audio is returned; one after aborts the
 // response, so its client reads the audio as incomplete.
-func streamSpeech(ctx context.Context, w http.ResponseWriter, router *downstreamService, pieces []string) error {
+func streamSpeech(ctx context.Context, w http.ResponseWriter, router *inference.Service, pieces []string) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	audio := make([]*speechAudio, len(pieces))
@@ -209,7 +210,7 @@ func streamSpeech(ctx context.Context, w http.ResponseWriter, router *downstream
 }
 
 // synthesize reads the audio the router speaks one piece of text with.
-func synthesize(ctx context.Context, router *downstreamService, text string, out *speechAudio) {
+func synthesize(ctx context.Context, router *inference.Service, text string, out *speechAudio) {
 	var err error
 	defer func() {
 		if failure := api.Rescued("speech synthesis", recover()); failure != nil {

@@ -10,6 +10,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
@@ -23,7 +24,7 @@ type turnPlan struct {
 	row         *domain.ThreadRow
 	turn        *turnRequest // the turn carried out: a retry is the turn it repeats
 	request     *request
-	model       *model
+	model       *inference.Model
 	titleText   string
 	retryTarget *retryTarget
 }
@@ -106,7 +107,7 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *auth.Principal
 		if id := domain.ValueOr(profile.DefaultPromptPresetID, ""); !r.input.PresetID.Set && id != "" {
 			preset = &id
 		}
-		c := h.models.catalog.get()
+		c := h.models.Catalog.Get()
 		t.Model = c.SelectedModel(&profile)
 		t.WebSearchEnabled = domain.ValueOr(profile.WebSearchEnabled, t.WebSearchEnabled)
 		c.ApplyPreset(t, &profile, preset)
@@ -158,7 +159,7 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *auth.Principal
 		if plan.retryTarget == nil {
 			return nil, api.Err(404, "THREAD_NOT_FOUND", "The widget call was not found")
 		}
-		if !slices.ContainsFunc(h.models.catalog.get().SelectedWidgets(r.input.Widgets, true), func(w domain.Widget) bool { return w.Name == plan.retryTarget.block.Name }) {
+		if !slices.ContainsFunc(h.models.Catalog.Get().SelectedWidgets(r.input.Widgets, true), func(w domain.Widget) bool { return w.Name == plan.retryTarget.block.Name }) {
 			return nil, api.Err(503, "TOOL_UNAVAILABLE", "This widget is not enabled for the client").WithAction(api.ActionStop)
 		}
 	}
@@ -193,7 +194,7 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	}
 	ctx = auth.WithCallerKey(ctx, string(r.credential.Key))
 	ctx = auth.WithUsage(ctx, usageForRun(r))
-	ctx = withUsageSink(ctx, r.out)
+	ctx = inference.WithUsageSink(ctx, r.out)
 	if err := h.refuseFlagged(ctx, r, p); err != nil {
 		return err
 	}
@@ -267,7 +268,7 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	runCtx, cancel := context.WithTimeout(r.stopped, runTimeout)
 	runCtx = auth.WithCallerKey(runCtx, string(r.credential.Key))
 	runCtx = auth.WithUsage(runCtx, usageForRun(r))
-	runCtx = withUsageSink(runCtx, r.out)
+	runCtx = inference.WithUsageSink(runCtx, r.out)
 	r.out.mu.Lock()
 	r.out.thoughts = h.thoughtSummaries(runCtx, r.out, r.assembler)
 	r.out.mu.Unlock()

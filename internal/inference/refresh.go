@@ -1,4 +1,4 @@
-package main
+package inference
 
 import (
 	"context"
@@ -18,13 +18,13 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
-type catalogCache struct {
+type CatalogCache struct {
 	mu    sync.RWMutex
 	value *domain.Catalog
 }
 
-func (c *catalogCache) get() *domain.Catalog      { c.mu.RLock(); defer c.mu.RUnlock(); return c.value }
-func (c *catalogCache) set(value *domain.Catalog) { c.mu.Lock(); defer c.mu.Unlock(); c.value = value }
+func (c *CatalogCache) Get() *domain.Catalog      { c.mu.RLock(); defer c.mu.RUnlock(); return c.value }
+func (c *CatalogCache) Set(value *domain.Catalog) { c.mu.Lock(); defer c.mu.Unlock(); c.value = value }
 
 func fetchConfig(ctx context.Context, client *http.Client, base, path string, out any) error {
 	req, _ := http.NewRequestWithContext(ctx, "GET", base+path, nil)
@@ -38,22 +38,22 @@ func fetchConfig(ctx context.Context, client *http.Client, base, path string, ou
 	}
 	return json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(out)
 }
-func (inf *models) refreshCatalog(ctx context.Context) error {
-	inf.refreshOffer(ctx)
+func (inf *Models) RefreshCatalog(ctx context.Context) error {
+	inf.RefreshOffer(ctx)
 	client := &http.Client{Timeout: 15 * time.Second}
 	var models []api.Object
-	if err := fetchConfig(ctx, client, inf.controlplane, "/api/config/models", &models); err != nil {
+	if err := fetchConfig(ctx, client, inf.Controlplane, "/api/config/models", &models); err != nil {
 		return err
 	}
-	c := buildCatalog(models, inf.offer.get())
+	c := buildCatalog(models, inf.Offer.Get())
 	// The first catalog may offer only Auto; a later one without models keeps the last.
-	if len(c.Models) == 0 && inf.catalog.get() != nil {
+	if len(c.Models) == 0 && inf.Catalog.Get() != nil {
 		return errors.New("no configured chat model is offered by the gateway")
 	}
-	inf.catalog.set(c)
+	inf.Catalog.Set(c)
 	return nil
 }
-func buildCatalog(config []api.Object, models []*model) *domain.Catalog {
+func buildCatalog(config []api.Object, models []*Model) *domain.Catalog {
 	prompt := domain.BuiltInPrompt()
 	c := &domain.Catalog{Prompt: prompt.SystemPrompt, Rules: prompt.Rules, WidgetHeader: prompt.GenUI.Header, EnabledWidgets: slices.Clone(prompt.GenUI.EnabledWidgets), Models: []api.Object{}, Presets: domain.BuiltInPresets()}
 	var unpinned []string
@@ -76,10 +76,10 @@ func buildCatalog(config []api.Object, models []*model) *domain.Catalog {
 			continue
 		}
 		for _, model := range models {
-			if model.name == name {
+			if model.Name == name {
 				def := maps.Clone(definition)
 				// A prompt must fit both the replica and the window the product configures.
-				window := model.context
+				window := model.Context
 				if configured > 0 && (window <= 0 || configured < window) {
 					window = configured
 				}

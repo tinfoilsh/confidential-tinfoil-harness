@@ -1,4 +1,4 @@
-package main
+package inference
 
 import (
 	"bytes"
@@ -20,24 +20,24 @@ import (
 	tinfoil "github.com/tinfoilsh/tinfoil-go"
 )
 
-type models struct {
-	auto         *model
-	catalog      catalogCache
-	gateway      string
-	client       *http.Client
-	offer        offerCache
-	services     map[string]*downstreamService
-	controlplane string
+type Models struct {
+	Auto         *Model
+	Catalog      CatalogCache
+	Gateway      string
+	Client       *http.Client
+	Offer        Offer
+	Services     map[string]*Service
+	Controlplane string
 }
 
 // The pinned repo is the trust anchor; the gateway's catalog supplies the rest.
-type model struct {
-	endpoint string
-	name     string
-	vision   bool
-	context  int // usable prompt budget, in tokens
+type Model struct {
+	Endpoint string
+	Name     string
+	Vision   bool
+	Context  int // usable prompt budget, in tokens
 
-	client *http.Client // seals each request to a verified replica
+	Client *http.Client // seals each request to a verified replica
 }
 
 // pin is a model the harness serves: its repository, and the name the
@@ -55,9 +55,9 @@ var pinned = []pin{
 	{"llama3-3-70b", "tinfoilsh/confidential-llama3-3-70b", "Llama 3.3 70B"},
 }
 
-// pinnedName is what the system prompt calls a model. The catalog's name is
+// PinnedName is what the system prompt calls a model. The catalog's name is
 // not used there, since the catalog comes from outside the enclave.
-func pinnedName(model string) string {
+func PinnedName(model string) string {
 	for _, p := range pinned {
 		if p.name == model {
 			return p.display
@@ -70,8 +70,8 @@ func pinnedName(model string) string {
 // SDK never tries to persist a secret under the read-only home directory.
 var cacheFallback = tinfoil.WithUserCacheSecret(api.Token())
 
-// attest verifies an enclave the harness dials directly.
-func attest(ctx context.Context, enclave, repo, usageSecret string) (*http.Client, error) {
+// Attest verifies an enclave the harness dials directly.
+func Attest(ctx context.Context, enclave, repo, usageSecret string) (*http.Client, error) {
 	return startupAttestation.run(ctx, func() (*http.Client, error) {
 		verified, err := tinfoil.NewClientWithOptions(tinfoil.WithEnclave(enclave), tinfoil.WithRepo(repo), cacheFallback)
 		if err != nil {
@@ -83,9 +83,9 @@ func attest(ctx context.Context, enclave, repo, usageSecret string) (*http.Clien
 	})
 }
 
-// newGateway seals each model request to a replica of the model it names,
+// NewGateway seals each model request to a replica of the model it names,
 // verified on first use against the pinned repository.
-func newGateway(gateway string, catalog func() tinfoil.Catalog) (*tinfoil.Gateway, error) {
+func NewGateway(gateway string, catalog func() tinfoil.Catalog) (*tinfoil.Gateway, error) {
 	pins := map[string]tinfoil.ModelPin{}
 	for _, p := range pinned {
 		pins[p.name] = tinfoil.ModelPin{Repo: p.repo}
@@ -93,23 +93,23 @@ func newGateway(gateway string, catalog func() tinfoil.Catalog) (*tinfoil.Gatewa
 	return tinfoil.NewGateway(gateway+"/v1/", catalog, tinfoil.GatewayOptions{ClientOptions: []tinfoil.ClientOption{cacheFallback}, ModelPins: pins, PinnedModelsOnly: true})
 }
 
-// offerCache holds the pinned models the gateway last offered. The SDK reads
+// Offer holds the pinned models the gateway last offered. The SDK reads
 // the catalog on every request, so a stored catalog is never mutated.
-type offerCache struct {
+type Offer struct {
 	mu      sync.RWMutex
-	models  []*model
+	models  []*Model
 	catalog tinfoil.Catalog
 }
 
-func (c *offerCache) get() []*model        { c.mu.RLock(); defer c.mu.RUnlock(); return c.models }
-func (c *offerCache) sdk() tinfoil.Catalog { c.mu.RLock(); defer c.mu.RUnlock(); return c.catalog }
-func (c *offerCache) set(models []*model, catalog tinfoil.Catalog) {
+func (c *Offer) Get() []*Model        { c.mu.RLock(); defer c.mu.RUnlock(); return c.models }
+func (c *Offer) SDK() tinfoil.Catalog { c.mu.RLock(); defer c.mu.RUnlock(); return c.catalog }
+func (c *Offer) Set(models []*Model, catalog tinfoil.Catalog) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.models, c.catalog = models, catalog
 }
 
-// refreshOffer serves the models the gateway offers and this harness pins.
+// RefreshOffer serves the models the gateway offers and this harness pins.
 //
 // The catalog is plaintext config, not a trust input. It can name any host, but
 // a host that does not attest against the pinned repo is never sealed to, and
@@ -118,22 +118,22 @@ func (c *offerCache) set(models []*model, catalog tinfoil.Catalog) {
 // confidentiality. That is what lets the enclave list live in one place, on the
 // side that already owns replica placement. The gateway omits pools without a
 // healthy replica, so a catalog that offers no pinned model keeps the last one.
-func (inf *models) refreshOffer(ctx context.Context) {
-	offered, err := fetchCatalog(ctx, inf.gateway)
+func (inf *Models) RefreshOffer(ctx context.Context) {
+	offered, err := fetchCatalog(ctx, inf.Gateway)
 	if err != nil {
 		slog.Warn("gateway catalog unavailable", "error", err)
 		return
 	}
-	models, catalog := offerModels(offered, inf.client)
+	models, catalog := offerModels(offered, inf.Client)
 	if len(models) == 0 {
 		slog.Warn("gateway offers no pinned model; keeping the last catalog")
 		return
 	}
-	inf.offer.set(models, catalog)
+	inf.Offer.Set(models, catalog)
 }
 
-func offerModels(offered map[string]catalogEntry, client *http.Client) ([]*model, tinfoil.Catalog) {
-	models, catalog := []*model{}, tinfoil.Catalog{}
+func offerModels(offered map[string]catalogEntry, client *http.Client) ([]*Model, tinfoil.Catalog) {
+	models, catalog := []*Model{}, tinfoil.Catalog{}
 	for _, p := range pinned {
 		entry, ok := offered[p.name]
 		if !ok || len(entry.Hosts) == 0 {
@@ -143,7 +143,7 @@ func offerModels(offered map[string]catalogEntry, client *http.Client) ([]*model
 			slog.Warn("gateway offers a pinned model from another repository", "model", p.name, "repo", entry.Repo)
 			continue
 		}
-		models = append(models, &model{name: p.name, vision: entry.Vision, context: entry.Context, client: client})
+		models = append(models, &Model{Name: p.name, Vision: entry.Vision, Context: entry.Context, Client: client})
 		catalog[p.name] = tinfoil.CatalogEntry{Repo: entry.Repo, Hosts: slices.Clone(entry.Hosts)}
 	}
 	return models, catalog
@@ -179,29 +179,29 @@ func fetchCatalog(ctx context.Context, gateway string) (map[string]catalogEntry,
 	return offered, nil
 }
 
-func served(models []*model) string {
+func Served(models []*Model) string {
 	names := make([]string, len(models))
 	for i, m := range models {
-		names[i] = m.name
+		names[i] = m.Name
 	}
 	return strings.Join(names, ", ")
 }
 
-type downstreamService struct {
+type Service struct {
 	URL    string
 	Client *http.Client
 }
 
-// bootModels verifies the gateway and the downstream enclaves, and reads the
+// Boot verifies the gateway and the downstream enclaves, and reads the
 // catalog of models the harness serves, which it keeps refreshing.
-func (inf *models) bootModels(ctx context.Context, usageSecret string) error {
-	gw, err := newGateway(inf.gateway, inf.offer.sdk)
+func (inf *Models) Boot(ctx context.Context, usageSecret string) error {
+	gw, err := NewGateway(inf.Gateway, inf.Offer.SDK)
 	if err != nil {
-		return fmt.Errorf("configure gateway %s: %w", inf.gateway, err)
+		return fmt.Errorf("configure gateway %s: %w", inf.Gateway, err)
 	}
 	// Outermost: the SDK salts each caller's prompt cache with the key set here.
-	inf.client = &http.Client{Transport: &auth.CallerTransport{Inner: gw.HTTPClient().Transport, UsageSecret: usageSecret}}
-	inf.services = map[string]*downstreamService{}
+	inf.Client = &http.Client{Transport: &auth.CallerTransport{Inner: gw.HTTPClient().Transport, UsageSecret: usageSecret}}
+	inf.Services = map[string]*Service{}
 	for _, config := range []struct {
 		role, repo, variable string
 		required             bool
@@ -219,7 +219,7 @@ func (inf *models) bootModels(ctx context.Context, usageSecret string) error {
 			slog.Warn("downstream enclave not configured", "role", config.role)
 			continue
 		}
-		client, err := attest(ctx, host, config.repo, usageSecret)
+		client, err := Attest(ctx, host, config.repo, usageSecret)
 		if err != nil {
 			if config.required {
 				return fmt.Errorf("verify required %s enclave %s: %w", config.role, host, err)
@@ -227,11 +227,11 @@ func (inf *models) bootModels(ctx context.Context, usageSecret string) error {
 			slog.Warn("downstream enclave unavailable", "role", config.role, "enclave", host, "error", err)
 			continue
 		}
-		inf.services[config.role] = &downstreamService{URL: "https://" + host, Client: client}
+		inf.Services[config.role] = &Service{URL: "https://" + host, Client: client}
 	}
-	router := inf.services["router"]
-	inf.auto = &model{name: "auto", client: router.Client, endpoint: router.URL + "/v1/chat/completions"}
-	if err := inf.refreshCatalog(ctx); err != nil {
+	router := inf.Services["router"]
+	inf.Auto = &Model{Name: "auto", Client: router.Client, Endpoint: router.URL + "/v1/chat/completions"}
+	if err := inf.RefreshCatalog(ctx); err != nil {
 		return err
 	}
 	go func() {
@@ -246,8 +246,8 @@ func (inf *models) bootModels(ctx context.Context, usageSecret string) error {
 			case <-tick.C:
 				refresh++
 				// Every minute until the gateway first offers a model, then every five.
-				if refresh%5 == 0 || len(inf.offer.get()) == 0 {
-					if err := inf.refreshCatalog(ctx); err != nil {
+				if refresh%5 == 0 || len(inf.Offer.Get()) == 0 {
+					if err := inf.RefreshCatalog(ctx); err != nil {
 						slog.Warn("catalog refresh refused", "error", err)
 					}
 				}
@@ -257,12 +257,12 @@ func (inf *models) bootModels(ctx context.Context, usageSecret string) error {
 	return nil
 }
 
-func (inf *models) serviceReady(role string) bool {
-	service := inf.services[role]
+func (inf *Models) ServiceReady(role string) bool {
+	service := inf.Services[role]
 	return service != nil && service.Client != nil
 }
-func (inf *models) serviceCall(ctx context.Context, role, path string, in, out any) error {
-	s := inf.services[role]
+func (inf *Models) ServiceCall(ctx context.Context, role, path string, in, out any) error {
+	s := inf.Services[role]
 	if s == nil {
 		return api.Err(503, "TOOL_UNAVAILABLE", role+" is unavailable")
 	}
@@ -271,22 +271,22 @@ func (inf *models) serviceCall(ctx context.Context, role, path string, in, out a
 
 type usageSinkKey struct{}
 
-// withUsageSink has the completions made under ctx tell sink of their usage.
-func withUsageSink(ctx context.Context, sink usageSink) context.Context {
+// WithUsageSink has the completions made under ctx tell sink of their usage.
+func WithUsageSink(ctx context.Context, sink UsageSink) context.Context {
 	return context.WithValue(ctx, usageSinkKey{}, sink)
 }
 
-// usageSink is told of a completion the model accepted and the usage it
+// UsageSink is told of a completion the model accepted and the usage it
 // reports.
-type usageSink interface {
+type UsageSink interface {
 	Accepted()
 	Meter(usage json.RawMessage)
 }
 
-func (inf *models) completion(ctx context.Context, m *model, payload api.Object) (string, error) {
-	endpoint := m.endpoint
+func (inf *Models) Completion(ctx context.Context, m *Model, payload api.Object) (string, error) {
+	endpoint := m.Endpoint
 	if endpoint == "" {
-		endpoint = inf.gateway + "/v1/chat/completions"
+		endpoint = inf.Gateway + "/v1/chat/completions"
 	}
 	payload["stream"] = false
 	// Without a scope of its own, a request would share the process-wide
@@ -299,7 +299,7 @@ func (inf *models) completion(ctx context.Context, m *model, payload api.Object)
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := m.client.Do(req)
+	resp, err := m.Client.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -308,7 +308,7 @@ func (inf *models) completion(ctx context.Context, m *model, payload api.Object)
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 		return "", api.WithRetryAfter(api.DownstreamError(resp.StatusCode, b), resp.Header)
 	}
-	if sink, ok := ctx.Value(usageSinkKey{}).(usageSink); ok {
+	if sink, ok := ctx.Value(usageSinkKey{}).(UsageSink); ok {
 		if usage, ok := auth.Usage(ctx); ok && usage.BillCustomerRequest {
 			sink.Accepted()
 		}
@@ -327,7 +327,7 @@ func (inf *models) completion(ctx context.Context, m *model, payload api.Object)
 	if len(result.Choices) == 0 {
 		return "", api.Err(502, "UPSTREAM_REFUSED", "The completion is empty")
 	}
-	if sink, ok := ctx.Value(usageSinkKey{}).(usageSink); ok && len(result.Usage) > 0 {
+	if sink, ok := ctx.Value(usageSinkKey{}).(UsageSink); ok && len(result.Usage) > 0 {
 		sink.Meter(result.Usage)
 	}
 	return result.Choices[0].Message.Content, nil

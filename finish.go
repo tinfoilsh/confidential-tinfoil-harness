@@ -8,6 +8,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 )
 
 // finishRun commits what the run produced and frames its end, then hands the
@@ -28,7 +29,7 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 	defer cancel()
 	ctx = auth.WithCallerKey(ctx, string(r.credential.Key))
 	ctx = auth.WithUsage(ctx, usageForRun(r))
-	ctx = withUsageSink(ctx, r.out)
+	ctx = inference.WithUsageSink(ctx, r.out)
 	r.out.mu.Lock()
 	messages := r.assembler.Messages()
 	spend, sources, reply := r.out.spend, r.out.sources, r.out.replyID
@@ -44,7 +45,7 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 		m := &messages[i]
 		m.IsInterrupted, m.IsError = new(cancelled), new(runErr != nil && !cancelled)
 		m.Model = cmp.Or(r.out.concreteModel, r.row.Model)
-		m.ModelDisplayName = h.models.catalog.get().DisplayName(m.Model)
+		m.ModelDisplayName = h.models.Catalog.Get().DisplayName(m.Model)
 		m.Usage = api.Raw(domain.MessageUsage{PromptTokens: spend.Prompt, CompletionTokens: spend.Completion})
 		// A continued reply keeps the citations it already had.
 		for _, annotation := range citationAnnotations(m.Content, sources) {

@@ -15,6 +15,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
@@ -30,7 +31,7 @@ const (
 	continueInstruction    = "Continue your previous response exactly where it left off. Do not repeat, summarize, or restate anything you already wrote, and do not add any preamble."
 )
 
-func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model) error {
+func (h *harness) loop(ctx context.Context, out *stream, req *request, m *inference.Model) error {
 	apiKey := auth.CallerKey(ctx)
 	inRun := usagereporting.Context{
 		ContextID:     req.runID,
@@ -44,7 +45,7 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 	ctx = auth.WithUsage(ctx, inRun)
 	first := auth.WithUsage(ctx, billing)
 
-	set, err := openTools(ctx, req, m.name, out.progress)
+	set, err := openTools(ctx, req, m.Name, out.progress)
 	if err != nil {
 		return fmt.Errorf("tools: %w", err)
 	}
@@ -227,10 +228,10 @@ func clip(out string, limit int) string {
 	return out
 }
 
-func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byte, widgets map[string]domain.Widget) ([]toolCall, string, error) {
-	endpoint := m.endpoint
+func (h *harness) turn(ctx context.Context, out *stream, m *inference.Model, payload []byte, widgets map[string]domain.Widget) ([]toolCall, string, error) {
+	endpoint := m.Endpoint
 	if endpoint == "" {
-		endpoint = h.models.gateway + "/v1/chat/completions"
+		endpoint = h.models.Gateway + "/v1/chat/completions"
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
@@ -239,7 +240,7 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 
-	resp, err := m.client.Do(req)
+	resp, err := m.Client.Do(req)
 	if err != nil {
 		return nil, "", fmt.Errorf("gateway: %w", err)
 	}

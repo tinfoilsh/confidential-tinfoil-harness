@@ -13,6 +13,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 )
 
 // modelReasoning is one chunk of reasoning a model streams.
@@ -65,7 +66,7 @@ func TestAThinkingReplysReasoningIsSummarized(t *testing.T) {
 			json.NewEncoder(w).Encode(api.Object{"summary": " Weighing options "})
 		}))
 		t.Cleanup(summarizer.Close)
-		h.models.services["summarizer"] = &downstreamService{URL: summarizer.URL, Client: summarizer.Client()}
+		h.models.Services["summarizer"] = &inference.Service{URL: summarizer.URL, Client: summarizer.Client()}
 		run, err := h.acceptTurn(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
 		if err != nil {
 			t.Fatal(err)

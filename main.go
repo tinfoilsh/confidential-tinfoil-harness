@@ -15,6 +15,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
 
@@ -26,7 +27,7 @@ type harness struct {
 	live         liveRuns
 	scratch      *scratchSpace
 	store        *store.Store
-	models       *models
+	models       *inference.Models
 }
 
 // listenAddr is the shim's upstream port in tinfoil-config.yml, which also
@@ -53,7 +54,7 @@ func main() {
 		slog.Error("prepare the temporary directory", "error", err)
 		os.Exit(1)
 	}
-	h := &harness{models: &models{gateway: gw, controlplane: controlplane},
+	h := &harness{models: &inference.Models{Gateway: gw, Controlplane: controlplane},
 		controlplane: controlplane,
 		cpClient:     &http.Client{Transport: &auth.CallerTransport{Inner: http.DefaultTransport}},
 		safeguards:   newSubmitter(os.Getenv("SAFEGUARDS_URL")),
@@ -80,7 +81,7 @@ func main() {
 		h.waitRuns(ctx)
 	}()
 
-	slog.Info("listening", "addr", listenAddr, "gateway", gw, "models", served(h.models.offer.get()), "safeguards", h.safeguards != nil)
+	slog.Info("listening", "addr", listenAddr, "gateway", gw, "models", inference.Served(h.models.Offer.Get()), "safeguards", h.safeguards != nil)
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		slog.Error("serve", "error", err)
 		os.Exit(1)
@@ -96,7 +97,7 @@ func attestWebSearch(ctx context.Context, usageSecret string) {
 		slog.Warn("no web search enclave is configured")
 		return
 	}
-	client, err := attest(ctx, webSearch.enclave, webSearch.repo, usageSecret)
+	client, err := inference.Attest(ctx, webSearch.enclave, webSearch.repo, usageSecret)
 	if err != nil {
 		slog.Warn("tool enclave did not verify", "enclave", webSearch.enclave, "error", err)
 		return

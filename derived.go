@@ -32,7 +32,7 @@ func titleSource(t *domain.Thread) string {
 }
 
 func (h *harness) generateTitle(ctx context.Context, r *chatRun, p *auth.Principal, titleState string, text string) {
-	if !h.models.serviceReady("summarizer") || titleState != "placeholder" {
+	if !h.models.ServiceReady("summarizer") || titleState != "placeholder" {
 		return
 	}
 	words := strings.Fields(text)
@@ -43,7 +43,7 @@ func (h *harness) generateTitle(ctx context.Context, r *chatRun, p *auth.Princip
 	var result struct {
 		Summary string `json:"summary"`
 	}
-	if err := h.models.serviceCall(ctx, "summarizer", "/summarize", api.Object{"content": text, "style": "title_summary"}, &result); err != nil {
+	if err := h.models.ServiceCall(ctx, "summarizer", "/summarize", api.Object{"content": text, "style": "title_summary"}, &result); err != nil {
 		return
 	}
 	title := strings.Trim(strings.TrimSpace(result.Summary), "\"'")
