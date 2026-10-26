@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"net/http/httptest"
 	"strconv"
@@ -55,12 +56,13 @@ func TestOutgrowingTheLogStopsTheRun(t *testing.T) {
 	// The run is still live, so a follower arriving once its client has left
 	// is sent the frames; they are wiped only once the run ends.
 	rn.log.detach()
-	if frames, _, _ := rn.log.read(0); len(frames) == 0 {
+	kept, _, _ := rn.log.read(0)
+	if len(kept) == 0 {
 		t.Fatal("the frames were wiped while the run was live")
 	}
 	rn.log.close(errDone)
-	if frames, _, closed := rn.log.read(0); frames != nil || closed != errTooLong {
-		t.Fatalf("the ended run kept %d frames and closed with %v", len(frames), closed)
+	if frames, _, closed := rn.log.read(0); frames != nil || closed != errTooLong || bytes.ContainsFunc(kept[0], func(b rune) bool { return b != 0 }) {
+		t.Fatalf("the ended run kept %d frames, closed with %v; first frame %.40q", len(frames), closed, kept[0])
 	}
 }
 
