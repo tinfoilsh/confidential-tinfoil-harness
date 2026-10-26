@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 // oldProfile is settings an old client stored: a custom default prompt, an
@@ -45,7 +46,7 @@ func presetsByID(profile api.Object) map[string]api.Object {
 
 func TestAStoredProfileReadsUpgradedAndKeepsTheUpgradeOnceChanged(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	p := &principal{ID: "alice"}
+	p := &auth.Principal{ID: "alice"}
 	stored := oldProfile()
 	stored["updatedAt"] = "2026-01-02T03:04:05Z"
 	rows.rows[rowMapKey(p, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(stored)}
@@ -69,7 +70,7 @@ func TestAStoredProfileReadsUpgradedAndKeepsTheUpgradeOnceChanged(t *testing.T) 
 		t.Fatalf("a second read upgraded differently:\n%v\n%v", again, profile)
 	}
 	// A profile without a date dates its migrated prompt the same on every read.
-	rows.rows[rowMapKey(&principal{ID: "bob"}, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(oldProfile())}
+	rows.rows[rowMapKey(&auth.Principal{ID: "bob"}, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(oldProfile())}
 	undated := profileOf(t, postRoute(h, "/v1/profile/get", api.Object{"key": keyBase64(key)}, "bob"))
 	if created := presetsByID(undated)[migratedPromptPresetID]["createdAt"]; created != float64(0) {
 		t.Fatalf("an undated profile's migrated prompt is dated %v", created)
@@ -143,7 +144,7 @@ func TestADeviceTurnDropsInvalidProfileFields(t *testing.T) {
 // whether a chat searches.
 func TestTheWebSearchSettingOfAnOldProfileIsKept(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	p := &principal{ID: "alice"}
+	p := &auth.Principal{ID: "alice"}
 	rows.rows[rowMapKey(p, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(api.Object{"webSearchAvailable": false, "webSearchEnabled": true})}
 	get := func(user string) api.Object {
 		return profileOf(t, postRoute(h, "/v1/profile/get", api.Object{"key": keyBase64(key)}, user))

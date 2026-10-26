@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 func TestSearchRefreshesResultsAfterACompletedRebuild(t *testing.T) {
@@ -35,7 +36,7 @@ func TestSearchRefreshesResultsAfterACompletedRebuild(t *testing.T) {
 			h, rows, key := testChatHarness(t, nil)
 			created := "2026-10-22T12:00:00Z"
 			for _, id := range []string{"partial", "indexed"} {
-				rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", id)] = storedRow{ID: id, ETag: "1", Data: api.Raw(Thread{
+				rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", id)] = storedRow{ID: id, ETag: "1", Data: api.Raw(Thread{
 					ID: id, Title: id + " conversation", TitleState: "manual", CreatedAt: created, UpdatedAt: created, Model: "gpt-oss-120b",
 					Messages: []Message{{ID: id + "-message", Role: "user", Content: "Find this conversation", CreatedAt: created}},
 				})}

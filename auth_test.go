@@ -21,6 +21,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 func TestAnonymousInferenceValidatesTheClientKey(t *testing.T) {
@@ -41,17 +42,17 @@ func TestAnonymousInferenceValidatesTheClientKey(t *testing.T) {
 		io.WriteString(w, "OK")
 	}))
 	defer cp.Close()
-	a := &authenticator{client: cp.Client(), controlplane: cp.URL, verify: func(context.Context, string) (string, error) {
+	a := &auth.Authenticator{Client: cp.Client(), Controlplane: cp.URL, Verify: func(context.Context, string) (string, error) {
 		return "", errors.New("invalid Clerk session")
 	}}
 	r := httptest.NewRequest(http.MethodPost, "/v1/session", nil)
 	r.Header.Set("Authorization", "Bearer free_client-key")
-	p, err := a.authenticate(r, true)
+	p, err := a.Authenticate(r, true)
 	if err != nil || !p.Anonymous || p.JWT != "" {
 		t.Fatalf("client key was not accepted as an anonymous credential: %v", err)
 	}
 	for range 2 {
-		credential, err := a.inference(context.Background(), p)
+		credential, err := a.Inference(context.Background(), p)
 		if err != nil || credential.Key != "free_client-key" || credential.Limit.Kind != nil || !credential.Expires.IsZero() {
 			t.Fatalf("incorrect credential or invented quota/expiry metadata: err=%v", err)
 		}
@@ -59,14 +60,14 @@ func TestAnonymousInferenceValidatesTheClientKey(t *testing.T) {
 	if calls.Load() != 2 {
 		t.Fatal("a free key's quota was not read for each request")
 	}
-	if _, err := a.authenticate(r, false); err == nil {
+	if _, err := a.Authenticate(r, false); err == nil {
 		t.Fatal("free key authorized a signed-in route")
 	}
 	r.Header.Set("Authorization", "Bearer invalid-clerk-token")
-	if _, err := a.authenticate(r, true); err == nil {
+	if _, err := a.Authenticate(r, true); err == nil {
 		t.Fatal("invalid Clerk session downgraded to anonymous")
 	}
-	if _, err := a.inference(context.Background(), &principal{Anonymous: true}); api.AsError(err).HTTP != 401 || calls.Load() != 2 {
+	if _, err := a.Inference(context.Background(), &auth.Principal{Anonymous: true}); api.AsError(err).HTTP != 401 || calls.Load() != 2 {
 		t.Fatal("missing client key reached controlplane")
 	}
 }
@@ -78,7 +79,7 @@ func TestSessionReadsFreeQuotaOncePerRequest(t *testing.T) {
 		json.NewEncoder(w).Encode(api.Object{"ok": true, "rate_limit": api.Object{"max_requests": 10, "remaining": 10 - calls.Add(1)}})
 	}))
 	defer cp.Close()
-	h.auth.client, h.auth.controlplane = cp.Client(), cp.URL
+	h.auth.Client, h.auth.Controlplane = cp.Client(), cp.URL
 	for _, remaining := range []int{9, 8} {
 		w := postRoute(h, "/v1/session", api.Object{}, "")
 		var session struct {
@@ -122,7 +123,7 @@ func TestLargeBodiesAreReadOnlyAfterAuthentication(t *testing.T) {
 			r.Header.Set("Authorization", "Bearer "+tc.session)
 		}
 		if tc.credential != "" {
-			r.Header.Set(inferenceKeyHeader, tc.credential)
+			r.Header.Set(auth.InferenceKeyHeader, tc.credential)
 		}
 		w := httptest.NewRecorder()
 		h.routes().ServeHTTP(w, r)
@@ -156,7 +157,7 @@ func TestAnonymousKeyValidationRefusesWorkBeforeAllocatingThreads(t *testing.T) 
 				io.WriteString(w, tc.body)
 			}))
 			defer cp.Close()
-			h.auth.client, h.auth.controlplane = cp.Client(), cp.URL
+			h.auth.Client, h.auth.Controlplane = cp.Client(), cp.URL
 			response := postRoute(h, "/v1/threads/turn", localInput("", api.Object{}), "")
 			var refused struct {
 				Error api.Error `json:"error"`
@@ -182,12 +183,12 @@ func TestAnonymousReconnectUsesKeyPossessionInsteadOfIP(t *testing.T) {
 	model, release := heldModel()
 	h, _, _ := testChatHarness(t, model)
 	t.Cleanup(release)
-	run, err := h.acceptTurn(context.Background(), &principal{Anonymous: true, AnonymousID: api.HashHex([]byte("free_anonymous-key")), InferenceKey: "free_anonymous-key"}, inferenceCredential{Key: "free_anonymous-key"}, contentKey{}, requestOf[turnRequest](localInput("", api.Object{})))
+	run, err := h.acceptTurn(context.Background(), &auth.Principal{Anonymous: true, AnonymousID: api.HashHex([]byte("free_anonymous-key")), InferenceKey: "free_anonymous-key"}, auth.Credential{Key: "free_anonymous-key"}, auth.ContentKey{}, requestOf[turnRequest](localInput("", api.Object{})))
 	if err != nil {
 		t.Fatal(err)
 	}
 	awaitFrame(t, run.log, "TEXT_MESSAGE_CHUNK")
-	if err := h.auth.recognize(context.Background(), run.principal); err != nil {
+	if err := h.auth.Recognize(context.Background(), run.principal); err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
@@ -279,7 +280,7 @@ func TestOnlyChatTokenChatsAreScreened(t *testing.T) {
 			r := httptest.NewRequest(http.MethodPost, "/v1/threads/turn", bytes.NewReader(api.Raw(sendInput(key))))
 			signIn(r, "alice")
 			if !subscribed {
-				r.Header.Set(inferenceKeyHeader, "free_anonymous-key")
+				r.Header.Set(auth.InferenceKeyHeader, "free_anonymous-key")
 			}
 			w := httptest.NewRecorder()
 			h.routes().ServeHTTP(w, r)
@@ -306,12 +307,12 @@ func TestChatTokensAreVerified(t *testing.T) {
 		return func(_ map[string]any, claims jwt.MapClaims) { claims[name] = value }
 	}
 	_, forger, _ := ed25519.GenerateKey(rand.Reader)
-	forged, _ := jwt.NewWithClaims(jwt.SigningMethodEdDSA, jwt.MapClaims{"iss": testChatIssuer, "sub": "alice", "aud": chatTokenAudience, "client_id": chatTokenClient, "scope": chatTokenScope,
-		"product": chatTokenProduct, "iat": time.Now().Unix(), "exp": time.Now().Add(time.Hour).Unix(), "jti": "forged"}).SignedString(forger)
+	forged, _ := jwt.NewWithClaims(jwt.SigningMethodEdDSA, jwt.MapClaims{"iss": testChatIssuer, "sub": "alice", "aud": auth.ChatTokenAudience, "client_id": auth.ChatTokenClient, "scope": auth.ChatTokenScope,
+		"product": auth.ChatTokenProduct, "iat": time.Now().Unix(), "exp": time.Now().Add(time.Hour).Unix(), "jti": "forged"}).SignedString(forger)
 	turn := func(credential string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(http.MethodPost, "/v1/threads/turn", bytes.NewReader(api.Raw(sendInput(key))))
 		r.Header.Set("Authorization", "Bearer clerk-alice")
-		r.Header.Set(inferenceKeyHeader, credential)
+		r.Header.Set(auth.InferenceKeyHeader, credential)
 		w := httptest.NewRecorder()
 		h.routes().ServeHTTP(w, r)
 		return w
@@ -390,7 +391,7 @@ func TestASignedOutCallersQuotaComesFromItsKey(t *testing.T) {
 	}))
 	defer cp.Close()
 	for _, harness := range []*harness{h, router} {
-		harness.auth.client, harness.auth.controlplane = cp.Client(), cp.URL
+		harness.auth.Client, harness.auth.Controlplane = cp.Client(), cp.URL
 	}
 	var session struct {
 		RateLimit json.RawMessage `json:"rateLimit"`

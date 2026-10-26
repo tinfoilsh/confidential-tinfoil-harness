@@ -1,4 +1,4 @@
-package main
+package auth
 
 import (
 	"crypto/sha256"
@@ -9,13 +9,13 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
-// contentKey is request-scoped. It is never included in response models.
-type contentKey [32]byte
+// ContentKey is request-scoped. It is never included in response models.
+type ContentKey [32]byte
 
-func (contentKey) LogValue() slog.Value { return slog.StringValue("REDACTED") }
+func (ContentKey) LogValue() slog.Value { return slog.StringValue("REDACTED") }
 
-func decodeContentKey(value []byte) (contentKey, error) {
-	var key contentKey
+func DecodeContentKey(value []byte) (ContentKey, error) {
+	var key ContentKey
 	if len(value) == 0 {
 		return key, api.Err(401, "KEY_REQUIRED", "A content key is required")
 	}
@@ -26,14 +26,14 @@ func decodeContentKey(value []byte) (contentKey, error) {
 	return key, nil
 }
 
-func decodeBase64Key(value []byte) (contentKey, error) {
+func DecodeBase64Key(value []byte) (ContentKey, error) {
 	b := make([]byte, base64.StdEncoding.DecodedLen(len(value)))
 	defer clear(b)
 	n, err := base64.StdEncoding.Strict().Decode(b, value)
 	if err != nil {
-		return contentKey{}, api.Err(400, "BAD_REQUEST", "key must be base64 encoding of 32 bytes")
+		return ContentKey{}, api.Err(400, "BAD_REQUEST", "key must be base64 encoding of 32 bytes")
 	}
-	return decodeContentKey(b[:n])
+	return DecodeContentKey(b[:n])
 }
 
-func (k contentKey) fingerprint() string { b := sha256.Sum256(k[:]); return hex.EncodeToString(b[:]) }
+func (k ContentKey) Fingerprint() string { b := sha256.Sum256(k[:]); return hex.EncodeToString(b[:]) }

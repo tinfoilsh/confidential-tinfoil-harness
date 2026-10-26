@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 // storedRow is a row as sync holds it: sealed JSON, opened only by the
@@ -37,17 +38,17 @@ type rowPage struct {
 	Unreadable map[string]error
 }
 type rowStore interface {
-	authorizeRun(context.Context, *principal, contentKey, string, *string) (storageGrant, error)
-	authorizeStorage(context.Context, *principal, contentKey, string, string) (secret, error)
-	load(context.Context, *principal, contentKey, string, string) (*storedRow, error)
-	pull(context.Context, *principal, contentKey, string, []string) ([]storedRow, map[string]error, error)
-	list(context.Context, *principal, contentKey, string, string, string, int) (rowPage, error)
-	push(context.Context, *principal, contentKey, string, *storedRow, string) (string, error)
+	authorizeRun(context.Context, *auth.Principal, auth.ContentKey, string, *string) (storageGrant, error)
+	authorizeStorage(context.Context, *auth.Principal, auth.ContentKey, string, string) (auth.Secret, error)
+	load(context.Context, *auth.Principal, auth.ContentKey, string, string) (*storedRow, error)
+	pull(context.Context, *auth.Principal, auth.ContentKey, string, []string) ([]storedRow, map[string]error, error)
+	list(context.Context, *auth.Principal, auth.ContentKey, string, string, string, int) (rowPage, error)
+	push(context.Context, *auth.Principal, auth.ContentKey, string, *storedRow, string) (string, error)
 	// remove deletes a row whatever its revision; a missing row is gone.
-	remove(context.Context, *principal, contentKey, string, string) error
-	removeRevision(context.Context, *principal, contentKey, string, string) error
+	remove(context.Context, *auth.Principal, auth.ContentKey, string, string) error
+	removeRevision(context.Context, *auth.Principal, auth.ContentKey, string, string) error
 	// ids lists every row of a scope, or a project's chats, unopened.
-	ids(context.Context, *principal, string, string) ([]string, error)
+	ids(context.Context, *auth.Principal, string, string) ([]string, error)
 }
 type syncClient struct {
 	URL    string
@@ -68,7 +69,7 @@ const (
 	maxCommitAttempts = 3
 )
 
-func (s *syncClient) call(ctx context.Context, p *principal, path string, in, out any) error {
+func (s *syncClient) call(ctx context.Context, p *auth.Principal, path string, in, out any) error {
 	if body, ok := in.(json.RawMessage); ok {
 		defer clear(body)
 	}
@@ -84,7 +85,7 @@ func (s *syncClient) call(ctx context.Context, p *principal, path string, in, ou
 
 // keyedBody appends the key directly to an owned buffer, keeping its base64
 // form out of strings and encoding/json's pooled encoder buffers.
-func keyedBody(key contentKey, in api.Object, multiple bool) json.RawMessage {
+func keyedBody(key auth.ContentKey, in api.Object, multiple bool) json.RawMessage {
 	defer clear(key[:])
 	body := api.Raw(in)
 	defer clear(body)
@@ -102,12 +103,12 @@ func keyedBody(key contentKey, in api.Object, multiple bool) json.RawMessage {
 	return append(out, suffix...)
 }
 
-func (s *syncClient) callKey(ctx context.Context, p *principal, path string, key contentKey, in api.Object, out any) error {
+func (s *syncClient) callKey(ctx context.Context, p *auth.Principal, path string, key auth.ContentKey, in api.Object, out any) error {
 	defer clear(key[:])
 	return s.call(ctx, p, path, keyedBody(key, in, false), out)
 }
 
-func (s *syncClient) authorizeRun(ctx context.Context, p *principal, key contentKey, threadID string, projectID *string) (storageGrant, error) {
+func (s *syncClient) authorizeRun(ctx context.Context, p *auth.Principal, key auth.ContentKey, threadID string, projectID *string) (storageGrant, error) {
 	defer clear(key[:])
 	in := api.Object{"thread_id": threadID}
 	if projectID != nil {
@@ -116,7 +117,7 @@ func (s *syncClient) authorizeRun(ctx context.Context, p *principal, key content
 	return s.storageCredential(ctx, p, "/v1/runs/authorize", key, in)
 }
 
-func (s *syncClient) authorizeStorage(ctx context.Context, p *principal, key contentKey, operation, projectID string) (secret, error) {
+func (s *syncClient) authorizeStorage(ctx context.Context, p *auth.Principal, key auth.ContentKey, operation, projectID string) (auth.Secret, error) {
 	defer clear(key[:])
 	in := api.Object{"operation": operation}
 	if projectID != "" {
@@ -127,11 +128,11 @@ func (s *syncClient) authorizeStorage(ctx context.Context, p *principal, key con
 }
 
 type storageGrant struct {
-	Token     secret    `json:"token"`
-	ExpiresAt time.Time `json:"expires_at"`
+	Token     auth.Secret `json:"token"`
+	ExpiresAt time.Time   `json:"expires_at"`
 }
 
-func (s *syncClient) storageCredential(ctx context.Context, p *principal, path string, key contentKey, input api.Object) (storageGrant, error) {
+func (s *syncClient) storageCredential(ctx context.Context, p *auth.Principal, path string, key auth.ContentKey, input api.Object) (storageGrant, error) {
 	defer clear(key[:])
 	var out storageGrant
 	err := s.callKey(ctx, p, path, key, input, &out)
@@ -160,7 +161,7 @@ type pullItem struct {
 // running. A later request may fetch it.
 var errRowNotFetched = api.Err(502, "UPSTREAM_REFUSED", "The sync service could not fetch the data in time")
 
-func (s *syncClient) pull(ctx context.Context, p *principal, key contentKey, scope string, ids []string) ([]storedRow, map[string]error, error) {
+func (s *syncClient) pull(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope string, ids []string) ([]storedRow, map[string]error, error) {
 	rows, failed := []storedRow{}, map[string]error{}
 	for start := 0; start < len(ids); start += pullBatch {
 		if err := s.pullBatch(ctx, p, key, scope, ids[start:min(len(ids), start+pullBatch)], true, &rows, failed); err != nil {
@@ -170,7 +171,7 @@ func (s *syncClient) pull(ctx context.Context, p *principal, key contentKey, sco
 	return rows, failed, nil
 }
 
-func (s *syncClient) pullBatch(ctx context.Context, p *principal, key contentKey, scope string, ids []string, retry bool, rows *[]storedRow, failed map[string]error) error {
+func (s *syncClient) pullBatch(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope string, ids []string, retry bool, rows *[]storedRow, failed map[string]error) error {
 	var result struct {
 		Items []pullItem `json:"items"`
 	}
@@ -210,7 +211,7 @@ func (s *syncClient) pullBatch(ctx context.Context, p *principal, key contentKey
 	}
 	return nil
 }
-func (s *syncClient) load(ctx context.Context, p *principal, key contentKey, scope, id string) (*storedRow, error) {
+func (s *syncClient) load(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, id string) (*storedRow, error) {
 	rows, failed, err := s.pull(ctx, p, key, scope, []string{id})
 	if err != nil {
 		return nil, err
@@ -227,7 +228,7 @@ func (s *syncClient) load(ctx context.Context, p *principal, key contentKey, sco
 }
 
 // listStatus is one page of row ids, newest first.
-func (s *syncClient) listStatus(ctx context.Context, p *principal, scope, cursor, project string, limit int) ([]string, string, error) {
+func (s *syncClient) listStatus(ctx context.Context, p *auth.Principal, scope, cursor, project string, limit int) ([]string, string, error) {
 	var status struct {
 		Updates []struct {
 			ID string `json:"id"`
@@ -253,7 +254,7 @@ func (s *syncClient) listStatus(ctx context.Context, p *principal, scope, cursor
 	return ids, status.Next, nil
 }
 
-func (s *syncClient) ids(ctx context.Context, p *principal, scope, project string) ([]string, error) {
+func (s *syncClient) ids(ctx context.Context, p *auth.Principal, scope, project string) ([]string, error) {
 	all, cursor := []string{}, ""
 	for {
 		ids, next, err := s.listStatus(ctx, p, scope, cursor, project, listStatusPage)
@@ -271,7 +272,7 @@ func (s *syncClient) ids(ctx context.Context, p *principal, scope, project strin
 	}
 }
 
-func (s *syncClient) list(ctx context.Context, p *principal, key contentKey, scope, cursor, project string, limit int) (rowPage, error) {
+func (s *syncClient) list(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, cursor, project string, limit int) (rowPage, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
@@ -285,7 +286,7 @@ func (s *syncClient) list(ctx context.Context, p *principal, key contentKey, sco
 	}
 	return page, err
 }
-func (s *syncClient) push(ctx context.Context, p *principal, key contentKey, scope string, row *storedRow, nonce string) (string, error) {
+func (s *syncClient) push(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope string, row *storedRow, nonce string) (string, error) {
 	var match any
 	if row.ETag != "" {
 		match = row.ETag
@@ -309,10 +310,10 @@ func (s *syncClient) push(ctx context.Context, p *principal, key contentKey, sco
 
 // An empty if_match has sync read the row's revision, delete at it, retry a
 // race, and treat a missing row as deleted.
-func (s *syncClient) remove(ctx context.Context, p *principal, key contentKey, scope, id string) error {
+func (s *syncClient) remove(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, id string) error {
 	return s.callKey(ctx, p, "/v1/sync/delete", key, api.Object{"scope": scope, "id": id, "if_match": "", "idempotency_key": uuid.NewString()}, nil)
 }
 
-func (s *syncClient) removeRevision(ctx context.Context, p *principal, key contentKey, id, revision string) error {
+func (s *syncClient) removeRevision(ctx context.Context, p *auth.Principal, key auth.ContentKey, id, revision string) error {
 	return s.callKey(ctx, p, "/v1/sync/delete", key, api.Object{"scope": "chat", "id": id, "if_match": revision, "idempotency_key": uuid.NewString()}, nil)
 }

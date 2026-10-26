@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 // Since sync protocol 3 a stored document's blob holds its extracted content
@@ -81,11 +82,11 @@ func unreachable(err error) bool {
 // placeAttachments stores every attachment of a thread under the thread, in
 // the protocol 3 format, before the thread is pushed. It keeps the content
 // inline in the given copy, which is the one a prompt is built from.
-func (h *harness) placeAttachments(ctx context.Context, p *principal, threadID string, t *Thread) error {
+func (h *harness) placeAttachments(ctx context.Context, p *auth.Principal, threadID string, t *Thread) error {
 	return t.eachAttachment(func(a *Attachment) error { return h.placeAttachment(ctx, p, threadID, a) })
 }
 
-func (h *harness) placeAttachment(ctx context.Context, p *principal, threadID string, a *Attachment) error {
+func (h *harness) placeAttachment(ctx context.Context, p *auth.Principal, threadID string, a *Attachment) error {
 	keyed := a.storageKey() != ""
 	elsewhere := !enclaveAttachmentID.MatchString(a.ID) || cmp.Or(a.StorageThreadID, threadID) != threadID
 	var data []byte
@@ -146,7 +147,7 @@ func unavailableDocument(a *Attachment) string {
 // hydrateDocuments reads offloaded documents into a working copy of a thread.
 // A document whose blob is gone is described as unavailable rather than
 // failing every later turn in its chat.
-func (h *harness) hydrateDocuments(ctx context.Context, p *principal, t *Thread) error {
+func (h *harness) hydrateDocuments(ctx context.Context, p *auth.Principal, t *Thread) error {
 	return t.eachAttachment(func(a *Attachment) error {
 		if a.isImage() || a.hasContent() {
 			return nil
@@ -166,7 +167,7 @@ func (h *harness) hydrateDocuments(ctx context.Context, p *principal, t *Thread)
 }
 
 // inflateDocument reads a document's content from its blob into it.
-func (h *harness) inflateDocument(ctx context.Context, p *principal, a *Attachment) error {
+func (h *harness) inflateDocument(ctx context.Context, p *auth.Principal, a *Attachment) error {
 	data, err := h.attachmentBytes(ctx, p, a, false)
 	if err != nil {
 		return err
@@ -184,7 +185,7 @@ func (h *harness) inflateDocument(ctx context.Context, p *principal, a *Attachme
 // not hold under the row's chat: a row the web or iOS app wrote before sync
 // checked references may point at blobs filed under another chat or deleted
 // since.
-func (h *harness) repairAttachments(ctx context.Context, p *principal, t *Thread, missing []string) error {
+func (h *harness) repairAttachments(ctx context.Context, p *auth.Principal, t *Thread, missing []string) error {
 	return t.eachAttachment(func(a *Attachment) error {
 		if !slices.Contains(missing, a.ID) {
 			return nil

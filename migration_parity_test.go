@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 func TestResponseLanguageUsesTheDeviceUnlessTheProfileChoosesOne(t *testing.T) {
@@ -47,7 +48,7 @@ func TestResponseLanguageUsesTheDeviceUnlessTheProfileChoosesOne(t *testing.T) {
 
 func TestMergingDeviceSettingsPreservesBothPromptLibraries(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	p := &principal{ID: "alice"}
+	p := &auth.Principal{ID: "alice"}
 	local := api.Object{"nickname": "Sam", "themeMode": "light", "customPromptPresets": []any{api.Object{"id": "user:same", "name": "Editor", "systemPrompt": "Local editing rules"}, api.Object{"id": "user:local", "name": "Research", "systemPrompt": "Local research rules"}}, "defaultPromptPresetId": "user:same", "favoritePromptPresetIds": []string{"user:same"}}
 	first := profileOf(t, postRoute(h, "/v1/profile/merge", api.Object{"key": keyBase64(key), "profile": local}, "alice"))
 	if first["nickname"] != "Sam" || len(presetsByID(first)) != 2 || first["defaultPromptPresetId"] != "user:same" {
@@ -163,7 +164,7 @@ func TestACloudRunUsesItsStorageCredentialForTheFinalSave(t *testing.T) {
 			w.WriteHeader(401)
 			return
 		}
-		p := &principal{ID: "alice"}
+		p := &auth.Principal{ID: "alice"}
 		switch r.URL.Path {
 		case "/v1/sync/pull":
 			items := []api.Object{}
@@ -194,7 +195,7 @@ func TestACloudRunUsesItsStorageCredentialForTheFinalSave(t *testing.T) {
 	h.storeRows = &syncClient{URL: server.URL, Client: server.Client()}
 	in := sendInput(key)
 	events := finishedRun(t, h, "/v1/threads/turn", in)
-	row, err := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", api.Str(in["threadId"]))
+	row, err := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", api.Str(in["threadId"]))
 	if err != nil || grantCalls.Load() != 1 || eventOfType(events, "RUN_FINISHED") == nil || len(mustRead(readThreadRow(row)).Messages) != 2 || mustRead(readThreadRow(row)).Messages[1].Content != "hello" {
 		t.Fatalf("reply was not stored with the run credential: %v", err)
 	}
@@ -272,7 +273,7 @@ type countedRunGrants struct {
 	grants atomic.Int32
 }
 
-func (s *countedRunGrants) authorizeRun(ctx context.Context, p *principal, key contentKey, id string, project *string) (storageGrant, error) {
+func (s *countedRunGrants) authorizeRun(ctx context.Context, p *auth.Principal, key auth.ContentKey, id string, project *string) (storageGrant, error) {
 	s.grants.Add(1)
 	return s.memoryRows.authorizeRun(ctx, p, key, id, project)
 }
@@ -283,7 +284,7 @@ func TestAQueuedTurnRefreshesStorageAccessBeforeStarting(t *testing.T) {
 	t.Cleanup(release)
 	grants := &countedRunGrants{memoryRows: rows}
 	h.storeRows = grants
-	p := &principal{ID: "alice", JWT: "clerk-alice"}
+	p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
 	in := sendInput(key)
 	first, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](in))
 	if err != nil {

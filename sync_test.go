@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 type syncTestTransport func(*http.Request) (*http.Response, error)
@@ -156,7 +157,7 @@ func TestSyncListPreservesChatProjectFilter(t *testing.T) {
 		}
 		return syncTestResponse(200, api.Object{"updates": []api.Object{}, "next_cursor": "after"})
 	})}}
-	page, err := client.list(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, randomKey(), "chat", "before", "project-main", 50)
+	page, err := client.list(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, randomKey(), "chat", "before", "project-main", 50)
 	if err != nil || page.Next != "after" {
 		t.Fatalf("list project chats: page=%+v err=%v", page, err)
 	}
@@ -200,7 +201,7 @@ func TestListPullsInBatchesAndListsUnreadableRows(t *testing.T) {
 		}
 		return syncTestResponse(200, api.Object{"items": items})
 	})}}
-	page, err := client.list(context.Background(), &principal{ID: "alice", JWT: "jwt"}, randomKey(), "chat", "", "", 100)
+	page, err := client.list(context.Background(), &auth.Principal{ID: "alice", JWT: "jwt"}, randomKey(), "chat", "", "", 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,12 +215,12 @@ func TestListPullsInBatchesAndListsUnreadableRows(t *testing.T) {
 	if len(page.Rows) != pullBatch+4 || !slices.Contains(titles, "row-7") || slices.Contains(titles, "row-3") || !slices.Equal(slices.Sorted(maps.Keys(page.Unreadable)), []string{"row-3"}) {
 		t.Fatalf("rows %v, unreadable %v", titles, page.Unreadable)
 	}
-	if _, err := client.load(context.Background(), &principal{ID: "alice", JWT: "jwt"}, randomKey(), "chat", "row-3"); api.AsError(err).Code != "KEY_MISMATCH" {
+	if _, err := client.load(context.Background(), &auth.Principal{ID: "alice", JWT: "jwt"}, randomKey(), "chat", "row-3"); api.AsError(err).Code != "KEY_MISMATCH" {
 		t.Fatalf("loading an unreadable row: %v", err)
 	}
 	// Sync answered for the row with a code the harness does not know, not
 	// with a refusal of the request, so loading it may be tried again.
-	if _, err := client.load(context.Background(), &principal{ID: "alice", JWT: "jwt"}, randomKey(), "chat", "row-busy"); api.AsError(err).Action != api.ActionRetry || api.AsError(err).Status != 0 {
+	if _, err := client.load(context.Background(), &auth.Principal{ID: "alice", JWT: "jwt"}, randomKey(), "chat", "row-busy"); api.AsError(err).Action != api.ActionRetry || api.AsError(err).Status != 0 {
 		t.Fatalf("loading a row sync could not read: %+v", api.AsError(err))
 	}
 }
@@ -331,7 +332,7 @@ func TestStoredRowsNameTheirFormat(t *testing.T) {
 // refused.
 func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	p := &principal{ID: "alice"}
+	p := &auth.Principal{ID: "alice"}
 	current := func(data api.Object) {
 		data["recordVersion"], data["titleState"], data["model"], data["presetId"], data["pinned"], data["webSearchEnabled"] = recordVersion, "manual", "auto", nil, false, true
 		for _, message := range api.Arr(data["messages"]) {
@@ -430,7 +431,7 @@ type pagedDocuments struct {
 	pages []rowPage
 }
 
-func (s *pagedDocuments) list(ctx context.Context, p *principal, key contentKey, scope, cursor, project string, limit int) (rowPage, error) {
+func (s *pagedDocuments) list(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, cursor, project string, limit int) (rowPage, error) {
 	if scope != "project_document" {
 		return s.memoryRows.list(ctx, p, key, scope, cursor, project, limit)
 	}
@@ -443,7 +444,7 @@ func (s *pagedDocuments) list(ctx context.Context, p *principal, key contentKey,
 // and says so. A page that lists a document again holds its newer copy.
 func TestADocumentSyncCannotOpenIsNeverLeftOutUnsaid(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	p := &principal{ID: "alice"}
+	p := &auth.Principal{ID: "alice"}
 	trip := "trip"
 	rows.rows[rowMapKey(p, "project", trip)] = storedRow{ID: trip, ETag: "1", Data: api.Raw(api.Object{"name": "Trip"})}
 	doc := func(id, filename string) storedRow {

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 func TestInvalidKeyEncodingNamesTheKey(t *testing.T) {
@@ -31,7 +32,7 @@ func TestRequestKeysAreClearedAfterDecoding(t *testing.T) {
 	key := randomKey()
 	body := api.Raw(api.Object{"key": keyBase64(key), "threadId": "chat-1"})
 	var received *runRequest
-	handle := decoded(func(_ context.Context, _ *principal, _ contentKey, in *runRequest) (any, error) {
+	handle := decoded(func(_ context.Context, _ *auth.Principal, _ auth.ContentKey, in *runRequest) (any, error) {
 		received = in
 		var wire api.Object
 		json.Unmarshal(api.Raw(in), &wire)
@@ -43,7 +44,7 @@ func TestRequestKeysAreClearedAfterDecoding(t *testing.T) {
 		}
 		return nil, nil
 	})
-	if _, err := handle(context.Background(), &principal{ID: "alice"}, key, body); err != nil {
+	if _, err := handle(context.Background(), &auth.Principal{ID: "alice"}, key, body); err != nil {
 		t.Fatal(err)
 	}
 	if received == nil || len(received.Key) != 0 {
@@ -62,13 +63,13 @@ func TestRunDropsKeyBeforeScreening(t *testing.T) {
 			t.Errorf("the completed conversation produced %d submissions", len(got))
 		}
 	}()
-	p := &principal{ID: "alice", JWT: "clerk-alice"}
+	p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
 	r, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	awaitFrame(t, r.log, "RUN_FINISHED")
-	if r.key != (contentKey{}) {
+	if r.key != (auth.ContentKey{}) {
 		t.Error("the completed run holds its storage key while screening")
 	}
 	row, err := rows.load(context.Background(), p, key, "chat", r.thread.id)
@@ -114,7 +115,7 @@ func TestSyncRequestKeyReadersAreCleared(t *testing.T) {
 				}
 				return syncTestResponse(status, api.Object{})
 			})}}
-			err := s.remove(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, key, "chat", "chat-1")
+			err := s.remove(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, key, "chat", "chat-1")
 			if (err == nil) != (status == http.StatusOK) || sent == nil || late == nil {
 				t.Fatalf("sync call: %v", err)
 			}

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 func TestARetryRepeatsWhatTheChatLeftUnfinished(t *testing.T) {
@@ -16,7 +17,7 @@ func TestARetryRepeatsWhatTheChatLeftUnfinished(t *testing.T) {
 		prompts <- lastRequest(r)
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\" violets are blue.\"}}]}\n\ndata: [DONE]\n\n")
 	})
-	p := &principal{ID: "alice"}
+	p := &auth.Principal{ID: "alice"}
 	for _, tc := range []struct {
 		name, lastKind string
 		more           []any

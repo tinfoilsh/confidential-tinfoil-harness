@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 func TestTranscriptInlinesAttachmentsAndDetachesKeys(t *testing.T) {
@@ -20,11 +21,11 @@ func TestTranscriptInlinesAttachmentsAndDetachesKeys(t *testing.T) {
 	storedThread(rows, "alice", "chat-1",
 		api.Object{"id": imageID, "type": "image", "fileName": "photo.png", "mimeType": "image/png", "encryptionKey": imageKey, "thumbnailBase64": "thumb", "storageThreadId": "chat-1"},
 		api.Object{"id": docID, "type": "document", "fileName": "plan.pdf", "encryptionKey": docKey, "pageCount": 2})
-	row := rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat-1")]
+	row := rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat-1")]
 	editRow(&row, func(data api.Object) {
 		data["projectId"], data["harnessRequests"], data["clock"] = "project-1", api.Object{"nonce": api.Object{}}, 9
 	})
-	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat-1")] = row
+	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat-1")] = row
 	w := postRoute(h, "/v1/threads/transcript", api.Object{"key": keyBase64(key), "threadId": "chat-1"}, "alice")
 	if w.Code != 200 {
 		t.Fatalf("HTTP %d: %s", w.Code, w.Body.String())
@@ -68,7 +69,7 @@ func TestTranscriptWaitsForALiveReply(t *testing.T) {
 	model, release := heldModel()
 	h, _, key := testChatHarness(t, model)
 	t.Cleanup(release)
-	p := &principal{ID: "alice", JWT: "clerk-alice"}
+	p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
 	run, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
@@ -104,7 +105,7 @@ func TestTransferDeletionPreservesRepliesStartedAfterTheCopy(t *testing.T) {
 	if copy.Code != 200 || json.Unmarshal(copy.Body.Bytes(), &copied) != nil || copied.Revision == "" {
 		t.Fatalf("copy: %s", copy.Body.String())
 	}
-	run, err := h.acceptTurn(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[turnRequest](in))
+	run, err := h.acceptTurn(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[turnRequest](in))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +119,7 @@ func TestTransferDeletionPreservesRepliesStartedAfterTheCopy(t *testing.T) {
 	if w := postRoute(h, "/v1/threads/delete", deletion, "alice"); w.Code != 409 || !strings.Contains(w.Body.String(), "REVISION_CONFLICT") {
 		t.Fatalf("stale transfer: %d %s", w.Code, w.Body.String())
 	}
-	row, err := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", id)
+	row, err := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", id)
 	if err != nil || len(mustRead(readThreadRow(row)).Messages) != 4 || mustRead(readThreadRow(row)).Messages[3].Content == "" {
 		t.Fatalf("reply lost: %v %+v", err, row)
 	}
@@ -126,7 +127,7 @@ func TestTransferDeletionPreservesRepliesStartedAfterTheCopy(t *testing.T) {
 	if w := postRoute(h, "/v1/threads/delete", deletion, "alice"); w.Code != 200 {
 		t.Fatalf("fresh transfer: %d %s", w.Code, w.Body.String())
 	}
-	if _, err := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", id); api.AsError(err).HTTP != 404 {
+	if _, err := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", id); api.AsError(err).HTTP != 404 {
 		t.Fatal("transferred chat remains in the cloud")
 	}
 }
@@ -183,7 +184,7 @@ func TestImportStoresTheDeviceChatUnderItsID(t *testing.T) {
 	if summary["id"] != "0000000000005_device" || summary["title"] != "From the device" || summary["activeRun"] != nil {
 		t.Fatalf("summary: %v", summary)
 	}
-	row, err := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", "0000000000005_device")
+	row, err := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "0000000000005_device")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,14 +233,14 @@ func TestImportMayReuseADeletedChatID(t *testing.T) {
 	})}}
 	h, _, key := testChatHarness(t, nil)
 	h.storeRows = client
-	if _, err := h.importThread(context.Background(), &principal{ID: "alice", JWT: "jwt"}, key, requestOf[threadImportRequest](api.Object{"threadId": "chat-1", "thread": api.Object{"messages": []any{}}})); err != nil {
+	if _, err := h.importThread(context.Background(), &auth.Principal{ID: "alice", JWT: "jwt"}, key, requestOf[threadImportRequest](api.Object{"threadId": "chat-1", "thread": api.Object{"messages": []any{}}})); err != nil {
 		t.Fatal(err)
 	}
 	if metadata["restoreDeleted"] != true {
 		t.Fatalf("metadata: %v", metadata)
 	}
 	row := &storedRow{ID: "chat-1", Data: api.Raw(api.Object{"messages": []any{}})}
-	client.push(context.Background(), &principal{ID: "alice", JWT: "jwt"}, key, "chat", row, "nonce")
+	client.push(context.Background(), &auth.Principal{ID: "alice", JWT: "jwt"}, key, "chat", row, "nonce")
 	if _, ok := metadata["restoreDeleted"]; ok {
 		t.Fatal("an ordinary push asked to restore a deleted chat")
 	}

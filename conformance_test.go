@@ -17,6 +17,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 // Runs recorded as fixtures in protocol/fixtures, which every client replays
@@ -100,7 +101,7 @@ func TestRunsShowTheChatTheHarnessKeeps(t *testing.T) {
 				}
 				kept = *metadata.Thread
 			} else {
-				row, err := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", events[0].ThreadID)
+				row, err := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
 				if err != nil {
 					t.Fatal(err)
 				}

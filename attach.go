@@ -26,6 +26,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	_ "golang.org/x/image/bmp"
 	"golang.org/x/image/draw"
 	_ "golang.org/x/image/tiff"
@@ -163,12 +164,12 @@ func composer() composerView {
 func randomBytes(n int) []byte { b := make([]byte, n); rand.Read(b); return b }
 
 func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
-	p, err := h.auth.authenticate(r, r.URL.Path == "/v1/transcriptions" || r.URL.Path == "/v1/attachments/upload")
+	p, err := h.auth.Authenticate(r, r.URL.Path == "/v1/transcriptions" || r.URL.Path == "/v1/attachments/upload")
 	if err != nil {
 		api.Respond(w, nil, err)
 		return
 	}
-	cred, err := h.auth.inference(r.Context(), p)
+	cred, err := h.auth.Inference(r.Context(), p)
 	if err != nil {
 		api.Respond(w, nil, h.withQuota(p, cred.Limit, err))
 		return
@@ -180,7 +181,7 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fields := map[string]string{}
-	var key contentKey
+	var key auth.ContentKey
 	defer clear(key[:])
 	var keyField []byte
 	defer func() { clear(keyField) }()
@@ -201,7 +202,7 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if r.URL.Path == "/v1/projects/documents/upload" {
-				key, err = decodeBase64Key(keyField)
+				key, err = auth.DecodeBase64Key(keyField)
 				clear(keyField)
 				keyField = nil
 				if err != nil {
@@ -576,11 +577,11 @@ func (h *harness) transcribe(ctx context.Context, filename string, data []byte) 
 }
 
 // attachment finds an attachment of the named thread for its client to download.
-func (h *harness) attachment(ctx context.Context, p *principal, key contentKey, id, threadID string) (*Attachment, []byte, error) {
+func (h *harness) attachment(ctx context.Context, p *auth.Principal, key auth.ContentKey, id, threadID string) (*Attachment, []byte, error) {
 	if p.Anonymous {
 		return nil, nil, api.Err(404, "THREAD_NOT_FOUND", "The attachment was not found")
 	}
-	if key == (contentKey{}) {
+	if key == (auth.ContentKey{}) {
 		return nil, nil, api.Err(401, "KEY_REQUIRED", "A content key is required")
 	}
 	var descriptor *Attachment
@@ -598,7 +599,7 @@ func (h *harness) attachment(ctx context.Context, p *principal, key contentKey, 
 	return descriptor, b, err
 }
 
-func (h *harness) attachmentBytes(ctx context.Context, p *principal, a *Attachment, public bool) ([]byte, error) {
+func (h *harness) attachmentBytes(ctx context.Context, p *auth.Principal, a *Attachment, public bool) ([]byte, error) {
 	if a.Base64 != "" {
 		return base64.StdEncoding.DecodeString(a.Base64)
 	}
@@ -689,7 +690,7 @@ func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 	var data []byte
 	if public {
 		encodedKey := []byte(in.AttKey)
-		key, keyErr := decodeBase64Key(encodedKey)
+		key, keyErr := auth.DecodeBase64Key(encodedKey)
 		clear(encodedKey)
 		clear(key[:])
 		if keyErr != nil {
@@ -698,7 +699,7 @@ func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 		}
 		// A share's client names the attachment and the key its link carries.
 		descriptor = &Attachment{ID: in.ID, EncryptionKey: in.AttKey, Kind: cmp.Or(in.Kind, in.Type), FileName: in.FileName, MimeType: in.MimeType, TextContent: in.TextContent, Pages: in.Pages}
-		data, err = h.attachmentBytes(r.Context(), &principal{Anonymous: true}, descriptor, true)
+		data, err = h.attachmentBytes(r.Context(), &auth.Principal{Anonymous: true}, descriptor, true)
 	} else {
 		key, keyErr := requestKey(in.Key)
 		in.ClearKey()
@@ -773,7 +774,7 @@ func turnAttachments(in *turnRequest, t *Thread) ([]Attachment, error) {
 
 // A local transcript may omit older images' bytes to stay small. The model
 // then reads such an image through its description, or not at all.
-func (h *harness) hydrateContext(ctx context.Context, p *principal, t *Thread, keyless bool) error {
+func (h *harness) hydrateContext(ctx context.Context, p *auth.Principal, t *Thread, keyless bool) error {
 	vision := h.catalog.get().vision(t.Model)
 	return t.eachAttachment(func(a *Attachment) error {
 		if !a.isImage() || !vision && a.Description != "" {

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 // The harness holds a chat only while its reply runs: there is no limit on
@@ -62,7 +63,7 @@ func TestAQueuedTurnThatCannotStartDoesNotStallTheQueue(t *testing.T) {
 	model, release := heldModel()
 	h, _, key := testChatHarness(t, model)
 	t.Cleanup(release)
-	p := &principal{ID: "alice", JWT: "clerk-alice"}
+	p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
 	first, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
@@ -94,7 +95,7 @@ func TestAFullQueueIsNotAnExhaustedQuota(t *testing.T) {
 	model, release := heldModel()
 	h, _, key := testChatHarness(t, model)
 	t.Cleanup(release)
-	p := &principal{ID: "alice", JWT: "clerk-alice"}
+	p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
 	first, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
@@ -116,7 +117,7 @@ func TestDeletingAChatEndsItsQueuedTurns(t *testing.T) {
 	model, release := heldModel()
 	h, rows, key := testChatHarness(t, model)
 	t.Cleanup(release)
-	p := &principal{ID: "alice", JWT: "clerk-alice"}
+	p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
 	first, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
@@ -158,7 +159,7 @@ func TestAChatDeletedAsItsTurnStartsStaysDeleted(t *testing.T) {
 		t.Cleanup(cp.Close)
 		release := sync.OnceFunc(func() { close(answer) })
 		t.Cleanup(release)
-		h.auth.client, h.auth.controlplane = cp.Client(), cp.URL
+		h.auth.Client, h.auth.Controlplane = cp.Client(), cp.URL
 		in := sendInput(key)
 		refused := make(chan *httptest.ResponseRecorder, 1)
 		go func() { refused <- postRoute(h, "/v1/threads/turn", in, "alice") }()
@@ -170,14 +171,14 @@ func TestAChatDeletedAsItsTurnStartsStaysDeleted(t *testing.T) {
 		if w := <-refused; w.Code != 404 {
 			t.Fatalf("a turn on a deleted chat: HTTP %d %s", w.Code, w.Body.String())
 		}
-		if _, err := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", api.Str(in["threadId"])); api.AsError(err).HTTP != 404 {
+		if _, err := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", api.Str(in["threadId"])); api.AsError(err).HTTP != 404 {
 			t.Fatalf("the deleted chat came back: %v", err)
 		}
 	})
 	t.Run("elsewhere", func(t *testing.T) {
 		h, rows, key := testChatHarness(t, nil)
 		id := rowID()
-		name := rowMapKey(&principal{ID: "alice"}, "chat", id)
+		name := rowMapKey(&auth.Principal{ID: "alice"}, "chat", id)
 		rows.rows[name] = storedRow{ID: id, ETag: "1", Data: api.Raw(api.Object{"title": "Old", "messages": []any{}})}
 		// Sync removes the chat for another instance just before the
 		// turn's write, which then conflicts.
@@ -190,7 +191,7 @@ func TestAChatDeletedAsItsTurnStartsStaysDeleted(t *testing.T) {
 		if w := postRoute(h, "/v1/threads/turn", in, "alice"); w.Code != 404 {
 			t.Fatalf("a turn on a deleted chat: HTTP %d %s", w.Code, w.Body.String())
 		}
-		if _, err := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", id); api.AsError(err).HTTP != 404 {
+		if _, err := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", id); api.AsError(err).HTTP != 404 {
 			t.Fatalf("the deleted chat came back: %v", err)
 		}
 	})
@@ -228,7 +229,7 @@ func TestAFinishingRunsWritesBlockNothing(t *testing.T) {
 		}
 		return nil
 	}
-	p := &principal{ID: "alice", JWT: "clerk-alice"}
+	p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
 	run, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
@@ -289,7 +290,7 @@ func TestFollowResumesALiveRunAfterTheClientsCursor(t *testing.T) {
 	model, release := heldModel()
 	h, _, key := testChatHarness(t, model)
 	t.Cleanup(release)
-	run, err := h.acceptTurn(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
+	run, err := h.acceptTurn(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +341,7 @@ func TestARetriedRequestFollowsItsRunOrIsAlreadyApplied(t *testing.T) {
 	model, release := heldModel()
 	h, rows, key := testChatHarness(t, model)
 	t.Cleanup(release)
-	p := &principal{ID: "alice", JWT: "clerk-alice"}
+	p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
 	in := sendInput(key)
 	run, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](in))
 	if err != nil {
@@ -390,7 +391,7 @@ func TestAFirstTurnCreatesItsChatUnderTheClientsID(t *testing.T) {
 	if events[0].ThreadID != in["threadId"] {
 		t.Fatalf("the chat was stored as %s, not %s", events[0].ThreadID, in["threadId"])
 	}
-	if _, err := rows.load(context.Background(), &principal{ID: "alice"}, key, "chat", api.Str(in["threadId"])); err != nil {
+	if _, err := rows.load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", api.Str(in["threadId"])); err != nil {
 		t.Fatal(err)
 	}
 	in = sendInput(key)
@@ -443,7 +444,7 @@ func TestAnotherCallerReachesNothingOfALiveRun(t *testing.T) {
 		}
 		held(w, r)
 	})
-	p := &principal{ID: "alice", JWT: "clerk-alice"}
+	p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
 	in := sendInput(key)
 	run, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](in))
 	if err != nil {
@@ -491,7 +492,7 @@ func TestAFinishedRunsLogIsWipedOnceNothingDrainsIt(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			model, release := heldModel()
 			h, _, key := testChatHarness(t, model)
-			p := &principal{ID: "alice", JWT: "clerk-alice"}
+			p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
 			run, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
 			if err != nil {
 				t.Fatal(err)

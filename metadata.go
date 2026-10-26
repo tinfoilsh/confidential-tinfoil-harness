@@ -5,10 +5,11 @@ import (
 	"encoding/json"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
-func (h *harness) favicon(ctx context.Context, p *principal, _ contentKey, in *pageRequest) (any, error) {
-	credential, err := h.auth.inference(ctx, p)
+func (h *harness) favicon(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *pageRequest) (any, error) {
+	credential, err := h.auth.Inference(ctx, p)
 	if err != nil {
 		return nil, err
 	}
@@ -20,8 +21,8 @@ func (h *harness) favicon(ctx context.Context, p *principal, _ contentKey, in *p
 
 // linkPreview reads a page's details for a link preview that holds none, as
 // the previous web client's did.
-func (h *harness) linkPreview(ctx context.Context, p *principal, _ contentKey, in *pageRequest) (any, error) {
-	credential, err := h.auth.inference(ctx, p)
+func (h *harness) linkPreview(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *pageRequest) (any, error) {
+	credential, err := h.auth.Inference(ctx, p)
 	if err != nil {
 		return nil, err
 	}

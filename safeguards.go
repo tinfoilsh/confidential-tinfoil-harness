@@ -175,7 +175,7 @@ func (h *harness) screen(r *chatRun, reply []Message, runErr error) {
 	h.live.mu.Lock()
 	deleted := r.thread.deleted
 	h.live.mu.Unlock()
-	if r.screening == nil || runErr != nil || r.cancelled || deleted || r.retryTarget != nil || r.principal.Anonymous || !r.credential.firstParty {
+	if r.screening == nil || runErr != nil || r.cancelled || deleted || r.retryTarget != nil || r.principal.Anonymous || !r.credential.FirstParty {
 		return
 	}
 	var text []string

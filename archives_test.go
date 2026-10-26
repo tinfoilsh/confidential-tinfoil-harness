@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 type formPart struct {
@@ -155,7 +156,7 @@ func importLines(t *testing.T, w *httptest.ResponseRecorder) imported {
 // storedChats are a user's stored chats read as the harness reads them.
 func storedChats(rows *memoryRows, user string) map[string]Thread {
 	chats := map[string]Thread{}
-	page, _ := rows.list(context.Background(), &principal{ID: user}, rows.key, "chat", "", "", 0)
+	page, _ := rows.list(context.Background(), &auth.Principal{ID: user}, rows.key, "chat", "", "", 0)
 	for _, row := range page.Rows {
 		t := mustRead(readThreadRow(&row)).Thread
 		chats[t.Title] = t
@@ -249,7 +250,7 @@ func withBackupEntries(t *testing.T, archive []byte, replaced map[string][]byte)
 func TestNativeBackupRoundTrips(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	fake := newFakeSync(t, h)
-	alice := &principal{ID: "alice"}
+	alice := &auth.Principal{ID: "alice"}
 	project := "project-1"
 	rows.rows[rowMapKey(alice, "project", project)] = storedRow{ID: project, ETag: "1", Data: api.Raw(api.Object{"name": "Research", "description": "Notes", "systemInstructions": "Cite sources", "color": "teal", "createdAt": "2026-01-01T00:00:00Z"})}
 	rows.rows[rowMapKey(alice, "project_document", project+"/doc-1")] = storedRow{ID: project + "/doc-1", ETag: "1", Data: api.Raw(api.Object{"filename": "paper.md", "contentType": "text/markdown", "sizeBytes": 12, "content": "Paper text"}), project: &project, projectSet: true}
@@ -373,7 +374,7 @@ func TestBackupsHoldWhatRestoresTake(t *testing.T) {
 func TestARestoreReadsDeviceChatsBeforeStoringTheCloud(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	newFakeSync(t, h)
-	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: api.Raw(api.Object{"title": "Stored", "messages": []any{api.Object{"id": "m", "role": "user", "content": "hi"}}})}
+	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: api.Raw(api.Object{"title": "Stored", "messages": []any{api.Object{"id": "m", "role": "user", "content": "hi"}}})}
 	device := api.Object{"id": "local-chat", "title": "On my device", "messages": []any{api.Object{"id": "d", "role": "user", "content": "hello"}}}
 	w := archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "native", "key": keyBase64(key)}), threadPart(device))
 	if w.Code != 200 {
@@ -489,8 +490,8 @@ func TestWebAppBackupsRestore(t *testing.T) {
 			if strings.Join(names, " ") != "thinking: tool_call:web_search tool_call:web_fetch tool_call:python content:" || len(chat.Messages[1].Annotations) != 1 {
 				t.Fatalf("the old timeline was not read: %v", names)
 			}
-			projects, _ := rows.list(context.Background(), &principal{ID: "alice"}, key, "project", "", "", 0)
-			docs, _ := h.projectDocuments(context.Background(), &principal{ID: "alice"}, key, *chat.ProjectID, refuseUnreadable)
+			projects, _ := rows.list(context.Background(), &auth.Principal{ID: "alice"}, key, "project", "", "", 0)
+			docs, _ := h.projectDocuments(context.Background(), &auth.Principal{ID: "alice"}, key, *chat.ProjectID, refuseUnreadable)
 			if len(projects.Rows) != 1 || mustRead(readProject(&projects.Rows[0])).Name != "Research" || len(docs) != 1 || docs[0].Content != "Extracted paper text" {
 				t.Fatalf("project: %v %v", projects.Rows, docs)
 			}
@@ -668,12 +669,12 @@ func TestClaudeProjectsRequireTheCloud(t *testing.T) {
 		t.Fatalf("projects imported to the device: HTTP %d %s", w.Code, w.Body.String())
 	}
 	result := importOf(t, h, "alice", projects, "projects.json", api.Object{"target": "cloud", "key": keyBase64(key)})
-	stored, _ := rows.list(context.Background(), &principal{ID: "alice"}, key, "project", "", "", 0)
+	stored, _ := rows.list(context.Background(), &auth.Principal{ID: "alice"}, key, "project", "", "", 0)
 	if result.done.JobID == nil || len(stored.Rows) != 1 {
 		t.Fatalf("projects: %d stored, done %+v", len(stored.Rows), result.done)
 	}
 	project := mustRead(readProject(&stored.Rows[0]))
-	docs, _ := h.projectDocuments(context.Background(), &principal{ID: "alice"}, key, project.ID, refuseUnreadable)
+	docs, _ := h.projectDocuments(context.Background(), &auth.Principal{ID: "alice"}, key, project.ID, refuseUnreadable)
 	if project.Name != "Release Notes" || project.SystemInstructions != "Write concise release notes." || len(docs) != 1 || docs[0].Filename != "style-guide.md" || docs[0].Content != "# Style guide" {
 		t.Fatalf("project: %+v %+v", project, docs)
 	}
@@ -681,7 +682,7 @@ func TestClaudeProjectsRequireTheCloud(t *testing.T) {
 	var split []json.RawMessage
 	json.Unmarshal(projects, &split)
 	one := importOf(t, h, "bob", split[0], "release-notes.json", api.Object{"target": "cloud", "key": keyBase64(key)})
-	if stored, _ := rows.list(context.Background(), &principal{ID: "bob"}, key, "project", "", "", 0); one.done.JobID == nil || len(stored.Rows) != 1 {
+	if stored, _ := rows.list(context.Background(), &auth.Principal{ID: "bob"}, key, "project", "", "", 0); one.done.JobID == nil || len(stored.Rows) != 1 {
 		t.Fatalf("a project file of its own was not imported: %+v", one.done)
 	}
 	full := importOf(t, h, "alice", fixture(t, "claude-export.zip"), "claude.zip", api.Object{"target": "device"})
@@ -712,7 +713,7 @@ func TestConversationsExportMatchesTheWebApp(t *testing.T) {
 		}
 	}
 	project := valueOr(stored.ProjectID, "")
-	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", stored.ID)] = storedRow{ID: stored.ID, ETag: "1", Data: api.Raw(stored), project: &project, projectSet: true}
+	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", stored.ID)] = storedRow{ID: stored.ID, ETag: "1", Data: api.Raw(stored), project: &project, projectSet: true}
 	parts := []formPart{optionsPart(api.Object{"format": "conversations", "key": keyBase64(key)})}
 	for _, thread := range threads.Device {
 		parts = append(parts, formPart{name: "thread", data: thread})
@@ -775,12 +776,12 @@ func TestAnExportWithoutTheKeyHoldsOnlyItsDeviceChats(t *testing.T) {
 // them.
 func TestArchivesNeedNoChatAccess(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: api.Raw(api.Object{"title": "Stored", "messages": []any{api.Object{"id": "m", "role": "user", "content": "hi"}}})}
+	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: api.Raw(api.Object{"title": "Stored", "messages": []any{api.Object{"id": "m", "role": "user", "content": "hi"}}})}
 	for name, credential := range map[string]string{"a free user": "free_anonymous-key", "a subscriber at its cap": ""} {
 		signedIn := func(r *http.Request) {
 			r.Header.Set("Authorization", "Bearer clerk-alice")
 			if credential != "" {
-				r.Header.Set(inferenceKeyHeader, credential)
+				r.Header.Set(auth.InferenceKeyHeader, credential)
 			}
 		}
 		export := archiveRequest(h, "/v1/export", signedIn, optionsPart(api.Object{"format": "native", "key": keyBase64(key)}))
@@ -974,7 +975,7 @@ func postRaw(t *testing.T, server *httptest.Server, path, contentType string, le
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { conn.Close() })
-	fmt.Fprintf(conn, "POST %s HTTP/1.1\r\nHost: harness\r\nAuthorization: Bearer clerk-alice\r\n%s: %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n", path, inferenceKeyHeader, chatTokenOf("alice"), contentType, length)
+	fmt.Fprintf(conn, "POST %s HTTP/1.1\r\nHost: harness\r\nAuthorization: Bearer clerk-alice\r\n%s: %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n", path, auth.InferenceKeyHeader, chatTokenOf("alice"), contentType, length)
 	return conn
 }
 

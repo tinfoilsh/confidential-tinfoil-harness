@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 // fakeImport is an import job of the fake sync enclave. Started, it stores
@@ -50,7 +51,7 @@ func (f *fakeSync) importStep(t *testing.T, h *harness, r *http.Request, in api.
 		return 200, api.Object{"ok": true}
 	case "/v1/import/start":
 		job := f.imports[api.Str(in["job_id"])]
-		key, err := decodeBase64Key([]byte(api.Str(in["key"])))
+		key, err := auth.DecodeBase64Key([]byte(api.Str(in["key"])))
 		if job == nil || err != nil {
 			return 400, api.Object{"code": "BAD_REQUEST"}
 		}
@@ -63,7 +64,7 @@ func (f *fakeSync) importStep(t *testing.T, h *harness, r *http.Request, in api.
 		}
 		user := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		user = strings.TrimPrefix(strings.TrimPrefix(user, "clerk-"), "sync-archive:")
-		p := &principal{ID: user}
+		p := &auth.Principal{ID: user}
 		counts, err := f.storeImport(h.storeRows.(*memoryRows), p, key, archive)
 		if err != nil {
 			t.Errorf("sync would refuse the import: %v", err)
@@ -114,14 +115,14 @@ func validTime(raw json.RawMessage) bool {
 }
 
 // mappedID is the id sync stores an imported entity under.
-func mappedID(p *principal, backup, kind, source string) string {
+func mappedID(p *auth.Principal, backup, kind, source string) string {
 	h := sha256.Sum256([]byte(fmt.Sprintf("tinfoil-restore-id-v1\x00%s\x00%s\x00%s\x00%s\x000", p.ID, backup, kind, source)))
 	s := hex.EncodeToString(h[:])
 	return s[:8] + "-" + s[8:12] + "-" + s[12:16] + "-" + s[16:20] + "-" + s[20:32]
 }
 
 // storeImport checks and stores a native cloud import as sync's job does.
-func (f *fakeSync) storeImport(rows *memoryRows, p *principal, key contentKey, archive []byte) (int, error) {
+func (f *fakeSync) storeImport(rows *memoryRows, p *auth.Principal, key auth.ContentKey, archive []byte) (int, error) {
 	zr, err := zip.NewReader(bytes.NewReader(archive), int64(len(archive)))
 	if err != nil {
 		return 0, err

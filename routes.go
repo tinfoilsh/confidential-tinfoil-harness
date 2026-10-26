@@ -6,16 +6,17 @@ import (
 	"net/http"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
-type jsonEndpoint func(context.Context, *principal, contentKey, json.RawMessage) (any, error)
+type jsonEndpoint func(context.Context, *auth.Principal, auth.ContentKey, json.RawMessage) (any, error)
 
 // validated is a request that checks itself once decoded.
 type validated interface{ validate() error }
 
 // decoded is a route whose handler takes its request decoded and checked.
-func decoded[T any](handle func(context.Context, *principal, contentKey, *T) (any, error)) jsonEndpoint {
-	return func(ctx context.Context, p *principal, key contentKey, body json.RawMessage) (any, error) {
+func decoded[T any](handle func(context.Context, *auth.Principal, auth.ContentKey, *T) (any, error)) jsonEndpoint {
+	return func(ctx context.Context, p *auth.Principal, key auth.ContentKey, body json.RawMessage) (any, error) {
 		defer clear(key[:])
 		in := new(T)
 		if keyed, ok := any(in).(interface{ ClearKey() }); ok {
@@ -101,7 +102,7 @@ func (h *harness) jsonRoute(spec routeSpec) http.HandlerFunc {
 			api.Respond(w, nil, err)
 			return
 		}
-		var key contentKey
+		var key auth.ContentKey
 		if spec.key {
 			var keyed api.KeyRequest
 			defer keyed.ClearKey()
@@ -109,7 +110,7 @@ func (h *harness) jsonRoute(spec routeSpec) http.HandlerFunc {
 				api.Respond(w, nil, err)
 				return
 			}
-			key, err = decodeContentKey(keyed.Key)
+			key, err = auth.DecodeContentKey(keyed.Key)
 			keyed.ClearKey()
 			if err != nil {
 				api.Respond(w, nil, err)
@@ -123,12 +124,12 @@ func (h *harness) jsonRoute(spec routeSpec) http.HandlerFunc {
 }
 
 // caller is who a request is from, recognized before its body is read.
-func (h *harness) caller(r *http.Request, anonymous bool) (*principal, error) {
-	p, err := h.auth.authenticate(r, anonymous)
+func (h *harness) caller(r *http.Request, anonymous bool) (*auth.Principal, error) {
+	p, err := h.auth.Authenticate(r, anonymous)
 	if err != nil {
 		return nil, err
 	}
-	return p, h.auth.recognize(r.Context(), p)
+	return p, h.auth.Recognize(r.Context(), p)
 }
 
 // threadOperation serves a route that changes a stored chat, named by id
@@ -156,13 +157,13 @@ func (h *harness) threadOperation(handler jsonEndpoint) http.HandlerFunc {
 			api.Respond(w, nil, err)
 			return
 		}
-		var key contentKey
+		var key auth.ContentKey
 		if !target.Local {
 			if p.Anonymous {
 				api.Respond(w, nil, errAnonymousCloud)
 				return
 			}
-			if key, err = decodeContentKey(target.Key); err != nil {
+			if key, err = auth.DecodeContentKey(target.Key); err != nil {
 				api.Respond(w, nil, err)
 				return
 			}

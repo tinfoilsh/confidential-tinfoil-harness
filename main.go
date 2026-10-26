@@ -20,6 +20,7 @@ import (
 	"time"
 	_ "time/tzdata"
 
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	tinfoil "github.com/tinfoilsh/tinfoil-go"
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
@@ -68,7 +69,7 @@ type harness struct {
 	cpClient     *http.Client
 	storeRows    rowStore
 	syncAPI      *syncClient
-	auth         *authenticator
+	auth         *auth.Authenticator
 	catalog      catalogCache
 	autoModel    *model
 	services     map[string]*downstreamService

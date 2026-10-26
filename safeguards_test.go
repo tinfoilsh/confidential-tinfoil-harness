@@ -13,10 +13,11 @@ import (
 	"unicode/utf8"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 // chatToken is a subscriber's Tinfoil Chat credential.
-var chatToken = inferenceCredential{Key: "chat-token", firstParty: true}
+var chatToken = auth.Credential{Key: "chat-token", FirstParty: true}
 
 func TestSubmitter_DeliversCompletedConversation(t *testing.T) {
 	var mu sync.Mutex
@@ -110,7 +111,7 @@ func TestOnlyCompletedFirstPartyChatsAreScreened(t *testing.T) {
 		"deleted":      {func(r *chatRun) { r.thread.deleted = true }, reply, nil, false},
 		"widget retry": {func(r *chatRun) { r.retryTarget = &retryTarget{block: Block{Name: "render_chart"}} }, reply, nil, false},
 		"anonymous":    {func(r *chatRun) { r.principal.Anonymous = true }, reply, nil, false},
-		"api key":      {func(r *chatRun) { r.credential.firstParty = false }, reply, nil, false},
+		"api key":      {func(r *chatRun) { r.credential.FirstParty = false }, reply, nil, false},
 		"not captured": {func(r *chatRun) { r.screening = nil }, reply, nil, false},
 		"no reply":     {func(*chatRun) {}, []Message{{Content: ""}}, nil, false},
 	} {
@@ -122,7 +123,7 @@ func TestOnlyCompletedFirstPartyChatsAreScreened(t *testing.T) {
 			}))
 			defer sidecar.Close()
 			h := &harness{safeguards: newSubmitter(sidecar.URL)}
-			r := &chatRun{thread: &threadSession{id: "chat-1"}, turn: &turnRequest{Kind: "send"}, principal: &principal{ID: "alice"}, credential: chatToken,
+			r := &chatRun{thread: &threadSession{id: "chat-1"}, turn: &turnRequest{Kind: "send"}, principal: &auth.Principal{ID: "alice"}, credential: chatToken,
 				screening: &screening{conversation: "chat-1", messages: []safeguardMessage{{Role: "user", Content: "hi"}}}}
 			tc.change(r)
 			h.screen(r, tc.reply, tc.err)

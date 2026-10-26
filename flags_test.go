@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 // A flag lookup the control plane is slow to answer flags nothing rather
@@ -27,10 +28,10 @@ func TestASlowFlagLookupFlagsNothing(t *testing.T) {
 	}))
 	t.Cleanup(cp.Close)
 	t.Cleanup(func() { close(stuck) })
-	h.auth.client, h.auth.controlplane = cp.Client(), cp.URL
-	saved := flagsTimeout
-	flagsTimeout = 50 * time.Millisecond
-	t.Cleanup(func() { flagsTimeout = saved })
+	h.auth.Client, h.auth.Controlplane = cp.Client(), cp.URL
+	saved := auth.FlagsTimeout
+	auth.FlagsTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { auth.FlagsTimeout = saved })
 	storedThread(rows, "alice", "chat-1")
 	within(t, "listing", func() error {
 		var list struct {
@@ -53,14 +54,14 @@ func TestAFlaggedChatTakesNoTurns(t *testing.T) {
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n")
 	})
 	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != safeguardFlagsPath || r.Header.Get("Authorization") != "Bearer clerk-alice" {
+		if r.URL.Path != auth.SafeguardFlagsPath || r.Header.Get("Authorization") != "Bearer clerk-alice" {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
 		io.WriteString(w, `{"flags":[{"id":"f1","conversation_id":"flagged","created_at":"2026-10-01T00:00:00Z"},{"id":"f2","conversation_id":"listed","created_at":"2026-10-01T00:00:00Z"}],"in_window":2,"window_hours":720,"warn_threshold":2,"ban_threshold":3}`)
 	}))
 	t.Cleanup(cp.Close)
-	h.auth.client, h.auth.controlplane = cp.Client(), cp.URL
+	h.auth.Client, h.auth.Controlplane = cp.Client(), cp.URL
 	storedThread(rows, "alice", "flagged")
 	storedThread(rows, "alice", "fine")
 	// A flagged chat that takes no turn is flagged only by the control plane.
@@ -132,7 +133,7 @@ func TestFlagsAreReusedOnlyForTheirCaller(t *testing.T) {
 		io.WriteString(w, `{"flags":[]}`)
 	}))
 	t.Cleanup(cp.Close)
-	h.auth.client, h.auth.controlplane = cp.Client(), cp.URL
+	h.auth.Client, h.auth.Controlplane = cp.Client(), cp.URL
 	storedThread(rows, "alice", "chat-1")
 	storedThread(rows, "bob", "chat-1")
 	flagged := func(user string) bool {

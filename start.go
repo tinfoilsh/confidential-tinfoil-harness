@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
@@ -37,7 +38,7 @@ var errThreadDeleted = api.Err(404, "THREAD_NOT_FOUND", "The thread was deleted"
 // prepareTurn applies a turn to its chat as read now. A stored chat's
 // attachments are placed under it; the prompt reads their content. With
 // create, a new chat's missing row is made.
-func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *principal, create bool) (*turnPlan, error) {
+func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *auth.Principal, create bool) (*turnPlan, error) {
 	s := r.thread
 	var row *threadRow
 	var profile Profile
@@ -222,11 +223,11 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	row, request, model, titleText := plan.row, plan.request, plan.model, plan.titleText
 	r.screening, r.retryTarget, r.turn = h.screening(request), plan.retryTarget, plan.turn
 	request.cacheScope = cacheScope(p, s.id, r.input.Options.CacheSecret)
-	request.refreshAuth = func(ctx context.Context) (inferenceCredential, error) {
+	request.refreshAuth = func(ctx context.Context) (auth.Credential, error) {
 		h.live.mu.Lock()
 		p, rejected := *r.principal, r.credential.Key
 		h.live.mu.Unlock()
-		credential, err := h.auth.renewed(&p, rejected)
+		credential, err := h.auth.Renewed(&p, rejected)
 		if err == nil {
 			h.live.mu.Lock()
 			r.credential = credential
@@ -300,12 +301,12 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 
 // refuseFlagged refuses a turn on a chat the safeguards flagged, which a
 // stored chat then records. An ask is a turn on the chat it asks about.
-func (h *harness) refuseFlagged(ctx context.Context, r *chatRun, p *principal) error {
+func (h *harness) refuseFlagged(ctx context.Context, r *chatRun, p *auth.Principal) error {
 	chat := r.thread.id
 	if r.input.Kind == "ask" {
 		chat = r.input.ThreadID
 	}
-	if !h.auth.flaggedChats(ctx, p)[chat] {
+	if !h.auth.FlaggedChats(ctx, p)[chat] {
 		return nil
 	}
 	if !r.thread.local && r.input.Kind != "ask" {
@@ -317,7 +318,7 @@ func (h *harness) refuseFlagged(ctx context.Context, r *chatRun, p *principal) e
 			return err
 		}
 	}
-	return errChatFlagged
+	return auth.ErrChatFlagged
 }
 
 // activeRun marks a chat's reply as streaming until the run's deadline.

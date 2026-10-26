@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 // The store is the harness's typed view of sync: chats, the profile,
@@ -25,7 +26,7 @@ var errEveryCommitConflicted = api.Err(409, "REVISION_CONFLICT", "The row change
 // push writes a row at the revision it was read at; an empty one creates
 // it. A push whose outcome is unknown is sent again under the same
 // idempotency key, which sync answers with the first push's outcome.
-func (h *harness) push(ctx context.Context, p *principal, key contentKey, scope string, row *storedRow) error {
+func (h *harness) push(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope string, row *storedRow) error {
 	nonce := uuid.NewString()
 	for attempt := 1; ; attempt++ {
 		etag, err := h.storeRows.push(ctx, p, key, scope, row, nonce)
@@ -42,7 +43,7 @@ func (h *harness) push(ctx context.Context, p *principal, key contentKey, scope 
 // commitRow applies edit to a row as read now and pushes it at that
 // revision, again after a conflict, so a conflict never overwrites another
 // writer's change with an old copy. With create, a missing row is made.
-func (h *harness) commitRow(ctx context.Context, p *principal, key contentKey, scope, id string, create bool, edit func(row *storedRow, exists bool) error) error {
+func (h *harness) commitRow(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, id string, create bool, edit func(row *storedRow, exists bool) error) error {
 	for attempt := 0; attempt < maxCommitAttempts; attempt++ {
 		row, err := h.storeRows.load(ctx, p, key, scope, id)
 		exists := err == nil
@@ -65,7 +66,7 @@ func (h *harness) commitRow(ctx context.Context, p *principal, key contentKey, s
 
 // eachRowOrUnreadable visits every row of a scope, or of a project's chats,
 // and names each row sync holds but cannot open.
-func (h *harness) eachRowOrUnreadable(ctx context.Context, p *principal, key contentKey, scope, project string, visit func(*storedRow) error, unreadable func(string)) error {
+func (h *harness) eachRowOrUnreadable(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, project string, visit func(*storedRow) error, unreadable func(string)) error {
 	cursor := ""
 	for {
 		page, err := h.storeRows.list(ctx, p, key, scope, cursor, project, 100)
@@ -90,7 +91,7 @@ func (h *harness) eachRowOrUnreadable(ctx context.Context, p *principal, key con
 	}
 }
 
-func (h *harness) eachRow(ctx context.Context, p *principal, key contentKey, scope, project string, visit func(*storedRow) error) error {
+func (h *harness) eachRow(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, project string, visit func(*storedRow) error) error {
 	return h.eachRowOrUnreadable(ctx, p, key, scope, project, visit, func(string) {})
 }
 
@@ -101,7 +102,7 @@ func refuseUnreadable(_ string, err error) error { return err }
 
 // Chats
 
-func (h *harness) loadThread(ctx context.Context, p *principal, key contentKey, id string) (*threadRow, error) {
+func (h *harness) loadThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, id string) (*threadRow, error) {
 	row, err := h.storeRows.load(ctx, p, key, "chat", id)
 	if err != nil {
 		return nil, err
@@ -109,7 +110,7 @@ func (h *harness) loadThread(ctx context.Context, p *principal, key contentKey, 
 	return readThreadRow(row)
 }
 
-func (h *harness) threadBatch(ctx context.Context, p *principal, key contentKey, ids []string) ([]*threadRow, error) {
+func (h *harness) threadBatch(ctx context.Context, p *auth.Principal, key auth.ContentKey, ids []string) ([]*threadRow, error) {
 	rows, failed, err := h.storeRows.pull(ctx, p, key, "chat", ids)
 	if err != nil {
 		return nil, err
@@ -130,12 +131,12 @@ func (h *harness) threadBatch(ctx context.Context, p *principal, key contentKey,
 	return threads, nil
 }
 
-func (h *harness) removeThreadRevision(ctx context.Context, p *principal, key contentKey, id, revision string) error {
+func (h *harness) removeThreadRevision(ctx context.Context, p *auth.Principal, key auth.ContentKey, id, revision string) error {
 	return h.storeRows.removeRevision(ctx, p, key, id, revision)
 }
 
 // threadPage is one page of a user's chats, newest first, or of a project's.
-func (h *harness) threadPage(ctx context.Context, p *principal, key contentKey, cursor, project string, limit int) ([]*threadRow, string, error) {
+func (h *harness) threadPage(ctx context.Context, p *auth.Principal, key auth.ContentKey, cursor, project string, limit int) ([]*threadRow, string, error) {
 	page, err := h.storeRows.list(ctx, p, key, "chat", cursor, project, limit)
 	if err != nil {
 		return nil, "", err
@@ -153,7 +154,7 @@ func (h *harness) threadPage(ctx context.Context, p *principal, key contentKey, 
 
 // saveThread pushes a chat at the revision it was read at. A chat naming
 // attachments sync does not hold under it is repaired once and pushed again.
-func (h *harness) saveThread(ctx context.Context, p *principal, key contentKey, row *threadRow) error {
+func (h *harness) saveThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, row *threadRow) error {
 	row.RecordVersion = recordVersion
 	row.UpdatedAt = api.Timestamp()
 	for repaired := false; ; repaired = true {
@@ -173,7 +174,7 @@ func (h *harness) saveThread(ctx context.Context, p *principal, key contentKey, 
 
 // mutateThread applies change to a stored chat as read now, again after a
 // conflict, so a conflict never overwrites another writer's change.
-func (h *harness) mutateThread(ctx context.Context, p *principal, key contentKey, id string, change func(*Thread) error) (*threadRow, error) {
+func (h *harness) mutateThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, id string, change func(*Thread) error) (*threadRow, error) {
 	for attempt := 0; attempt < maxCommitAttempts; attempt++ {
 		row, err := h.loadThread(ctx, p, key, id)
 		if err != nil {
@@ -195,18 +196,18 @@ func (h *harness) mutateThread(ctx context.Context, p *principal, key contentKey
 
 // A deletion needs no revision: sync reads the row's, retries a race, and
 // treats a missing row as deleted.
-func (h *harness) removeRow(ctx context.Context, p *principal, key contentKey, scope, id string) error {
+func (h *harness) removeRow(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, id string) error {
 	return h.storeRows.remove(ctx, p, key, scope, id)
 }
 
 // chatIDs lists every chat id of a user, or of a project, unopened.
-func (h *harness) chatIDs(ctx context.Context, p *principal, project string) ([]string, error) {
+func (h *harness) chatIDs(ctx context.Context, p *auth.Principal, project string) ([]string, error) {
 	return h.storeRows.ids(ctx, p, "chat", project)
 }
 
 // forkStored has sync copy a chat's first count messages, with their
 // attachments, into a new chat.
-func (h *harness) forkStored(ctx context.Context, p *principal, key contentKey, source, target, title string, count int) error {
+func (h *harness) forkStored(ctx context.Context, p *auth.Principal, key auth.ContentKey, source, target, title string, count int) error {
 	return h.syncAPI.callKey(ctx, p, "/v1/sync/fork", key, api.Object{"source_id": source, "target_id": target, "message_count": count, "title": title, "created_at": api.Timestamp(), "idempotency_key": uuid.NewString()}, nil)
 }
 
@@ -214,7 +215,7 @@ func (h *harness) forkStored(ctx context.Context, p *principal, key contentKey, 
 // them sync or this harness cannot open, which are left out. A chat deleted
 // since it was indexed is not a result. One sync could not fetch in time
 // fails the search, which may find it when run again.
-func (h *harness) searchResults(ctx context.Context, p *principal, key contentKey, ids []string) ([]*threadRow, int, error) {
+func (h *harness) searchResults(ctx context.Context, p *auth.Principal, key auth.ContentKey, ids []string) ([]*threadRow, int, error) {
 	rows, failed, err := h.storeRows.pull(ctx, p, key, "chat", ids)
 	if err != nil {
 		return nil, 0, err
@@ -244,7 +245,7 @@ func (h *harness) searchResults(ctx context.Context, p *principal, key contentKe
 
 // searchChats finds the ids of a user's chats that match a query, and
 // whether sync must index them first.
-func (h *harness) searchChats(ctx context.Context, p *principal, key contentKey, query string, limit int) ([]string, bool, error) {
+func (h *harness) searchChats(ctx context.Context, p *auth.Principal, key auth.ContentKey, query string, limit int) ([]string, bool, error) {
 	var found struct {
 		NeedsReindex bool `json:"needs_reindex"`
 		Results      []struct {
@@ -267,7 +268,7 @@ const (
 )
 
 // reindexChats has sync index a user's chats, reporting whether more indexing is needed.
-func (h *harness) reindexChats(ctx context.Context, p *principal, key contentKey) (bool, error) {
+func (h *harness) reindexChats(ctx context.Context, p *auth.Principal, key auth.ContentKey) (bool, error) {
 	var job struct {
 		Status  string `json:"status"`
 		Partial bool   `json:"partial"`
@@ -289,7 +290,7 @@ func (h *harness) reindexChats(ctx context.Context, p *principal, key contentKey
 // Profile
 
 // loadProfile is the user's profile, or nil without one.
-func (h *harness) loadProfile(ctx context.Context, p *principal, key contentKey) (*storedProfile, error) {
+func (h *harness) loadProfile(ctx context.Context, p *auth.Principal, key auth.ContentKey) (*storedProfile, error) {
 	row, err := h.storeRows.load(ctx, p, key, "profile", "profile")
 	if err != nil {
 		if api.AsError(err).HTTP == 404 {
@@ -304,7 +305,7 @@ func (h *harness) loadProfile(ctx context.Context, p *principal, key contentKey)
 	return &profile, nil
 }
 
-func (h *harness) mutateProfile(ctx context.Context, p *principal, key contentKey, change func(*storedProfile) error) (storedProfile, error) {
+func (h *harness) mutateProfile(ctx context.Context, p *auth.Principal, key auth.ContentKey, change func(*storedProfile) error) (storedProfile, error) {
 	var profile storedProfile
 	err := h.commitRow(ctx, p, key, "profile", "profile", true, func(row *storedRow, exists bool) error {
 		profile = storedProfile{}
@@ -336,7 +337,7 @@ var errProfileUnchanged = errors.New("profile unchanged")
 
 // Projects
 
-func (h *harness) loadProject(ctx context.Context, p *principal, key contentKey, id string) (Project, error) {
+func (h *harness) loadProject(ctx context.Context, p *auth.Principal, key auth.ContentKey, id string) (Project, error) {
 	row, err := h.storeRows.load(ctx, p, key, "project", id)
 	if err != nil {
 		return Project{}, err
@@ -344,7 +345,7 @@ func (h *harness) loadProject(ctx context.Context, p *principal, key contentKey,
 	return readProject(row)
 }
 
-func (h *harness) projectPage(ctx context.Context, p *principal, key contentKey, cursor string, limit int) ([]Project, string, error) {
+func (h *harness) projectPage(ctx context.Context, p *auth.Principal, key auth.ContentKey, cursor string, limit int) ([]Project, string, error) {
 	page, err := h.storeRows.list(ctx, p, key, "project", cursor, "", limit)
 	if err != nil {
 		return nil, "", err
@@ -361,7 +362,7 @@ func (h *harness) projectPage(ctx context.Context, p *principal, key contentKey,
 }
 
 // mutateProject applies change to a project, or with create to a new one.
-func (h *harness) mutateProject(ctx context.Context, p *principal, key contentKey, id string, create bool, change func(*Project)) (Project, error) {
+func (h *harness) mutateProject(ctx context.Context, p *auth.Principal, key auth.ContentKey, id string, create bool, change func(*Project)) (Project, error) {
 	var project Project
 	err := h.commitRow(ctx, p, key, "project", id, create, func(row *storedRow, exists bool) error {
 		project = Project{ID: id, CreatedAt: api.Timestamp()}
@@ -380,7 +381,7 @@ func (h *harness) mutateProject(ctx context.Context, p *principal, key contentKe
 }
 
 // Sync deletes every project and project document in one step.
-func (h *harness) removeAllProjects(ctx context.Context, p *principal, key contentKey) (int, error) {
+func (h *harness) removeAllProjects(ctx context.Context, p *auth.Principal, key auth.ContentKey) (int, error) {
 	var result struct {
 		Deleted int `json:"deleted"`
 	}
@@ -392,7 +393,7 @@ func (h *harness) removeAllProjects(ctx context.Context, p *principal, key conte
 // open, or this harness cannot read, is passed to unreadable with why, which
 // fails the read by returning an error or leaves the document out by
 // returning nil.
-func (h *harness) projectDocuments(ctx context.Context, p *principal, key contentKey, id string, unreadable func(row string, err error) error) ([]ProjectDocument, error) {
+func (h *harness) projectDocuments(ctx context.Context, p *auth.Principal, key auth.ContentKey, id string, unreadable func(row string, err error) error) ([]ProjectDocument, error) {
 	// Unfiltered pages can repeat a row that changed while listing; the
 	// later copy is the newer one.
 	var order []string
@@ -448,7 +449,7 @@ type documentCopy struct {
 }
 
 // createProjectDocument stores a new document under its project.
-func (h *harness) createProjectDocument(ctx context.Context, p *principal, key contentKey, doc ProjectDocument) (ProjectDocument, error) {
+func (h *harness) createProjectDocument(ctx context.Context, p *auth.Principal, key auth.ContentKey, doc ProjectDocument) (ProjectDocument, error) {
 	id := doc.ProjectID + "/" + doc.ID
 	err := h.commitRow(ctx, p, key, "project_document", id, true, func(row *storedRow, exists bool) error {
 		row.project, row.projectSet = &doc.ProjectID, true
@@ -472,7 +473,7 @@ func (h *harness) createProjectDocument(ctx context.Context, p *principal, key c
 // putAttachment stores a blob under a chat. Sync derives its id from the
 // idempotency key, chat and bytes, so storing the same attachment again
 // reuses its blob.
-func (h *harness) putAttachment(ctx context.Context, p *principal, chatID, clientID string, data []byte) (string, string, error) {
+func (h *harness) putAttachment(ctx context.Context, p *auth.Principal, chatID, clientID string, data []byte) (string, string, error) {
 	in := api.Object{"chat_id": chatID, "plaintext": base64.StdEncoding.EncodeToString(data), "idempotency_key": clientID}
 	var stored struct {
 		ID  string `json:"id"`
@@ -504,7 +505,7 @@ func (h *harness) putAttachment(ctx context.Context, p *principal, chatID, clien
 }
 
 // getAttachment reads a blob, or with public a blob a share holds.
-func (h *harness) getAttachment(ctx context.Context, p *principal, id, attKey string, public bool) ([]byte, error) {
+func (h *harness) getAttachment(ctx context.Context, p *auth.Principal, id, attKey string, public bool) ([]byte, error) {
 	path := "/v1/attachment/get"
 	if public {
 		path += "-public"
@@ -521,7 +522,7 @@ func (h *harness) getAttachment(ctx context.Context, p *principal, id, attKey st
 // Shares
 
 // sealShare seals a share's payload under a key the link carries.
-func (h *harness) sealShare(ctx context.Context, p *principal, plaintext []byte) ([]byte, string, error) {
+func (h *harness) sealShare(ctx context.Context, p *auth.Principal, plaintext []byte) ([]byte, string, error) {
 	var sealed struct {
 		Ciphertext string `json:"ciphertext"`
 		ShareKey   string `json:"share_key"`
@@ -537,7 +538,7 @@ func (h *harness) openSealedShare(ctx context.Context, shareKey string, cipherte
 	var opened struct {
 		Plaintext string `json:"plaintext"`
 	}
-	if err := h.syncAPI.call(ctx, &principal{Anonymous: true}, "/v1/share/open", api.Object{"share_key": shareKey, "ciphertext": base64.StdEncoding.EncodeToString(ciphertext)}, &opened); err != nil {
+	if err := h.syncAPI.call(ctx, &auth.Principal{Anonymous: true}, "/v1/share/open", api.Object{"share_key": shareKey, "ciphertext": base64.StdEncoding.EncodeToString(ciphertext)}, &opened); err != nil {
 		return nil, err
 	}
 	return base64.StdEncoding.DecodeString(opened.Plaintext)
@@ -545,11 +546,11 @@ func (h *harness) openSealedShare(ctx context.Context, shareKey string, cipherte
 
 // Keys and imports
 
-func (h *harness) authorizeArchive(ctx context.Context, p *principal, keyBytes []byte, operation string) error {
+func (h *harness) authorizeArchive(ctx context.Context, p *auth.Principal, keyBytes []byte, operation string) error {
 	if len(keyBytes) == 0 {
 		return nil
 	}
-	key, err := decodeContentKey(keyBytes)
+	key, err := auth.DecodeContentKey(keyBytes)
 	if err != nil {
 		return err
 	}
@@ -563,13 +564,13 @@ func (h *harness) authorizeArchive(ctx context.Context, p *principal, keyBytes [
 }
 
 // keyCall passes a key management request to sync as the client sent it.
-func (h *harness) keyCall(ctx context.Context, p *principal, path string, in json.RawMessage) (json.RawMessage, error) {
+func (h *harness) keyCall(ctx context.Context, p *auth.Principal, path string, in json.RawMessage) (json.RawMessage, error) {
 	var out json.RawMessage
 	err := h.syncAPI.call(ctx, p, path, in, &out)
 	return out, err
 }
 
 // syncImport makes one call of an archive import, whose job sync runs.
-func (h *harness) syncImport(ctx context.Context, p *principal, step string, in, out any) error {
+func (h *harness) syncImport(ctx context.Context, p *auth.Principal, step string, in, out any) error {
 	return h.syncAPI.call(ctx, p, "/v1/import/"+step, in, out)
 }

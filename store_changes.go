@@ -4,10 +4,11 @@ import (
 	"context"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 // Change tokens describe storage metadata, without loading chat contents.
-func (h *harness) storageChanges(ctx context.Context, p *principal) (any, error) {
+func (h *harness) storageChanges(ctx context.Context, p *auth.Principal) (any, error) {
 	var chats struct {
 		Current string `json:"current_revision"`
 	}

@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 // liveRuns holds what this instance is executing: each chat's running reply
@@ -22,7 +23,7 @@ type liveRuns struct {
 	working sync.WaitGroup
 }
 
-func liveKey(p *principal, id string) string { return p.scope() + "/" + id }
+func liveKey(p *auth.Principal, id string) string { return p.Scope() + "/" + id }
 
 var errRunNotFound = api.Err(404, "RUN_NOT_FOUND", "The run is not live on this instance")
 
@@ -56,9 +57,9 @@ type chatRun struct {
 	input                    *turnRequest
 	turn                     *turnRequest // the turn as carried out, once started
 	received                 string       // when the turn's request arrived
-	principal                *principal
-	key                      contentKey
-	credential               inferenceCredential
+	principal                *auth.Principal
+	key                      auth.ContentKey
+	credential               auth.Credential
 	nonce, digest, messageID string
 	queued, cancelled        bool
 	running                  bool            // its RUN_STARTED is framed
@@ -84,11 +85,11 @@ func (r *chatRun) release() {
 	clear(r.key[:])
 	r.input, r.turn, r.retryTarget, r.assembler, r.screening, r.profile = nil, nil, nil, nil, nil, nil
 	r.replacement = replacedWidget{}
-	r.principal = &principal{ID: r.principal.ID, AnonymousID: r.principal.AnonymousID, Anonymous: r.principal.Anonymous}
+	r.principal = &auth.Principal{ID: r.principal.ID, AnonymousID: r.principal.AnonymousID, Anonymous: r.principal.Anonymous}
 	r.credential.Key = ""
 }
 
-func (h *harness) authorizedRun(p *principal, key contentKey, id, runID string) (*chatRun, error) {
+func (h *harness) authorizedRun(p *auth.Principal, key auth.ContentKey, id, runID string) (*chatRun, error) {
 	if err := api.RequireID("threadId", id); err != nil {
 		return nil, err
 	}
@@ -101,7 +102,7 @@ func (h *harness) authorizedRun(p *principal, key contentKey, id, runID string) 
 	if r == nil || r.thread.id != id {
 		return nil, errRunNotFound
 	}
-	if !r.thread.keyless && r.thread.keyHash != key.fingerprint() {
+	if !r.thread.keyless && r.thread.keyHash != key.Fingerprint() {
 		return nil, api.Err(409, "KEY_MISMATCH", "The run uses another key")
 	}
 	return r, nil
