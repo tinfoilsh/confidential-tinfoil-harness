@@ -24,6 +24,20 @@ type liveRuns struct {
 	working sync.WaitGroup
 }
 
+// counts is how many chats, runs and client requests the registry holds.
+func (l *liveRuns) counts() (threads, runs, requests int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.threads), len(l.runs), len(l.requests)
+}
+
+// locked runs f under the registry's lock.
+func (l *liveRuns) locked(f func()) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	f()
+}
+
 func liveKey(p *auth.Principal, id string) string { return p.Scope() + "/" + id }
 
 var errRunNotFound = api.Err(404, "RUN_NOT_FOUND", "The run is not live on this instance")
@@ -80,6 +94,9 @@ type chatRun struct {
 	// yielded marks an active run stopped so a queued turn starts now.
 	yielded bool
 }
+
+// holdsKey reports whether the run still holds its caller's content key.
+func (r *chatRun) holdsKey() bool { return r.key != (auth.ContentKey{}) }
 
 // release drops what a run holds of its caller once nothing reads it.
 func (r *chatRun) release() {
@@ -187,3 +204,11 @@ func (h *harness) endQueued(r *chatRun, why error) {
 	r.release()
 	close(r.finished)
 }
+
+// instanceID names this process, which alone holds its live runs. Clients
+// send it back with requests about a run, so that a deployment of several
+// can route them here.
+var instanceID = api.Token()
+
+// instance is the id of this process.
+func instance() string { return instanceID }

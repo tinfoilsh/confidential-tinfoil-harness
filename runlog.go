@@ -29,8 +29,15 @@ type runlog struct {
 	// ended marks the run as ended and no longer registered, so nothing
 	// more attaches; a log that is ended and that its last reader has left
 	// is wiped. A log a run outgrew is closed before the run ends.
-	ended   bool
-	readers int
+	ended    bool
+	draining int
+}
+
+// readers is how many streams are draining the log.
+func (l *runlog) readers() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.draining
 }
 
 func newRunlog() *runlog { return &runlog{wake: make(chan struct{})} }
@@ -56,14 +63,14 @@ func (l *runlog) grow(frame []byte) error {
 func (l *runlog) attach() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.readers++
+	l.draining++
 }
 
 // detach ends a stream's draining of the log.
 func (l *runlog) detach() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.readers--
+	l.draining--
 	l.wipe()
 }
 
@@ -71,7 +78,7 @@ func (l *runlog) detach() {
 // the run's plaintext leaves memory as its last stream ends rather than when
 // the collector reuses it. l.mu is held.
 func (l *runlog) wipe() {
-	if !l.ended || l.readers > 0 {
+	if !l.ended || l.draining > 0 {
 		return
 	}
 	for _, frame := range l.frames {

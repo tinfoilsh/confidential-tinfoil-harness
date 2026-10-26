@@ -278,8 +278,8 @@ func TestARunNamesTheInstanceHoldingIt(t *testing.T) {
 		}
 		named = append(named, events[0].Instance)
 	}
-	if named[0] == "" || named[0] != named[1] || named[0] != instanceID {
-		t.Fatalf("runs named instances %q, not this one, %q", named, instanceID)
+	if named[0] == "" || named[0] != named[1] || named[0] != instance() {
+		t.Fatalf("runs named instances %q, not this one, %q", named, instance())
 	}
 }
 
@@ -473,10 +473,9 @@ func TestAnotherCallerReachesNothingOfALiveRun(t *testing.T) {
 	if events[0].Type != "RUN_STARTED" || events[0].RunID == run.log.id || events[0].ThreadID == run.thread.id || events[len(events)-1].Type != "RUN_FINISHED" {
 		t.Fatalf("another account's turn with the same nonce was not its own: %v", events)
 	}
-	h.live.mu.Lock()
-	stillQueued := slices.Contains(run.thread.queue, next)
-	h.live.mu.Unlock()
-	if !stillQueued || run.thread.active != run {
+	var stillQueued, stillActive bool
+	h.live.locked(func() { stillQueued, stillActive = slices.Contains(run.thread.queue, next), run.thread.active == run })
+	if !stillQueued || !stillActive {
 		t.Fatal("another account's requests changed the run")
 	}
 }
@@ -498,11 +497,7 @@ func TestAFinishedRunsLogIsWipedOnceNothingDrainsIt(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			readers := func() int {
-				run.log.log.mu.Lock()
-				defer run.log.log.mu.Unlock()
-				return run.log.log.readers
-			}
+			readers := run.log.log.readers
 			awaitFrame(t, run.log, "RUN_STARTED")
 			first, _, _ := run.log.log.read(0)
 			kept := first[0]

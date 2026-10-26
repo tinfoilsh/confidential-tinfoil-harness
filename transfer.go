@@ -73,7 +73,7 @@ func (h *harness) threadTranscript(ctx context.Context, p *auth.Principal, key a
 	}{domain.DeviceTranscript{Thread: row.Thread}, row.ETag}, nil
 }
 
-func (h *harness) finishTransfer(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *deleteThreadRequest) error {
+func (h *harness) finishTransfer(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *api.DeleteRequest) error {
 	h.live.mu.Lock()
 	name := liveKey(p, in.ID)
 	s := h.live.threads[name]

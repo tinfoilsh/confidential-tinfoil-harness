@@ -71,7 +71,7 @@ func TestRunDropsKeyBeforeScreening(t *testing.T) {
 		t.Fatal(err)
 	}
 	awaitFrame(t, r.log, "RUN_FINISHED")
-	if r.key != (auth.ContentKey{}) {
+	if r.holdsKey() {
 		t.Error("the completed run holds its storage key while screening")
 	}
 	row, err := rows.Load(context.Background(), p, key, "chat", r.thread.id)

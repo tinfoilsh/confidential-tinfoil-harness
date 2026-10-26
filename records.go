@@ -81,7 +81,7 @@ func (h *harness) session(ctx context.Context, p *auth.Principal, _ auth.Content
 		ProfileDefaults: domain.DefaultProfile(),
 		Composer:        attach.Composer(),
 		Presets:         presets,
-		Features:        map[string]bool{"webSearch": webSearch.client != nil, "transcription": h.models.ServiceReady("router"), "speech": h.models.ServiceReady("router")},
+		Features:        map[string]bool{"webSearch": webSearchReady(), "transcription": h.models.ServiceReady("router"), "speech": h.models.ServiceReady("router")},
 	}, nil
 }
 
@@ -210,7 +210,7 @@ func (h *harness) changeThread(ctx context.Context, p *auth.Principal, key auth.
 // or the one a device chat's client sends.
 func (h *harness) sourceProfile(ctx context.Context, p *auth.Principal, key auth.ContentKey, source domain.ThreadSource) (domain.Profile, error) {
 	if !source.Local {
-		return h.profile(ctx, p, key)
+		return h.store.Profile(ctx, p, key)
 	}
 	return *domain.LocalProfile(source.Profile), nil
 }
@@ -223,7 +223,7 @@ func deviceReply(row *domain.ThreadRow) any {
 	}{domain.DeviceThread(&row.Thread)}
 }
 
-func (h *harness) deleteThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *deleteThreadRequest) (any, error) {
+func (h *harness) deleteThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *api.DeleteRequest) (any, error) {
 	var err error
 	if in.Revision != "" {
 		err = h.finishTransfer(ctx, p, key, in)
@@ -353,7 +353,7 @@ func (h *harness) deleteAllThreads(ctx context.Context, p *auth.Principal, key a
 		return nil, err
 	}
 	for _, id := range ids {
-		if _, err := h.deleteThread(ctx, p, key, &deleteThreadRequest{IDRequest: api.IDRequest{ID: id}}); err != nil {
+		if _, err := h.deleteThread(ctx, p, key, &api.DeleteRequest{IDRequest: api.IDRequest{ID: id}}); err != nil {
 			return nil, err
 		}
 	}
@@ -363,15 +363,6 @@ func (h *harness) deleteAllThreads(ctx context.Context, p *auth.Principal, key a
 // deletedCount answers a bulk deletion.
 type deletedCount struct {
 	Deleted int `json:"deleted"`
-}
-
-// profile is a user's settings as a prompt reads them.
-func (h *harness) profile(ctx context.Context, p *auth.Principal, key auth.ContentKey) (domain.Profile, error) {
-	stored, err := h.store.LoadProfile(ctx, p, key)
-	if err != nil || stored == nil {
-		return domain.Profile{}, err
-	}
-	return stored.Profile, nil
 }
 
 // viewProfile is a stored profile as its client reads it.

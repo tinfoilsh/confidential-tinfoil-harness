@@ -373,9 +373,7 @@ func replayOf(h *harness, r *http.Request) *httptest.ResponseRecorder {
 
 // liveCount is how many chats, runs and client requests the harness holds.
 func liveCount(h *harness) (threads, runs, requests int) {
-	h.live.mu.Lock()
-	defer h.live.mu.Unlock()
-	return len(h.live.threads), len(h.live.runs), len(h.live.requests)
+	return h.live.counts()
 }
 
 func postRoute(h *harness, path string, in api.Object, user string) *httptest.ResponseRecorder {
@@ -692,9 +690,9 @@ func TestADeadRunNeverLocksItsChat(t *testing.T) {
 	p := &auth.Principal{ID: "alice"}
 	recent := api.Now().Add(time.Hour).Format(time.RFC3339Nano)
 	runs := map[string]api.Object{
-		"stale":     {"runId": "dead", "instance": instanceID, "lastEventId": 7, "expiresAt": api.Now().Add(-time.Minute).Format(time.RFC3339Nano)},
-		"recent":    {"runId": "dead", "instance": instanceID, "lastEventId": 7, "expiresAt": recent},
-		"unstamped": {"runId": "dead", "instance": instanceID},
+		"stale":     {"runId": "dead", "instance": instance(), "lastEventId": 7, "expiresAt": api.Now().Add(-time.Minute).Format(time.RFC3339Nano)},
+		"recent":    {"runId": "dead", "instance": instance(), "lastEventId": 7, "expiresAt": recent},
+		"unstamped": {"runId": "dead", "instance": instance()},
 		// A process from before runs named their instance stored this one.
 		"unnamed": {"runId": "dead", "expiresAt": recent},
 	}
@@ -712,7 +710,7 @@ func TestADeadRunNeverLocksItsChat(t *testing.T) {
 	for _, thread := range list.Threads {
 		hints[api.Str(thread["id"])] = thread["activeRun"]
 	}
-	if len(hints) != 4 || hints["stale"] != nil || hints["unstamped"] != nil || hints["unnamed"] != nil || !reflect.DeepEqual(hints["recent"], map[string]any{"runId": "dead", "expiresAt": recent, "instance": instanceID}) {
+	if len(hints) != 4 || hints["stale"] != nil || hints["unstamped"] != nil || hints["unnamed"] != nil || !reflect.DeepEqual(hints["recent"], map[string]any{"runId": "dead", "expiresAt": recent, "instance": instance()}) {
 		t.Fatalf("summaries report %v", hints)
 	}
 	for _, id := range []string{"stale", "recent"} {
@@ -1353,11 +1351,7 @@ func serveWebsearch(t *testing.T, respond func(name string, args map[string]any)
 		return s
 	}, &mcp.StreamableHTTPOptions{Stateless: true}))
 	t.Cleanup(server.Close)
-	f := webSearch
-	saved := *f
-	t.Cleanup(func() { *f = saved })
-	f.enclave = strings.TrimPrefix(server.URL, "https://")
-	f.client = &http.Client{Transport: &auth.CallerTransport{Inner: server.Client().Transport, UsageSecret: "test-usage-secret"}}
+	t.Cleanup(useWebSearch(strings.TrimPrefix(server.URL, "https://"), &http.Client{Transport: &auth.CallerTransport{Inner: server.Client().Transport, UsageSecret: "test-usage-secret"}}))
 	return recorded
 }
 
@@ -2037,4 +2031,9 @@ func (h *harness) useAuth(a *auth.Authenticator) {
 // plane at url.
 func (h *harness) atControlplane(url string) {
 	h.controlplane, h.models.Controlplane, h.attachments.Controlplane, h.archives.Controlplane = url, url, url, url
+}
+
+// caller is a request context carrying one API key.
+func caller(apiKey string) context.Context {
+	return auth.WithCallerKey(context.Background(), apiKey)
 }

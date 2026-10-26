@@ -62,7 +62,7 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *auth.Principal
 		}
 	} else {
 		var err error
-		profile, err = h.profile(ctx, p, r.key)
+		profile, err = h.store.Profile(ctx, p, r.key)
 		if err != nil {
 			return nil, err
 		}
@@ -257,7 +257,7 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	}
 	r.row, r.running = row, true
 	// Framed under the lock, so no queue change reaches the run before them.
-	r.out.emit(domain.RunStarted{ThreadID: s.id, RunID: r.log.id, Instance: instanceID, MessageID: r.out.replyID})
+	r.out.emit(domain.RunStarted{ThreadID: s.id, RunID: r.log.id, Instance: instance(), MessageID: r.out.replyID})
 	r.out.emit(domain.MessagesSnapshot{Messages: shown.Messages, HasOlder: shown.HasOlder})
 	r.out.emit(domain.StateSnapshotEvent{Snapshot: domain.StateSnapshot{Thread: shown.ThreadSummary, Queue: queueItems(s), RateLimit: r.credential.Limit}})
 	r.out.mu.Lock()
@@ -327,7 +327,7 @@ func (h *harness) refuseFlagged(ctx context.Context, r *chatRun, p *auth.Princip
 
 // activeRun marks a chat's reply as streaming until the run's deadline.
 func activeRun(runID string) *domain.ActiveRun {
-	return &domain.ActiveRun{RunID: runID, ExpiresAt: api.Now().Add(runTimeout).Format(time.RFC3339Nano), Instance: instanceID}
+	return &domain.ActiveRun{RunID: runID, ExpiresAt: api.Now().Add(runTimeout).Format(time.RFC3339Nano), Instance: instance()}
 }
 
 func usageForRun(r *chatRun) usagereporting.Context {

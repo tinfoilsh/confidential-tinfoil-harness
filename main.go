@@ -13,7 +13,6 @@ import (
 	"time"
 	_ "time/tzdata"
 
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/archives"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
@@ -90,25 +89,3 @@ func main() {
 	}
 	<-stopped
 }
-
-// Web search is opt-in per run, so an enclave that is not configured or does
-// not verify is skipped, not fatal.
-func attestWebSearch(ctx context.Context, usageSecret string) {
-	webSearch.enclave = os.Getenv("TINFOIL_TOOLS_ENCLAVE")
-	if webSearch.enclave == "" {
-		slog.Warn("no web search enclave is configured")
-		return
-	}
-	client, err := inference.Attest(ctx, webSearch.enclave, webSearch.repo, usageSecret)
-	if err != nil {
-		slog.Warn("tool enclave did not verify", "enclave", webSearch.enclave, "error", err)
-		return
-	}
-	webSearch.client = client
-	slog.Info("tool enclave verified", "enclave", webSearch.enclave)
-}
-
-// instanceID names this process, which alone holds its live runs. Clients
-// send it back with requests about a run, so that a deployment of several
-// can route them here.
-var instanceID = api.Token()

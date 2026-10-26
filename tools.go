@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -17,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 )
 
 // The web search enclave's tools are named here rather than discovered, so an
@@ -30,6 +33,17 @@ type toolEnclave struct {
 }
 
 type tool struct{ remote, as string }
+
+// webSearchReady reports whether a verified web search enclave serves runs.
+func webSearchReady() bool { return webSearch.client != nil }
+
+// useWebSearch has runs search the web through enclave with client, which
+// verified it, and returns what puts the previous enclave back.
+func useWebSearch(enclave string, client *http.Client) (restore func()) {
+	saved := *webSearch
+	webSearch.enclave, webSearch.client = enclave, client
+	return func() { *webSearch = saved }
+}
 
 var webSearch = &toolEnclave{
 	repo:  "tinfoilsh/confidential-websearch",
@@ -210,4 +224,21 @@ func output(result *mcp.CallToolResult) string {
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+// Web search is opt-in per run, so an enclave that is not configured or does
+// not verify is skipped, not fatal.
+func attestWebSearch(ctx context.Context, usageSecret string) {
+	webSearch.enclave = os.Getenv("TINFOIL_TOOLS_ENCLAVE")
+	if webSearch.enclave == "" {
+		slog.Warn("no web search enclave is configured")
+		return
+	}
+	client, err := inference.Attest(ctx, webSearch.enclave, webSearch.repo, usageSecret)
+	if err != nil {
+		slog.Warn("tool enclave did not verify", "enclave", webSearch.enclave, "error", err)
+		return
+	}
+	webSearch.client = client
+	slog.Info("tool enclave verified", "enclave", webSearch.enclave)
 }

@@ -13,3 +13,9 @@ type ThreadRequest struct {
 }
 
 func (in *ThreadRequest) Validate() error { return RequireID("threadId", in.ThreadID) }
+
+// DeleteRequest names a row to delete, at the revision the caller read.
+type DeleteRequest struct {
+	IDRequest
+	Revision string `json:"revision,omitempty"`
+}

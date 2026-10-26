@@ -3,19 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
-
-// caller is a request context carrying one API key.
-func caller(apiKey string) context.Context {
-	return auth.WithCallerKey(context.Background(), apiKey)
-}
 
 func TestOutgrowingTheLogStopsTheRun(t *testing.T) {
 	rn := newRun("00")
@@ -36,9 +31,9 @@ func TestOutgrowingTheLogStopsTheRun(t *testing.T) {
 	// A client following the run is told the same error a request is.
 	w := httptest.NewRecorder()
 	follow(w, httptest.NewRequest("POST", "/v1/threads/follow", nil), rn, 0)
-	events := eventsIn(t, w)
+	last := lastEventIn(t, w)
 	want := api.AsError(errTooLong)
-	if last := events[len(events)-1]; last.Type != "RUN_ERROR" || last.Code != "RUN_LOG_FULL" || last.Code != want.Code || last.Message != want.Message {
+	if last.Type != "RUN_ERROR" || last.Code != "RUN_LOG_FULL" || last.Code != want.Code || last.Message != want.Message {
 		t.Fatalf("the run ended with %+v, not %+v", last, want)
 	}
 	// A client that applied that error and follows again is sent it alone,
@@ -82,4 +77,20 @@ func TestAPanickingToolCallDoesNotTakeTheRun(t *testing.T) {
 	if rn.log.closed != nil {
 		t.Fatalf("a panicking tool call closed the log: %v", rn.log.closed)
 	}
+}
+
+// lastEventIn is the last event a streamed response holds.
+func lastEventIn(t *testing.T, w *httptest.ResponseRecorder) (last struct{ Type, Code, Message string }) {
+	t.Helper()
+	if w.Code != 200 {
+		t.Fatalf("HTTP %d: %s", w.Code, w.Body.String())
+	}
+	for _, line := range strings.Split(w.Body.String(), "\n") {
+		if data, ok := strings.CutPrefix(line, "data: "); ok {
+			if err := json.Unmarshal([]byte(data), &last); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	return last
 }

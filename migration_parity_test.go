@@ -299,9 +299,7 @@ func TestAQueuedTurnRefreshesStorageAccessBeforeStarting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.live.mu.Lock()
-	queued.principal.SyncExpires = api.Now()
-	h.live.mu.Unlock()
+	h.live.locked(func() { queued.principal.SyncExpires = api.Now() })
 	release()
 	<-queued.finished
 	row, err := rows.Load(context.Background(), p, key, "chat", api.Str(in["threadId"]))
