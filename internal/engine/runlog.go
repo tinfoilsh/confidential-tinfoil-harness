@@ -1,4 +1,4 @@
-package main
+package engine
 
 import (
 	"errors"
@@ -11,16 +11,16 @@ import (
 const (
 	// A run holds its whole log in memory, so this is its share of the enclave.
 	maxRunLog  = 8 << 20
-	runTimeout = 30 * time.Minute
+	RunTimeout = 30 * time.Minute
 )
 
 var (
-	errDone = errors.New("run finished")
-	// errTooLong ends a run that outgrew the log this harness can hold for it.
-	errTooLong = api.Err(413, "RUN_LOG_FULL", "The run log is full")
+	ErrDone = errors.New("run finished")
+	// ErrTooLong ends a run that outgrew the log this harness can hold for it.
+	ErrTooLong = api.Err(413, "RUN_LOG_FULL", "The run log is full")
 )
 
-type runlog struct {
+type FrameLog struct {
 	mu     sync.Mutex
 	frames [][]byte
 	bytes  int
@@ -33,22 +33,22 @@ type runlog struct {
 	draining int
 }
 
-// readers is how many streams are draining the log.
-func (l *runlog) readers() int {
+// Readers is how many streams are draining the log.
+func (l *FrameLog) Readers() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.draining
 }
 
-func newRunlog() *runlog { return &runlog{wake: make(chan struct{})} }
+func newRunlog() *FrameLog { return &FrameLog{wake: make(chan struct{})} }
 
 // grow appends one frame and reports the error the log has closed with.
-func (l *runlog) grow(frame []byte) error {
+func (l *FrameLog) grow(frame []byte) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.closed == nil {
 		if l.bytes+len(frame) > maxRunLog {
-			l.closed = errTooLong
+			l.closed = ErrTooLong
 		} else {
 			l.frames, l.bytes = append(l.frames, frame), l.bytes+len(frame)
 		}
@@ -57,17 +57,17 @@ func (l *runlog) grow(frame []byte) error {
 	return l.closed
 }
 
-// attach counts a stream about to drain the log. It is called while the run
+// Attach counts a stream about to drain the log. It is called while the run
 // is registered, which a run is until just before its log is ended, so the
 // log still holds every frame.
-func (l *runlog) attach() {
+func (l *FrameLog) Attach() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.draining++
 }
 
-// detach ends a stream's draining of the log.
-func (l *runlog) detach() {
+// Detach ends a stream's draining of the log.
+func (l *FrameLog) Detach() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.draining--
@@ -77,7 +77,7 @@ func (l *runlog) detach() {
 // wipe zeroes and drops the frames of an ended log that nothing drains, so
 // the run's plaintext leaves memory as its last stream ends rather than when
 // the collector reuses it. l.mu is held.
-func (l *runlog) wipe() {
+func (l *FrameLog) wipe() {
 	if !l.ended || l.draining > 0 {
 		return
 	}
@@ -87,14 +87,14 @@ func (l *runlog) wipe() {
 	l.frames = nil
 }
 
-func (l *runlog) signal() {
+func (l *FrameLog) signal() {
 	close(l.wake)
 	l.wake = make(chan struct{})
 }
 
 // close ends the log with err, once its run has left the registry. A log
 // already closed, because the run outgrew it, keeps that error.
-func (l *runlog) close(err error) {
+func (l *FrameLog) close(err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.closed == nil {
@@ -105,7 +105,7 @@ func (l *runlog) close(err error) {
 	l.wipe()
 }
 
-func (l *runlog) read(from int) ([][]byte, <-chan struct{}, error) {
+func (l *FrameLog) Read(from int) ([][]byte, <-chan struct{}, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if from < len(l.frames) {
@@ -114,12 +114,12 @@ func (l *runlog) read(from int) ([][]byte, <-chan struct{}, error) {
 	return nil, l.wake, l.closed
 }
 
-type run struct {
-	id   string
-	log  *runlog
-	stop func() // cancels the run itself
+type Log struct {
+	ID     string
+	Frames *FrameLog
+	stop   func() // cancels the run itself
 }
 
-func newRun(id string) *run {
-	return &run{id: id, log: newRunlog(), stop: func() {}}
+func NewLog(id string) *Log {
+	return &Log{ID: id, Frames: newRunlog(), stop: func() {}}
 }

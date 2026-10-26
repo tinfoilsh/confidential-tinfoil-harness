@@ -13,6 +13,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 )
 
@@ -46,7 +47,7 @@ func TestAThinkingReplysReasoningIsSummarized(t *testing.T) {
 		summarizer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			var in struct{ Content, Style string }
 			json.NewDecoder(r.Body).Decode(&in)
-			if in.Style != thoughtsStyle {
+			if in.Style != engine.ThoughtsStyle {
 				json.NewEncoder(w).Encode(api.Object{"summary": "Title"})
 				return
 			}
@@ -67,7 +68,7 @@ func TestAThinkingReplysReasoningIsSummarized(t *testing.T) {
 		}))
 		t.Cleanup(summarizer.Close)
 		h.models.Services["summarizer"] = &inference.Service{URL: summarizer.URL, Client: summarizer.Client()}
-		run, err := h.engine.acceptTurn(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
+		run, err := h.engine.AcceptTurn(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[engine.TurnRequest](sendInput(key)))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -77,11 +78,11 @@ func TestAThinkingReplysReasoningIsSummarized(t *testing.T) {
 			t.Fatalf("failing %v: the reasoning was never summarized", failing)
 		}
 		if !failing {
-			awaitFrame(t, run.log, "REASONING_SUMMARY")
+			awaitFrame(t, run.Log, "REASONING_SUMMARY")
 		}
 		close(release)
-		<-run.finished
-		frames, _, _ := run.log.log.read(0)
+		<-run.Finished
+		frames, _, _ := run.Log.Frames.Read(0)
 		var summaries []event
 		var last event
 		for _, frame := range frames {
@@ -90,7 +91,7 @@ func TestAThinkingReplysReasoningIsSummarized(t *testing.T) {
 				summaries = append(summaries, last)
 			}
 		}
-		chat := storedChat(t, rows, key, run.thread.id)
+		chat := storedChat(t, rows, key, run.Thread.ID)
 		reply := chat.Messages[1]
 		mu.Lock()
 		calls := asked
@@ -107,7 +108,7 @@ func TestAThinkingReplysReasoningIsSummarized(t *testing.T) {
 		if len(summaries) != 1 || summaries[0].MessageID != reply.ID || summaries[0].BlockID != reply.ID+"_thinking_0" || string(summaries[0].Content) != `"Weighing options"` {
 			t.Fatalf("the run sent summaries %+v for reply %s", summaries, reply.ID)
 		}
-		if row := rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", run.thread.id)]; strings.Contains(string(row.Data), "Weighing options") {
+		if row := rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", run.Thread.ID)]; strings.Contains(string(row.Data), "Weighing options") {
 			t.Fatalf("the summary was stored: %s", row.Data)
 		}
 	}

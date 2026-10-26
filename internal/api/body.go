@@ -36,7 +36,7 @@ const MaxRequestBody = 8 << 20
 const MaxResponseBody = 96 << 20
 
 // ReadBody reads a request body of at most limit bytes that holds one JSON
-// Object.
+// object.
 func ReadBody(w http.ResponseWriter, r *http.Request, limit int64) (json.RawMessage, error) {
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	body, err := ReadWipeable(r.Body)

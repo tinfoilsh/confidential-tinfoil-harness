@@ -23,6 +23,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 )
 
@@ -185,12 +186,12 @@ func TestAnonymousReconnectUsesKeyPossessionInsteadOfIP(t *testing.T) {
 	model, release := heldModel()
 	h, _, _ := testChatHarness(t, model)
 	t.Cleanup(release)
-	run, err := h.engine.acceptTurn(context.Background(), &auth.Principal{Anonymous: true, AnonymousID: api.HashHex([]byte("free_anonymous-key")), InferenceKey: "free_anonymous-key"}, auth.Credential{Key: "free_anonymous-key"}, auth.ContentKey{}, requestOf[turnRequest](localInput("", api.Object{})))
+	run, err := h.engine.AcceptTurn(context.Background(), &auth.Principal{Anonymous: true, AnonymousID: api.HashHex([]byte("free_anonymous-key")), InferenceKey: "free_anonymous-key"}, auth.Credential{Key: "free_anonymous-key"}, auth.ContentKey{}, requestOf[engine.TurnRequest](localInput("", api.Object{})))
 	if err != nil {
 		t.Fatal(err)
 	}
-	awaitFrame(t, run.log, "TEXT_MESSAGE_CHUNK")
-	if err := h.auth.Recognize(context.Background(), run.principal); err != nil {
+	awaitFrame(t, run.Log, "TEXT_MESSAGE_CHUNK")
+	if err := h.auth.Recognize(context.Background(), run.Principal); err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
@@ -201,7 +202,7 @@ func TestAnonymousReconnectUsesKeyPossessionInsteadOfIP(t *testing.T) {
 		{"free_other-client", "192.0.2.1:1234", 401},
 		{"", "192.0.2.1:1234", 401},
 	} {
-		body := api.Raw(api.Object{"threadId": run.thread.id, "runId": run.log.id})
+		body := api.Raw(api.Object{"threadId": run.Thread.ID, "runId": run.Log.ID})
 		req := httptest.NewRequest(http.MethodPost, "/v1/threads/follow", bytes.NewReader(body))
 		req.RemoteAddr = tc.ip
 		if tc.key != "" {

@@ -1,4 +1,4 @@
-package main
+package engine
 
 import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
@@ -8,7 +8,7 @@ import (
 // applyTurn makes the change a turn's kind makes to a transcript before its
 // reply: a new or edited question, or the cut a regeneration or
 // continuation starts from. An answer to the last question changes nothing.
-func applyTurn(t *domain.Thread, in *turnRequest, messageID string, attachments []domain.Attachment) error {
+func applyTurn(t *domain.Thread, in *TurnRequest, messageID string, attachments []domain.Attachment) error {
 	if t.MessageIndex(messageID) >= 0 {
 		return nil
 	}
@@ -63,7 +63,7 @@ func applyTurn(t *domain.Thread, in *turnRequest, messageID string, attachments 
 // retried is the turn a retry carries out, which the chat decides: a failed
 // or stopped continuation continues again, any other last reply is
 // regenerated, and a last question without a reply is answered.
-func retried(t *domain.Thread, in *turnRequest) (*turnRequest, error) {
+func retried(t *domain.Thread, in *TurnRequest) (*TurnRequest, error) {
 	if len(t.Messages) == 0 {
 		return nil, api.Err(400, "BAD_REQUEST", "The chat has nothing to retry")
 	}

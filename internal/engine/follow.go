@@ -1,4 +1,4 @@
-package main
+package engine
 
 import (
 	"net/http"
@@ -8,9 +8,9 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
-// handleFollow re-attaches a client to a run that is live on this instance.
-func (eng *engine) handleFollow(w http.ResponseWriter, r *http.Request) {
-	p, err := eng.auth.Caller(r, true)
+// HandleFollow re-attaches a client to a run that is live on this instance.
+func (eng *Engine) HandleFollow(w http.ResponseWriter, r *http.Request) {
+	p, err := eng.Auth.Caller(r, true)
 	if err != nil {
 		api.Respond(w, nil, err)
 		return
@@ -21,7 +21,7 @@ func (eng *engine) handleFollow(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, err)
 		return
 	}
-	var in runRequest
+	var in RunRequest
 	defer in.ClearKey()
 	if err := api.DecodeBody(body, &in); err != nil {
 		api.Respond(w, nil, err)
@@ -40,41 +40,41 @@ func (eng *engine) handleFollow(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, err)
 		return
 	}
-	eng.live.mu.Lock()
-	if eng.live.runs[liveKey(p, in.RunID)] != live {
-		eng.live.mu.Unlock()
+	eng.Live.mu.Lock()
+	if eng.Live.runs[liveKey(p, in.RunID)] != live {
+		eng.Live.mu.Unlock()
 		api.Respond(w, nil, errRunNotFound)
 		return
 	}
-	live.log.log.attach()
+	live.Log.Frames.Attach()
 	if !p.Anonymous && !live.ending {
-		p.SyncToken = live.principal.SyncToken
-		p.SyncExpires = live.principal.SyncExpires
-		live.principal = p
+		p.SyncToken = live.Principal.SyncToken
+		p.SyncExpires = live.Principal.SyncExpires
+		live.Principal = p
 	}
-	eng.live.mu.Unlock()
-	defer live.log.log.detach()
-	from, err := resumeFrom(live.log.log, r.Header.Get(lastEventIDHeader))
+	eng.Live.mu.Unlock()
+	defer live.Log.Frames.Detach()
+	from, err := ResumeFrom(live.Log.Frames, r.Header.Get(lastEventIDHeader))
 	if err != nil {
 		api.Respond(w, nil, err)
 		return
 	}
-	follow(w, r, live.log, from)
+	Follow(w, r, live.Log, from)
 }
 
 // lastEventIDHeader names the last event of a run a client applied, as
 // server-sent events name it.
 const lastEventIDHeader = "Last-Event-ID"
 
-// resumeFrom is the frame a followed run resumes at: the one after the event
+// ResumeFrom is the frame a followed run resumes at: the one after the event
 // a client names as the last it applied, or the run's first when it names
 // none. A cursor the run never sent is refused.
-func resumeFrom(log *runlog, lastEventID string) (int, error) {
+func ResumeFrom(log *FrameLog, lastEventID string) (int, error) {
 	if lastEventID == "" {
 		return 0, nil
 	}
 	after, err := strconv.Atoi(lastEventID)
-	sent, _, closed := log.read(0)
+	sent, _, closed := log.Read(0)
 	switch {
 	case err != nil || after < 0:
 		return 0, api.Err(400, "BAD_REQUEST", "Last-Event-ID must be an event's cursor")
@@ -83,7 +83,7 @@ func resumeFrom(log *runlog, lastEventID string) (int, error) {
 	// A log that failed ends its streams with the error, under the cursor
 	// after its last frame. A client that applied that error is sent it
 	// again, which ends this stream too.
-	case after == len(sent) && closed != nil && closed != errDone:
+	case after == len(sent) && closed != nil && closed != ErrDone:
 		return after, nil
 	}
 	return 0, api.Err(400, "BAD_REQUEST", "Last-Event-ID names an event this run never sent")

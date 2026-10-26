@@ -1,4 +1,4 @@
-package main
+package engine
 
 import (
 	"cmp"
@@ -16,15 +16,15 @@ import (
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
-// commitTimeout bounds a finished run's writes and a queued turn's start.
-const commitTimeout = time.Minute
+// CommitTimeout bounds a finished run's writes and a queued turn's start.
+const CommitTimeout = time.Minute
 
 // turnPlan is what a turn starts from: its thread with the turn applied, in
 // the form it is stored, and the request its run makes.
 type turnPlan struct {
 	row         *domain.ThreadRow
-	turn        *turnRequest // the turn carried out: a retry is the turn it repeats
-	request     *request
+	turn        *TurnRequest // the turn carried out: a retry is the turn it repeats
+	request     *Request
 	model       *inference.Model
 	titleText   string
 	retryTarget *retryTarget
@@ -42,8 +42,8 @@ var errThreadDeleted = api.Err(404, "THREAD_NOT_FOUND", "The thread was deleted"
 // prepareTurn applies a turn to its chat as read now. A stored chat's
 // attachments are placed under it; the prompt reads their content. With
 // create, a new chat's missing row is made.
-func (eng *engine) prepareTurn(ctx context.Context, r *chatRun, p *auth.Principal, create bool) (*turnPlan, error) {
-	s := r.thread
+func (eng *Engine) prepareTurn(ctx context.Context, r *Run, p *auth.Principal, create bool) (*turnPlan, error) {
+	s := r.Thread
 	var row *domain.ThreadRow
 	var profile domain.Profile
 	var project *domain.Project
@@ -52,9 +52,9 @@ func (eng *engine) prepareTurn(ctx context.Context, r *chatRun, p *auth.Principa
 	// settings are the ones its client sends; an ask about a stored chat
 	// reads the user's and the chat's project, as the chat does.
 	if s.local {
-		eng.live.mu.Lock()
+		eng.Live.mu.Lock()
 		row = &domain.ThreadRow{Thread: s.row.Clone()}
-		eng.live.mu.Unlock()
+		eng.Live.mu.Unlock()
 	}
 	if r.input.Local {
 		if r.profile != nil {
@@ -62,30 +62,30 @@ func (eng *engine) prepareTurn(ctx context.Context, r *chatRun, p *auth.Principa
 		}
 	} else {
 		var err error
-		profile, err = eng.store.Profile(ctx, p, r.key)
+		profile, err = eng.Store.Profile(ctx, p, r.key)
 		if err != nil {
 			return nil, err
 		}
 		if !s.local {
 			// A new chat's first turn creates its row under the client's id.
-			row, err = eng.store.LoadThread(ctx, p, r.key, s.id)
-			if err != nil && (api.AsError(err).HTTP != 404 || !domain.RowIDPattern.MatchString(s.id) || !create) {
+			row, err = eng.Store.LoadThread(ctx, p, r.key, s.ID)
+			if err != nil && (api.AsError(err).HTTP != 404 || !domain.RowIDPattern.MatchString(s.ID) || !create) {
 				return nil, err
 			}
 			if err != nil {
-				row = &domain.ThreadRow{Thread: newThread(s.id, r.input.ProjectID, r.input.PresetID.Value)}
+				row = &domain.ThreadRow{Thread: newThread(s.ID, r.input.ProjectID, r.input.PresetID.Value)}
 			}
 			if row.LastRequestID == r.nonce {
 				return nil, errAlreadyApplied
 			}
 		}
 		if id := domain.ValueOr(row.ProjectID, ""); id != "" {
-			stored, err := eng.store.LoadProject(ctx, p, r.key, id)
+			stored, err := eng.Store.LoadProject(ctx, p, r.key, id)
 			if err != nil {
 				return nil, err
 			}
 			project = &stored
-			docs, err = eng.store.ProjectDocuments(ctx, p, r.key, id, store.RefuseUnreadable)
+			docs, err = eng.Store.ProjectDocuments(ctx, p, r.key, id, store.RefuseUnreadable)
 			if err != nil {
 				return nil, err
 			}
@@ -108,7 +108,7 @@ func (eng *engine) prepareTurn(ctx context.Context, r *chatRun, p *auth.Principa
 		if id := domain.ValueOr(profile.DefaultPromptPresetID, ""); !r.input.PresetID.Set && id != "" {
 			preset = &id
 		}
-		c := eng.models.Catalog.Get()
+		c := eng.Models.Catalog.Get()
 		t.Model = c.SelectedModel(&profile)
 		t.WebSearchEnabled = domain.ValueOr(profile.WebSearchEnabled, t.WebSearchEnabled)
 		c.ApplyPreset(t, &profile, preset)
@@ -127,21 +127,21 @@ func (eng *engine) prepareTurn(ctx context.Context, r *chatRun, p *auth.Principa
 	// chat. An ask's stored source has attachments in sync; a keyless thread
 	// carries its own. Image descriptions are stored, image bytes are not.
 	if !s.local {
-		if err := eng.attachments.PlaceAttachments(ctx, p, s.id, t); err != nil {
+		if err := eng.Attachments.PlaceAttachments(ctx, p, s.ID, t); err != nil {
 			return nil, err
 		}
 	}
-	if err := eng.attachments.HydrateContext(ctx, p, t, s.keyless); err != nil {
+	if err := eng.Attachments.HydrateContext(ctx, p, t, s.keyless); err != nil {
 		return nil, err
 	}
 	// Offloaded documents are read back for the prompt alone.
 	working := t.Clone()
 	if !s.keyless {
-		if err := eng.attachments.HydrateDocuments(ctx, p, &working); err != nil {
+		if err := eng.Attachments.HydrateDocuments(ctx, p, &working); err != nil {
 			return nil, err
 		}
 	}
-	request, model, err := eng.buildRequest(&working, &profile, project, docs, turn, r.log.id)
+	request, model, err := eng.BuildRequest(&working, &profile, project, docs, turn, r.Log.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -160,12 +160,12 @@ func (eng *engine) prepareTurn(ctx context.Context, r *chatRun, p *auth.Principa
 		if plan.retryTarget == nil {
 			return nil, api.Err(404, "THREAD_NOT_FOUND", "The widget call was not found")
 		}
-		if !slices.ContainsFunc(eng.models.Catalog.Get().SelectedWidgets(r.input.Widgets, true), func(w domain.Widget) bool { return w.Name == plan.retryTarget.block.Name }) {
+		if !slices.ContainsFunc(eng.Models.Catalog.Get().SelectedWidgets(r.input.Widgets, true), func(w domain.Widget) bool { return w.Name == plan.retryTarget.block.Name }) {
 			return nil, api.Err(503, "TOOL_UNAVAILABLE", "This widget is not enabled for the client").WithAction(api.ActionStop)
 		}
 	}
 	t.ContextUsage = requestContextUsage(request)
-	t.ActiveRun, t.LastRequestID, t.LastRequestKind = activeRun(r.log.id), r.nonce, turn.Kind
+	t.ActiveRun, t.LastRequestID, t.LastRequestKind = activeRun(r.Log.ID), r.nonce, turn.Kind
 	if !s.local {
 		attach.StripInlineAttachments(t)
 	}
@@ -175,23 +175,23 @@ func (eng *engine) prepareTurn(ctx context.Context, r *chatRun, p *auth.Principa
 // launch starts the chat's active turn. It commits the turn and the active
 // run's marker before any model I/O, and holds no lock while it reads or
 // writes; a chat being deleted or the service stopping refuses it at the end.
-func (eng *engine) launch(ctx context.Context, r *chatRun) error {
-	s := r.thread
-	eng.live.mu.Lock()
-	p := r.principal
-	eng.live.mu.Unlock()
-	if !s.keyless && !p.SyncExpires.After(api.Now().Add(runTimeout+commitTimeout)) {
+func (eng *Engine) launch(ctx context.Context, r *Run) error {
+	s := r.Thread
+	eng.Live.mu.Lock()
+	p := r.Principal
+	eng.Live.mu.Unlock()
+	if !s.keyless && !p.SyncExpires.After(api.Now().Add(RunTimeout+CommitTimeout)) {
 		fresh := *p
 		fresh.SyncToken = ""
-		grant, err := eng.store.Rows.AuthorizeRun(ctx, &fresh, r.key, r.input.ThreadID, r.input.ProjectID)
+		grant, err := eng.Store.Rows.AuthorizeRun(ctx, &fresh, r.key, r.input.ThreadID, r.input.ProjectID)
 		if err != nil {
 			return err
 		}
 		fresh.SyncToken, fresh.SyncExpires = grant.Token, grant.ExpiresAt
 		p = &fresh
-		eng.live.mu.Lock()
-		r.principal = p
-		eng.live.mu.Unlock()
+		eng.Live.mu.Lock()
+		r.Principal = p
+		eng.Live.mu.Unlock()
 	}
 	ctx = auth.WithCallerKey(ctx, string(r.credential.Key))
 	ctx = auth.WithUsage(ctx, usageForRun(r))
@@ -210,13 +210,13 @@ func (eng *engine) launch(ctx context.Context, r *chatRun) error {
 		if s.local {
 			break
 		}
-		eng.live.mu.Lock()
+		eng.Live.mu.Lock()
 		deleted := s.deleted
-		eng.live.mu.Unlock()
+		eng.Live.mu.Unlock()
 		if deleted {
 			return errThreadDeleted
 		}
-		err = eng.store.SaveThread(ctx, p, r.key, plan.row)
+		err = eng.Store.SaveThread(ctx, p, r.key, plan.row)
 		if err == nil {
 			break
 		}
@@ -226,16 +226,16 @@ func (eng *engine) launch(ctx context.Context, r *chatRun) error {
 	}
 	row, request, model, titleText := plan.row, plan.request, plan.model, plan.titleText
 	r.screening, r.retryTarget, r.turn = eng.screening(request), plan.retryTarget, plan.turn
-	request.cacheScope = cacheScope(p, s.id, r.input.Options.CacheSecret)
+	request.cacheScope = cacheScope(p, s.ID, r.input.Options.CacheSecret)
 	request.refreshAuth = func(ctx context.Context) (auth.Credential, error) {
-		eng.live.mu.Lock()
-		p, rejected := *r.principal, r.credential.Key
-		eng.live.mu.Unlock()
-		credential, err := eng.auth.Renewed(&p, rejected)
+		eng.Live.mu.Lock()
+		p, rejected := *r.Principal, r.credential.Key
+		eng.Live.mu.Unlock()
+		credential, err := eng.Auth.Renewed(&p, rejected)
 		if err == nil {
-			eng.live.mu.Lock()
+			eng.Live.mu.Lock()
 			r.credential = credential
-			eng.live.mu.Unlock()
+			eng.Live.mu.Unlock()
 		}
 		return credential, err
 	}
@@ -246,27 +246,27 @@ func (eng *engine) launch(ctx context.Context, r *chatRun) error {
 		r.out.replyID = reply.ID
 	}
 	shown := domain.Window(row, "", domain.MessageWindow)
-	eng.live.mu.Lock()
+	eng.Live.mu.Lock()
 	if s.deleted {
-		eng.live.mu.Unlock()
+		eng.Live.mu.Unlock()
 		return errThreadDeleted
 	}
-	if eng.live.closing {
-		eng.live.mu.Unlock()
+	if eng.Live.closing {
+		eng.Live.mu.Unlock()
 		return errShutdown
 	}
 	r.row, r.running = row, true
 	// Framed under the lock, so no queue change reaches the run before them.
-	r.out.emit(domain.RunStarted{ThreadID: s.id, RunID: r.log.id, Instance: instance(), MessageID: r.out.replyID})
+	r.out.emit(domain.RunStarted{ThreadID: s.ID, RunID: r.Log.ID, Instance: InstanceID(), MessageID: r.out.replyID})
 	r.out.emit(domain.MessagesSnapshot{Messages: shown.Messages, HasOlder: shown.HasOlder})
 	r.out.emit(domain.StateSnapshotEvent{Snapshot: domain.StateSnapshot{Thread: shown.ThreadSummary, Queue: queueItems(s), RateLimit: r.credential.Limit}})
 	r.out.mu.Lock()
-	r.out.observe = r.assembler.Apply
+	r.out.Observe = r.assembler.Apply
 	r.out.mu.Unlock()
-	titlePrincipal := *r.principal
-	eng.live.working.Add(1)
-	eng.live.mu.Unlock()
-	runCtx, cancel := context.WithTimeout(r.stopped, runTimeout)
+	titlePrincipal := *r.Principal
+	eng.Live.working.Add(1)
+	eng.Live.mu.Unlock()
+	runCtx, cancel := context.WithTimeout(r.stopped, RunTimeout)
 	runCtx = auth.WithCallerKey(runCtx, string(r.credential.Key))
 	runCtx = auth.WithUsage(runCtx, usageForRun(r))
 	runCtx = inference.WithUsageSink(runCtx, r.out)
@@ -305,16 +305,16 @@ func (eng *engine) launch(ctx context.Context, r *chatRun) error {
 
 // refuseFlagged refuses a turn on a chat the safeguards flagged, which a
 // stored chat then records. An ask is a turn on the chat it asks about.
-func (eng *engine) refuseFlagged(ctx context.Context, r *chatRun, p *auth.Principal) error {
-	chat := r.thread.id
+func (eng *Engine) refuseFlagged(ctx context.Context, r *Run, p *auth.Principal) error {
+	chat := r.Thread.ID
 	if r.input.Kind == "ask" {
 		chat = r.input.ThreadID
 	}
-	if !eng.auth.FlaggedChats(ctx, p)[chat] {
+	if !eng.Auth.FlaggedChats(ctx, p)[chat] {
 		return nil
 	}
-	if !r.thread.local && r.input.Kind != "ask" {
-		_, err := eng.store.MutateThread(ctx, p, r.key, chat, func(t *domain.Thread) error {
+	if !r.Thread.local && r.input.Kind != "ask" {
+		_, err := eng.Store.MutateThread(ctx, p, r.key, chat, func(t *domain.Thread) error {
 			t.Flagged = true
 			return nil
 		})
@@ -327,18 +327,18 @@ func (eng *engine) refuseFlagged(ctx context.Context, r *chatRun, p *auth.Princi
 
 // activeRun marks a chat's reply as streaming until the run's deadline.
 func activeRun(runID string) *domain.ActiveRun {
-	return &domain.ActiveRun{RunID: runID, ExpiresAt: api.Now().Add(runTimeout).Format(time.RFC3339Nano), Instance: instance()}
+	return &domain.ActiveRun{RunID: runID, ExpiresAt: api.Now().Add(RunTimeout).Format(time.RFC3339Nano), Instance: InstanceID()}
 }
 
-func usageForRun(r *chatRun) usagereporting.Context {
-	return usagereporting.Context{ContextID: r.log.id, RootRequestID: r.log.id, ParentService: "harness", APIKeyHash: usagereporting.HashAPIKey(string(r.credential.Key)), Depth: 1}
+func usageForRun(r *Run) usagereporting.Context {
+	return usagereporting.Context{ContextID: r.Log.ID, RootRequestID: r.Log.ID, ParentService: "harness", APIKeyHash: usagereporting.HashAPIKey(string(r.credential.Key)), Depth: 1}
 }
 
 // runQueue starts queued turns until one runs or the chat's queue empties.
 // A turn that cannot start ends with its own RUN_ERROR.
-func (eng *engine) runQueue(next *chatRun) {
+func (eng *Engine) runQueue(next *Run) {
 	for next != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), commitTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), CommitTimeout)
 		err := eng.launch(ctx, next)
 		cancel()
 		if err == nil {
@@ -350,15 +350,15 @@ func (eng *engine) runQueue(next *chatRun) {
 
 // endUnstarted ends a turn that failed to start and returns the queued turn
 // to start after it.
-func (eng *engine) endUnstarted(r *chatRun, err error) *chatRun {
-	eng.live.mu.Lock()
+func (eng *Engine) endUnstarted(r *Run, err error) *Run {
+	eng.Live.mu.Lock()
 	next := eng.advance(r, true)
-	eng.live.mu.Unlock()
-	e := api.AsError(auth.WithQuota(r.principal, r.credential.Limit, err))
+	eng.Live.mu.Unlock()
+	e := api.AsError(auth.WithQuota(r.Principal, r.credential.Limit, err))
 	limit := domain.ValueOr(e.RateLimit, r.credential.Limit)
-	r.out.emit(domain.FailedRun(r.thread.id, r.log.id, e, &domain.RunMetadata{RateLimit: &limit}))
-	r.log.log.close(errDone)
+	r.out.emit(domain.FailedRun(r.Thread.ID, r.Log.ID, e, &domain.RunMetadata{RateLimit: &limit}))
+	r.Log.Frames.close(ErrDone)
 	r.release()
-	close(r.finished)
+	close(r.Finished)
 	return next
 }

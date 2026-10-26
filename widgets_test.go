@@ -14,6 +14,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 )
 
@@ -48,11 +49,11 @@ func catalogWidgets(names ...string) map[string]domain.Widget {
 
 // invokeWidget runs one widget call and returns what the model reads and the
 // results the caller was sent.
-func invokeWidget(t *testing.T, set *toolset, call toolCall) (string, []string) {
+func invokeWidget(t *testing.T, set *engine.Toolset, call engine.ToolCall) (string, []string) {
 	t.Helper()
-	out := &stream{run: newRun("00")}
+	out := &engine.Stream{Run: engine.NewLog("00")}
 	var results []string
-	out.observe = func(e domain.Event, _ string) {
+	out.Observe = func(e domain.Event, _ string) {
 		if result, ok := e.(domain.ToolCallResult); ok {
 			results = append(results, string(result.Content))
 		}
@@ -60,17 +61,17 @@ func invokeWidget(t *testing.T, set *toolset, call toolCall) (string, []string) 
 	var reply struct {
 		Content string `json:"content"`
 	}
-	json.Unmarshal(invoke(context.Background(), out, set, call), &reply)
+	json.Unmarshal(engine.Invoke(context.Background(), out, set, call), &reply)
 	return reply.Content, results
 }
 
-func widgetToolset() *toolset {
-	return &toolset{widgets: catalogWidgets("render_artifact_preview"), local: func(context.Context, toolCall) (any, error) { return "[rendered for the user]", nil }}
+func widgetToolset() *engine.Toolset {
+	return &engine.Toolset{Widgets: catalogWidgets("render_artifact_preview"), Local: func(context.Context, engine.ToolCall) (any, error) { return "[rendered for the user]", nil }}
 }
 
 func TestWidgetSchemaViolationIsReportedToTheModel(t *testing.T) {
 	set := widgetToolset()
-	call := toolCall{id: "c1", name: "render_artifact_preview", args: `{"title":"Demo","source":"<p>hi</p>"}`}
+	call := engine.ToolCall{ID: "c1", Name: "render_artifact_preview", Args: `{"title":"Demo","source":"<p>hi</p>"}`}
 	for attempt := 1; attempt <= domain.MaxWidgetRetries+1; attempt++ {
 		model, shown := invokeWidget(t, set, call)
 		if len(shown) != 1 || api.Obj(api.Parsed([]byte(shown[0])))["status"] != "error" {
@@ -89,26 +90,26 @@ func TestWidgetSchemaViolationIsReportedToTheModel(t *testing.T) {
 			t.Fatalf("attempt %d: the model read %s", attempt, model)
 		}
 	}
-	if model, _ := invokeWidget(t, widgetToolset(), toolCall{id: "c2", name: "render_artifact_preview", args: `{"source":`}); !strings.Contains(model, "the component was not displayed: arguments are not valid JSON. Call") {
+	if model, _ := invokeWidget(t, widgetToolset(), engine.ToolCall{ID: "c2", Name: "render_artifact_preview", Args: `{"source":`}); !strings.Contains(model, "the component was not displayed: arguments are not valid JSON. Call") {
 		t.Fatalf("unparseable arguments read as %s", model)
 	}
 }
 
 func TestWidgetRetriesAreCountedPerNameWithinRun(t *testing.T) {
 	set := widgetToolset()
-	set.widgets = catalogWidgets("render_artifact_preview", "render_stat_cards")
+	set.Widgets = catalogWidgets("render_artifact_preview", "render_stat_cards")
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	told := map[string]int{}
 	for range 4 {
-		for _, call := range []toolCall{{id: "a", name: "render_artifact_preview", args: `{}`}, {id: "s", name: "render_stat_cards", args: `{"stats":[]}`}} {
+		for _, call := range []engine.ToolCall{{ID: "a", Name: "render_artifact_preview", Args: `{}`}, {ID: "s", Name: "render_stat_cards", Args: `{"stats":[]}`}} {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				out := &stream{run: newRun("00")}
-				if strings.Contains(string(invoke(context.Background(), out, set, call)), "did not match") {
+				out := &engine.Stream{Run: engine.NewLog("00")}
+				if strings.Contains(string(engine.Invoke(context.Background(), out, set, call)), "did not match") {
 					mu.Lock()
-					told[call.name]++
+					told[call.Name]++
 					mu.Unlock()
 				}
 			}()
@@ -203,15 +204,15 @@ func TestEveryViewMarksWidgetArgumentsTheDeclarationRefuses(t *testing.T) {
 
 func TestValidWidgetArgumentsAreAcknowledged(t *testing.T) {
 	set := widgetToolset()
-	model, shown := invokeWidget(t, set, toolCall{id: "c1", name: "render_artifact_preview", args: `{"title":"Demo","source":{"type":"html","html":"<p>hi</p>"}}`})
+	model, shown := invokeWidget(t, set, engine.ToolCall{ID: "c1", Name: "render_artifact_preview", Args: `{"title":"Demo","source":{"type":"html","html":"<p>hi</p>"}}`})
 	if model != "[rendered for the user]" || len(shown) != 1 || shown[0] != `"[rendered for the user]"` {
 		t.Fatalf("a valid widget read as %q and showed %q", model, shown)
 	}
 	extra := `{"title":"Demo","theme":"dark","source":{"type":"html","html":"<p>hi</p>","language":"html"}}`
-	if model, shown := invokeWidget(t, set, toolCall{id: "c3", name: "render_artifact_preview", args: extra}); model != "[rendered for the user]" || len(shown) != 1 {
+	if model, shown := invokeWidget(t, set, engine.ToolCall{ID: "c3", Name: "render_artifact_preview", Args: extra}); model != "[rendered for the user]" || len(shown) != 1 {
 		t.Fatalf("a widget with undeclared fields read as %q and showed %q", model, shown)
 	}
-	if model, _ := invokeWidget(t, set, toolCall{id: "c2", name: "render_unknown", args: `{"anything":1}`}); model != `{"error":"unknown tool"}` {
+	if model, _ := invokeWidget(t, set, engine.ToolCall{ID: "c2", Name: "render_unknown", Args: `{"anything":1}`}); model != `{"error":"unknown tool"}` {
 		t.Fatalf("an unknown widget read as %q", model)
 	}
 }

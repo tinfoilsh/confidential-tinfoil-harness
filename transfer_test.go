@@ -12,6 +12,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
 
@@ -72,18 +73,18 @@ func TestTranscriptWaitsForALiveReply(t *testing.T) {
 	h, _, key := testChatHarness(t, model)
 	t.Cleanup(release)
 	p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
-	run, err := h.engine.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
+	run, err := h.engine.AcceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[engine.TurnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	awaitFrame(t, run.log, "TEXT_MESSAGE_CHUNK")
-	in := api.Object{"key": keyBase64(key), "threadId": run.thread.id}
+	awaitFrame(t, run.Log, "TEXT_MESSAGE_CHUNK")
+	in := api.Object{"key": keyBase64(key), "threadId": run.Thread.ID}
 	w := postRoute(h, "/v1/threads/transcript", in, "alice")
 	if w.Code != 409 || !strings.Contains(w.Body.String(), "RUN_IN_FLIGHT") {
 		t.Fatalf("a live reply could be left behind: %d %s", w.Code, w.Body.String())
 	}
 	release()
-	<-run.finished
+	<-run.Finished
 	w = postRoute(h, "/v1/threads/transcript", in, "alice")
 	var out struct {
 		Thread domain.Thread `json:"thread"`
@@ -107,17 +108,17 @@ func TestTransferDeletionPreservesRepliesStartedAfterTheCopy(t *testing.T) {
 	if copy.Code != 200 || json.Unmarshal(copy.Body.Bytes(), &copied) != nil || copied.Revision == "" {
 		t.Fatalf("copy: %s", copy.Body.String())
 	}
-	run, err := h.engine.acceptTurn(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[turnRequest](in))
+	run, err := h.engine.AcceptTurn(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[engine.TurnRequest](in))
 	if err != nil {
 		t.Fatal(err)
 	}
-	awaitFrame(t, run.log, "TEXT_MESSAGE_CHUNK")
+	awaitFrame(t, run.Log, "TEXT_MESSAGE_CHUNK")
 	deletion := api.Object{"key": keyBase64(key), "id": id, "revision": copied.Revision}
 	if w := postRoute(h, "/v1/threads/delete", deletion, "alice"); w.Code != 409 || !strings.Contains(w.Body.String(), "RUN_IN_FLIGHT") {
 		t.Fatalf("active transfer: %d %s", w.Code, w.Body.String())
 	}
 	release()
-	<-run.finished
+	<-run.Finished
 	if w := postRoute(h, "/v1/threads/delete", deletion, "alice"); w.Code != 409 || !strings.Contains(w.Body.String(), "REVISION_CONFLICT") {
 		t.Fatalf("stale transfer: %d %s", w.Code, w.Body.String())
 	}
@@ -235,7 +236,7 @@ func TestImportMayReuseADeletedChatID(t *testing.T) {
 	})}}
 	h, _, key := testChatHarness(t, nil)
 	h.store.Rows = client
-	if _, err := h.engine.importThread(context.Background(), &auth.Principal{ID: "alice", JWT: "jwt"}, key, requestOf[threadImportRequest](api.Object{"threadId": "chat-1", "thread": api.Object{"messages": []any{}}})); err != nil {
+	if _, err := h.engine.ImportThread(context.Background(), &auth.Principal{ID: "alice", JWT: "jwt"}, key, requestOf[engine.ThreadImportRequest](api.Object{"threadId": "chat-1", "thread": api.Object{"messages": []any{}}})); err != nil {
 		t.Fatal(err)
 	}
 	if metadata["restoreDeleted"] != true {

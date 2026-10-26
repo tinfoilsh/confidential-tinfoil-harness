@@ -1,4 +1,4 @@
-package main
+package engine
 
 import (
 	"cmp"
@@ -13,22 +13,22 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
-// runRequest names a run, or a turn queued behind one, of a chat.
-type runRequest struct {
+// RunRequest names a run, or a turn queued behind one, of a chat.
+type RunRequest struct {
 	api.KeyRequest
 	ThreadID string `json:"threadId"`
 	RunID    string `json:"runId"`
 	QueueID  string `json:"queueId"`
 }
 
-// threadImportRequest stores a device chat in the cloud under its id.
-type threadImportRequest struct {
+// ThreadImportRequest stores a device chat in the cloud under its id.
+type ThreadImportRequest struct {
 	api.KeyRequest
 	ThreadID string          `json:"threadId"`
 	Thread   json.RawMessage `json:"thread"`
 }
 
-func (in *threadImportRequest) Validate() error {
+func (in *ThreadImportRequest) Validate() error {
 	if err := api.RequireID("threadId", in.ThreadID); err != nil {
 		return err
 	}
@@ -38,8 +38,8 @@ func (in *threadImportRequest) Validate() error {
 	return domain.ValidateLocalThread(in.Thread)
 }
 
-// turnRequest is one user action on a chat, which its run carries out.
-type turnRequest struct {
+// TurnRequest is one user action on a chat, which its run carries out.
+type TurnRequest struct {
 	api.KeyRequest
 	ClientRequestID string               `json:"clientRequestId"`
 	ThreadID        string               `json:"threadId"`
@@ -82,7 +82,7 @@ var (
 
 // Validate refuses a turn its run could not carry out. Who may send it is
 // checked with the caller.
-func (in *turnRequest) Validate() error {
+func (in *TurnRequest) Validate() error {
 	if _, err := uuid.Parse(in.ClientRequestID); err != nil {
 		return api.Err(400, "BAD_REQUEST", "clientRequestId must be a UUID")
 	}
@@ -101,7 +101,7 @@ func (in *turnRequest) Validate() error {
 }
 
 // validateContent refuses a turn whose content cannot make its message.
-func (in *turnRequest) validateContent() error {
+func (in *TurnRequest) validateContent() error {
 	if err := api.RequireID("threadId", in.ThreadID); err != nil {
 		return err
 	}
@@ -148,7 +148,7 @@ func (in *turnRequest) validateContent() error {
 
 // digest identifies a turn's content, so a retry of the request is told from
 // another request under the same id.
-func (in *turnRequest) digest() string {
+func (in *TurnRequest) digest() string {
 	copy := *in
 	copy.Key = nil
 	return api.HashHex(api.Raw(copy))

@@ -1,4 +1,4 @@
-package main
+package engine
 
 import (
 	"context"
@@ -78,7 +78,7 @@ func TestOldRepliesKeepWhenTheirStepsRan(t *testing.T) {
 
 func TestALateReasoningTailIsNotSummarized(t *testing.T) {
 	assembler := domain.NewMessageAssembler()
-	summaries := &thoughtSummaries{out: &stream{}, assembler: assembler, summarize: func(ctx context.Context, _ string) (string, error) { return "", ctx.Err() }}
+	summaries := &thoughtSummaries{out: &Stream{}, assembler: assembler, summarize: func(ctx context.Context, _ string) (string, error) { return "", ctx.Err() }}
 	for _, e := range []domain.Event{
 		domain.ReasoningChunk{MessageID: "r-reasoning", Delta: "plan"},
 		domain.TextChunk{MessageID: "r", Delta: strings.Repeat("answer ", minSummaryWords)},

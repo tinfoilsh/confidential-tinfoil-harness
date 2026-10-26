@@ -12,6 +12,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
 
@@ -33,8 +34,8 @@ func TestInvalidKeyEncodingNamesTheKey(t *testing.T) {
 func TestRequestKeysAreClearedAfterDecoding(t *testing.T) {
 	key := randomKey()
 	body := api.Raw(api.Object{"key": keyBase64(key), "threadId": "chat-1"})
-	var received *runRequest
-	handle := decoded(func(_ context.Context, _ *auth.Principal, _ auth.ContentKey, in *runRequest) (any, error) {
+	var received *engine.RunRequest
+	handle := decoded(func(_ context.Context, _ *auth.Principal, _ auth.ContentKey, in *engine.RunRequest) (any, error) {
 		received = in
 		var wire api.Object
 		json.Unmarshal(api.Raw(in), &wire)
@@ -66,15 +67,15 @@ func TestRunDropsKeyBeforeScreening(t *testing.T) {
 		}
 	}()
 	p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
-	r, err := h.engine.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
+	r, err := h.engine.AcceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[engine.TurnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	awaitFrame(t, r.log, "RUN_FINISHED")
-	if r.holdsKey() {
+	awaitFrame(t, r.Log, "RUN_FINISHED")
+	if r.HoldsKey() {
 		t.Error("the completed run holds its storage key while screening")
 	}
-	row, err := rows.Load(context.Background(), p, key, "chat", r.thread.id)
+	row, err := rows.Load(context.Background(), p, key, "chat", r.Thread.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

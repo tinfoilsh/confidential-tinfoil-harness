@@ -24,6 +24,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 )
 
@@ -181,7 +182,7 @@ func TestTitleRunsBeforeAnswerFinishes(t *testing.T) {
 	}))
 	defer server.Close()
 	h.models.Services["summarizer"] = &inference.Service{URL: server.URL, Client: server.Client()}
-	run, err := h.engine.acceptTurn(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
+	run, err := h.engine.AcceptTurn(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[engine.TurnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,8 +193,8 @@ func TestTitleRunsBeforeAnswerFinishes(t *testing.T) {
 		t.Fatal("title waited for the model")
 	}
 	close(release)
-	<-run.finished
-	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", run.thread.id)
+	<-run.Finished
+	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", run.Thread.ID)
 	if mustRead(domain.ReadThreadRow(row)).Title != "A generated title" {
 		t.Fatal("title did not commit")
 	}
@@ -291,25 +292,25 @@ func TestShutdownCommitsPartialOutput(t *testing.T) {
 		close(started)
 		<-r.Context().Done()
 	})
-	run, err := h.engine.acceptTurn(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key)))
+	run, err := h.engine.AcceptTurn(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[engine.TurnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	<-started
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	h.engine.stopRuns()
-	h.engine.waitRuns(ctx)
+	h.engine.Stop()
+	h.engine.Wait(ctx)
 	select {
-	case <-run.finished:
+	case <-run.Finished:
 	default:
 		t.Fatal("shutdown did not finish the run")
 	}
-	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", run.thread.id)
+	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", run.Thread.ID)
 	if mustRead(domain.ReadThreadRow(row)).ActiveRun != nil {
 		t.Fatal("shutdown left an active marker")
 	}
-	if _, err := h.engine.acceptTurn(context.Background(), &auth.Principal{ID: "alice"}, chatCredential("alice"), key, requestOf[turnRequest](sendInput(key))); err == nil {
+	if _, err := h.engine.AcceptTurn(context.Background(), &auth.Principal{ID: "alice"}, chatCredential("alice"), key, requestOf[engine.TurnRequest](sendInput(key))); err == nil {
 		t.Fatal("accepted a turn during shutdown")
 	}
 }

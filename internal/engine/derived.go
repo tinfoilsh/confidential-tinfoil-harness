@@ -1,4 +1,4 @@
-package main
+package engine
 
 import (
 	"context"
@@ -32,8 +32,8 @@ func titleSource(t *domain.Thread) string {
 	return ""
 }
 
-func (eng *engine) generateTitle(ctx context.Context, r *chatRun, p *auth.Principal, titleState string, text string) {
-	if !eng.models.ServiceReady("summarizer") || titleState != "placeholder" {
+func (eng *Engine) generateTitle(ctx context.Context, r *Run, p *auth.Principal, titleState string, text string) {
+	if !eng.Models.ServiceReady("summarizer") || titleState != "placeholder" {
 		return
 	}
 	words := strings.Fields(text)
@@ -44,7 +44,7 @@ func (eng *engine) generateTitle(ctx context.Context, r *chatRun, p *auth.Princi
 	var result struct {
 		Summary string `json:"summary"`
 	}
-	if err := eng.models.ServiceCall(ctx, "summarizer", "/summarize", api.Object{"content": text, "style": "title_summary"}, &result); err != nil {
+	if err := eng.Models.ServiceCall(ctx, "summarizer", "/summarize", api.Object{"content": text, "style": "title_summary"}, &result); err != nil {
 		return
 	}
 	title := strings.Trim(strings.TrimSpace(result.Summary), "\"'")
@@ -59,14 +59,14 @@ func (eng *engine) generateTitle(ctx context.Context, r *chatRun, p *auth.Princi
 	}
 	// A local thread's row lives only in this run, and its client stores the
 	// title it reads from the event below.
-	if r.thread.local {
-		eng.live.mu.Lock()
-		defer eng.live.mu.Unlock()
+	if r.Thread.local {
+		eng.Live.mu.Lock()
+		defer eng.Live.mu.Unlock()
 		name(&r.row.Thread)
 		r.out.emit(domain.StateDelta{Delta: titleDelta(&r.row.Thread)})
 		return
 	}
-	updated, err := eng.store.MutateThread(ctx, p, r.key, r.thread.id, name)
+	updated, err := eng.Store.MutateThread(ctx, p, r.key, r.Thread.ID, name)
 	if err != nil {
 		return
 	}

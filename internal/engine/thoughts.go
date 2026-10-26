@@ -1,4 +1,4 @@
-package main
+package engine
 
 import (
 	"context"
@@ -17,14 +17,14 @@ const (
 	summaryTailWords = 200
 	summaryInterval  = 3 * time.Second
 	summaryTimeout   = 30 * time.Second
-	thoughtsStyle    = "thoughts_summary"
+	ThoughtsStyle    = "thoughts_summary"
 )
 
 // thoughtSummaries follows the thinking block a reply streams into. The
 // stream's mutex guards every field.
 type thoughtSummaries struct {
 	ctx       context.Context
-	out       *stream
+	out       *Stream
 	assembler *domain.MessageAssembler
 	summarize func(context.Context, string) (string, error)
 
@@ -39,8 +39,8 @@ type thoughtSummaries struct {
 
 // thoughtSummaries starts following a run's reasoning, unless no summarizer
 // verified.
-func (eng *engine) thoughtSummaries(ctx context.Context, out *stream, assembler *domain.MessageAssembler) *thoughtSummaries {
-	if !eng.models.ServiceReady("summarizer") {
+func (eng *Engine) thoughtSummaries(ctx context.Context, out *Stream, assembler *domain.MessageAssembler) *thoughtSummaries {
+	if !eng.Models.ServiceReady("summarizer") {
 		return nil
 	}
 	return &thoughtSummaries{ctx: ctx, out: out, assembler: assembler, summarize: func(ctx context.Context, text string) (string, error) {
@@ -49,12 +49,12 @@ func (eng *engine) thoughtSummaries(ctx context.Context, out *stream, assembler 
 		var result struct {
 			Summary string `json:"summary"`
 		}
-		err := eng.models.ServiceCall(ctx, "summarizer", "/summarize", api.Object{"content": text, "style": thoughtsStyle}, &result)
+		err := eng.Models.ServiceCall(ctx, "summarizer", "/summarize", api.Object{"content": text, "style": ThoughtsStyle}, &result)
 		return result.Summary, err
 	}}
 }
 
-// follow reads a frame the run's reply was built from.
+// Follow reads a frame the run's reply was built from.
 func (s *thoughtSummaries) follow(e domain.Event) {
 	switch e := e.(type) {
 	case domain.ReasoningChunk:

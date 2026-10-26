@@ -16,6 +16,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/archives"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
@@ -27,7 +28,7 @@ type harness struct {
 	models       *inference.Models
 	attachments  *attach.Service
 	archives     *archives.Service
-	engine       *engine
+	engine       *engine.Engine
 }
 
 // listenAddr is the shim's upstream port in tinfoil-config.yml, which also
@@ -48,7 +49,7 @@ func main() {
 
 	ctx, shutdown := context.WithCancel(context.Background())
 	defer shutdown()
-	attestWebSearch(ctx, usageSecret)
+	engine.AttestWebSearch(ctx, usageSecret)
 	scratch, err := archives.MeasuredScratch()
 	if err != nil {
 		slog.Error("prepare the temporary directory", "error", err)
@@ -64,7 +65,7 @@ func main() {
 	}
 	h.attachments = &attach.Service{Auth: h.auth, Controlplane: h.controlplane, Models: h.models, Store: h.store}
 	h.store.Repair = h.attachments
-	h.engine = &engine{safeguards: newSubmitter(os.Getenv("SAFEGUARDS_URL")), store: h.store, models: h.models, attachments: h.attachments, auth: h.auth}
+	h.engine = &engine.Engine{Safeguards: engine.NewSubmitter(os.Getenv("SAFEGUARDS_URL")), Store: h.store, Models: h.models, Attachments: h.attachments, Auth: h.auth}
 	h.archives = &archives.Service{Scratch: scratch, CPClient: &http.Client{Transport: &auth.CallerTransport{Inner: http.DefaultTransport}}, Store: h.store, Attachments: h.attachments, Auth: h.auth, Controlplane: h.controlplane}
 
 	srv := &http.Server{Addr: listenAddr, Handler: h.routes(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: time.Minute}
@@ -74,14 +75,14 @@ func main() {
 	go func() {
 		<-stop
 		defer close(stopped)
-		h.engine.stopRuns()
+		h.engine.Stop()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		srv.Shutdown(ctx)
-		h.engine.waitRuns(ctx)
+		h.engine.Wait(ctx)
 	}()
 
-	slog.Info("listening", "addr", listenAddr, "gateway", gw, "models", inference.Served(h.models.Offer.Get()), "safeguards", h.engine.safeguards != nil)
+	slog.Info("listening", "addr", listenAddr, "gateway", gw, "models", inference.Served(h.models.Offer.Get()), "safeguards", h.engine.Safeguards != nil)
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		slog.Error("serve", "error", err)
 		os.Exit(1)
