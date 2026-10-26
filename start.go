@@ -7,6 +7,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
@@ -31,7 +32,7 @@ type retryTarget struct {
 }
 
 // errThreadDeleted refuses a turn on a chat deleted while the turn started.
-var errThreadDeleted = apiErr(404, "THREAD_NOT_FOUND", "The thread was deleted")
+var errThreadDeleted = api.Err(404, "THREAD_NOT_FOUND", "The thread was deleted")
 
 // prepareTurn applies a turn to its chat as read now. A stored chat's
 // attachments are placed under it; the prompt reads their content. With
@@ -63,11 +64,11 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *principal, cre
 		if !s.local {
 			// A new chat's first turn creates its row under the client's id.
 			row, err = h.loadThread(ctx, p, r.key, s.id)
-			if err != nil && (asAPIError(err).HTTP != 404 || !rowIDPattern.MatchString(s.id) || !create) {
+			if err != nil && (api.AsError(err).HTTP != 404 || !rowIDPattern.MatchString(s.id) || !create) {
 				return nil, err
 			}
 			if err != nil {
-				row = &threadRow{Thread: newThread(s.id, r.input.ProjectID, r.input.PresetID.value)}
+				row = &threadRow{Thread: newThread(s.id, r.input.ProjectID, r.input.PresetID.Value)}
 			}
 			if row.LastRequestID == r.nonce {
 				return nil, errAlreadyApplied
@@ -98,8 +99,8 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *principal, cre
 	// or null, overrides the default, and the turn's own settings override
 	// the preset's.
 	if row.etag == "" && len(t.Messages) == 0 {
-		preset := r.input.PresetID.value
-		if id := valueOr(profile.DefaultPromptPresetID, ""); !r.input.PresetID.set && id != "" {
+		preset := r.input.PresetID.Value
+		if id := valueOr(profile.DefaultPromptPresetID, ""); !r.input.PresetID.Set && id != "" {
 			preset = &id
 		}
 		c := h.catalog.get()
@@ -152,10 +153,10 @@ func (h *harness) prepareTurn(ctx context.Context, r *chatRun, p *principal, cre
 			}
 		}
 		if plan.retryTarget == nil {
-			return nil, apiErr(404, "THREAD_NOT_FOUND", "The widget call was not found")
+			return nil, api.Err(404, "THREAD_NOT_FOUND", "The widget call was not found")
 		}
 		if !slices.ContainsFunc(h.catalog.get().selectedWidgets(r.input.Widgets, true), func(w widget) bool { return w.Name == plan.retryTarget.block.Name }) {
-			return nil, apiErr(503, "TOOL_UNAVAILABLE", "This widget is not enabled for the client").withAction(actionStop)
+			return nil, api.Err(503, "TOOL_UNAVAILABLE", "This widget is not enabled for the client").WithAction(api.ActionStop)
 		}
 	}
 	t.ContextUsage = requestContextUsage(request)
@@ -174,7 +175,7 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	h.live.mu.Lock()
 	p := r.principal
 	h.live.mu.Unlock()
-	if !s.keyless && !p.SyncExpires.After(nowUTC().Add(runTimeout+commitTimeout)) {
+	if !s.keyless && !p.SyncExpires.After(api.Now().Add(runTimeout+commitTimeout)) {
 		fresh := *p
 		fresh.SyncToken = ""
 		grant, err := h.storeRows.authorizeRun(ctx, &fresh, r.key, r.input.ThreadID, r.input.ProjectID)
@@ -214,7 +215,7 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 		if err == nil {
 			break
 		}
-		if asAPIError(err).Code != "REVISION_CONFLICT" || attempt == maxCommitAttempts {
+		if api.AsError(err).Code != "REVISION_CONFLICT" || attempt == maxCommitAttempts {
 			return err
 		}
 	}
@@ -312,7 +313,7 @@ func (h *harness) refuseFlagged(ctx context.Context, r *chatRun, p *principal) e
 			t.Flagged = true
 			return nil
 		})
-		if err != nil && asAPIError(err).HTTP != http.StatusNotFound {
+		if err != nil && api.AsError(err).HTTP != http.StatusNotFound {
 			return err
 		}
 	}
@@ -321,7 +322,7 @@ func (h *harness) refuseFlagged(ctx context.Context, r *chatRun, p *principal) e
 
 // activeRun marks a chat's reply as streaming until the run's deadline.
 func activeRun(runID string) *ActiveRun {
-	return &ActiveRun{RunID: runID, ExpiresAt: nowUTC().Add(runTimeout).Format(time.RFC3339Nano), Instance: instanceID}
+	return &ActiveRun{RunID: runID, ExpiresAt: api.Now().Add(runTimeout).Format(time.RFC3339Nano), Instance: instanceID}
 }
 
 func usageForRun(r *chatRun) usagereporting.Context {
@@ -348,7 +349,7 @@ func (h *harness) endUnstarted(r *chatRun, err error) *chatRun {
 	h.live.mu.Lock()
 	next := h.advance(r, true)
 	h.live.mu.Unlock()
-	e := asAPIError(h.withQuota(r.principal, r.credential.Limit, err))
+	e := api.AsError(h.withQuota(r.principal, r.credential.Limit, err))
 	limit := valueOr(e.RateLimit, r.credential.Limit)
 	r.out.emit(failedRun(r.thread.id, r.log.id, e, &runMetadata{RateLimit: &limit}))
 	r.log.log.close(errDone)

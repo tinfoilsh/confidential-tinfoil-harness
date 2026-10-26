@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 type syncTestTransport func(*http.Request) (*http.Response, error)
@@ -22,7 +24,7 @@ type syncTestTransport func(*http.Request) (*http.Response, error)
 func (f syncTestTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func syncTestResponse(status int, body any) (*http.Response, error) {
-	return &http.Response{StatusCode: status, Body: io.NopCloser(bytes.NewReader(raw(body))), Header: http.Header{"Content-Type": {"application/json"}}}, nil
+	return &http.Response{StatusCode: status, Body: io.NopCloser(bytes.NewReader(api.Raw(body))), Header: http.Header{"Content-Type": {"application/json"}}}, nil
 }
 
 func TestGetProjectLoadsDocumentsAcrossSyncPages(t *testing.T) {
@@ -56,65 +58,65 @@ func TestGetProjectLoadsDocumentsAcrossSyncPages(t *testing.T) {
 			h, _, key := testChatHarness(t, nil)
 			var cursors, pulled []string
 			h.storeRows = &syncClient{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
-				var in object
+				var in api.Object
 				if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 					t.Errorf("decode sync request: %v", err)
-					return syncTestResponse(400, object{})
+					return syncTestResponse(400, api.Object{})
 				}
 				switch r.URL.Path {
 				case "/v1/sync/list-status":
 					// Match the sync service's actual filter contract.
-					if str(in["project_id"]) != "" && in["scope"] != "chat" {
-						return syncTestResponse(400, object{"code": "BAD_REQUEST", "message": "project_id filter is only valid for chat scope"})
+					if api.Str(in["project_id"]) != "" && in["scope"] != "chat" {
+						return syncTestResponse(400, api.Object{"code": "BAD_REQUEST", "message": "project_id filter is only valid for chat scope"})
 					}
 					if in["scope"] != "project_document" {
 						t.Errorf("listed scope %v, want project_document", in["scope"])
-						return syncTestResponse(400, object{})
+						return syncTestResponse(400, api.Object{})
 					}
-					cursor := str(in["cursor"])
+					cursor := api.Str(in["cursor"])
 					cursors = append(cursors, cursor)
 					p, ok := tc.pages[cursor]
 					if !ok {
 						t.Errorf("unexpected cursor %q", cursor)
-						return syncTestResponse(400, object{})
+						return syncTestResponse(400, api.Object{})
 					}
-					updates := []object{}
+					updates := []api.Object{}
 					for _, id := range p.ids {
-						updates = append(updates, object{"id": id})
+						updates = append(updates, api.Object{"id": id})
 					}
-					return syncTestResponse(200, object{"updates": updates, "next_cursor": p.next})
+					return syncTestResponse(200, api.Object{"updates": updates, "next_cursor": p.next})
 				case "/v1/sync/pull":
-					items := []object{}
-					for _, value := range arr(in["ids"]) {
-						id := str(value)
-						var data object
+					items := []api.Object{}
+					for _, value := range api.Arr(in["ids"]) {
+						id := api.Str(value)
+						var data api.Object
 						switch in["scope"] {
 						case "project":
 							if id != "project-main" {
 								t.Errorf("unexpected project %q", id)
 							}
-							data = object{"name": "New project"}
+							data = api.Object{"name": "New project"}
 						case "project_document":
 							doc, ok := strings.CutPrefix(id, "project-main/")
 							if !ok {
 								t.Errorf("pulled another project's document %q", id)
-								return syncTestResponse(409, object{"code": "KEY_MISMATCH"})
+								return syncTestResponse(409, api.Object{"code": "KEY_MISMATCH"})
 							}
 							pulled = append(pulled, doc)
-							data = object{"filename": doc + ".txt", "content": "Project context"}
+							data = api.Object{"filename": doc + ".txt", "content": "Project context"}
 						default:
 							t.Errorf("unexpected pull scope %v", in["scope"])
-							return syncTestResponse(400, object{})
+							return syncTestResponse(400, api.Object{})
 						}
-						items = append(items, object{"id": id, "ok": true, "etag": "1", "plaintext": base64.StdEncoding.EncodeToString(raw(data))})
+						items = append(items, api.Object{"id": id, "ok": true, "etag": "1", "plaintext": base64.StdEncoding.EncodeToString(api.Raw(data))})
 					}
-					return syncTestResponse(200, object{"items": items})
+					return syncTestResponse(200, api.Object{"items": items})
 				default:
 					t.Errorf("unexpected sync path %q", r.URL.Path)
-					return syncTestResponse(404, object{})
+					return syncTestResponse(404, api.Object{})
 				}
 			})}}
-			response := postRoute(h, "/v1/projects/get", object{"id": "project-main", "key": key.base64()}, "alice")
+			response := postRoute(h, "/v1/projects/get", api.Object{"id": "project-main", "key": key.base64()}, "alice")
 			if response.Code != 200 {
 				t.Fatalf("open project: HTTP %d: %s", response.Code, response.Body.String())
 			}
@@ -145,14 +147,14 @@ func TestGetProjectLoadsDocumentsAcrossSyncPages(t *testing.T) {
 
 func TestSyncListPreservesChatProjectFilter(t *testing.T) {
 	client := &syncClient{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
-		var in object
+		var in api.Object
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			t.Error(err)
 		}
 		if r.URL.Path != "/v1/sync/list-status" || in["scope"] != "chat" || in["project_id"] != "project-main" || in["cursor"] != "before" || in["direction"] != "desc" {
 			t.Errorf("incorrect chat listing: path=%s request=%v", r.URL.Path, in)
 		}
-		return syncTestResponse(200, object{"updates": []object{}, "next_cursor": "after"})
+		return syncTestResponse(200, api.Object{"updates": []api.Object{}, "next_cursor": "after"})
 	})}}
 	page, err := client.list(context.Background(), &principal{ID: "alice", JWT: "clerk-alice"}, randomKey(), "chat", "before", "project-main", 50)
 	if err != nil || page.Next != "after" {
@@ -168,35 +170,35 @@ func TestListPullsInBatchesAndListsUnreadableRows(t *testing.T) {
 	batches, retried := []int{}, 0
 	client := &syncClient{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
 		if r.Header.Get("X-Sync-Protocol") != "3" {
-			return syncTestResponse(426, object{"code": "SYNC_PROTOCOL_UPGRADE_REQUIRED"})
+			return syncTestResponse(426, api.Object{"code": "SYNC_PROTOCOL_UPGRADE_REQUIRED"})
 		}
-		var in object
+		var in api.Object
 		json.NewDecoder(r.Body).Decode(&in)
 		if r.URL.Path == "/v1/sync/list-status" {
-			updates := []object{}
+			updates := []api.Object{}
 			for _, id := range ids {
-				updates = append(updates, object{"id": id})
+				updates = append(updates, api.Object{"id": id})
 			}
-			return syncTestResponse(200, object{"updates": updates})
+			return syncTestResponse(200, api.Object{"updates": updates})
 		}
-		requested := arr(in["ids"])
+		requested := api.Arr(in["ids"])
 		batches = append(batches, len(requested))
-		items := []object{}
+		items := []api.Object{}
 		for _, value := range requested {
-			id := str(value)
+			id := api.Str(value)
 			switch {
 			case id == "row-3":
-				items = append(items, object{"id": id, "ok": false, "code": "UNKNOWN_KEY", "key_id": "retired"})
+				items = append(items, api.Object{"id": id, "ok": false, "code": "UNKNOWN_KEY", "key_id": "retired"})
 			case id == "row-7" && retried == 0:
 				retried++
-				items = append(items, object{"id": id, "ok": false, "code": "NETWORK"})
+				items = append(items, api.Object{"id": id, "ok": false, "code": "NETWORK"})
 			case id == "row-busy":
-				items = append(items, object{"id": id, "ok": false, "code": "BUSY"})
+				items = append(items, api.Object{"id": id, "ok": false, "code": "BUSY"})
 			default:
-				items = append(items, object{"id": id, "ok": true, "etag": "1", "plaintext": base64.StdEncoding.EncodeToString(raw(object{"title": id}))})
+				items = append(items, api.Object{"id": id, "ok": true, "etag": "1", "plaintext": base64.StdEncoding.EncodeToString(api.Raw(api.Object{"title": id}))})
 			}
 		}
-		return syncTestResponse(200, object{"items": items})
+		return syncTestResponse(200, api.Object{"items": items})
 	})}}
 	page, err := client.list(context.Background(), &principal{ID: "alice", JWT: "jwt"}, randomKey(), "chat", "", "", 100)
 	if err != nil {
@@ -212,13 +214,13 @@ func TestListPullsInBatchesAndListsUnreadableRows(t *testing.T) {
 	if len(page.Rows) != pullBatch+4 || !slices.Contains(titles, "row-7") || slices.Contains(titles, "row-3") || !slices.Equal(slices.Sorted(maps.Keys(page.Unreadable)), []string{"row-3"}) {
 		t.Fatalf("rows %v, unreadable %v", titles, page.Unreadable)
 	}
-	if _, err := client.load(context.Background(), &principal{ID: "alice", JWT: "jwt"}, randomKey(), "chat", "row-3"); asAPIError(err).Code != "KEY_MISMATCH" {
+	if _, err := client.load(context.Background(), &principal{ID: "alice", JWT: "jwt"}, randomKey(), "chat", "row-3"); api.AsError(err).Code != "KEY_MISMATCH" {
 		t.Fatalf("loading an unreadable row: %v", err)
 	}
 	// Sync answered for the row with a code the harness does not know, not
 	// with a refusal of the request, so loading it may be tried again.
-	if _, err := client.load(context.Background(), &principal{ID: "alice", JWT: "jwt"}, randomKey(), "chat", "row-busy"); asAPIError(err).Action != actionRetry || asAPIError(err).Status != 0 {
-		t.Fatalf("loading a row sync could not read: %+v", asAPIError(err))
+	if _, err := client.load(context.Background(), &principal{ID: "alice", JWT: "jwt"}, randomKey(), "chat", "row-busy"); api.AsError(err).Action != api.ActionRetry || api.AsError(err).Status != 0 {
+		t.Fatalf("loading a row sync could not read: %+v", api.AsError(err))
 	}
 }
 
@@ -226,10 +228,10 @@ func TestListPullsInBatchesAndListsUnreadableRows(t *testing.T) {
 // open. Favorites cleanup may read the profile; deletion never opens the chat.
 func TestDeletionsLeaveTheWorkToSync(t *testing.T) {
 	h, _, key := testChatHarness(t, nil)
-	var requests []object
-	pages := map[string]object{"": {"updates": []object{{"id": "one"}, {"id": "sealed-to-a-retired-key"}}, "next_cursor": "more"}, "more": {"updates": []object{{"id": "two"}}}}
+	var requests []api.Object
+	pages := map[string]api.Object{"": {"updates": []api.Object{{"id": "one"}, {"id": "sealed-to-a-retired-key"}}, "next_cursor": "more"}, "more": {"updates": []api.Object{{"id": "two"}}}}
 	h.syncAPI = &syncClient{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
-		var in object
+		var in api.Object
 		json.NewDecoder(r.Body).Decode(&in)
 		in["path"] = r.URL.Path
 		requests = append(requests, in)
@@ -239,48 +241,48 @@ func TestDeletionsLeaveTheWorkToSync(t *testing.T) {
 				t.Fatalf("deletion opened a chat: %v", in)
 			}
 			requests = requests[:len(requests)-1]
-			return syncTestResponse(200, object{"items": []object{{"id": "profile", "ok": false, "code": "NOT_FOUND"}}})
+			return syncTestResponse(200, api.Object{"items": []api.Object{{"id": "profile", "ok": false, "code": "NOT_FOUND"}}})
 		case "/v1/sync/list-status":
-			return syncTestResponse(200, pages[str(in["cursor"])])
+			return syncTestResponse(200, pages[api.Str(in["cursor"])])
 		case "/v1/sync/delete-all-projects":
-			return syncTestResponse(200, object{"ok": true, "deleted": 4})
+			return syncTestResponse(200, api.Object{"ok": true, "deleted": 4})
 		case "/v1/sync/delete":
-			return syncTestResponse(200, object{"ok": true})
+			return syncTestResponse(200, api.Object{"ok": true})
 		}
-		return syncTestResponse(404, object{"code": "NOT_FOUND"})
+		return syncTestResponse(404, api.Object{"code": "NOT_FOUND"})
 	})}}
 	h.storeRows = h.syncAPI
-	deleted := func(scope, id string) object {
-		return object{"path": "/v1/sync/delete", "scope": scope, "id": id, "key": key.base64(), "if_match": ""}
+	deleted := func(scope, id string) api.Object {
+		return api.Object{"path": "/v1/sync/delete", "scope": scope, "id": id, "key": key.base64(), "if_match": ""}
 	}
 	for _, tc := range []struct {
 		path string
-		in   object
-		want []object
+		in   api.Object
+		want []api.Object
 	}{
-		{"/v1/threads/delete", object{"id": "missing"}, []object{deleted("chat", "missing")}},
-		{"/v1/threads/delete", object{"id": "transferred", "revision": "copied-revision"}, []object{{"path": "/v1/sync/delete", "scope": "chat", "id": "transferred", "key": key.base64(), "if_match": "copied-revision"}}},
-		{"/v1/projects/delete", object{"id": "project-1"}, []object{deleted("project", "project-1")}},
-		{"/v1/threads/delete-all", object{"projectId": "project-1"}, []object{
+		{"/v1/threads/delete", api.Object{"id": "missing"}, []api.Object{deleted("chat", "missing")}},
+		{"/v1/threads/delete", api.Object{"id": "transferred", "revision": "copied-revision"}, []api.Object{{"path": "/v1/sync/delete", "scope": "chat", "id": "transferred", "key": key.base64(), "if_match": "copied-revision"}}},
+		{"/v1/projects/delete", api.Object{"id": "project-1"}, []api.Object{deleted("project", "project-1")}},
+		{"/v1/threads/delete-all", api.Object{"projectId": "project-1"}, []api.Object{
 			{"path": "/v1/sync/list-status", "scope": "chat", "project_id": "project-1", "cursor": "", "limit": float64(listStatusPage), "direction": "desc"},
 			{"path": "/v1/sync/list-status", "scope": "chat", "project_id": "project-1", "cursor": "more", "limit": float64(listStatusPage), "direction": "desc"},
 			deleted("chat", "one"), deleted("chat", "sealed-to-a-retired-key"), deleted("chat", "two")}},
-		{"/v1/projects/delete-all", object{}, []object{{"path": "/v1/sync/delete-all-projects", "key": key.base64()}}},
+		{"/v1/projects/delete-all", api.Object{}, []api.Object{{"path": "/v1/sync/delete-all-projects", "key": key.base64()}}},
 	} {
 		requests = nil
 		tc.in["key"] = key.base64()
 		w := postRoute(h, tc.path, tc.in, "alice")
 		for _, request := range requests {
-			if str(request["idempotency_key"]) == "" && request["path"] != "/v1/sync/list-status" {
+			if api.Str(request["idempotency_key"]) == "" && request["path"] != "/v1/sync/list-status" {
 				t.Fatalf("%s: sync was asked %v without an idempotency key", tc.path, request)
 			}
 			delete(request, "idempotency_key")
 		}
-		if w.Code != 200 || !reflect.DeepEqual(decodeValue(raw(requests)), decodeValue(raw(tc.want))) {
+		if w.Code != 200 || !reflect.DeepEqual(decodeValue(api.Raw(requests)), decodeValue(api.Raw(tc.want))) {
 			t.Fatalf("%s: HTTP %d %s, sync was asked\n%v\nwant\n%v", tc.path, w.Code, w.Body.String(), requests, tc.want)
 		}
 	}
-	if w := postRoute(h, "/v1/threads/delete-all", object{"key": key.base64()}, ""); w.Code != 401 {
+	if w := postRoute(h, "/v1/threads/delete-all", api.Object{"key": key.base64()}, ""); w.Code != 401 {
 		t.Fatalf("anonymous bulk deletion accepted: %d", w.Code)
 	}
 }
@@ -290,11 +292,11 @@ func TestDeletionsLeaveTheWorkToSync(t *testing.T) {
 func TestStoredRowsNameTheirFormat(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	finishedRun(t, h, "/v1/threads/turn", sendInput(key))
-	if w := postRoute(h, "/v1/profile/update", object{"key": key.base64(), "patch": object{"nickname": "Sam"}}, "alice"); w.Code != 200 {
+	if w := postRoute(h, "/v1/profile/update", api.Object{"key": key.base64(), "patch": api.Object{"nickname": "Sam"}}, "alice"); w.Code != 200 {
 		t.Fatalf("profile: HTTP %d %s", w.Code, w.Body)
 	}
 	var project Project
-	if w := postRoute(h, "/v1/projects/create", object{"key": key.base64(), "name": "Trip"}, "alice"); w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &project) != nil {
+	if w := postRoute(h, "/v1/projects/create", api.Object{"key": key.base64(), "name": "Trip"}, "alice"); w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &project) != nil {
 		t.Fatalf("project: HTTP %d %s", w.Code, w.Body)
 	}
 	if w := uploadRoute(h, "/v1/projects/documents/upload", "notes.txt", []byte("Pack light"), map[string]string{"key": key.base64(), "projectId": project.ID}, "alice"); w.Code != 200 {
@@ -330,48 +332,48 @@ func TestStoredRowsNameTheirFormat(t *testing.T) {
 func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	p := &principal{ID: "alice"}
-	current := func(data object) {
+	current := func(data api.Object) {
 		data["recordVersion"], data["titleState"], data["model"], data["presetId"], data["pinned"], data["webSearchEnabled"] = recordVersion, "manual", "auto", nil, false, true
-		for _, message := range arr(data["messages"]) {
-			obj(message)["createdAt"] = "2026-01-01T00:00:00Z"
+		for _, message := range api.Arr(data["messages"]) {
+			api.Obj(message)["createdAt"] = "2026-01-01T00:00:00Z"
 		}
 	}
-	formats := map[string]func(object){
-		"legacy":  func(object) {},
+	formats := map[string]func(api.Object){
+		"legacy":  func(api.Object) {},
 		"current": current,
-		"later":   func(data object) { data["recordVersion"] = recordVersion + 1 },
-		"extra": func(data object) {
+		"later":   func(data api.Object) { data["recordVersion"] = recordVersion + 1 },
+		"extra": func(data api.Object) {
 			current(data)
 			data["mood"] = "sunny"
 		},
-		"incomplete": func(data object) {
+		"incomplete": func(data api.Object) {
 			current(data)
 			delete(data, "webSearchEnabled")
 		},
-		"nulled": func(data object) {
+		"nulled": func(data api.Object) {
 			current(data)
 			data["messages"] = nil
 		},
 	}
 	readable := map[string]bool{"legacy": true, "current": true}
 	refused := func(w *httptest.ResponseRecorder) bool {
-		e := obj(obj(decodeValue(w.Body.Bytes()))["error"])
+		e := api.Obj(api.Obj(decodeValue(w.Body.Bytes()))["error"])
 		return w.Code == http.StatusConflict && e["code"] == "RECORD_UNSUPPORTED" && e["action"] == "stop"
 	}
 	for format, edit := range formats {
 		storedThread(rows, "alice", format)
 		row := rows.rows[rowMapKey(p, "chat", format)]
-		editRow(&row, func(data object) {
+		editRow(&row, func(data api.Object) {
 			data["id"] = format
 			edit(data)
 		})
 		rows.rows[rowMapKey(p, "chat", format)] = row
-		w := postRoute(h, "/v1/threads/get", object{"key": key.base64(), "id": format}, "alice")
+		w := postRoute(h, "/v1/threads/get", api.Object{"key": key.base64(), "id": format}, "alice")
 		if readable[format] && w.Code != http.StatusOK || !readable[format] && !refused(w) {
 			t.Errorf("opening the %s chat: HTTP %d %s", format, w.Code, w.Body)
 		}
 		id := rowID()
-		thread := object{"id": id, "title": "On my device", "messages": []any{object{"id": "m1", "role": "user", "content": "hi"}}}
+		thread := api.Object{"id": id, "title": "On my device", "messages": []any{api.Object{"id": "m1", "role": "user", "content": "hi"}}}
 		edit(thread)
 		w = postRoute(h, "/v1/threads/turn", localInput(id, thread), "alice")
 		if readable[format] && w.Code != http.StatusOK || !readable[format] && !refused(w) {
@@ -381,7 +383,7 @@ func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 	var list struct {
 		Threads []threadSummary `json:"threads"`
 	}
-	json.Unmarshal(postRoute(h, "/v1/threads/list", object{"key": key.base64()}, "alice").Body.Bytes(), &list)
+	json.Unmarshal(postRoute(h, "/v1/threads/list", api.Object{"key": key.base64()}, "alice").Body.Bytes(), &list)
 	listed := []string{}
 	for _, thread := range list.Threads {
 		listed = append(listed, thread.ID)
@@ -389,16 +391,16 @@ func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 	if slices.Sort(listed); !slices.Equal(listed, []string{"current", "legacy"}) {
 		t.Errorf("the list holds %v", listed)
 	}
-	rows.rows[rowMapKey(p, "project", "later")] = storedRow{ID: "later", ETag: "1", Data: raw(object{"name": "Trip", "recordVersion": recordVersion + 1})}
-	if w := postRoute(h, "/v1/projects/get", object{"key": key.base64(), "id": "later"}, "alice"); !refused(w) {
+	rows.rows[rowMapKey(p, "project", "later")] = storedRow{ID: "later", ETag: "1", Data: api.Raw(api.Object{"name": "Trip", "recordVersion": recordVersion + 1})}
+	if w := postRoute(h, "/v1/projects/get", api.Object{"key": key.base64(), "id": "later"}, "alice"); !refused(w) {
 		t.Errorf("opening a project in a later format: HTTP %d %s", w.Code, w.Body)
 	}
 	trip := "trip"
-	rows.rows[rowMapKey(p, "project", trip)] = storedRow{ID: trip, ETag: "1", Data: raw(object{"name": "Trip"})}
-	for doc, data := range map[string]object{"notes": {"filename": "notes.md"}, "later": {"filename": "later.md", "recordVersion": recordVersion + 1}} {
-		rows.rows[rowMapKey(p, "project_document", trip+"/"+doc)] = storedRow{ID: trip + "/" + doc, ETag: "1", Data: raw(data), project: &trip, projectSet: true}
+	rows.rows[rowMapKey(p, "project", trip)] = storedRow{ID: trip, ETag: "1", Data: api.Raw(api.Object{"name": "Trip"})}
+	for doc, data := range map[string]api.Object{"notes": {"filename": "notes.md"}, "later": {"filename": "later.md", "recordVersion": recordVersion + 1}} {
+		rows.rows[rowMapKey(p, "project_document", trip+"/"+doc)] = storedRow{ID: trip + "/" + doc, ETag: "1", Data: api.Raw(data), project: &trip, projectSet: true}
 	}
-	if w := postRoute(h, "/v1/projects/get", object{"key": key.base64(), "id": trip}, "alice"); !refused(w) {
+	if w := postRoute(h, "/v1/projects/get", api.Object{"key": key.base64(), "id": trip}, "alice"); !refused(w) {
 		t.Errorf("opening a project with a document in a later format: HTTP %d %s", w.Code, w.Body)
 	}
 	storedThread(rows, "alice", "trip-chat")
@@ -408,15 +410,15 @@ func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 	if w := postRoute(h, "/v1/threads/turn", continueInput(key, "trip-chat"), "alice"); !refused(w) {
 		t.Errorf("a turn in a project with a document in a later format: HTTP %d %s", w.Code, w.Body)
 	}
-	w := archiveRoute(h, "/v1/export", "alice", optionsPart(object{"format": "native", "key": key.base64()}))
+	w := archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "native", "key": key.base64()}))
 	files, _ := unzipped(t, w.Body.Bytes())
 	var manifest backupManifest
 	json.Unmarshal(files[manifestPath], &manifest)
 	if left := (backupOmission{Kind: "project_document", SourceID: "later", ParentSourceID: trip, Category: "invalid", Reason: "row_unreadable"}); w.Code != http.StatusOK || manifest.Counts.ProjectDocuments != 1 || !slices.Contains(manifest.Omissions, left) {
 		t.Errorf("backing up a project with a document in a later format: HTTP %d %+v", w.Code, manifest)
 	}
-	rows.rows[rowMapKey(p, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: raw(object{"nickname": "Sam", "recordVersion": recordVersion + 1})}
-	if w := postRoute(h, "/v1/profile/get", object{"key": key.base64()}, "alice"); !refused(w) {
+	rows.rows[rowMapKey(p, "profile", "profile")] = storedRow{ID: "profile", ETag: "1", Data: api.Raw(api.Object{"nickname": "Sam", "recordVersion": recordVersion + 1})}
+	if w := postRoute(h, "/v1/profile/get", api.Object{"key": key.base64()}, "alice"); !refused(w) {
 		t.Errorf("opening a profile in a later format: HTTP %d %s", w.Code, w.Body)
 	}
 }
@@ -443,19 +445,19 @@ func TestADocumentSyncCannotOpenIsNeverLeftOutUnsaid(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	p := &principal{ID: "alice"}
 	trip := "trip"
-	rows.rows[rowMapKey(p, "project", trip)] = storedRow{ID: trip, ETag: "1", Data: raw(object{"name": "Trip"})}
+	rows.rows[rowMapKey(p, "project", trip)] = storedRow{ID: trip, ETag: "1", Data: api.Raw(api.Object{"name": "Trip"})}
 	doc := func(id, filename string) storedRow {
-		return storedRow{ID: trip + "/" + id, ETag: "1", Data: raw(object{"filename": filename}), project: &trip, projectSet: true}
+		return storedRow{ID: trip + "/" + id, ETag: "1", Data: api.Raw(api.Object{"filename": filename}), project: &trip, projectSet: true}
 	}
 	h.storeRows = &pagedDocuments{memoryRows: rows, pages: []rowPage{
 		{Rows: []storedRow{doc("notes", "draft.md"), doc("map", "map.md")}, Next: "1"},
-		{Rows: []storedRow{doc("notes", "notes.md")}, Unreadable: map[string]error{trip + "/map": apiErr(409, "KEY_MISMATCH", "sealed to another key")}},
+		{Rows: []storedRow{doc("notes", "notes.md")}, Unreadable: map[string]error{trip + "/map": api.Err(409, "KEY_MISMATCH", "sealed to another key")}},
 	}}
-	w := postRoute(h, "/v1/projects/get", object{"key": key.base64(), "id": trip}, "alice")
-	if e := obj(obj(decodeValue(w.Body.Bytes()))["error"]); w.Code != http.StatusConflict || e["code"] != "KEY_MISMATCH" || e["action"] != "unlock" {
+	w := postRoute(h, "/v1/projects/get", api.Object{"key": key.base64(), "id": trip}, "alice")
+	if e := api.Obj(api.Obj(decodeValue(w.Body.Bytes()))["error"]); w.Code != http.StatusConflict || e["code"] != "KEY_MISMATCH" || e["action"] != "unlock" {
 		t.Errorf("opening the project: HTTP %d %s", w.Code, w.Body)
 	}
-	w = archiveRoute(h, "/v1/export", "alice", optionsPart(object{"format": "native", "key": key.base64()}))
+	w = archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "native", "key": key.base64()}))
 	files, _ := unzipped(t, w.Body.Bytes())
 	var manifest backupManifest
 	json.Unmarshal(files[manifestPath], &manifest)

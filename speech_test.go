@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 func TestSpeechStreamsTheRoutersAudio(t *testing.T) {
@@ -25,7 +27,7 @@ func TestSpeechStreamsTheRoutersAudio(t *testing.T) {
 	h := routerHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		json.NewDecoder(r.Body).Decode(&body)
-		got.Store(object{"path": r.URL.Path, "auth": r.Header.Get("Authorization"), "body": body})
+		got.Store(api.Object{"path": r.URL.Path, "auth": r.Header.Get("Authorization"), "body": body})
 		w.Header().Set("Content-Type", "audio/pcm")
 		w.Write(pcm[:2])
 		w.(http.Flusher).Flush()
@@ -33,16 +35,16 @@ func TestSpeechStreamsTheRoutersAudio(t *testing.T) {
 	})
 	for _, tc := range []struct {
 		user, auth string
-		in         object
+		in         api.Object
 	}{
-		{"", "Bearer free_anonymous-key", object{"text": "  Hello there.  "}},
-		{"alice", "Bearer " + chatTokenOf("alice"), object{"text": "Hello there."}},
+		{"", "Bearer free_anonymous-key", api.Object{"text": "  Hello there.  "}},
+		{"alice", "Bearer " + chatTokenOf("alice"), api.Object{"text": "Hello there."}},
 	} {
 		response := postRoute(h, "/v1/speech", tc.in, tc.user)
 		if response.Code != 200 || response.Header().Get("Content-Type") != "audio/pcm" || response.Header().Get("Cache-Control") != "no-store" || !bytes.Equal(response.Body.Bytes(), pcm) {
 			t.Fatalf("HTTP %d %q: %x", response.Code, response.Header().Get("Content-Type"), response.Body.Bytes())
 		}
-		want := object{"path": "/v1/audio/speech", "auth": tc.auth, "body": map[string]any{"model": "qwen3-tts", "voice": speechVoice, "instructions": speechInstructions, "input": "Hello there.", "response_format": "pcm", "stream_format": "audio"}}
+		want := api.Object{"path": "/v1/audio/speech", "auth": tc.auth, "body": map[string]any{"model": "qwen3-tts", "voice": speechVoice, "instructions": speechInstructions, "input": "Hello there.", "response_format": "pcm", "stream_format": "audio"}}
 		if !reflect.DeepEqual(got.Load(), want) {
 			t.Fatalf("router got %v, want %v", got.Load(), want)
 		}
@@ -50,7 +52,7 @@ func TestSpeechStreamsTheRoutersAudio(t *testing.T) {
 	var session struct {
 		Features map[string]bool `json:"features"`
 	}
-	json.Unmarshal(postRoute(h, "/v1/session", object{}, "").Body.Bytes(), &session)
+	json.Unmarshal(postRoute(h, "/v1/session", api.Object{}, "").Body.Bytes(), &session)
 	if !session.Features["speech"] {
 		t.Fatal("the session does not advertise speech")
 	}
@@ -64,24 +66,24 @@ func TestSpeechRefusesWhatTheClientWouldNotSend(t *testing.T) {
 		w.Write([]byte{0, 0})
 	})
 	for _, tc := range []struct {
-		in   object
+		in   api.Object
 		want int
 	}{
-		{object{"text": strings.Repeat("a", maxSpeechText+1)}, 413},
-		{object{"text": " \n "}, 400},
-		{object{}, 400},
-		{object{"text": 42}, 400},
-		{object{"messageId": "m1"}, 400},
-		{object{"threadId": "chat-1", "messageId": "m1", "key": randomKey().base64()}, 401},
-		{object{"threadId": "chat-1", "messageId": "m1", "local": true}, 400},
-		{object{"threadId": "chat-1", "messageId": "m9", "local": true, "thread": priorThread()}, 404},
-		{object{"threadId": "chat-1", "messageId": "m2", "local": true, "thread": object{"messages": []any{object{"id": "m2", "role": "assistant", "content": "```\ncode\n```"}}}}, 400},
+		{api.Object{"text": strings.Repeat("a", maxSpeechText+1)}, 413},
+		{api.Object{"text": " \n "}, 400},
+		{api.Object{}, 400},
+		{api.Object{"text": 42}, 400},
+		{api.Object{"messageId": "m1"}, 400},
+		{api.Object{"threadId": "chat-1", "messageId": "m1", "key": randomKey().base64()}, 401},
+		{api.Object{"threadId": "chat-1", "messageId": "m1", "local": true}, 400},
+		{api.Object{"threadId": "chat-1", "messageId": "m9", "local": true, "thread": priorThread()}, 404},
+		{api.Object{"threadId": "chat-1", "messageId": "m2", "local": true, "thread": api.Object{"messages": []any{api.Object{"id": "m2", "role": "assistant", "content": "```\ncode\n```"}}}}, 400},
 	} {
 		if response := postRoute(h, "/v1/speech", tc.in, ""); response.Code != tc.want {
 			t.Errorf("%v: HTTP %d, want %d", tc.in, response.Code, tc.want)
 		}
 	}
-	r := httptest.NewRequest("POST", "/v1/speech", bytes.NewReader(raw(object{"text": "Hello"})))
+	r := httptest.NewRequest("POST", "/v1/speech", bytes.NewReader(api.Raw(api.Object{"text": "Hello"})))
 	w := httptest.NewRecorder()
 	h.routes().ServeHTTP(w, r)
 	if w.Code != 401 || calls.Load() != 0 {
@@ -108,9 +110,9 @@ func TestSpeechPassesOnRefusalsWithTheirDelay(t *testing.T) {
 				w.WriteHeader(tc.status)
 				io.WriteString(w, tc.body)
 			})
-			response := postRoute(h, "/v1/speech", object{"text": "Hello"}, "")
+			response := postRoute(h, "/v1/speech", api.Object{"text": "Hello"}, "")
 			var body struct {
-				Error apiError `json:"error"`
+				Error api.Error `json:"error"`
 			}
 			json.Unmarshal(response.Body.Bytes(), &body)
 			if response.Code != tc.want || body.Error.Code != tc.code || response.Header().Get("Retry-After") != tc.retryAfter {
@@ -158,9 +160,9 @@ func TestAMessageIsReadAloudInOrderWithoutItsCode(t *testing.T) {
 	for i := 1; i <= 12; i++ {
 		fmt.Fprintf(&long, "Sentence %d walks through the plan in enough detail to fill a piece. ", i)
 	}
-	thread := object{"title": "Trip", "messages": []any{object{"id": "q", "role": "user", "content": "Plan it"}, object{"id": "short", "role": "assistant", "content": reply}, object{"id": "long", "role": "assistant", "content": long.String()}}}
-	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: raw(thread)}
-	read := func(in object, user string) (string, []string) {
+	thread := api.Object{"title": "Trip", "messages": []any{api.Object{"id": "q", "role": "user", "content": "Plan it"}, api.Object{"id": "short", "role": "assistant", "content": reply}, api.Object{"id": "long", "role": "assistant", "content": long.String()}}}
+	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat-1")] = storedRow{ID: "chat-1", ETag: "1", Data: api.Raw(thread)}
+	read := func(in api.Object, user string) (string, []string) {
 		t.Helper()
 		mu.Lock()
 		asked = nil
@@ -175,15 +177,15 @@ func TestAMessageIsReadAloudInOrderWithoutItsCode(t *testing.T) {
 	}
 	// Text a client selected reads by the same rules, without an account.
 	for _, tc := range []struct {
-		in   object
+		in   api.Object
 		user string
-	}{{object{"key": key.base64(), "threadId": "chat-1", "messageId": "short"}, "alice"}, {object{"text": reply}, ""}} {
+	}{{api.Object{"key": key.base64(), "threadId": "chat-1", "messageId": "short"}, "alice"}, {api.Object{"text": reply}, ""}} {
 		audio, pieces := read(tc.in, tc.user)
 		if want := "Trip plan\nPack light, see the guide and . More at . Use rsync and compute x^2 steps."; len(pieces) != 1 || pieces[0] != want || audio != "<"+want+">" {
 			t.Fatalf("%v was read as %q", tc.in, pieces)
 		}
 	}
-	for _, in := range []object{{"key": key.base64(), "threadId": "chat-1", "messageId": "long"}, {"text": long.String()}} {
+	for _, in := range []api.Object{{"key": key.base64(), "threadId": "chat-1", "messageId": "long"}, {"text": long.String()}} {
 		audio, pieces := read(in, "alice")
 		slices.SortFunc(pieces, func(a, b string) int { return cmp.Compare(leadingNumber(a), leadingNumber(b)) })
 		inOrder := ""
@@ -195,7 +197,7 @@ func TestAMessageIsReadAloudInOrderWithoutItsCode(t *testing.T) {
 		}
 	}
 	// A device chat's message reads the same, without an account.
-	if device, _ := read(object{"local": true, "threadId": "chat-1", "thread": thread, "messageId": "short"}, ""); !strings.HasPrefix(device, "<Trip plan\n") {
+	if device, _ := read(api.Object{"local": true, "threadId": "chat-1", "thread": thread, "messageId": "short"}, ""); !strings.HasPrefix(device, "<Trip plan\n") {
 		t.Fatalf("the device chat's reply was read as %q", device)
 	}
 }
@@ -221,7 +223,7 @@ func TestSpeechThatFailsPartwayEndsIncomplete(t *testing.T) {
 	for i := 1; i <= 12; i++ {
 		fmt.Fprintf(&long, "Sentence %d walks through the plan in enough detail to fill a piece. ", i)
 	}
-	req, _ := http.NewRequest("POST", server.URL+"/v1/speech", bytes.NewReader(raw(object{"text": long.String()})))
+	req, _ := http.NewRequest("POST", server.URL+"/v1/speech", bytes.NewReader(api.Raw(api.Object{"text": long.String()})))
 	signIn(req, "alice")
 	resp, err := server.Client().Do(req)
 	if err != nil {

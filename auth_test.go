@@ -20,14 +20,15 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 func TestAnonymousInferenceValidatesTheClientKey(t *testing.T) {
 	var calls atomic.Int32
 	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
-		var body object
-		if r.Method != http.MethodPost || r.URL.Path != "/api/shim/validate-key" || json.NewDecoder(r.Body).Decode(&body) != nil || str(body["api_key"]) != "free_client-key" || body["include_rate_limit"] != true {
+		var body api.Object
+		if r.Method != http.MethodPost || r.URL.Path != "/api/shim/validate-key" || json.NewDecoder(r.Body).Decode(&body) != nil || api.Str(body["api_key"]) != "free_client-key" || body["include_rate_limit"] != true {
 			t.Error("did not validate the supplied key using the existing endpoint")
 			w.WriteHeader(http.StatusBadRequest)
 			return
@@ -65,7 +66,7 @@ func TestAnonymousInferenceValidatesTheClientKey(t *testing.T) {
 	if _, err := a.authenticate(r, true); err == nil {
 		t.Fatal("invalid Clerk session downgraded to anonymous")
 	}
-	if _, err := a.inference(context.Background(), &principal{Anonymous: true}); asAPIError(err).HTTP != 401 || calls.Load() != 2 {
+	if _, err := a.inference(context.Background(), &principal{Anonymous: true}); api.AsError(err).HTTP != 401 || calls.Load() != 2 {
 		t.Fatal("missing client key reached controlplane")
 	}
 }
@@ -74,14 +75,14 @@ func TestSessionReadsFreeQuotaOncePerRequest(t *testing.T) {
 	h, _, _ := testChatHarness(t, nil)
 	var calls atomic.Int32
 	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(object{"ok": true, "rate_limit": object{"max_requests": 10, "remaining": 10 - calls.Add(1)}})
+		json.NewEncoder(w).Encode(api.Object{"ok": true, "rate_limit": api.Object{"max_requests": 10, "remaining": 10 - calls.Add(1)}})
 	}))
 	defer cp.Close()
 	h.auth.client, h.auth.controlplane = cp.Client(), cp.URL
 	for _, remaining := range []int{9, 8} {
-		w := postRoute(h, "/v1/session", object{}, "")
+		w := postRoute(h, "/v1/session", api.Object{}, "")
 		var session struct {
-			RateLimit rateLimit `json:"rateLimit"`
+			RateLimit api.RateLimit `json:"rateLimit"`
 		}
 		if err := json.Unmarshal(w.Body.Bytes(), &session); err != nil || w.Code != 200 || session.RateLimit.Remaining == nil || *session.RateLimit.Remaining != remaining {
 			t.Fatalf("session quota: HTTP %d %s", w.Code, w.Body.String())
@@ -156,9 +157,9 @@ func TestAnonymousKeyValidationRefusesWorkBeforeAllocatingThreads(t *testing.T) 
 			}))
 			defer cp.Close()
 			h.auth.client, h.auth.controlplane = cp.Client(), cp.URL
-			response := postRoute(h, "/v1/threads/turn", localInput("", object{}), "")
+			response := postRoute(h, "/v1/threads/turn", localInput("", api.Object{}), "")
 			var refused struct {
-				Error apiError `json:"error"`
+				Error api.Error `json:"error"`
 			}
 			json.Unmarshal(response.Body.Bytes(), &refused)
 			threads, runs, requests := liveCount(h)
@@ -166,10 +167,10 @@ func TestAnonymousKeyValidationRefusesWorkBeforeAllocatingThreads(t *testing.T) 
 				t.Fatalf("validation did not refuse work: HTTP %d %s, models=%d, rows=%d, live=%d/%d/%d", response.Code, response.Body.String(), modelCalls.Load(), rows.calls, threads, runs, requests)
 			}
 			if tc.status == 429 {
-				session := postRoute(h, "/v1/session", object{}, "")
-				var body object
+				session := postRoute(h, "/v1/session", api.Object{}, "")
+				var body api.Object
 				json.Unmarshal(session.Body.Bytes(), &body)
-				if session.Code != 200 || str(obj(body["rateLimit"])["kind"]) != "free_daily" || integer(obj(body["rateLimit"])["remaining"]) != 0 {
+				if session.Code != 200 || api.Str(api.Obj(body["rateLimit"])["kind"]) != "free_daily" || api.Int(api.Obj(body["rateLimit"])["remaining"]) != 0 {
 					t.Fatal("exhausted session cannot display its quota")
 				}
 			}
@@ -181,7 +182,7 @@ func TestAnonymousReconnectUsesKeyPossessionInsteadOfIP(t *testing.T) {
 	model, release := heldModel()
 	h, _, _ := testChatHarness(t, model)
 	t.Cleanup(release)
-	run, err := h.acceptTurn(context.Background(), &principal{Anonymous: true, AnonymousID: hashHex([]byte("free_anonymous-key")), InferenceKey: "free_anonymous-key"}, inferenceCredential{Key: "free_anonymous-key"}, contentKey{}, requestOf[turnRequest](localInput("", object{})))
+	run, err := h.acceptTurn(context.Background(), &principal{Anonymous: true, AnonymousID: hashHex([]byte("free_anonymous-key")), InferenceKey: "free_anonymous-key"}, inferenceCredential{Key: "free_anonymous-key"}, contentKey{}, requestOf[turnRequest](localInput("", api.Object{})))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +198,7 @@ func TestAnonymousReconnectUsesKeyPossessionInsteadOfIP(t *testing.T) {
 		{"free_other-client", "192.0.2.1:1234", 401},
 		{"", "192.0.2.1:1234", 401},
 	} {
-		body := raw(object{"threadId": run.thread.id, "runId": run.log.id})
+		body := api.Raw(api.Object{"threadId": run.thread.id, "runId": run.log.id})
 		req := httptest.NewRequest(http.MethodPost, "/v1/threads/follow", bytes.NewReader(body))
 		req.RemoteAddr = tc.ip
 		if tc.key != "" {
@@ -225,11 +226,11 @@ func TestAnonymousRunThatExhaustsItsQuotaReportsNoneLeft(t *testing.T) {
 		w.WriteHeader(http.StatusTooManyRequests)
 		io.WriteString(w, `{"error":{"message":"Daily request limit reached.","type":"insufficient_quota","code":"insufficient_quota"}}`)
 	})
-	events := eventsIn(t, postRoute(h, "/v1/threads/turn", localInput("", object{}), ""))
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", localInput("", api.Object{}), ""))
 	var limit json.RawMessage
 	for _, e := range events {
 		if e.Type == "STATE_SNAPSHOT" {
-			limit = raw(obj(e.Snapshot)["rateLimit"])
+			limit = api.Raw(api.Obj(e.Snapshot)["rateLimit"])
 		}
 	}
 	if last := events[len(events)-1]; last.Code != "QUOTA_EXHAUSTED" || string(limit) != `{"kind":"free_daily","maxRequests":0,"remaining":0}` {
@@ -260,7 +261,7 @@ func TestOversizedBodiesAreRefusedAsTooLarge(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.routes().ServeHTTP(w, r)
 	var refused struct {
-		Error apiError `json:"error"`
+		Error api.Error `json:"error"`
 	}
 	json.Unmarshal(w.Body.Bytes(), &refused)
 	if w.Code != http.StatusRequestEntityTooLarge || refused.Error.Code != "PAYLOAD_TOO_LARGE" {
@@ -275,7 +276,7 @@ func TestOnlyChatTokenChatsAreScreened(t *testing.T) {
 		t.Run(strconv.FormatBool(subscribed), func(t *testing.T) {
 			h, _, key := testChatHarness(t, nil)
 			drained := screenedBy(t, h)
-			r := httptest.NewRequest(http.MethodPost, "/v1/threads/turn", bytes.NewReader(raw(sendInput(key))))
+			r := httptest.NewRequest(http.MethodPost, "/v1/threads/turn", bytes.NewReader(api.Raw(sendInput(key))))
 			signIn(r, "alice")
 			if !subscribed {
 				r.Header.Set(inferenceKeyHeader, "free_anonymous-key")
@@ -308,7 +309,7 @@ func TestChatTokensAreVerified(t *testing.T) {
 	forged, _ := jwt.NewWithClaims(jwt.SigningMethodEdDSA, jwt.MapClaims{"iss": testChatIssuer, "sub": "alice", "aud": chatTokenAudience, "client_id": chatTokenClient, "scope": chatTokenScope,
 		"product": chatTokenProduct, "iat": time.Now().Unix(), "exp": time.Now().Add(time.Hour).Unix(), "jti": "forged"}).SignedString(forger)
 	turn := func(credential string) *httptest.ResponseRecorder {
-		r := httptest.NewRequest(http.MethodPost, "/v1/threads/turn", bytes.NewReader(raw(sendInput(key))))
+		r := httptest.NewRequest(http.MethodPost, "/v1/threads/turn", bytes.NewReader(api.Raw(sendInput(key))))
 		r.Header.Set("Authorization", "Bearer clerk-alice")
 		r.Header.Set(inferenceKeyHeader, credential)
 		w := httptest.NewRecorder()
@@ -349,7 +350,7 @@ func TestASignedInSessionOpensWithoutChatAccess(t *testing.T) {
 	h.routes().ServeHTTP(w, r)
 	var session struct {
 		User      sessionUser `json:"user"`
-		RateLimit object      `json:"rateLimit"`
+		RateLimit api.Object  `json:"rateLimit"`
 	}
 	json.Unmarshal(w.Body.Bytes(), &session)
 	if w.Code != 200 || session.User.ID != "alice" || session.RateLimit["kind"] != nil {
@@ -376,15 +377,15 @@ func TestASignedOutCallersQuotaComesFromItsKey(t *testing.T) {
 		}
 	})
 	router := routerHarness(t, func(w http.ResponseWriter, r *http.Request) { refusing(w) })
-	resets := nowUTC().Add(5 * time.Hour).Format(time.RFC3339)
+	resets := api.Now().Add(5 * time.Hour).Format(time.RFC3339)
 	cp := httptest.NewServer(unflagged(func(w http.ResponseWriter, r *http.Request) {
-		var in object
+		var in api.Object
 		json.NewDecoder(r.Body).Decode(&in)
 		if in["include_rate_limit"] != true {
 			io.WriteString(w, "OK")
 			return
 		}
-		json.NewEncoder(w).Encode(object{"ok": true, "rate_limit": object{"max_requests": 10, "remaining": 7, "max_input_tokens": 1000, "input_tokens_used": 100, "input_tokens_remaining": 900,
+		json.NewEncoder(w).Encode(api.Object{"ok": true, "rate_limit": api.Object{"max_requests": 10, "remaining": 7, "max_input_tokens": 1000, "input_tokens_used": 100, "input_tokens_remaining": 900,
 			"max_output_tokens": 500, "output_tokens_used": 0, "output_tokens_remaining": 500, "resets_at": resets}})
 	}))
 	defer cp.Close()
@@ -394,39 +395,39 @@ func TestASignedOutCallersQuotaComesFromItsKey(t *testing.T) {
 	var session struct {
 		RateLimit json.RawMessage `json:"rateLimit"`
 	}
-	json.Unmarshal(postRoute(h, "/v1/session", object{}, "").Body.Bytes(), &session)
+	json.Unmarshal(postRoute(h, "/v1/session", api.Object{}, "").Body.Bytes(), &session)
 	if want := `{"kind":"free_daily","maxRequests":10,"remaining":7,"inputTokens":{"max":1000,"used":100,"remaining":900},"outputTokens":{"max":500,"used":0,"remaining":500},"resetsAt":"` + resets + `"}`; string(session.RateLimit) != want {
 		t.Fatalf("the session reports %s, want %s", session.RateLimit, want)
 	}
-	reported := func(e event) rateLimit {
+	reported := func(e event) api.RateLimit {
 		var metadata runMetadata
 		json.Unmarshal(e.Metadata, &metadata)
-		return valueOr(metadata.RateLimit, rateLimit{})
+		return valueOr(metadata.RateLimit, api.RateLimit{})
 	}
-	events := eventsIn(t, postRoute(h, "/v1/threads/turn", localInput("", object{}), ""))
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", localInput("", api.Object{}), ""))
 	want := `{"kind":"free_daily","maxRequests":10,"remaining":6,"inputTokens":{"max":1000,"used":112,"remaining":888},"outputTokens":{"max":500,"used":3,"remaining":497},"resetsAt":"` + resets + `"}`
-	if last := events[len(events)-1]; last.Type != "RUN_FINISHED" || string(raw(reported(last))) != want {
-		t.Fatalf("the run ended %s reporting %s, want %s", last.Type, raw(reported(last)), want)
+	if last := events[len(events)-1]; last.Type != "RUN_FINISHED" || string(api.Raw(reported(last))) != want {
+		t.Fatalf("the run ended %s reporting %s, want %s", last.Type, api.Raw(reported(last)), want)
 	}
 	refuse.Store(true)
-	events = eventsIn(t, postRoute(h, "/v1/threads/turn", localInput("", object{}), ""))
+	events = eventsIn(t, postRoute(h, "/v1/threads/turn", localInput("", api.Object{}), ""))
 	spent := `{"kind":"free_daily","maxRequests":10,"remaining":0,"inputTokens":{"max":1000,"used":100,"remaining":900},"outputTokens":{"max":500,"used":0,"remaining":500},"resetsAt":"` + resets + `"}`
-	if last := events[len(events)-1]; last.Code != "QUOTA_EXHAUSTED" || string(raw(reported(last))) != spent {
-		t.Fatalf("the refused run ended %s reporting %s", last.Code, raw(reported(last)))
+	if last := events[len(events)-1]; last.Code != "QUOTA_EXHAUSTED" || string(api.Raw(reported(last))) != spent {
+		t.Fatalf("the refused run ended %s reporting %s", last.Code, api.Raw(reported(last)))
 	}
 	// A refusal before a run starts, as when a model is asked to describe an
 	// image, or from another service reports the same quota.
 	var photo bytes.Buffer
 	png.Encode(&photo, image.NewRGBA(image.Rect(0, 0, 4, 4)))
 	h.offer.models = append(h.offer.models, &model{name: "gemma4-31b", vision: true, context: 8192, client: h.offer.models[0].client})
-	described := localInput("", object{})
-	described["attachments"] = []any{object{"id": "att_photo", "kind": "image", "fileName": "photo.png", "mimeType": "image/png", "base64": base64.StdEncoding.EncodeToString(photo.Bytes())}}
+	described := localInput("", api.Object{})
+	described["attachments"] = []any{api.Object{"id": "att_photo", "kind": "image", "fileName": "photo.png", "mimeType": "image/png", "base64": base64.StdEncoding.EncodeToString(photo.Bytes())}}
 	for _, w := range []*httptest.ResponseRecorder{postRoute(h, "/v1/threads/turn", described, ""), uploadRoute(router, "/v1/transcriptions", "memo.mp3", []byte("ID3 audio"), nil, "")} {
 		var refused struct {
-			Error apiError `json:"error"`
+			Error api.Error `json:"error"`
 		}
 		json.Unmarshal(w.Body.Bytes(), &refused)
-		if w.Code != 429 || string(raw(refused.Error.RateLimit)) != spent {
+		if w.Code != 429 || string(api.Raw(refused.Error.RateLimit)) != spent {
 			t.Fatalf("a refusal: HTTP %d %s", w.Code, w.Body.String())
 		}
 	}

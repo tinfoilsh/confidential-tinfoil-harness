@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 // A web search or page fetch shows its query or page, its status and its
@@ -15,7 +16,7 @@ func TestSearchesShowWhatTheyFoundAsTheyRun(t *testing.T) {
 		if name == "fetch" {
 			return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: "timeout"}}}, nil
 		}
-		return nil, object{"results": []object{{"title": "A", "url": "https://a.test/1", "content": "alpha", "author": "Ann"}}}
+		return nil, api.Object{"results": []api.Object{{"title": "A", "url": "https://a.test/1", "content": "alpha", "author": "Ann"}}}
 	})
 	h, rows, key := testChatHarness(t, toolTurns(toolCallChunk(0, "s", "web_search", `{"query":"cats"}`)+toolCallChunk(1, "f", "web_fetch", `{"urls":["https://b.test"]}`), nil))
 	events := finishedRun(t, h, "/v1/threads/turn", searchInput(key))

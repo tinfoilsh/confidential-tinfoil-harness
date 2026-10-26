@@ -1,4 +1,4 @@
-package main
+package api
 
 type tokenBudget struct {
 	Max       int `json:"max"`
@@ -7,7 +7,7 @@ type tokenBudget struct {
 }
 
 // Only free keys count requests; a subscriber's hourly cap is in tokens.
-type rateLimit struct {
+type RateLimit struct {
 	Kind         any          `json:"kind"`
 	MaxRequests  *int         `json:"maxRequests,omitempty"`
 	Remaining    *int         `json:"remaining,omitempty"`
@@ -16,15 +16,15 @@ type rateLimit struct {
 	ResetsAt     string       `json:"resetsAt,omitempty"`
 }
 
-func (l rateLimit) exhausted() bool { return l.Remaining != nil && *l.Remaining <= 0 }
+func (l RateLimit) Exhausted() bool { return l.Remaining != nil && *l.Remaining <= 0 }
 
-func exhaustedLimit(kind string) rateLimit {
-	return rateLimit{Kind: kind, MaxRequests: new(0), Remaining: new(0)}
+func ExhaustedLimit(kind string) RateLimit {
+	return RateLimit{Kind: kind, MaxRequests: new(0), Remaining: new(0)}
 }
 
-// quota is the rate_limit object both credential exchanges answer with. A
+// Quota is the rate_limit object both credential exchanges answer with. A
 // missing or zero maximum leaves that dimension unlimited.
-type quota struct {
+type Quota struct {
 	MaxRequests     *int   `json:"max_requests"`
 	Remaining       *int   `json:"remaining"`
 	MaxInput        *int   `json:"max_input_tokens"`
@@ -36,8 +36,8 @@ type quota struct {
 	ResetsAt        string `json:"resets_at"`
 }
 
-func (q quota) limit(kind string) rateLimit {
-	l := rateLimit{Kind: kind, InputTokens: budget(q.MaxInput, q.InputUsed, q.InputRemaining), OutputTokens: budget(q.MaxOutput, q.OutputUsed, q.OutputRemaining), ResetsAt: q.ResetsAt}
+func (q Quota) Limit(kind string) RateLimit {
+	l := RateLimit{Kind: kind, InputTokens: budget(q.MaxInput, q.InputUsed, q.InputRemaining), OutputTokens: budget(q.MaxOutput, q.OutputUsed, q.OutputRemaining), ResetsAt: q.ResetsAt}
 	if q.MaxRequests != nil && *q.MaxRequests > 0 && q.Remaining != nil {
 		l.MaxRequests, l.Remaining = q.MaxRequests, q.Remaining
 	}
@@ -52,7 +52,7 @@ func budget(limit, used, remaining *int) *tokenBudget {
 }
 
 // debited is the quota after a run's request and the tokens it spent.
-func (l rateLimit) debited(spent usage) rateLimit {
+func (l RateLimit) Debited(spent Usage) RateLimit {
 	if l.Remaining != nil {
 		l.Remaining = new(max(0, *l.Remaining-1))
 	}
@@ -62,7 +62,7 @@ func (l rateLimit) debited(spent usage) rateLimit {
 }
 
 // none is the quota with no request left.
-func (l rateLimit) none() rateLimit {
+func (l RateLimit) None() RateLimit {
 	if l.MaxRequests == nil {
 		l.MaxRequests = new(0)
 	}
@@ -78,7 +78,7 @@ func (b *tokenBudget) spend(tokens int64) *tokenBudget {
 	return &tokenBudget{Max: b.Max, Used: b.Used + int(tokens), Remaining: max(0, b.Remaining-int(tokens))}
 }
 
-type usage struct {
+type Usage struct {
 	Prompt     int64 `json:"prompt_tokens"`
 	Completion int64 `json:"completion_tokens"`
 	Total      int64 `json:"total_tokens"`

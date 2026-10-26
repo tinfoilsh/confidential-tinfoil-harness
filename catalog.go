@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 //go:embed widgets.json
@@ -91,12 +92,12 @@ var widgetCatalog = sync.OnceValue(func() []widget {
 })
 
 func (w widget) declaration() json.RawMessage {
-	return raw(object{"type": "function", "function": object{"name": w.Name, "description": w.Description, "parameters": w.Schema}})
+	return api.Raw(api.Object{"type": "function", "function": api.Object{"name": w.Name, "description": w.Description, "parameters": w.Schema}})
 }
 
 type chatCatalog struct {
-	Models                      []object
-	Deprecated                  []object
+	Models                      []api.Object
+	Deprecated                  []api.Object
 	Listed                      []string // every chat model the control plane lists, offered or not
 	Prompt, Rules, WidgetHeader string
 	EnabledWidgets              []string
@@ -126,7 +127,7 @@ func fetchConfig(ctx context.Context, client *http.Client, base, path string, ou
 func (h *harness) refreshCatalog(ctx context.Context) error {
 	h.refreshOffer(ctx)
 	client := &http.Client{Timeout: 15 * time.Second}
-	var models []object
+	var models []api.Object
 	if err := fetchConfig(ctx, client, h.controlplane, "/api/config/models", &models); err != nil {
 		return err
 	}
@@ -138,21 +139,21 @@ func (h *harness) refreshCatalog(ctx context.Context) error {
 	h.catalog.set(c)
 	return nil
 }
-func buildCatalog(config []object, models []*model) *chatCatalog {
+func buildCatalog(config []api.Object, models []*model) *chatCatalog {
 	prompt := builtInPrompt()
-	c := &chatCatalog{Prompt: prompt.SystemPrompt, Rules: prompt.Rules, WidgetHeader: prompt.GenUI.Header, EnabledWidgets: slices.Clone(prompt.GenUI.EnabledWidgets), Models: []object{}, Presets: builtInPresets()}
+	c := &chatCatalog{Prompt: prompt.SystemPrompt, Rules: prompt.Rules, WidgetHeader: prompt.GenUI.Header, EnabledWidgets: slices.Clone(prompt.GenUI.EnabledWidgets), Models: []api.Object{}, Presets: builtInPresets()}
 	var unpinned []string
 	for _, definition := range config {
-		if !boolean(definition["chat"], false) || str(definition["type"]) != "chat" {
+		if !api.Bool(definition["chat"], false) || api.Str(definition["type"]) != "chat" {
 			continue
 		}
-		name, repo := str(definition["modelName"]), str(definition["repo"])
+		name, repo := api.Str(definition["modelName"]), api.Str(definition["repo"])
 		c.Listed = append(c.Listed, name)
-		if boolean(definition["deprecated"], false) {
+		if api.Bool(definition["deprecated"], false) {
 			c.Deprecated = append(c.Deprecated, definition)
 			continue
 		}
-		configured := integer(obj(definition["chatConfig"])["contextWindowTokens"])
+		configured := api.Int(api.Obj(definition["chatConfig"])["contextWindowTokens"])
 		if configured > 0 && (c.Fallback == 0 || configured < c.Fallback) {
 			c.Fallback = configured
 		}
@@ -179,9 +180,9 @@ func buildCatalog(config []object, models []*model) *chatCatalog {
 	}
 	return c
 }
-func (c *chatCatalog) definition(name string) object {
+func (c *chatCatalog) definition(name string) api.Object {
 	for _, m := range c.Models {
-		if str(m["modelName"]) == name {
+		if api.Str(m["modelName"]) == name {
 			return m
 		}
 	}
@@ -190,13 +191,13 @@ func (c *chatCatalog) definition(name string) object {
 
 // displayName is what clients call a configured model, if anything.
 func (c *chatCatalog) displayName(name string) string {
-	return str(c.definition(name)["name"])
+	return api.Str(c.definition(name)["name"])
 }
 
 // vision reports whether a model reads images. The router gives an Auto turn
 // that carries images to a multimodal model.
 func (c *chatCatalog) vision(name string) bool {
-	return name == "auto" || boolean(c.definition(name)["multimodal"], false)
+	return name == "auto" || api.Bool(c.definition(name)["multimodal"], false)
 }
 
 // offers reports whether a chat may run on a model now.
@@ -210,8 +211,8 @@ func (c *chatCatalog) offers(name string) bool {
 
 // autoOnly reports whether a model is configured as not paid: it serves free
 // keys behind Auto, and no chat chooses it.
-func autoOnly(definition object) bool {
-	return !boolean(definition["paid"], true)
+func autoOnly(definition api.Object) bool {
+	return !api.Bool(definition["paid"], true)
 }
 
 // applyPreset files a chat under a prompt preset, or none, and takes the
@@ -292,7 +293,7 @@ func intelligence(level string) (int, error) {
 			return i * 20, nil
 		}
 	}
-	return 0, apiErr(400, "BAD_REQUEST", "Unknown Auto intelligence level")
+	return 0, api.Err(400, "BAD_REQUEST", "Unknown Auto intelligence level")
 }
 
 // modelConfig is what a client shows of a model the control plane configures.
@@ -355,7 +356,7 @@ func (c *chatCatalog) displayModels() []sessionModel {
 			continue
 		}
 		var config modelConfig
-		readLenient(raw(m), &config)
+		readLenient(api.Raw(m), &config)
 		display := sessionModel{ID: config.ModelName, Label: config.Name, ShortLabel: cmp.Or(config.NameShort, config.Name), Icon: config.Image, Description: config.ChatConfig.DescriptionShort,
 			Deprecated: config.Deprecated, Badges: []lifecycleBadge{}}
 		if reason := config.ChatConfig.ReasoningConfig; reason != nil {
@@ -396,23 +397,23 @@ var reasoningSetting = regexp.MustCompile(`^[a-z]{1,16}$`)
 
 // modelParams are the reasoning settings a model's configuration asks for:
 // whether it thinks and how hard, and nothing else.
-func modelParams(def object, thinking bool, effort string) object {
-	params := object{}
-	reason := obj(obj(def["chatConfig"])["reasoningConfig"])
+func modelParams(def api.Object, thinking bool, effort string) api.Object {
+	params := api.Object{}
+	reason := api.Obj(api.Obj(def["chatConfig"])["reasoningConfig"])
 	mode := "enable"
-	if boolean(reason["supportsToggle"], false) && !thinking {
+	if api.Bool(reason["supportsToggle"], false) && !thinking {
 		mode = "disable"
 	}
-	if effort == "" || !boolean(reason["supportsEffort"], false) {
+	if effort == "" || !api.Bool(reason["supportsEffort"], false) {
 		effort = "medium"
 	}
-	effort = firstString(obj(reason["effortMap"])[effort], effort)
-	block := obj(substituteEffort(obj(obj(reason["params"])["/v1/chat/completions"])[mode], effort))
+	effort = api.FirstString(api.Obj(reason["effortMap"])[effort], effort)
+	block := api.Obj(substituteEffort(api.Obj(api.Obj(reason["params"])["/v1/chat/completions"])[mode], effort))
 	if value, ok := block["reasoning_effort"].(string); ok && reasoningSetting.MatchString(value) {
 		params["reasoning_effort"] = value
 	}
-	switches := object{}
-	for k, v := range obj(block["chat_template_kwargs"]) {
+	switches := api.Object{}
+	for k, v := range api.Obj(block["chat_template_kwargs"]) {
 		switch value := v.(type) {
 		case bool:
 			if k == "enable_thinking" || k == "thinking" {
@@ -443,13 +444,13 @@ func substituteEffort(value any, effort string) any {
 		}
 		return out
 	case map[string]any:
-		out := object{}
+		out := api.Object{}
 		for k, item := range v {
 			out[k] = substituteEffort(item, effort)
 		}
 		return out
-	case object:
-		out := object{}
+	case api.Object:
+		out := api.Object{}
 		for k, item := range v {
 			out[k] = substituteEffort(item, effort)
 		}

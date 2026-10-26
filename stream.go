@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 type stream struct {
@@ -19,7 +21,7 @@ type stream struct {
 
 	// mu serializes writes against the tool goroutines.
 	mu       sync.Mutex
-	spend    usage
+	spend    api.Usage
 	observe  func(e runEvent, at string)
 	thoughts *thoughtSummaries // nil unless a summarizer summarizes the run's reasoning
 	sources  []citationSource  // pages the run's tools showed the model
@@ -34,7 +36,7 @@ func (s *stream) cite(sources []citationSource) {
 func (s *stream) emit(e runEvent) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.frame(e, timestamp())
+	s.frame(e, api.Timestamp())
 }
 
 func (s *stream) text(message, delta string) {
@@ -74,7 +76,7 @@ func (s *stream) progress(call, note string, done float64) {
 const activityTool = "TOOL"
 
 func (s *stream) meter(raw json.RawMessage) {
-	var turn usage
+	var turn api.Usage
 	if json.Unmarshal(raw, &turn) != nil {
 		return
 	}
@@ -134,9 +136,9 @@ func follow(w http.ResponseWriter, r *http.Request, rn *run, from int) {
 		if closed != nil {
 			open()
 			if closed != errDone {
-				e := *asAPIError(closed)
+				e := *api.AsError(closed)
 				e.Message = closed.Error()
-				encoded, _ := encodeEvent(runError{apiError: &e}, "")
+				encoded, _ := encodeEvent(runError{Error: &e}, "")
 				fmt.Fprintf(w, "id: %d\ndata: %s\n\n", from, encoded)
 				flush.Flush()
 			}

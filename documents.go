@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 // Since sync protocol 3 a stored document's blob holds its extracted content
@@ -40,9 +42,9 @@ func encodeDocument(a *Attachment) ([]byte, error) {
 		payload.Pages = append(payload.Pages, DocumentPage{Page: max(0, page.Page), Text: page.Text, Image: image, IsScanned: page.IsScanned})
 	}
 	if payload.empty() {
-		return nil, apiErr(415, "ATTACHMENT_UNSUPPORTED", "The document has no extracted content")
+		return nil, api.Err(415, "ATTACHMENT_UNSUPPORTED", "The document has no extracted content")
 	}
-	return raw(payload), nil
+	return api.Raw(payload), nil
 }
 
 func decodeDocument(data []byte) (documentBlob, error) {
@@ -55,7 +57,7 @@ func decodeDocument(data []byte) (documentBlob, error) {
 			return documentBlob{TextContent: valueOr(payload.TextContent, ""), Pages: valueOr(payload.Pages, []DocumentPage{})}, nil
 		}
 	}
-	return documentBlob{}, apiErr(422, "ATTACHMENT_UNSUPPORTED", "The stored document cannot be read")
+	return documentBlob{}, api.Err(422, "ATTACHMENT_UNSUPPORTED", "The stored document cannot be read")
 }
 
 func documentText(content documentBlob) string {
@@ -72,7 +74,7 @@ func documentText(content documentBlob) string {
 }
 
 func unreachable(err error) bool {
-	e := asAPIError(err)
+	e := api.AsError(err)
 	return e.HTTP == 404 || e.Status == 400 || e.Status == 404 || e.Code == "ATTACHMENT_UNSUPPORTED"
 }
 
@@ -99,7 +101,7 @@ func (h *harness) placeAttachment(ctx context.Context, p *principal, threadID st
 	case a.isImage() && a.Base64 != "" && (!keyed || elsewhere):
 		decoded, err := base64.StdEncoding.DecodeString(a.Base64)
 		if err != nil {
-			return apiErr(400, "ATTACHMENT_UNSUPPORTED", "An image is not valid base64")
+			return api.Err(400, "ATTACHMENT_UNSUPPORTED", "An image is not valid base64")
 		}
 		data = decoded
 	case keyed && elsewhere:

@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 // Read-aloud audio is mono 16-bit 24 kHz PCM. Each piece of a message is
@@ -28,49 +30,49 @@ const (
 func (h *harness) handleSpeech(w http.ResponseWriter, r *http.Request) {
 	p, err := h.auth.authenticate(r, true)
 	if err != nil {
-		respond(w, nil, err)
+		api.Respond(w, nil, err)
 		return
 	}
 	credential, err := h.auth.inference(r.Context(), p)
 	if err != nil {
-		respond(w, nil, h.withQuota(p, credential.Limit, err))
+		api.Respond(w, nil, h.withQuota(p, credential.Limit, err))
 		return
 	}
-	body, err := readBody(w, r, maxTurnBody)
+	body, err := api.ReadBody(w, r, maxTurnBody)
 	defer clear(body)
 	if err != nil {
-		respond(w, nil, err)
+		api.Respond(w, nil, err)
 		return
 	}
 	in := &speechRequest{}
-	defer in.clearKey()
-	if err := decodeBody(body, in); err != nil {
-		respond(w, nil, err)
+	defer in.ClearKey()
+	if err := api.DecodeBody(body, in); err != nil {
+		api.Respond(w, nil, err)
 		return
 	}
 	if err := in.validate(); err != nil {
-		respond(w, nil, err)
+		api.Respond(w, nil, err)
 		return
 	}
 	text, err := h.speechText(r.Context(), p, in)
-	in.clearKey()
+	in.ClearKey()
 	if err != nil {
-		respond(w, nil, err)
+		api.Respond(w, nil, err)
 		return
 	}
 	pieces := splitSpeech(text)
 	if len(pieces) == 0 {
-		respond(w, nil, apiErr(400, "BAD_REQUEST", "There is nothing to read aloud"))
+		api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "There is nothing to read aloud"))
 		return
 	}
 	router := h.services["router"]
 	if router == nil {
-		respond(w, nil, apiErr(503, "TOOL_UNAVAILABLE", "Speech is unavailable"))
+		api.Respond(w, nil, api.Err(503, "TOOL_UNAVAILABLE", "Speech is unavailable"))
 		return
 	}
 	ctx := context.WithValue(r.Context(), apiKeyKey{}, string(credential.Key))
 	if err := streamSpeech(ctx, w, router, pieces); err != nil {
-		respond(w, nil, h.withQuota(p, credential.Limit, err))
+		api.Respond(w, nil, h.withQuota(p, credential.Limit, err))
 	}
 }
 
@@ -103,12 +105,12 @@ func (h *harness) speechText(ctx context.Context, p *principal, in *speechReques
 		}
 		index := thread.messageIndex(in.MessageID)
 		if index < 0 {
-			return "", apiErr(404, "THREAD_NOT_FOUND", "The message was not found")
+			return "", api.Err(404, "THREAD_NOT_FOUND", "The message was not found")
 		}
 		source = thread.Messages[index].Content
 	}
 	if utf8.RuneCountInString(source) > maxSpeechText {
-		return "", apiErr(413, "PAYLOAD_TOO_LARGE", "The text is too long to read aloud")
+		return "", api.Err(413, "PAYLOAD_TOO_LARGE", "The text is too long to read aloud")
 	}
 	return speakableText(source), nil
 }
@@ -199,7 +201,7 @@ func streamSpeech(ctx context.Context, w http.ResponseWriter, router *downstream
 		<-slots
 	}
 	if !started {
-		return apiErr(502, "UPSTREAM_REFUSED", "The speech service returned no audio")
+		return api.Err(502, "UPSTREAM_REFUSED", "The speech service returned no audio")
 	}
 	return nil
 }
@@ -215,7 +217,7 @@ func synthesize(ctx context.Context, router *downstreamService, text string, out
 	}()
 	ctx, cancel := context.WithTimeout(ctx, speechTimeout)
 	defer cancel()
-	speech := raw(object{"model": speechModel, "voice": speechVoice, "instructions": speechInstructions, "input": text, "response_format": "pcm", "stream_format": "audio"})
+	speech := api.Raw(api.Object{"model": speechModel, "voice": speechVoice, "instructions": speechInstructions, "input": text, "response_format": "pcm", "stream_format": "audio"})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, router.URL+"/v1/audio/speech", bytes.NewReader(speech))
 	if err != nil {
 		return
@@ -228,11 +230,11 @@ func synthesize(ctx context.Context, router *downstreamService, text string, out
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-		err = withRetryAfter(downstreamError(resp.StatusCode, b), resp.Header)
+		err = api.WithRetryAfter(api.DownstreamError(resp.StatusCode, b), resp.Header)
 		return
 	}
 	if media, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type")); media != speechMediaType {
-		err = apiErr(502, "UPSTREAM_REFUSED", "The speech service returned unsupported audio")
+		err = api.Err(502, "UPSTREAM_REFUSED", "The speech service returned unsupported audio")
 		return
 	}
 	body, chunk := io.LimitReader(resp.Body, maxSpeechBytes), make([]byte, speechReadSize)

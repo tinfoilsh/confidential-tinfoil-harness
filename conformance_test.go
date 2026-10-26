@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 // Runs recorded as fixtures in protocol/fixtures, which every client replays
@@ -39,12 +40,12 @@ type runFixture struct {
 // fixtureChat is the chat a client shows after a run: its messages with the
 // members a client's reducer builds, its title, and how the run ended.
 type fixtureChat struct {
-	Messages   []object `json:"messages"`
-	Title      string   `json:"title"`
-	TitleState string   `json:"titleState"`
-	Status     string   `json:"status"`
+	Messages   []api.Object `json:"messages"`
+	Title      string       `json:"title"`
+	TitleState string       `json:"titleState"`
+	Status     string       `json:"status"`
 	// Error is what the run's RUN_ERROR reports of why it failed.
-	Error *apiError `json:"error,omitempty"`
+	Error *api.Error `json:"error,omitempty"`
 }
 
 // A client that applies a run's frames shows the chat the harness keeps: a
@@ -77,7 +78,7 @@ func TestRunsShowTheChatTheHarnessKeeps(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.search {
 				serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
-					return nil, object{"results": []object{{"title": "Cats", "url": "https://cats.test", "content": "All about cats."}}}
+					return nil, api.Object{"results": []api.Object{{"title": "Cats", "url": "https://cats.test", "content": "All about cats."}}}
 				})
 			}
 			h, rows, key := testChatHarness(t, tc.model)
@@ -154,11 +155,11 @@ func conformance(t *testing.T, name, description string, frames []fixtureFrame, 
 	}
 	var last struct {
 		Type string `json:"type"`
-		apiError
+		api.Error
 	}
 	json.Unmarshal(frames[len(frames)-1].Event, &last)
 	if last.Type == "RUN_ERROR" {
-		recorded.Expected.Status, recorded.Expected.Error = "error", &last.apiError
+		recorded.Expected.Status, recorded.Expected.Error = "error", &last.Error
 	}
 	encoded, err := json.MarshalIndent(recorded, "", "  ")
 	if err != nil {
@@ -180,14 +181,14 @@ func conformance(t *testing.T, name, description string, frames []fixtureFrame, 
 
 // projectedMessage is a message with the members a client's reducer must
 // build: a question's text, and a reply's timeline steps.
-func projectedMessage(m messageView) object {
-	out := object{"id": m.ID, "role": m.Role}
+func projectedMessage(m messageView) api.Object {
+	out := api.Object{"id": m.ID, "role": m.Role}
 	if m.Role == "user" {
 		out["content"] = valueOr(m.Content, "")
 	}
-	timeline := []object{}
+	timeline := []api.Object{}
 	for _, block := range m.Timeline {
-		step := object{"id": block.ID, "type": block.Type}
+		step := api.Object{"id": block.ID, "type": block.Type}
 		for name, value := range map[string]any{"content": block.Content, "toolCallId": block.ToolCallID, "name": block.Name, "arguments": block.Arguments} {
 			if value != "" {
 				step[name] = value

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 // maxWidgetRetries bounds how often one run tells the model a widget's
@@ -115,7 +116,7 @@ func widgetFailure(w widget, args string) json.RawMessage {
 		}
 		problem = strings.TrimPrefix(err.Error(), "validating root: ")
 	}
-	return raw(object{"status": "error", "error": fmt.Sprintf("The arguments for %s did not match the tool's parameter schema and the component was not displayed: %s. Call %s again with corrected arguments that match the schema exactly.", w.Name, problem, w.Name)})
+	return api.Raw(api.Object{"status": "error", "error": fmt.Sprintf("The arguments for %s did not match the tool's parameter schema and the component was not displayed: %s. Call %s again with corrected arguments that match the schema exactly.", w.Name, problem, w.Name)})
 }
 
 // checkedWidgets is a copy of a timeline for its client, in which each widget
@@ -203,11 +204,11 @@ func (h *harness) widgetResult(ctx context.Context, call toolCall) (any, error) 
 	if call.name != "render_link_preview" {
 		return "[rendered for the user]", nil
 	}
-	var args object
+	var args api.Object
 	if json.Unmarshal([]byte(call.args), &args) != nil {
-		return nil, apiErr(400, "BAD_REQUEST", "Invalid widget arguments")
+		return nil, api.Err(400, "BAD_REQUEST", "Invalid widget arguments")
 	}
-	return h.linkDetails(ctx, str(args["url"]))
+	return h.linkDetails(ctx, api.Str(args["url"]))
 }
 
 // normalizeToolResult is the caller's copy of a tool result. Its text shares
@@ -215,10 +216,10 @@ func (h *harness) widgetResult(ctx context.Context, call toolCall) (any, error) 
 func normalizeToolResult(call toolCall, content string) any {
 	var result any
 	if json.Unmarshal([]byte(content), &result) != nil {
-		result = object{"output": content}
+		result = api.Object{"output": content}
 	}
-	value := obj(result)
-	args := obj(decodeValue([]byte(historyArgs(call.args))))
+	value := api.Obj(result)
+	args := api.Obj(decodeValue([]byte(historyArgs(call.args))))
 	if strings.HasPrefix(call.name, "render_") {
 		return result
 	}
@@ -232,47 +233,47 @@ func normalizeToolResult(call toolCall, content string) any {
 	}
 	switch call.name {
 	case "web_search":
-		rows, seen := []object{}, map[string]bool{}
-		for _, r := range arr(value["results"]) {
-			row := obj(r)
-			url := strings.TrimSpace(str(row["url"]))
+		rows, seen := []api.Object{}, map[string]bool{}
+		for _, r := range api.Arr(value["results"]) {
+			row := api.Obj(r)
+			url := strings.TrimSpace(api.Str(row["url"]))
 			if url == "" || seen[url] {
 				continue
 			}
 			seen[url] = true
-			source := object{"url": url, "title": strings.TrimSpace(str(row["title"])), "snippet": take(firstString(row["snippet"], row["content"], row["text"]))}
-			if published := strings.TrimSpace(str(row["published_date"])); published != "" {
+			source := api.Object{"url": url, "title": strings.TrimSpace(api.Str(row["title"])), "snippet": take(api.FirstString(row["snippet"], row["content"], row["text"]))}
+			if published := strings.TrimSpace(api.Str(row["published_date"])); published != "" {
 				source["publishedDate"] = published
 			}
-			if author := strings.TrimSpace(str(row["author"])); author != "" {
+			if author := strings.TrimSpace(api.Str(row["author"])); author != "" {
 				source["author"] = author
 			}
 			rows = append(rows, source)
 		}
-		shown := object{"query": args["query"], "results": rows}
-		if boolean(value["pii_checked"], false) {
+		shown := api.Object{"query": args["query"], "results": rows}
+		if api.Bool(value["pii_checked"], false) {
 			shown["pii"] = piiReport(value)
 		}
 		return shown
 	case "web_fetch":
-		shown := object{"url": firstString(arr(args["urls"])...), "title": "Fetched page", "text": ""}
-		pages, failed := []object{}, []object{}
-		for _, p := range arr(value["pages"]) {
-			page := obj(p)
-			url := strings.TrimSpace(str(page["url"]))
+		shown := api.Object{"url": api.FirstString(api.Arr(args["urls"])...), "title": "Fetched page", "text": ""}
+		pages, failed := []api.Object{}, []api.Object{}
+		for _, p := range api.Arr(value["pages"]) {
+			page := api.Obj(p)
+			url := strings.TrimSpace(api.Str(page["url"]))
 			if url == "" {
 				continue
 			}
-			text := take(firstString(page["content"], page["text"]))
+			text := take(api.FirstString(page["content"], page["text"]))
 			if len(pages) == 0 {
 				// Shown twice, as the result and as its first page, so spent twice.
 				shown["url"], shown["text"] = url, take(text)
 			}
-			pages = append(pages, object{"url": url, "title": "Fetched page", "text": text})
+			pages = append(pages, api.Object{"url": url, "title": "Fetched page", "text": text})
 		}
-		for _, r := range arr(value["results"]) {
-			if result := obj(r); str(result["status"]) != "completed" {
-				failed = append(failed, object{"url": result["url"], "error": result["error"]})
+		for _, r := range api.Arr(value["results"]) {
+			if result := api.Obj(r); api.Str(result["status"]) != "completed" {
+				failed = append(failed, api.Object{"url": result["url"], "error": result["error"]})
 			}
 		}
 		shown["pages"], shown["failed"] = pages, failed
@@ -281,7 +282,7 @@ func normalizeToolResult(call toolCall, content string) any {
 		if _, ok := value["filename"]; ok {
 			return value
 		}
-		name := path.Base(str(args["path"]))
+		name := path.Base(api.Str(args["path"]))
 		language, body := "", content
 		if header, rest, ok := strings.Cut(content, "\n"); ok {
 			fence := header[:len(header)-len(strings.TrimLeft(header, "`"))]
@@ -290,16 +291,16 @@ func normalizeToolResult(call toolCall, content string) any {
 				body = strings.TrimSuffix(rest, "\n"+fence)
 			}
 		}
-		return object{"filename": name, "language": language, "content": take(body)}
+		return api.Object{"filename": name, "language": language, "content": take(body)}
 	default:
-		return object{"output": take(cmp.Or(firstString(value["output"], value["stdout"]), content))}
+		return api.Object{"output": take(cmp.Or(api.FirstString(value["output"], value["stdout"]), content))}
 	}
 }
 
 // piiReport is what the privacy filter masked from a search's query, in the
 // model router's shape. Offsets are code points into the query the model
 // sent; the removed text itself never leaves the enclave.
-func piiReport(result object) object {
+func piiReport(result api.Object) api.Object {
 	offset := func(v any) (int64, bool) {
 		f, ok := v.(float64)
 		if !ok {
@@ -307,16 +308,16 @@ func piiReport(result object) object {
 		}
 		return floatToBoundedInt64(f)
 	}
-	redactions := []object{}
-	for _, item := range arr(result["pii_redactions"]) {
-		span := obj(item)
+	redactions := []api.Object{}
+	for _, item := range api.Arr(result["pii_redactions"]) {
+		span := api.Obj(item)
 		start, startOK := offset(span["start"])
 		end, endOK := offset(span["end"])
 		if startOK && endOK {
-			redactions = append(redactions, object{"type": str(span["type"]), "start": start, "end": end})
+			redactions = append(redactions, api.Object{"type": api.Str(span["type"]), "start": start, "end": end})
 		}
 	}
-	return object{"masked": boolean(result["pii_masked"], false), "redacted_query": str(result["redacted_query"]), "redactions": redactions}
+	return api.Object{"masked": api.Bool(result["pii_masked"], false), "redacted_query": api.Str(result["redacted_query"]), "redactions": redactions}
 }
 
 func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *model) error {
@@ -331,8 +332,8 @@ func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *
 	if err != nil {
 		return err
 	}
-	conversation = append(conversation, raw(object{"role": "user", "content": "Regenerate the arguments for the " + declaration.Name + " widget. Preserve the user's intent and return only JSON matching its schema."}))
-	payload := object{"model": req.model, "messages": conversation, "user_cache_secret": req.cacheScope, "response_format": object{"type": "json_schema", "json_schema": object{"name": "widget_arguments", "strict": true, "schema": declaration.Schema}}}
+	conversation = append(conversation, api.Raw(api.Object{"role": "user", "content": "Regenerate the arguments for the " + declaration.Name + " widget. Preserve the user's intent and return only JSON matching its schema."}))
+	payload := api.Object{"model": req.model, "messages": conversation, "user_cache_secret": req.cacheScope, "response_format": api.Object{"type": "json_schema", "json_schema": api.Object{"name": "widget_arguments", "strict": true, "schema": declaration.Schema}}}
 	for k, v := range req.params {
 		payload[k] = v
 	}
@@ -345,7 +346,7 @@ func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *
 	content = widgetArguments(strings.TrimSpace(content))
 	var value any
 	if json.Unmarshal([]byte(content), &value) != nil || declaration.schema.Validate(value) != nil {
-		return apiErr(502, "UPSTREAM_REFUSED", "The replacement widget arguments do not match the schema")
+		return api.Err(502, "UPSTREAM_REFUSED", "The replacement widget arguments do not match the schema")
 	}
 	id := r.input.ToolCallID
 	r.out.callStart(id, declaration.Name, r.retryTarget.parentID)
@@ -354,9 +355,9 @@ func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *
 	// The widget's result is the one a call with these arguments returns.
 	result, err := h.widgetResult(ctx, toolCall{id: id, name: declaration.Name, args: content})
 	if err != nil {
-		result = object{"error": asAPIError(err).Message}
+		result = api.Object{"error": api.AsError(err).Message}
 	}
-	r.replacement = replacedWidget{arguments: content, result: raw(result)}
+	r.replacement = replacedWidget{arguments: content, result: api.Raw(result)}
 	r.out.emit(toolCallResult{MessageID: "msg_" + token(), ToolCallID: id, Role: "tool", Content: r.replacement.result})
 	return nil
 }
@@ -381,11 +382,11 @@ func replaceWidget(t *Thread, messageID, callID, expected string, replacement re
 				continue
 			}
 			if block.Arguments != expected && block.Arguments != replacement.arguments {
-				return apiErr(409, "REVISION_CONFLICT", "The widget changed during its retry")
+				return api.Err(409, "REVISION_CONFLICT", "The widget changed during its retry")
 			}
 			block.Arguments, block.Result = replacement.arguments, replacement.result
 			return nil
 		}
 	}
-	return apiErr(409, "REVISION_CONFLICT", "The widget was removed during its retry")
+	return api.Err(409, "REVISION_CONFLICT", "The widget was removed during its retry")
 }

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
@@ -68,7 +69,7 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 		tools := defs
 		if turn > maxTurns {
 			tools = nil
-			conversation = append(conversation, raw(object{"role": "system", "content": finalAnswerInstruction}))
+			conversation = append(conversation, api.Raw(api.Object{"role": "system", "content": finalAnswerInstruction}))
 		}
 		conversation, err = trimToolHistory(req, conversation, tools)
 		if err != nil {
@@ -83,7 +84,7 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 			turnCtx = first
 		}
 		calls, answer, err := h.turn(turnCtx, out, m, payload, set.widgets)
-		if err != nil && req.refreshAuth != nil && !refreshed && asAPIError(err).HTTP == http.StatusUnauthorized {
+		if err != nil && req.refreshAuth != nil && !refreshed && api.AsError(err).HTTP == http.StatusUnauthorized {
 			// A 401 rejected this model request before processing. Replay its
 			// exact body once, retaining the run ID and request billing flag.
 			refreshed = true
@@ -108,7 +109,7 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 			return nil
 		}
 		if turn > maxTurns {
-			return apiErr(502, "MAX_TURNS", fmt.Sprintf("The model called tools for %d turns without answering", maxTurns))
+			return api.Err(502, "MAX_TURNS", fmt.Sprintf("The model called tools for %d turns without answering", maxTurns))
 		}
 		reply := requested(answer, calls)
 		if req.policy == "all" || req.policy == "tool-call-only" {
@@ -117,9 +118,9 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 			out.mu.Unlock()
 			if reasoning != "" {
 				// Echoed in the field the enclave streamed it in, since vLLM versions disagree on it.
-				value := obj(decodeValue(reply))
+				value := api.Obj(decodeValue(reply))
 				value[field] = reasoning
-				reply = raw(value)
+				reply = api.Raw(value)
 			}
 		}
 		conversation = append(conversation, reply)
@@ -193,9 +194,9 @@ func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) (mess
 		}
 		content, err := set.local(ctx, call)
 		if err != nil {
-			content = object{"error": asAPIError(err).Message}
+			content = api.Object{"error": api.AsError(err).Message}
 		}
-		out.emit(toolCallResult{MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: raw(content)})
+		out.emit(toolCallResult{MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: api.Raw(content)})
 		return answered(call.id, "[rendered for the user]")
 	}
 	out.activity(call)
@@ -212,7 +213,7 @@ func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) (mess
 	} else {
 		shown = normalizeToolResult(call, content)
 	}
-	out.emit(toolCallResult{MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: raw(shown), Metadata: meta, Display: searchDisplay(call.name, call.args, raw(shown))})
+	out.emit(toolCallResult{MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: api.Raw(shown), Metadata: meta, Display: searchDisplay(call.name, call.args, api.Raw(shown))})
 	return answered(call.id, clip(read, maxToolOutput))
 }
 
@@ -245,7 +246,7 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return nil, "", &refusal{status: resp.StatusCode, detail: string(bytes.TrimSpace(detail)), retryAfter: retryAfter(resp.Header)}
+		return nil, "", &api.Refusal{Status: resp.StatusCode, Detail: string(bytes.TrimSpace(detail)), RetryAfter: api.RetryAfter(resp.Header)}
 	}
 
 	out.mu.Lock()
@@ -299,10 +300,10 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 			Usage json.RawMessage `json:"usage"`
 		}
 		if json.Unmarshal([]byte(data), &chunk) != nil {
-			return nil, answer.String(), apiErr(502, "UPSTREAM_REFUSED", "The model stream contains invalid JSON")
+			return nil, answer.String(), api.Err(502, "UPSTREAM_REFUSED", "The model stream contains invalid JSON")
 		}
 		if len(chunk.Error) > 0 && string(chunk.Error) != "null" || chunk.Object == "error" {
-			return nil, answer.String(), streamError([]byte(data))
+			return nil, answer.String(), api.StreamError([]byte(data))
 		}
 		if chunk.Model != "" && chunk.Model != "auto" {
 			out.mu.Lock()
@@ -334,7 +335,7 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 		}
 		for _, called := range delta.ToolCalls {
 			if called.Index < 0 || called.Index >= maxToolCalls {
-				return nil, answer.String(), apiErr(502, "UPSTREAM_REFUSED", "The model exceeded the tool call limit")
+				return nil, answer.String(), api.Err(502, "UPSTREAM_REFUSED", "The model exceeded the tool call limit")
 			}
 			calls = announce(out, message, calls, called, widgets)
 		}
@@ -344,7 +345,7 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 		return calls, answer.String(), err
 	}
 	if !ended {
-		return calls, answer.String(), apiErr(502, "UPSTREAM_REFUSED", "The model stream ended before completion")
+		return calls, answer.String(), api.Err(502, "UPSTREAM_REFUSED", "The model stream ended before completion")
 	}
 	for i := range calls {
 		c := &calls[i]

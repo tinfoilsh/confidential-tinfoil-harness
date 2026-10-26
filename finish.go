@@ -4,6 +4,8 @@ import (
 	"cmp"
 	"context"
 	"slices"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 // finishRun commits what the run produced and frames its end, then hands the
@@ -41,7 +43,7 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 		m.IsInterrupted, m.IsError = new(cancelled), new(runErr != nil && !cancelled)
 		m.Model = cmp.Or(r.out.concreteModel, r.row.Model)
 		m.ModelDisplayName = h.catalog.get().displayName(m.Model)
-		m.Usage = raw(messageUsage{PromptTokens: spend.Prompt, CompletionTokens: spend.Completion})
+		m.Usage = api.Raw(messageUsage{PromptTokens: spend.Prompt, CompletionTokens: spend.Completion})
 		// A continued reply keeps the citations it already had.
 		for _, annotation := range citationAnnotations(m.Content, sources) {
 			if !slices.ContainsFunc(m.Annotations, func(kept Annotation) bool { return citedFrom(kept) == citedFrom(annotation) }) {
@@ -92,9 +94,9 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 	clear(r.key[:])
 	limit := held
 	if r.out.modelAccepted {
-		limit = held.debited(spend)
+		limit = held.Debited(spend)
 	}
-	if runErr != nil && asAPIError(runErr).Code == "QUOTA_EXHAUSTED" {
+	if runErr != nil && api.AsError(runErr).Code == "QUOTA_EXHAUSTED" {
 		limit = exhausted(p, held)
 	}
 	summary := summarize(&r.row.Thread)
@@ -114,7 +116,7 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 	r.out.emit(stateSnapshotEvent{stateSnapshot{summary, queue, limit}})
 	metadata.RateLimit = &limit
 	if runErr != nil && !cancelled {
-		r.out.emit(failedRun(s.id, r.log.id, asAPIError(runErr), &metadata))
+		r.out.emit(failedRun(s.id, r.log.id, api.AsError(runErr), &metadata))
 	} else {
 		metadata.Usage, metadata.Cancelled = &spend, &cancelled
 		r.out.emit(runFinished{ThreadID: s.id, RunID: r.log.id, Metadata: metadata})

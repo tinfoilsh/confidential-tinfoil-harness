@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 // chatToken is a subscriber's Tinfoil Chat credential.
@@ -81,9 +83,9 @@ func TestSubmitter_TrimsOversizedHistory(t *testing.T) {
 func TestScreeningIsThePromptAndHistoryWithoutToolResults(t *testing.T) {
 	h := &harness{safeguards: &submitter{}}
 	req := &request{system: "be helpful", conversation: "chat-1", groups: [][]json.RawMessage{
-		{raw(object{"role": "user", "content": []any{object{"type": "text", "text": "look"}, object{"type": "image_url", "image_url": object{"url": "data:..."}}}})},
-		{raw(object{"role": "assistant", "content": "", "reasoning_content": "hidden", "tool_calls": []any{object{"id": "c1"}}}), raw(object{"role": "tool", "tool_call_id": "c1", "content": "42"})},
-		{raw(object{"role": "user", "content": "thanks"})},
+		{api.Raw(api.Object{"role": "user", "content": []any{api.Object{"type": "text", "text": "look"}, api.Object{"type": "image_url", "image_url": api.Object{"url": "data:..."}}}})},
+		{api.Raw(api.Object{"role": "assistant", "content": "", "reasoning_content": "hidden", "tool_calls": []any{api.Object{"id": "c1"}}}), api.Raw(api.Object{"role": "tool", "tool_call_id": "c1", "content": "42"})},
+		{api.Raw(api.Object{"role": "user", "content": "thanks"})},
 	}}
 	want := &screening{conversation: "chat-1", messages: []safeguardMessage{{Role: "system", Content: "be helpful"}, {Role: "user", Content: "look\n[image_url]"}, {Role: "assistant", Content: ""}, {Role: "user", Content: "thanks"}}}
 	if got := h.screening(req); !reflect.DeepEqual(got, want) {

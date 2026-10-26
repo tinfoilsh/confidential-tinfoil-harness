@@ -1,4 +1,4 @@
-package main
+package api
 
 import (
 	"bytes"
@@ -12,50 +12,50 @@ import (
 	"strings"
 )
 
-func respond(w http.ResponseWriter, result any, err error) {
+func Respond(w http.ResponseWriter, result any, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	if err != nil {
-		e := asAPIError(err)
+		e := AsError(err)
 		if e.RetryAfter > 0 {
 			w.Header().Set("Retry-After", strconv.Itoa(e.RetryAfter))
 		}
 		w.WriteHeader(e.HTTP)
-		result = object{"error": e}
+		result = Object{"error": e}
 	}
 	if result == nil {
-		result = object{}
+		result = Object{}
 	}
 	json.NewEncoder(w).Encode(result)
 }
 
-const maxRequestBody = 8 << 20
+const MaxRequestBody = 8 << 20
 
-// maxResponseBody bounds a downstream answer: a pull of sync's largest batch,
+// MaxResponseBody bounds a downstream answer: a pull of sync's largest batch,
 // or an attachment, base64 encoded.
-const maxResponseBody = 96 << 20
+const MaxResponseBody = 96 << 20
 
-// readBody reads a request body of at most limit bytes that holds one JSON
-// object.
-func readBody(w http.ResponseWriter, r *http.Request, limit int64) (json.RawMessage, error) {
+// ReadBody reads a request body of at most limit bytes that holds one JSON
+// Object.
+func ReadBody(w http.ResponseWriter, r *http.Request, limit int64) (json.RawMessage, error) {
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
-	body, err := readWipeable(r.Body)
+	body, err := ReadWipeable(r.Body)
 	if err != nil {
 		clear(body)
-		return nil, bodyError(err, "Expected a JSON object")
+		return nil, BodyError(err, "Expected a JSON object")
 	}
-	if !isObject(body) || !json.Valid(body) {
+	if !IsObject(body) || !json.Valid(body) {
 		clear(body)
-		return nil, apiErr(400, "BAD_REQUEST", "Expected a JSON object")
+		return nil, Err(400, "BAD_REQUEST", "Expected a JSON object")
 	}
 	return body, nil
 }
 
 const bodyReadChunk = 4 << 10
 
-// readWipeable clears both the read scratch space and replaced growth buffers.
+// ReadWipeable clears both the read scratch space and replaced growth buffers.
 // The caller owns and clears the returned bytes.
-func readWipeable(r io.Reader) ([]byte, error) {
+func ReadWipeable(r io.Reader) ([]byte, error) {
 	chunk := make([]byte, bodyReadChunk)
 	defer clear(chunk)
 	var buffer wipingBuffer
@@ -76,37 +76,37 @@ func (b *wipingBuffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// bodyError tells a body over the size limit, or one that stopped
+// BodyError tells a body over the size limit, or one that stopped
 // arriving, from a malformed one.
-func bodyError(err error, malformed string) *apiError {
+func BodyError(err error, malformed string) *Error {
 	var tooLarge *http.MaxBytesError
 	if errors.As(err, &tooLarge) {
-		return apiErr(http.StatusRequestEntityTooLarge, "PAYLOAD_TOO_LARGE", "The request exceeds the size limit")
+		return Err(http.StatusRequestEntityTooLarge, "PAYLOAD_TOO_LARGE", "The request exceeds the size limit")
 	}
 	if errors.Is(err, os.ErrDeadlineExceeded) {
-		return apiErr(http.StatusRequestTimeout, "REQUEST_TIMEOUT", "The request stopped sending its body")
+		return Err(http.StatusRequestTimeout, "REQUEST_TIMEOUT", "The request stopped sending its body")
 	}
-	return apiErr(400, "BAD_REQUEST", malformed)
+	return Err(400, "BAD_REQUEST", malformed)
 }
 
-func isObject(value json.RawMessage) bool {
+func IsObject(value json.RawMessage) bool {
 	trimmed := bytes.TrimSpace(value)
 	return len(trimmed) > 0 && trimmed[0] == '{'
 }
 
-// decodeRequest decodes a JSON object into a request, naming the first
+// DecodeRequest decodes a JSON object into a request, naming the first
 // field of the wrong type.
-func decodeRequest(body []byte, in any) error {
-	return requestError(json.Unmarshal(body, in))
+func DecodeRequest(body []byte, in any) error {
+	return RequestError(json.Unmarshal(body, in))
 }
 
-// decodeBody consumes the owned HTTP buffer after copying its fields.
-func decodeBody(body []byte, in any) error {
+// DecodeBody consumes the owned HTTP buffer after copying its fields.
+func DecodeBody(body []byte, in any) error {
 	defer clear(body)
-	return decodeRequest(body, in)
+	return DecodeRequest(body, in)
 }
 
-type keyRequest struct {
+type KeyRequest struct {
 	Key keyBytes `json:"key,omitempty"`
 }
 
@@ -119,28 +119,28 @@ func (key *keyBytes) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	if len(data) == 0 || data[0] != '"' {
-		return apiErr(400, "BAD_REQUEST", "key must be a base64 string")
+		return Err(400, "BAD_REQUEST", "key must be a base64 string")
 	}
 	if err := json.Unmarshal(data, (*[]byte)(key)); err != nil {
-		return apiErr(400, "BAD_REQUEST", "key must be a base64 string")
+		return Err(400, "BAD_REQUEST", "key must be a base64 string")
 	}
 	return nil
 }
 
-func (in *keyRequest) clearKey() {
+func (in *KeyRequest) ClearKey() {
 	clear(in.Key)
 	in.Key = nil
 }
 
-func requestError(err error) error {
-	var refused *apiError
+func RequestError(err error) error {
+	var refused *Error
 	if errors.As(err, &refused) {
 		return refused
 	}
 	var mistyped *json.UnmarshalTypeError
 	if err == nil || !errors.As(err, &mistyped) || mistyped.Field == "" {
 		if err != nil {
-			return apiErr(400, "BAD_REQUEST", "Expected a JSON object")
+			return Err(400, "BAD_REQUEST", "Expected a JSON object")
 		}
 		return nil
 	}
@@ -152,7 +152,7 @@ func requestError(err error) error {
 		}
 		path = path[:len(path)-1]
 	}
-	return apiErr(400, "BAD_REQUEST", path[len(path)-1]+" must be "+jsonKind(mistyped.Type))
+	return Err(400, "BAD_REQUEST", path[len(path)-1]+" must be "+jsonKind(mistyped.Type))
 }
 
 func jsonKind(t reflect.Type) string {
@@ -172,32 +172,32 @@ func jsonKind(t reflect.Type) string {
 	return "a number"
 }
 
-// nullable is a field whose absence differs from null: null clears what
+// Nullable is a field whose absence differs from null: null clears what
 // absence leaves as it is.
-type nullable[T any] struct {
-	set, invalid bool
-	value        *T
+type Nullable[T any] struct {
+	Set, invalid bool
+	Value        *T
 }
 
-func (n *nullable[T]) UnmarshalJSON(b []byte) error {
-	n.set = true
+func (n *Nullable[T]) UnmarshalJSON(b []byte) error {
+	n.Set = true
 	if string(b) == "null" {
 		return nil
 	}
-	n.value = new(T)
-	if json.Unmarshal(b, n.value) != nil {
-		n.value, n.invalid = nil, true
+	n.Value = new(T)
+	if json.Unmarshal(b, n.Value) != nil {
+		n.Value, n.invalid = nil, true
 	}
 	return nil
 }
 
-func (n nullable[T]) IsZero() bool                 { return !n.set }
-func (n nullable[T]) MarshalJSON() ([]byte, error) { return json.Marshal(n.value) }
+func (n Nullable[T]) IsZero() bool                 { return !n.Set }
+func (n Nullable[T]) MarshalJSON() ([]byte, error) { return json.Marshal(n.Value) }
 
 // check refuses a value of the wrong type, as decoding refuses other fields.
-func (n nullable[T]) check(name string) error {
+func (n Nullable[T]) Check(name string) error {
 	if n.invalid {
-		return apiErr(400, "BAD_REQUEST", name+" must be "+jsonKind(reflect.TypeFor[T]()))
+		return Err(400, "BAD_REQUEST", name+" must be "+jsonKind(reflect.TypeFor[T]()))
 	}
 	return nil
 }
@@ -207,9 +207,9 @@ func (n nullable[T]) check(name string) error {
 // unbounded frame.
 const maxIDLength = 128
 
-// identifier holds a caller's id to printable ASCII, short of the length at
+// IsIdentifier holds a caller's id to printable ASCII, short of the length at
 // which it stops being a name.
-func identifier(s string) bool {
+func IsIdentifier(s string) bool {
 	if len(s) > maxIDLength {
 		return false
 	}
@@ -221,11 +221,11 @@ func identifier(s string) bool {
 	return true
 }
 
-// requireID refuses an id that cannot name a row. Ids become path segments
+// RequireID refuses an id that cannot name a row. Ids become path segments
 // of other services' URLs, so the dot segments are refused, as sync does.
-func requireID(field, id string) error {
-	if id == "" || id == "." || id == ".." || !identifier(id) || strings.ContainsAny(id, "/\\?#") {
-		return apiErr(400, "BAD_REQUEST", field+" must be a valid identifier")
+func RequireID(field, id string) error {
+	if id == "" || id == "." || id == ".." || !IsIdentifier(id) || strings.ContainsAny(id, "/\\?#") {
+		return Err(400, "BAD_REQUEST", field+" must be a valid identifier")
 	}
 	return nil
 }

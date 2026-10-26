@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 func TestImagePreprocessingBoundsAndTransparency(t *testing.T) {
@@ -46,7 +47,7 @@ func TestImagePreprocessingBoundsAndTransparency(t *testing.T) {
 	binary.BigEndian.PutUint32(oversized[16:20], 10000)
 	binary.BigEndian.PutUint32(oversized[20:24], 10000)
 	binary.BigEndian.PutUint32(oversized[29:33], crc32.ChecksumIEEE(oversized[12:29]))
-	if _, _, err := resizeImage(oversized); err == nil || asAPIError(err).Code != "ATTACHMENT_UNSUPPORTED" || !strings.Contains(asAPIError(err).Message, "pixel limit") {
+	if _, _, err := resizeImage(oversized); err == nil || api.AsError(err).Code != "ATTACHMENT_UNSUPPORTED" || !strings.Contains(api.AsError(err).Message, "pixel limit") {
 		t.Fatal("pixel limit was not checked before decoding", err)
 	}
 	source.Reset()
@@ -99,7 +100,7 @@ func TestManagedModelRetriesARejectedChatTokenOnce(t *testing.T) {
 			}
 			present("alice", renewed)
 			present("bob", others)
-			r := httptest.NewRequest(http.MethodPost, "/v1/threads/turn", bytes.NewReader(raw(sendInput(key))))
+			r := httptest.NewRequest(http.MethodPost, "/v1/threads/turn", bytes.NewReader(api.Raw(sendInput(key))))
 			signIn(r, "alice")
 			r.Header.Set(inferenceKeyHeader, soon)
 			w := httptest.NewRecorder()
@@ -121,18 +122,18 @@ func TestManagedModelRetriesARejectedChatTokenOnce(t *testing.T) {
 }
 
 func TestSharedThreadUsesPublicTimelineAndAttachments(t *testing.T) {
-	result := obj(decodeValue(raw(mustRead(sharedThreadView("share-id", raw(object{"title": "Shared", "createdAt": float64(1700000000000), "messages": []any{
-		object{"role": "assistant", "content": "answer", "timestamp": float64(1700000000000)},
-		object{"role": "user", "content": "photo", "timestamp": float64(1700000000000), "attachments": []any{object{"id": "attachment", "type": "image", "fileName": "photo.png", "mimeType": "image/png", "encryptionKey": "share-attachment-key", "thumbnailBase64": "thumbnail"}}},
+	result := api.Obj(decodeValue(api.Raw(mustRead(sharedThreadView("share-id", api.Raw(api.Object{"title": "Shared", "createdAt": float64(1700000000000), "messages": []any{
+		api.Object{"role": "assistant", "content": "answer", "timestamp": float64(1700000000000)},
+		api.Object{"role": "user", "content": "photo", "timestamp": float64(1700000000000), "attachments": []any{api.Object{"id": "attachment", "type": "image", "fileName": "photo.png", "mimeType": "image/png", "encryptionKey": "share-attachment-key", "thumbnailBase64": "thumbnail"}}},
 	}}))))))
-	if !strings.HasPrefix(str(result["createdAt"]), "2023-") {
+	if !strings.HasPrefix(api.Str(result["createdAt"]), "2023-") {
 		t.Fatalf("invalid timestamp: %v", result)
 	}
-	messages := arr(result["messages"])
-	if len(arr(obj(messages[0])["timeline"])) == 0 || str(obj(messages[0])["id"]) == "" {
+	messages := api.Arr(result["messages"])
+	if len(api.Arr(api.Obj(messages[0])["timeline"])) == 0 || api.Str(api.Obj(messages[0])["id"]) == "" {
 		t.Fatal("legacy assistant was not normalized")
 	}
-	attachment := obj(arr(obj(messages[1])["attachments"])[0])
+	attachment := api.Obj(api.Arr(api.Obj(messages[1])["attachments"])[0])
 	if attachment["attKey"] != "share-attachment-key" || attachment["kind"] != "image" || attachment["thumbnail"] != "thumbnail" {
 		t.Fatalf("attachment lost fields: %v", attachment)
 	}
@@ -170,7 +171,7 @@ func TestTitleRunsBeforeAnswerFinishes(t *testing.T) {
 	})
 	titled := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(object{"summary": "A generated title"})
+		json.NewEncoder(w).Encode(api.Object{"summary": "A generated title"})
 		close(titled)
 	}))
 	defer server.Close()
@@ -197,10 +198,10 @@ func TestWidgetSchemaBounds(t *testing.T) {
 	if !ok {
 		t.Fatal("render_clock is not in the widget catalog")
 	}
-	if err := clock.schema.Validate(object{"durationSeconds": float64(1)}); err != nil {
+	if err := clock.schema.Validate(api.Object{"durationSeconds": float64(1)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := clock.schema.Validate(object{"durationSeconds": float64(0)}); err == nil {
+	if err := clock.schema.Validate(api.Object{"durationSeconds": float64(0)}); err == nil {
 		t.Fatal("exclusive lower bound ignored")
 	}
 }
@@ -208,17 +209,17 @@ func TestWidgetSchemaBounds(t *testing.T) {
 func TestWidgetRetryReplacesOnlyTheArguments(t *testing.T) {
 	replacement := `{"stats":[{"label":"Count","value":2}]}`
 	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
-		var body object
+		var body api.Object
 		json.NewDecoder(r.Body).Decode(&body)
-		if obj(body["response_format"])["type"] != "json_schema" {
+		if api.Obj(body["response_format"])["type"] != "json_schema" {
 			t.Error("retry did not request a schema")
 		}
-		json.NewEncoder(w).Encode(object{"choices": []object{{"message": object{"content": `{"stats":"[{\"label\":\"Count\",\"value\":2}]"} Here are the stats.`}}}})
+		json.NewEncoder(w).Encode(api.Object{"choices": []api.Object{{"message": api.Object{"content": `{"stats":"[{\"label\":\"Count\",\"value\":2}]"} Here are the stats.`}}}})
 	})
 	catalog := h.catalog.get()
 	catalog.EnabledWidgets = []string{"render_stat_cards"}
 	original := `{"stats":[{"label":"Count","value":1}]}`
-	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat")] = storedRow{ID: "chat", ETag: "1", Data: raw(object{"createdAt": timestamp(), "title": "Title", "titleState": "manual", "model": "kimi-k3", "messages": []any{object{"id": "user", "role": "user", "content": "show a stat", "timestamp": timestamp()}, object{"id": "assistant", "role": "assistant", "content": "keep this text", "timestamp": timestamp(), "timeline": []any{object{"type": "content", "id": "text", "content": "keep this text"}, object{"type": "tool_call", "id": "call", "toolCallId": "call", "name": "render_stat_cards", "arguments": original}}}}})}
+	rows.rows[rowMapKey(&principal{ID: "alice"}, "chat", "chat")] = storedRow{ID: "chat", ETag: "1", Data: api.Raw(api.Object{"createdAt": api.Timestamp(), "title": "Title", "titleState": "manual", "model": "kimi-k3", "messages": []any{api.Object{"id": "user", "role": "user", "content": "show a stat", "timestamp": api.Timestamp()}, api.Object{"id": "assistant", "role": "assistant", "content": "keep this text", "timestamp": api.Timestamp(), "timeline": []any{api.Object{"type": "content", "id": "text", "content": "keep this text"}, api.Object{"type": "tool_call", "id": "call", "toolCallId": "call", "name": "render_stat_cards", "arguments": original}}}}})}
 	in := sendInput(key)
 	in["threadId"] = "chat"
 	in["kind"] = "retryToolCall"
@@ -252,17 +253,17 @@ func TestManagedToolLoopKeepsReasoningAndOneAssistantMessage(t *testing.T) {
 			io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"reason first\",\"tool_calls\":[{\"index\":0,\"id\":\"clock-call\",\"function\":{\"name\":\"render_clock\",\"arguments\":\"{}\"}}]}}]}\n\ndata: [DONE]\n\n")
 			return
 		}
-		var body object
+		var body api.Object
 		json.NewDecoder(r.Body).Decode(&body)
-		messages := arr(body["messages"])
-		if obj(messages[len(messages)-2])["reasoning_content"] != "reason first" {
+		messages := api.Arr(body["messages"])
+		if api.Obj(messages[len(messages)-2])["reasoning_content"] != "reason first" {
 			t.Error("reasoning disappeared from the tool exchange")
 		}
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"the clock is ready\"}}]}\n\ndata: [DONE]\n\n")
 	})
 	catalog := h.catalog.get()
 	catalog.EnabledWidgets = []string{"render_clock"}
-	obj(catalog.Models[0]["chatConfig"])["reasoningConfig"] = object{"reasoningHistoryPolicy": "tool-call-only"}
+	api.Obj(catalog.Models[0]["chatConfig"])["reasoningConfig"] = api.Object{"reasoningHistoryPolicy": "tool-call-only"}
 	in := sendInput(key)
 	in["widgets"] = []any{"render_clock"}
 	w := postRoute(h, "/v1/threads/turn", in, "alice")

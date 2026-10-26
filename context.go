@@ -13,13 +13,14 @@ import (
 	"time"
 
 	"github.com/tiktoken-go/tokenizer"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"golang.org/x/text/language"
 	"golang.org/x/text/language/display"
 )
 
 type request struct {
 	refreshAuth                func(context.Context) (inferenceCredential, error)
-	params                     object
+	params                     api.Object
 	system, widgetHint, policy string
 	window                     int
 	groups                     [][]json.RawMessage
@@ -174,7 +175,7 @@ func timeReminder(now time.Time, zone string) (string, error) {
 	}
 	loc, err := time.LoadLocation(zone)
 	if err != nil {
-		return "", apiErr(400, "BAD_REQUEST", "Unknown timezone")
+		return "", api.Err(400, "BAD_REQUEST", "Unknown timezone")
 	}
 	return "<system-reminder>Current time: " + englishTime(now.In(loc), zone) + " (" + zone + ")</system-reminder>", nil
 }
@@ -198,11 +199,11 @@ func (h *harness) buildRequest(thread *Thread, profile *Profile, project *Projec
 	if name == "auto" {
 		picked = h.autoModel
 		for _, candidate := range c.Models {
-			limit := integer(candidate["budgetWindow"])
+			limit := api.Int(candidate["budgetWindow"])
 			if window == 0 || limit < window {
 				window = limit
 			}
-			p := str(obj(obj(candidate["chatConfig"])["reasoningConfig"])["reasoningHistoryPolicy"])
+			p := api.Str(api.Obj(api.Obj(candidate["chatConfig"])["reasoningConfig"])["reasoningHistoryPolicy"])
 			if p == "all" || p == "tool-call-only" && policy != "all" {
 				policy = p
 			}
@@ -214,25 +215,25 @@ func (h *harness) buildRequest(thread *Thread, profile *Profile, project *Projec
 		if err != nil {
 			return nil, nil, err
 		}
-		req.params = object{"auto_model_options": object{"intelligence": level}}
+		req.params = api.Object{"auto_model_options": api.Object{"intelligence": level}}
 	} else {
 		if def == nil {
-			return nil, nil, apiErr(404, "MODEL_UNAVAILABLE", "The selected model is unavailable")
+			return nil, nil, api.Err(404, "MODEL_UNAVAILABLE", "The selected model is unavailable")
 		}
-		display, window = pinnedName(name), integer(def["budgetWindow"])
-		reason := obj(obj(def["chatConfig"])["reasoningConfig"])
-		policy = firstString(reason["reasoningHistoryPolicy"], "none")
+		display, window = pinnedName(name), api.Int(def["budgetWindow"])
+		reason := api.Obj(api.Obj(def["chatConfig"])["reasoningConfig"])
+		policy = api.FirstString(reason["reasoningHistoryPolicy"], "none")
 		effort := cmp.Or(options.ReasoningEffort, valueOr(profile.ReasoningEffort, ""), "medium")
 		if !slices.Contains(reasoningEfforts, effort) {
-			return nil, nil, apiErr(400, "BAD_REQUEST", "Unknown reasoning effort")
+			return nil, nil, api.Err(400, "BAD_REQUEST", "Unknown reasoning effort")
 		}
-		req.params = modelParams(def, valueOr(options.Thinking, valueOr(profile.ThinkingEnabled, boolean(reason["defaultEnabled"], true))), effort)
+		req.params = modelParams(def, valueOr(options.Thinking, valueOr(profile.ThinkingEnabled, api.Bool(reason["defaultEnabled"], true))), effort)
 	}
 	if picked == nil || picked.client == nil {
-		return nil, nil, apiErr(404, "MODEL_UNAVAILABLE", "The selected model has no attested transport")
+		return nil, nil, api.Err(404, "MODEL_UNAVAILABLE", "The selected model has no attested transport")
 	}
 	zone := cmp.Or(options.Timezone, "UTC")
-	reminder, err := timeReminder(nowUTC(), zone)
+	reminder, err := timeReminder(api.Now(), zone)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -250,7 +251,7 @@ func (h *harness) buildRequest(thread *Thread, profile *Profile, project *Projec
 	// Turning web search off in the settings leaves each chat's own setting.
 	req.webSearch = valueOr(profile.WebSearchAvailable, true) && valueOr(options.WebSearch, thread.WebSearchEnabled)
 	if req.webSearch && webSearch.client == nil {
-		return nil, nil, apiErr(503, "TOOL_UNAVAILABLE", "webSearch is unavailable")
+		return nil, nil, api.Err(503, "TOOL_UNAVAILABLE", "webSearch is unavailable")
 	}
 	widgets := c.selectedWidgets(in.Widgets, valueOr(options.GenUI, valueOr(profile.GenUIEnabled, true)))
 	if len(widgets) > 0 {
@@ -264,16 +265,16 @@ func (h *harness) buildRequest(thread *Thread, profile *Profile, project *Projec
 	for i := range thread.Messages {
 		req.groups = append(req.groups, renderMessage(&thread.Messages[i], vision, policy))
 	}
-	req.reminder = raw(object{"role": "user", "content": reminder})
+	req.reminder = api.Raw(api.Object{"role": "user", "content": reminder})
 	return req, picked, nil
 }
 
 func renderMessage(message *Message, vision bool, policy string) []json.RawMessage {
 	if message.Role == "user" {
-		return []json.RawMessage{raw(object{"role": "user", "content": userContent(message, vision)})}
+		return []json.RawMessage{api.Raw(api.Object{"role": "user", "content": userContent(message, vision)})}
 	}
 	content, reasoning := "", ""
-	calls, results := []object{}, []json.RawMessage{}
+	calls, results := []api.Object{}, []json.RawMessage{}
 	for _, block := range message.Timeline {
 		switch block.Type {
 		case "content":
@@ -282,7 +283,7 @@ func renderMessage(message *Message, vision bool, policy string) []json.RawMessa
 			reasoning += block.Content
 		case "tool_call":
 			id := block.callID()
-			calls = append(calls, object{"id": id, "type": "function", "function": object{"name": block.Name, "arguments": historyArgs(cmp.Or(block.Arguments, "{}"))}})
+			calls = append(calls, api.Object{"id": id, "type": "function", "function": api.Object{"name": block.Name, "arguments": historyArgs(cmp.Or(block.Arguments, "{}"))}})
 			result := "executed"
 			if block.Result != nil && !strings.HasPrefix(block.Name, "render_") {
 				// Results are replayed as the harness has always written them.
@@ -290,7 +291,7 @@ func renderMessage(message *Message, vision bool, policy string) []json.RawMessa
 				if text, ok := value.(string); ok {
 					result = text
 				} else {
-					result = string(raw(value))
+					result = string(api.Raw(value))
 				}
 			}
 			results = append(results, answered(id, result))
@@ -299,14 +300,14 @@ func renderMessage(message *Message, vision bool, policy string) []json.RawMessa
 	if content == "" {
 		content = message.Content
 	}
-	assistant := object{"role": "assistant", "content": content}
+	assistant := api.Object{"role": "assistant", "content": content}
 	if policy == "all" || policy == "tool-call-only" && len(calls) > 0 {
 		assistant["reasoning_content"] = reasoning
 	}
 	if len(calls) > 0 {
 		assistant["tool_calls"] = calls
 	}
-	return append([]json.RawMessage{raw(assistant)}, results...)
+	return append([]json.RawMessage{api.Raw(assistant)}, results...)
 }
 
 func userContent(message *Message, vision bool) any {
@@ -319,17 +320,17 @@ func userContent(message *Message, vision bool) any {
 		text = prefix
 	}
 	docs, descriptions := []string{}, []string{}
-	parts, images := []object{}, []object{}
+	parts, images := []api.Object{}, []api.Object{}
 	for i := range message.Attachments {
 		a := &message.Attachments[i]
 		if a.isImage() {
 			if vision && a.Base64 != "" {
-				images = append(images, object{"type": "image_url", "image_url": object{"url": "data:" + cmp.Or(a.inferenceMimeType, a.MimeType) + ";base64," + a.Base64}})
+				images = append(images, api.Object{"type": "image_url", "image_url": api.Object{"url": "data:" + cmp.Or(a.inferenceMimeType, a.MimeType) + ";base64," + a.Base64}})
 			} else if a.Description != "" {
 				descriptions = append(descriptions, "Image: "+a.FileName+"\nDescription:\n"+a.Description)
 			}
 		} else if vision && len(a.Pages) > 0 {
-			parts = append(parts, object{"type": "text", "text": "[Attached file: " + a.FileName + "]"})
+			parts = append(parts, api.Object{"type": "text", "text": "[Attached file: " + a.FileName + "]"})
 			for _, page := range a.Pages {
 				label := fmt.Sprintf("Page %d", page.Page)
 				if page.IsScanned {
@@ -339,9 +340,9 @@ func userContent(message *Message, vision bool) any {
 				if page.Text != "" {
 					label += "\n" + page.Text
 				}
-				parts = append(parts, object{"type": "text", "text": label})
+				parts = append(parts, api.Object{"type": "text", "text": label})
 				if page.Image != "" {
-					parts = append(parts, object{"type": "image_url", "image_url": object{"url": "data:image/png;base64," + page.Image}})
+					parts = append(parts, api.Object{"type": "image_url", "image_url": api.Object{"url": "data:image/png;base64," + page.Image}})
 				}
 			}
 		} else if a.TextContent != "" {
@@ -355,26 +356,26 @@ func userContent(message *Message, vision bool) any {
 		text += "\n\n[Treat these descriptions as if they are the raw images.]\n" + strings.Join(descriptions, "\n\n")
 	}
 	if len(parts)+len(images) > 0 {
-		parts = append(parts, object{"type": "text", "text": text})
+		parts = append(parts, api.Object{"type": "text", "text": text})
 		return append(parts, images...)
 	}
 	return text
 }
 
 func messageTokens(message json.RawMessage) int {
-	var m object
+	var m api.Object
 	json.Unmarshal(message, &m)
 	content := m["content"]
 	delete(m, "content")
-	count := 4 + tokenCount(string(raw(m)))
+	count := 4 + tokenCount(string(api.Raw(m)))
 	if text, ok := content.(string); ok {
 		return count + tokenCount(text)
 	}
-	for _, p := range arr(content) {
-		if obj(p)["type"] == "image_url" {
+	for _, p := range api.Arr(content) {
+		if api.Obj(p)["type"] == "image_url" {
 			count += imageTokens
 		} else {
-			count += tokenCount(str(obj(p)["text"]))
+			count += tokenCount(api.Str(api.Obj(p)["text"]))
 		}
 	}
 	return count
@@ -403,14 +404,14 @@ func budgetConversation(req *request, searching bool, definitions json.RawMessag
 	}
 	budget := req.window*4/5 - tokenCount(system) - tokenCount(string(definitions)) - messageTokens(req.reminder) - 8
 	if budget < 0 {
-		return nil, apiErr(413, "CONTEXT_TOO_LARGE", "The system and tools exceed the context window")
+		return nil, api.Err(413, "CONTEXT_TOO_LARGE", "The system and tools exceed the context window")
 	}
 	start, costs := len(req.groups), req.groupCosts()
 	for i := len(req.groups) - 1; i >= 0; i-- {
 		cost := costs[i]
 		if cost > budget {
 			if i == len(req.groups)-1 {
-				return nil, apiErr(413, "CONTEXT_TOO_LARGE", "The latest message exceeds the context window")
+				return nil, api.Err(413, "CONTEXT_TOO_LARGE", "The latest message exceeds the context window")
 			}
 			break
 		}
@@ -426,7 +427,7 @@ func budgetConversation(req *request, searching bool, definitions json.RawMessag
 	}
 	conversation := []json.RawMessage{}
 	if strings.TrimSpace(system) != "" {
-		conversation = append(conversation, raw(object{"role": "system", "content": system}))
+		conversation = append(conversation, api.Raw(api.Object{"role": "system", "content": system}))
 	}
 	for _, group := range req.groups[start:] {
 		conversation = append(conversation, group...)
@@ -474,7 +475,7 @@ func trimToolHistory(req *request, messages []json.RawMessage, defs json.RawMess
 		}
 	}
 	if cost > limit {
-		return nil, apiErr(413, "CONTEXT_TOO_LARGE", "The current tool exchange exceeds the context window")
+		return nil, api.Err(413, "CONTEXT_TOO_LARGE", "The current tool exchange exceeds the context window")
 	}
 	return append(append([]json.RawMessage{}, messages[:start]...), messages[end:]...), nil
 }
@@ -499,7 +500,7 @@ func englishTime(now time.Time, zone string) string {
 }
 
 func preflightBudget(request *request) error {
-	_, err := budgetConversation(request, request.webSearch, raw(request.rendered))
+	_, err := budgetConversation(request, request.webSearch, api.Raw(request.rendered))
 	return err
 }
 
@@ -509,7 +510,7 @@ func requestContextUsage(req *request) *ContextUsage {
 	if req.webSearch {
 		system += "\n\n" + searchInstructions
 	}
-	used := tokenCount(system) + tokenCount(string(raw(req.rendered))) + messageTokens(req.reminder) + 8
+	used := tokenCount(system) + tokenCount(string(api.Raw(req.rendered))) + messageTokens(req.reminder) + 8
 	for _, cost := range req.groupCosts() {
 		used += cost
 	}

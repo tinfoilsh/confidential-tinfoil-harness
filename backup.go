@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 // A native backup is a ZIP archive: one JSON entry per project, project
@@ -211,16 +213,16 @@ func safeEntryName(f *zip.File) bool {
 // header says.
 func readEntry(f *zip.File, limit int64) ([]byte, error) {
 	if f.UncompressedSize64 > uint64(limit) {
-		return nil, apiErr(413, "IMPORT_TOO_LARGE", "An archive entry exceeds the size limit")
+		return nil, api.Err(413, "IMPORT_TOO_LARGE", "An archive entry exceeds the size limit")
 	}
 	r, err := f.Open()
 	if err != nil {
-		return nil, apiErr(400, "IMPORT_INVALID", "An archive entry cannot be read")
+		return nil, api.Err(400, "IMPORT_INVALID", "An archive entry cannot be read")
 	}
 	defer r.Close()
 	b, err := io.ReadAll(io.LimitReader(r, int64(f.UncompressedSize64)+1))
 	if err != nil || uint64(len(b)) != f.UncompressedSize64 {
-		return nil, apiErr(400, "IMPORT_INVALID", "An archive entry does not match its size")
+		return nil, api.Err(400, "IMPORT_INVALID", "An archive entry does not match its size")
 	}
 	return b, nil
 }
@@ -241,7 +243,7 @@ func newBackupWriter(w io.Writer) *backupWriter {
 
 func (b *backupWriter) add(kind, name string, data []byte) error {
 	if len(b.manifest.Files)+1 >= maxArchiveEntries {
-		return apiErr(413, "ARCHIVE_TOO_LARGE", "The backup holds too many items")
+		return api.Err(413, "ARCHIVE_TOO_LARGE", "The backup holds too many items")
 	}
 	if err := b.write(name, data, backupEntryLimit(name), kind != "images" || path.Ext(name) == ".json"); err != nil {
 		return err
@@ -255,13 +257,13 @@ func (b *backupWriter) add(kind, name string, data []byte) error {
 func (b *backupWriter) write(name string, data []byte, limit uint64, compress bool) error {
 	b.expanded += uint64(len(data))
 	if uint64(len(data)) > limit || b.expanded > maxArchiveExpansion {
-		return apiErr(413, "ARCHIVE_TOO_LARGE", "The backup exceeds the size a restore takes")
+		return api.Err(413, "ARCHIVE_TOO_LARGE", "The backup exceeds the size a restore takes")
 	}
 	return writeEntry(b.zip, name, data, compress)
 }
 
 func (b *backupWriter) addJSON(kind, name string, value any) error {
-	return b.add(kind, name, raw(value))
+	return b.add(kind, name, api.Raw(value))
 }
 
 func (b *backupWriter) omit(omission backupOmission) {
@@ -287,7 +289,7 @@ func (b *backupWriter) close(id string, created time.Time) error {
 	if detached > 0 {
 		m.Warnings = append(m.Warnings, backupWarning{Code: "chats_detached_from_omitted_projects", Category: "relationship_adjustment", Count: detached})
 	}
-	if err := b.write(manifestPath, raw(m), maxBackupManifestBytes, true); err != nil {
+	if err := b.write(manifestPath, api.Raw(m), maxBackupManifestBytes, true); err != nil {
 		return err
 	}
 	return b.zip.Close()
@@ -314,7 +316,7 @@ func decodeEntry(f *zip.File, v any) error {
 		return err
 	}
 	if err := json.Unmarshal(b, v); err != nil {
-		return apiErr(400, "IMPORT_INVALID", "An archive entry is not valid JSON: "+f.Name)
+		return api.Err(400, "IMPORT_INVALID", "An archive entry is not valid JSON: "+f.Name)
 	}
 	return nil
 }

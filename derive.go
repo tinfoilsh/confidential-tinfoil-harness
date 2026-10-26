@@ -9,6 +9,7 @@ import (
 	"regexp"
 
 	"github.com/google/uuid"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 // contentKey is request-scoped. It is never included in response models.
@@ -19,10 +20,10 @@ func (contentKey) LogValue() slog.Value { return slog.StringValue("REDACTED") }
 func decodeContentKey(value []byte) (contentKey, error) {
 	var key contentKey
 	if len(value) == 0 {
-		return key, apiErr(401, "KEY_REQUIRED", "A content key is required")
+		return key, api.Err(401, "KEY_REQUIRED", "A content key is required")
 	}
 	if len(value) != len(key) {
-		return key, apiErr(400, "BAD_REQUEST", "key must be base64 encoding of 32 bytes")
+		return key, api.Err(400, "BAD_REQUEST", "key must be base64 encoding of 32 bytes")
 	}
 	copy(key[:], value)
 	return key, nil
@@ -33,7 +34,7 @@ func decodeBase64Key(value []byte) (contentKey, error) {
 	defer clear(b)
 	n, err := base64.StdEncoding.Strict().Decode(b, value)
 	if err != nil {
-		return contentKey{}, apiErr(400, "BAD_REQUEST", "key must be base64 encoding of 32 bytes")
+		return contentKey{}, api.Err(400, "BAD_REQUEST", "key must be base64 encoding of 32 bytes")
 	}
 	return decodeContentKey(b[:n])
 }
@@ -47,5 +48,5 @@ const maxReverseMillis = 9999999999999
 var rowIDPattern = regexp.MustCompile(`^\d{13}_[0-9a-f-]{36}$`)
 
 func rowID() string {
-	return fmt.Sprintf("%013d_%s", maxReverseMillis-nowUTC().UnixMilli(), uuid.NewString())
+	return fmt.Sprintf("%013d_%s", maxReverseMillis-api.Now().UnixMilli(), uuid.NewString())
 }

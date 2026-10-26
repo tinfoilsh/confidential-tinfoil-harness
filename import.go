@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/importer"
 )
 
@@ -59,7 +60,7 @@ var importNamespace = uuid.NewSHA1(uuid.NameSpaceURL, []byte("https://chat.tinfo
 var sniffedImages = []string{"image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp"}
 
 type importOptions struct {
-	keyRequest
+	api.KeyRequest
 	Target string `json:"target"`
 }
 
@@ -68,17 +69,17 @@ func (h *harness) handleImport(w http.ResponseWriter, r *http.Request) {
 	// with or without chat access.
 	p, err := h.auth.authenticate(r, false)
 	if err != nil {
-		respond(w, nil, err)
+		api.Respond(w, nil, err)
 		return
 	}
 	size, err := requestSize(r, maxImportBody)
 	if err != nil {
-		respond(w, nil, err)
+		api.Respond(w, nil, err)
 		return
 	}
 	lease, err := h.scratch.lease(r.Context(), importSpaceFactor*size)
 	if err != nil {
-		respond(w, nil, err)
+		api.Respond(w, nil, err)
 		return
 	}
 	defer lease.release()
@@ -89,31 +90,31 @@ func (h *harness) handleImport(w http.ResponseWriter, r *http.Request) {
 			return nil
 		}
 		if len(options.Key) == 0 {
-			return apiErr(401, "KEY_REQUIRED", "A content key is required")
+			return api.Err(401, "KEY_REQUIRED", "A content key is required")
 		}
 		return h.authorizeArchive(r.Context(), p, options.Key, "import")
 	})
-	defer options.clearKey()
+	defer options.ClearKey()
 	if err != nil {
-		respond(w, nil, err)
+		api.Respond(w, nil, err)
 		return
 	}
 	lift()
 	run := &importRun{h: h, p: p, lease: lease, out: &importStream{w: w}, seen: map[string]bool{}}
 	switch options.Target {
 	case "device":
-		options.clearKey()
+		options.ClearKey()
 	case "cloud":
 		key, err := decodeContentKey(options.Key)
-		options.clearKey()
+		options.ClearKey()
 		if err != nil {
-			respond(w, nil, err)
+			api.Respond(w, nil, err)
 			return
 		}
 		defer clear(key[:])
 		run.key = &key
 	default:
-		respond(w, nil, apiErr(400, "BAD_REQUEST", "target must be cloud or device"))
+		api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "target must be cloud or device"))
 		return
 	}
 	err = run.run(r.Context(), upload)
@@ -125,7 +126,7 @@ func (h *harness) handleImport(w http.ResponseWriter, r *http.Request) {
 func requestSize(r *http.Request, limit int64) (int64, error) {
 	switch {
 	case r.ContentLength > limit:
-		return 0, apiErr(413, "PAYLOAD_TOO_LARGE", "The request exceeds the size limit")
+		return 0, api.Err(413, "PAYLOAD_TOO_LARGE", "The request exceeds the size limit")
 	case r.ContentLength < 0:
 		return limit, nil
 	}
@@ -136,7 +137,7 @@ func readImportForm(r *http.Request, lease *scratchLease, authorize func(importO
 	var options importOptions
 	reader, err := r.MultipartReader()
 	if err != nil {
-		return nil, options, apiErr(400, "BAD_REQUEST", "Expected multipart form data")
+		return nil, options, api.Err(400, "BAD_REQUEST", "Expected multipart form data")
 	}
 	var upload *scratchFile
 	hasOptions := false
@@ -151,10 +152,10 @@ func readImportForm(r *http.Request, lease *scratchLease, authorize func(importO
 		switch part.FormName() {
 		case "file":
 			if !hasOptions {
-				return nil, options, apiErr(400, "BAD_REQUEST", "options must precede the archive")
+				return nil, options, api.Err(400, "BAD_REQUEST", "options must precede the archive")
 			}
 			if upload != nil {
-				return nil, options, apiErr(400, "BAD_REQUEST", "Expected one archive")
+				return nil, options, api.Err(400, "BAD_REQUEST", "Expected one archive")
 			}
 			if upload, err = lease.create(); err != nil {
 				return nil, options, err
@@ -164,7 +165,7 @@ func readImportForm(r *http.Request, lease *scratchLease, authorize func(importO
 			}
 		case "options":
 			if hasOptions {
-				return nil, options, apiErr(400, "BAD_REQUEST", "Duplicate multipart field")
+				return nil, options, api.Err(400, "BAD_REQUEST", "Duplicate multipart field")
 			}
 			hasOptions = true
 			if err := decodeFormField(part, &options); err != nil {
@@ -174,12 +175,12 @@ func readImportForm(r *http.Request, lease *scratchLease, authorize func(importO
 				return nil, options, err
 			}
 		default:
-			return nil, options, apiErr(400, "BAD_REQUEST", "Unknown multipart field: "+part.FormName())
+			return nil, options, api.Err(400, "BAD_REQUEST", "Unknown multipart field: "+part.FormName())
 		}
 		part.Close()
 	}
 	if upload == nil || upload.Size() == 0 || !hasOptions {
-		return nil, options, apiErr(400, "BAD_REQUEST", "An archive and options are required")
+		return nil, options, api.Err(400, "BAD_REQUEST", "An archive and options are required")
 	}
 	return upload, options, nil
 }
@@ -187,26 +188,26 @@ func readImportForm(r *http.Request, lease *scratchLease, authorize func(importO
 // formError is a multipart body's failure: the harness's own refusal, a
 // body over its limit, or a malformed form.
 func formError(err error) error {
-	var refused *apiError
+	var refused *api.Error
 	if errors.As(err, &refused) {
 		return refused
 	}
 	if err == nil {
-		return apiErr(400, "BAD_REQUEST", "The form has too many parts")
+		return api.Err(400, "BAD_REQUEST", "The form has too many parts")
 	}
-	return bodyError(err, "Invalid multipart form")
+	return api.BodyError(err, "Invalid multipart form")
 }
 
 func decodeFormField(part *multipart.Part, v any) error {
-	b, err := readWipeable(io.LimitReader(part, maxFormField+1))
+	b, err := api.ReadWipeable(io.LimitReader(part, maxFormField+1))
 	defer clear(b)
 	if err != nil || len(b) > maxFormField {
-		return apiErr(400, "BAD_REQUEST", "Multipart field is too large")
+		return api.Err(400, "BAD_REQUEST", "Multipart field is too large")
 	}
-	if !isObject(b) {
-		return apiErr(400, "BAD_REQUEST", part.FormName()+" must be a JSON object")
+	if !api.IsObject(b) {
+		return api.Err(400, "BAD_REQUEST", part.FormName()+" must be a JSON object")
 	}
-	return decodeRequest(b, v)
+	return api.DecodeRequest(b, v)
 }
 
 // importRun is one import: where its chats go and what it left out.
@@ -233,7 +234,7 @@ func (j *importRun) run(ctx context.Context, upload *scratchFile) error {
 		head := make([]byte, 4)
 		upload.ReadAt(head, 0)
 		if bytes.Equal(head, []byte("PK\x03\x04")) {
-			return apiErr(400, "IMPORT_INVALID", "The archive is damaged")
+			return api.Err(400, "IMPORT_INVALID", "The archive is damaged")
 		}
 		if err := importer.Records(upload.section(0, upload.Size()), func(record json.RawMessage) error { return j.record(record, nil, nil) }); err != nil {
 			return importError(err)
@@ -241,7 +242,7 @@ func (j *importRun) run(ctx context.Context, upload *scratchFile) error {
 		return j.complete(ctx)
 	}
 	if len(zr.File) > maxArchiveEntries {
-		return apiErr(413, "IMPORT_TOO_LARGE", "The archive holds too many files")
+		return api.Err(413, "IMPORT_TOO_LARGE", "The archive holds too many files")
 	}
 	backup, err := openNativeBackup(zr)
 	if err != nil {
@@ -256,7 +257,7 @@ func (j *importRun) run(ctx context.Context, upload *scratchFile) error {
 // importError is an error reading an export, as the client is told it.
 func importError(err error) error {
 	if errors.Is(err, importer.ErrInvalid) {
-		return apiErr(400, "IMPORT_INVALID", "The export cannot be read: "+strings.TrimPrefix(err.Error(), importer.ErrInvalid.Error()+": "))
+		return api.Err(400, "IMPORT_INVALID", "The export cannot be read: "+strings.TrimPrefix(err.Error(), importer.ErrInvalid.Error()+": "))
 	}
 	return err
 }
@@ -264,10 +265,10 @@ func importError(err error) error {
 // complete stores what goes to the cloud once every record is read.
 func (j *importRun) complete(ctx context.Context) error {
 	if !j.recognized {
-		return apiErr(400, "IMPORT_INVALID", "This file is not a Tinfoil backup or a ChatGPT, Claude or Tinfoil export")
+		return api.Err(400, "IMPORT_INVALID", "This file is not a Tinfoil backup or a ChatGPT, Claude or Tinfoil export")
 	}
 	if j.key == nil && !j.out.started && j.warnings.projectsSkipped > 0 {
-		return apiErr(400, "PROJECTS_REQUIRE_CLOUD", "Projects are kept in the cloud; turn on cloud sync to import them")
+		return api.Err(400, "PROJECTS_REQUIRE_CLOUD", "Projects are kept in the cloud; turn on cloud sync to import them")
 	}
 	if j.cloud == nil {
 		return nil
@@ -309,7 +310,7 @@ func (j *importRun) record(record json.RawMessage, index *importer.Index, read f
 		}
 		return j.project(project)
 	}
-	return apiErr(400, "IMPORT_INVALID", "This file is not a Tinfoil backup or a ChatGPT, Claude or Tinfoil export")
+	return api.Err(400, "IMPORT_INVALID", "This file is not a Tinfoil backup or a ChatGPT, Claude or Tinfoil export")
 }
 
 // export reads a ZIP export of ChatGPT, Claude or Tinfoil.
@@ -322,7 +323,7 @@ func (j *importRun) export(ctx context.Context, zr *zip.Reader) error {
 			continue
 		}
 		if expanded += f.UncompressedSize64; expanded > maxArchiveExpansion {
-			return apiErr(413, "IMPORT_TOO_LARGE", "The archive expands past the size limit")
+			return api.Err(413, "IMPORT_TOO_LARGE", "The archive expands past the size limit")
 		}
 		files[f.Name] = f
 		names = append(names, f.Name)
@@ -337,12 +338,12 @@ func (j *importRun) export(ctx context.Context, zr *zip.Reader) error {
 	}
 	records := append(conversationFiles(names), projectFiles(names)...)
 	if len(records) == 0 {
-		return apiErr(400, "IMPORT_INVALID", "The archive holds no conversations or projects")
+		return api.Err(400, "IMPORT_INVALID", "The archive holds no conversations or projects")
 	}
 	for _, name := range records {
 		r, err := files[name].Open()
 		if err != nil {
-			return apiErr(400, "IMPORT_INVALID", "An archive entry cannot be read")
+			return api.Err(400, "IMPORT_INVALID", "An archive entry cannot be read")
 		}
 		err = importer.Records(io.LimitReader(r, maxArchiveJSONEntry), func(record json.RawMessage) error { return j.record(record, index, read) })
 		r.Close()
@@ -432,7 +433,7 @@ func (j *importRun) conversationThread(c *importer.Conversation, read func(strin
 	if len(c.Messages) > 0 {
 		first = c.Messages[0].CreatedAt
 	}
-	created := firstTime(c.CreatedAt, c.UpdatedAt, first, nowUTC())
+	created := firstTime(c.CreatedAt, c.UpdatedAt, first, api.Now())
 	t := Thread{Title: cmp.Or(strings.TrimSpace(c.Title), "Imported Chat"), TitleState: "generated", CreatedAt: isoString(created), UpdatedAt: isoString(firstTime(c.UpdatedAt, created)),
 		Model: autoModelName, WebSearchEnabled: true, Messages: []Message{}}
 	for i, m := range c.Messages {
@@ -508,7 +509,7 @@ func (j *importRun) prepare(t *Thread) error {
 	t.ActiveRun, t.ContextUsage, t.HiddenCount, t.Flagged = nil, nil, 0, false
 	t.LastRequestID, t.LastRequestKind = "", ""
 	if _, err := time.Parse(time.RFC3339Nano, t.CreatedAt); err != nil {
-		t.CreatedAt = cmp.Or(isoTime(t.UpdatedAt), timestamp())
+		t.CreatedAt = cmp.Or(isoTime(t.UpdatedAt), api.Timestamp())
 	}
 	if _, err := time.Parse(time.RFC3339Nano, t.UpdatedAt); err != nil {
 		t.UpdatedAt = t.CreatedAt
@@ -542,7 +543,7 @@ func (j *importRun) prepare(t *Thread) error {
 	j.chats++
 	j.messages += len(messages)
 	if j.chats > maxImportChats || j.messages > maxImportMessages || j.attachments > maxImportAttachments {
-		return apiErr(413, "IMPORT_TOO_LARGE", "The archive holds more chats, messages or attachments than an import takes")
+		return api.Err(413, "IMPORT_TOO_LARGE", "The archive holds more chats, messages or attachments than an import takes")
 	}
 	return nil
 }
@@ -656,7 +657,7 @@ type importStream struct {
 type importLine struct {
 	Thread *importThread `json:"thread,omitempty"`
 	Done   *importDone   `json:"done,omitempty"`
-	Error  *apiError     `json:"error,omitempty"`
+	Error  *api.Error    `json:"error,omitempty"`
 }
 
 type importDone struct {
@@ -686,19 +687,19 @@ func (s *importStream) thread(t *importThread) error {
 
 func (s *importStream) finish(jobID *string, warnings []string, err error) {
 	if err != nil && !s.started {
-		respond(s.w, nil, err)
+		api.Respond(s.w, nil, err)
 		return
 	}
 	s.start()
 	if err != nil {
-		s.enc.Encode(importLine{Error: asAPIError(err)})
+		s.enc.Encode(importLine{Error: api.AsError(err)})
 		return
 	}
 	s.enc.Encode(importLine{Done: &importDone{JobID: jobID, Warnings: warnings}})
 }
 
 // errAttachmentMissing is an attachment whose bytes its source does not hold.
-var errAttachmentMissing = apiErr(404, "THREAD_NOT_FOUND", "The attachment was not found")
+var errAttachmentMissing = api.Err(404, "THREAD_NOT_FOUND", "The attachment was not found")
 
 // A native cloud import is the archive sync's import job stores: one entry
 // per project, document and chat, each chat image's bytes as a blob, and a
@@ -784,7 +785,7 @@ func newCloudArchive(file *scratchFile, source string) *cloudArchive {
 }
 
 func (c *cloudArchive) entity(kind, sourceID, projectSourceID string, payload any) error {
-	data := raw(payload)
+	data := api.Raw(payload)
 	name := "entities/" + kind + "/" + strconv.Itoa(len(c.manifest.Entities)) + ".json"
 	if err := writeEntry(c.zip, name, data, true); err != nil {
 		return err
@@ -812,7 +813,7 @@ func (c *cloudArchive) chat(sourceID, projectSourceID string, t *Thread) error {
 			if a.isImage() {
 				data, err := base64.StdEncoding.DecodeString(a.Base64)
 				if err != nil {
-					return apiErr(400, "IMPORT_INVALID", "An image is not valid base64")
+					return api.Err(400, "IMPORT_INVALID", "An image is not valid base64")
 				}
 				name := "blobs/" + strconv.Itoa(len(c.manifest.Blobs)) + ".bin"
 				if err := writeEntry(c.zip, name, data, false); err != nil {
@@ -830,7 +831,7 @@ func (c *cloudArchive) chat(sourceID, projectSourceID string, t *Thread) error {
 }
 
 func (c *cloudArchive) finish() error {
-	if err := writeEntry(c.zip, manifestPath, raw(c.manifest), true); err != nil {
+	if err := writeEntry(c.zip, manifestPath, api.Raw(c.manifest), true); err != nil {
 		return err
 	}
 	return c.zip.Close()
@@ -856,7 +857,7 @@ func (h *harness) stageImport(ctx context.Context, p *principal, key contentKey,
 	defer clear(key[:])
 	size := archive.Size()
 	if size > maxCloudImport {
-		return "", apiErr(413, "IMPORT_TOO_LARGE", "The chats for the cloud exceed what one import takes")
+		return "", api.Err(413, "IMPORT_TOO_LARGE", "The chats for the cloud exceed what one import takes")
 	}
 	hash := sha256.New()
 	if _, err := io.Copy(hash, archive.section(0, size)); err != nil {
@@ -881,7 +882,7 @@ func (h *harness) stageImport(ctx context.Context, p *principal, key contentKey,
 			return "", err
 		}
 	}
-	return created.JobID, h.syncAPI.callKey(ctx, p, "/v1/import/start", key, object{"job_id": created.JobID}, nil)
+	return created.JobID, h.syncAPI.callKey(ctx, p, "/v1/import/start", key, api.Object{"job_id": created.JobID}, nil)
 }
 
 // importKindCounts is what sync's job did with one kind of item.

@@ -25,6 +25,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	_ "golang.org/x/image/bmp"
 	"golang.org/x/image/draw"
 	_ "golang.org/x/image/tiff"
@@ -164,18 +165,18 @@ func randomBytes(n int) []byte { b := make([]byte, n); rand.Read(b); return b }
 func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 	p, err := h.auth.authenticate(r, r.URL.Path == "/v1/transcriptions" || r.URL.Path == "/v1/attachments/upload")
 	if err != nil {
-		respond(w, nil, err)
+		api.Respond(w, nil, err)
 		return
 	}
 	cred, err := h.auth.inference(r.Context(), p)
 	if err != nil {
-		respond(w, nil, h.withQuota(p, cred.Limit, err))
+		api.Respond(w, nil, h.withQuota(p, cred.Limit, err))
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxTextBytes+(1<<20))
 	reader, err := r.MultipartReader()
 	if err != nil {
-		respond(w, nil, apiErr(400, "BAD_REQUEST", "Expected multipart form data"))
+		api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "Expected multipart form data"))
 		return
 	}
 	fields := map[string]string{}
@@ -191,12 +192,12 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		if err != nil || count >= maxFormParts {
-			respond(w, nil, apiErr(400, "BAD_REQUEST", "Invalid multipart upload"))
+			api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "Invalid multipart upload"))
 			return
 		}
 		if part.FormName() == "file" {
 			if filename != "" || part.FileName() == "" {
-				respond(w, nil, apiErr(400, "BAD_REQUEST", "Expected one named file"))
+				api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "Expected one named file"))
 				return
 			}
 			if r.URL.Path == "/v1/projects/documents/upload" {
@@ -204,31 +205,31 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 				clear(keyField)
 				keyField = nil
 				if err != nil {
-					respond(w, nil, err)
+					api.Respond(w, nil, err)
 					return
 				}
 				p.SyncToken, err = h.storeRows.authorizeStorage(r.Context(), p, key, "project-upload", fields["projectId"])
 				if err != nil {
-					respond(w, nil, err)
+					api.Respond(w, nil, err)
 					return
 				}
 			}
 			filename = filepath.Base(part.FileName())
 			file, err = io.ReadAll(io.LimitReader(part, maxTextBytes+1))
 			if err != nil || len(file) > maxTextBytes {
-				respond(w, nil, apiErr(413, "ATTACHMENT_TOO_LARGE", "The upload exceeds the size limit"))
+				api.Respond(w, nil, api.Err(413, "ATTACHMENT_TOO_LARGE", "The upload exceeds the size limit"))
 				return
 			}
 		} else {
-			value, err := readWipeable(io.LimitReader(part, maxFormField+1))
+			value, err := api.ReadWipeable(io.LimitReader(part, maxFormField+1))
 			if err != nil || len(value) > maxFormField {
 				clear(value)
-				respond(w, nil, apiErr(400, "BAD_REQUEST", "Multipart field is too large"))
+				api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "Multipart field is too large"))
 				return
 			}
 			if _, exists := fields[part.FormName()]; exists {
 				clear(value)
-				respond(w, nil, apiErr(400, "BAD_REQUEST", "Duplicate multipart field"))
+				api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "Duplicate multipart field"))
 				return
 			}
 			if part.FormName() == "key" {
@@ -243,57 +244,57 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer clear(file)
 	if filename == "" || len(file) == 0 {
-		respond(w, nil, apiErr(400, "BAD_REQUEST", "A nonempty file is required"))
+		api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "A nonempty file is required"))
 		return
 	}
 	ctx := context.WithValue(r.Context(), apiKeyKey{}, string(cred.Key))
 	if r.URL.Path == "/v1/transcriptions" {
 		text, err := h.transcribe(ctx, filename, file)
-		respond(w, object{"text": text}, h.withQuota(p, cred.Limit, err))
+		api.Respond(w, api.Object{"text": text}, h.withQuota(p, cred.Limit, err))
 		return
 	}
 	descriptor, err := h.preprocess(ctx, filename, file)
 	if err != nil {
-		respond(w, nil, h.withQuota(p, cred.Limit, err))
+		api.Respond(w, nil, h.withQuota(p, cred.Limit, err))
 		return
 	}
 	// An upload is only converted. Its client sends the descriptor back with
 	// the turn that attaches it, and that turn stores it with the chat.
 	if r.URL.Path == "/v1/attachments/upload" {
 		descriptor.ID = "att_" + token()
-		respond(w, struct {
+		api.Respond(w, struct {
 			Attachment Attachment `json:"attachment"`
 		}{descriptor}, nil)
 		return
 	}
 	if r.URL.Path == "/v1/projects/documents/upload" {
 		projectID := fields["projectId"]
-		if err := requireID("projectId", projectID); err != nil {
-			respond(w, nil, err)
+		if err := api.RequireID("projectId", projectID); err != nil {
+			api.Respond(w, nil, err)
 			return
 		}
 		if _, err := h.loadProject(ctx, p, key, projectID); err != nil {
-			respond(w, nil, err)
+			api.Respond(w, nil, err)
 			return
 		}
 		if descriptor.isImage() {
 			descriptor.TextContent, err = h.describeImage(ctx, descriptor.Base64)
 			if err != nil {
-				respond(w, nil, h.withQuota(p, cred.Limit, err))
+				api.Respond(w, nil, h.withQuota(p, cred.Limit, err))
 				return
 			}
 		}
 		if descriptor.TextContent == "" {
-			respond(w, nil, apiErr(415, "ATTACHMENT_UNSUPPORTED", "Project documents require extracted text"))
+			api.Respond(w, nil, api.Err(415, "ATTACHMENT_UNSUPPORTED", "Project documents require extracted text"))
 			return
 		}
 		doc, err := h.createProjectDocument(ctx, p, key, ProjectDocument{ID: rowID(), ProjectID: projectID, Filename: filename, ContentType: descriptor.MimeType, SizeBytes: len(file), Content: descriptor.TextContent})
-		respond(w, doc, err)
+		api.Respond(w, doc, err)
 		return
 	}
 }
 
-var errUnsupportedType = apiErr(415, "ATTACHMENT_UNSUPPORTED", "Unsupported file type")
+var errUnsupportedType = api.Err(415, "ATTACHMENT_UNSUPPORTED", "Unsupported file type")
 
 // fitsUpload refuses a descriptor no upload makes: one of a file uploads do
 // not take, an image without its bytes, or holding more than an upload of
@@ -308,14 +309,14 @@ func (d *sentAttachment) fitsUpload() error {
 		return errUnsupportedType
 	}
 	if group == &imageUploads && d.Base64 == "" {
-		return apiErr(400, "BAD_REQUEST", "An image attachment requires its bytes")
+		return api.Err(400, "BAD_REQUEST", "An image attachment requires its bytes")
 	}
 	content := len(d.TextContent) + base64.StdEncoding.DecodedLen(len(d.Base64))
 	for _, page := range d.Pages {
 		content += len(page.Text) + len(page.Image)
 	}
 	if content > group.maxContent() {
-		return apiErr(413, "ATTACHMENT_TOO_LARGE", "The attachment exceeds the size limit for its type")
+		return api.Err(413, "ATTACHMENT_TOO_LARGE", "The attachment exceeds the size limit for its type")
 	}
 	return nil
 }
@@ -330,12 +331,12 @@ func (d *sentAttachment) stored() (Attachment, error) {
 	}
 	data, err := base64.StdEncoding.DecodeString(a.Base64)
 	if err != nil {
-		return Attachment{}, apiErr(415, "ATTACHMENT_UNSUPPORTED", "The image could not be decoded")
+		return Attachment{}, api.Err(415, "ATTACHMENT_UNSUPPORTED", "The image could not be decoded")
 	}
 	defer clear(data)
 	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil {
-		return Attachment{}, apiErr(415, "ATTACHMENT_UNSUPPORTED", "The image could not be decoded")
+		return Attachment{}, api.Err(415, "ATTACHMENT_UNSUPPORTED", "The image could not be decoded")
 	}
 	// An image within the bounds, as the copy an upload makes is, is kept.
 	if max(cfg.Width, cfg.Height) <= modelImageSide {
@@ -373,18 +374,18 @@ func (h *harness) preprocess(ctx context.Context, filename string, data []byte) 
 	}
 	descriptor := Attachment{Kind: group.kind, FileName: filename, MimeType: http.DetectContentType(data), Size: new(int64(len(data)))}
 	if len(data) > group.MaxBytes {
-		return Attachment{}, apiErr(413, "ATTACHMENT_TOO_LARGE", "The file exceeds the size limit for its type")
+		return Attachment{}, api.Err(413, "ATTACHMENT_TOO_LARGE", "The file exceeds the size limit for its type")
 	}
 	switch group {
 	case &textUploads:
 		if bytes.ContainsRune(data, 0) {
-			return Attachment{}, apiErr(415, "ATTACHMENT_UNSUPPORTED", "Text uploads must contain UTF-8 text")
+			return Attachment{}, api.Err(415, "ATTACHMENT_UNSUPPORTED", "Text uploads must contain UTF-8 text")
 		}
 		// As the web client read text, what is not UTF-8 reads as U+FFFD,
 		// which can make the text longer than the file.
 		descriptor.TextContent = strings.ToValidUTF8(string(data), string(utf8.RuneError))
 		if len(descriptor.TextContent) > group.maxContent() {
-			return Attachment{}, apiErr(413, "ATTACHMENT_TOO_LARGE", "The file exceeds the size limit for its type")
+			return Attachment{}, api.Err(413, "ATTACHMENT_TOO_LARGE", "The file exceeds the size limit for its type")
 		}
 		if m := mime.TypeByExtension(ext); m != "" {
 			descriptor.MimeType = m
@@ -397,7 +398,7 @@ func (h *harness) preprocess(ctx context.Context, filename string, data []byte) 
 		descriptor.Base64, descriptor.Thumbnail = base64.StdEncoding.EncodeToString(resized), base64.StdEncoding.EncodeToString(thumb)
 	case &documentUploads:
 		if ext == ".pdf" && !bytes.HasPrefix(data, []byte("%PDF-")) || ext != ".pdf" && !bytes.HasPrefix(data, []byte("PK\x03\x04")) {
-			return Attachment{}, apiErr(415, "ATTACHMENT_UNSUPPORTED", "The file contents do not match the document type")
+			return Attachment{}, api.Err(415, "ATTACHMENT_UNSUPPORTED", "The file contents do not match the document type")
 		}
 		result, err := h.convert(ctx, filename, data)
 		if err != nil {
@@ -414,7 +415,7 @@ func (h *harness) preprocess(ctx context.Context, filename string, data []byte) 
 		}
 		var mistyped *json.UnmarshalTypeError
 		if err := json.Unmarshal(result, &converted); err != nil && !errors.As(err, &mistyped) {
-			return Attachment{}, apiErr(502, "UPSTREAM_REFUSED", "Invalid document response")
+			return Attachment{}, api.Err(502, "UPSTREAM_REFUSED", "Invalid document response")
 		}
 		document := converted.conversion
 		if converted.Document != nil {
@@ -436,11 +437,11 @@ func (h *harness) preprocess(ctx context.Context, filename string, data []byte) 
 func resizeImage(data []byte) ([]byte, []byte, error) {
 	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil || cfg.Width < 1 || cfg.Height < 1 || int64(cfg.Width)*int64(cfg.Height) > maxImagePixels {
-		return nil, nil, apiErr(415, "ATTACHMENT_UNSUPPORTED", "The image cannot be decoded within the pixel limit")
+		return nil, nil, api.Err(415, "ATTACHMENT_UNSUPPORTED", "The image cannot be decoded within the pixel limit")
 	}
 	im, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
-		return nil, nil, apiErr(415, "ATTACHMENT_UNSUPPORTED", "The image could not be decoded")
+		return nil, nil, api.Err(415, "ATTACHMENT_UNSUPPORTED", "The image could not be decoded")
 	}
 	encode := func(maxSide int) ([]byte, error) {
 		width, height := cfg.Width, cfg.Height
@@ -475,7 +476,7 @@ var conversionDeadline = 10 * time.Minute
 func (h *harness) convert(ctx context.Context, filename string, data []byte) ([]byte, error) {
 	router := h.services["router"]
 	if router == nil {
-		return nil, apiErr(503, "TOOL_UNAVAILABLE", "Document conversion is unavailable")
+		return nil, api.Err(503, "TOOL_UNAVAILABLE", "Document conversion is unavailable")
 	}
 	ctx, cancel := context.WithTimeout(ctx, conversionDeadline)
 	defer cancel()
@@ -499,7 +500,7 @@ func (h *harness) convert(ctx context.Context, filename string, data []byte) ([]
 // capacityDelay is how long a capacity rejection asks to wait, or zero when the
 // refusal is final. An exhausted quota needs the user rather than a retry.
 func capacityDelay(err error) time.Duration {
-	var e *apiError
+	var e *api.Error
 	if !errors.As(err, &e) || e.Code == "QUOTA_EXHAUSTED" || e.Status != http.StatusTooManyRequests && e.Status != http.StatusServiceUnavailable {
 		return 0
 	}
@@ -542,24 +543,24 @@ func multipartCall(ctx context.Context, service *downstreamService, path, fileFi
 		return nil, err
 	}
 	if len(b) > maxTextBytes {
-		return nil, apiErr(413, "ATTACHMENT_TOO_LARGE", "The converted document exceeds the text limit")
+		return nil, api.Err(413, "ATTACHMENT_TOO_LARGE", "The converted document exceeds the text limit")
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, withRetryAfter(downstreamError(resp.StatusCode, b), resp.Header)
+		return nil, api.WithRetryAfter(api.DownstreamError(resp.StatusCode, b), resp.Header)
 	}
 	return b, nil
 }
 func (h *harness) transcribe(ctx context.Context, filename string, data []byte) (string, error) {
 	if len(data) > audioUploads.MaxBytes {
-		return "", apiErr(413, "ATTACHMENT_TOO_LARGE", "The recording exceeds the size limit")
+		return "", api.Err(413, "ATTACHMENT_TOO_LARGE", "The recording exceeds the size limit")
 	}
 	if !audioUploads.accepts(filename) {
-		return "", apiErr(415, "ATTACHMENT_UNSUPPORTED", "Unsupported recording type")
+		return "", api.Err(415, "ATTACHMENT_UNSUPPORTED", "Unsupported recording type")
 	}
 	// The router reads the model from the form, as the web client's SDK sends it.
 	router := h.services["router"]
 	if router == nil {
-		return "", apiErr(503, "TOOL_UNAVAILABLE", "Transcription is unavailable")
+		return "", api.Err(503, "TOOL_UNAVAILABLE", "Transcription is unavailable")
 	}
 	b, err := multipartCall(ctx, router, "/v1/audio/transcriptions", "file", filename, data, map[string]string{"model": "voxtral-small-24b", "response_format": "text"})
 	if err != nil {
@@ -577,10 +578,10 @@ func (h *harness) transcribe(ctx context.Context, filename string, data []byte) 
 // attachment finds an attachment of the named thread for its client to download.
 func (h *harness) attachment(ctx context.Context, p *principal, key contentKey, id, threadID string) (*Attachment, []byte, error) {
 	if p.Anonymous {
-		return nil, nil, apiErr(404, "THREAD_NOT_FOUND", "The attachment was not found")
+		return nil, nil, api.Err(404, "THREAD_NOT_FOUND", "The attachment was not found")
 	}
 	if key == (contentKey{}) {
-		return nil, nil, apiErr(401, "KEY_REQUIRED", "A content key is required")
+		return nil, nil, api.Err(401, "KEY_REQUIRED", "A content key is required")
 	}
 	var descriptor *Attachment
 	if threadID != "" {
@@ -591,7 +592,7 @@ func (h *harness) attachment(ctx context.Context, p *principal, key contentKey, 
 		descriptor = row.attachment(id)
 	}
 	if descriptor == nil {
-		return nil, nil, apiErr(404, "THREAD_NOT_FOUND", "The attachment was not found")
+		return nil, nil, api.Err(404, "THREAD_NOT_FOUND", "The attachment was not found")
 	}
 	b, err := h.attachmentBytes(ctx, p, descriptor, false)
 	return descriptor, b, err
@@ -604,7 +605,7 @@ func (h *harness) attachmentBytes(ctx context.Context, p *principal, a *Attachme
 	data, err := h.getAttachment(ctx, p, a.ID, a.storageKey(), public)
 	// Sync moves an image that only has a legacy key into its own storage
 	// under the same id and key, after which the control plane refuses it.
-	if err != nil && asAPIError(err).HTTP == http.StatusNotFound && !public && a.EncryptionKey == "" && a.Key != "" {
+	if err != nil && api.AsError(err).HTTP == http.StatusNotFound && !public && a.EncryptionKey == "" && a.Key != "" {
 		return h.legacyAttachmentBytes(ctx, a.ID, a.Key)
 	}
 	return data, err
@@ -618,7 +619,7 @@ var legacyAttachments = &http.Client{Timeout: 5 * time.Minute}
 func (h *harness) legacyAttachmentBytes(ctx context.Context, id, encodedKey string) ([]byte, error) {
 	key, err := base64.StdEncoding.DecodeString(encodedKey)
 	if err != nil || len(key) != 32 {
-		return nil, apiErr(422, "ATTACHMENT_UNSUPPORTED", "An old attachment key is invalid")
+		return nil, api.Err(422, "ATTACHMENT_UNSUPPORTED", "An old attachment key is invalid")
 	}
 	defer clear(key)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, h.controlplane+"/api/storage/attachment/"+url.PathEscape(id), nil)
@@ -631,14 +632,14 @@ func (h *harness) legacyAttachmentBytes(ctx context.Context, id, encodedKey stri
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
-		return nil, apiErr(404, "THREAD_NOT_FOUND", "The attachment was not found")
+		return nil, api.Err(404, "THREAD_NOT_FOUND", "The attachment was not found")
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*maxTextBytes))
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, downstreamError(resp.StatusCode, body)
+		return nil, api.DownstreamError(resp.StatusCode, body)
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -649,11 +650,11 @@ func (h *harness) legacyAttachmentBytes(ctx context.Context, id, encodedKey stri
 		return nil, err
 	}
 	if len(body) < gcm.NonceSize()+gcm.Overhead() {
-		return nil, apiErr(422, "ATTACHMENT_UNSUPPORTED", "An old attachment is truncated")
+		return nil, api.Err(422, "ATTACHMENT_UNSUPPORTED", "An old attachment is truncated")
 	}
 	plain, err := gcm.Open(nil, body[:gcm.NonceSize()], body[gcm.NonceSize():], nil)
 	if err != nil {
-		return nil, apiErr(422, "ATTACHMENT_UNSUPPORTED", "An old attachment cannot be decrypted")
+		return nil, api.Err(422, "ATTACHMENT_UNSUPPORTED", "An old attachment cannot be decrypted")
 	}
 	return plain, nil
 }
@@ -664,24 +665,24 @@ const opaqueContentType = "application/octet-stream"
 func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 	p, err := h.caller(r, true)
 	if err != nil {
-		respond(w, nil, err)
+		api.Respond(w, nil, err)
 		return
 	}
-	body, err := readBody(w, r, maxRequestBody)
+	body, err := api.ReadBody(w, r, api.MaxRequestBody)
 	defer clear(body)
 	if err != nil {
-		respond(w, nil, err)
+		api.Respond(w, nil, err)
 		return
 	}
 	public := r.URL.Path == "/v1/attachments/get-public"
 	var in attachmentRequest
-	defer in.clearKey()
-	if err := decodeBody(body, &in); err != nil {
-		respond(w, nil, err)
+	defer in.ClearKey()
+	if err := api.DecodeBody(body, &in); err != nil {
+		api.Respond(w, nil, err)
 		return
 	}
 	if err := in.validate(); err != nil {
-		respond(w, nil, err)
+		api.Respond(w, nil, err)
 		return
 	}
 	var descriptor *Attachment
@@ -692,7 +693,7 @@ func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 		clear(encodedKey)
 		clear(key[:])
 		if keyErr != nil {
-			respond(w, nil, keyErr)
+			api.Respond(w, nil, keyErr)
 			return
 		}
 		// A share's client names the attachment and the key its link carries.
@@ -700,9 +701,9 @@ func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 		data, err = h.attachmentBytes(r.Context(), &principal{Anonymous: true}, descriptor, true)
 	} else {
 		key, keyErr := requestKey(in.Key)
-		in.clearKey()
+		in.ClearKey()
 		if keyErr != nil {
-			respond(w, nil, keyErr)
+			api.Respond(w, nil, keyErr)
 			return
 		}
 		defer clear(key[:])
@@ -710,7 +711,7 @@ func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 		clear(key[:])
 	}
 	if err != nil {
-		respond(w, nil, err)
+		api.Respond(w, nil, err)
 		return
 	}
 	defer clear(data)
@@ -719,7 +720,7 @@ func (h *harness) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 		content := descriptor.content()
 		if content.empty() {
 			if content, err = decodeDocument(data); err != nil {
-				respond(w, nil, err)
+				api.Respond(w, nil, err)
 				return
 			}
 		}
@@ -763,7 +764,7 @@ func turnAttachments(in *turnRequest, t *Thread) ([]Attachment, error) {
 		}
 		held := t.attachment(sent.ID)
 		if held == nil {
-			return nil, apiErr(404, "THREAD_NOT_FOUND", "The attachment was not found")
+			return nil, api.Err(404, "THREAD_NOT_FOUND", "The attachment was not found")
 		}
 		result = append(result, *held)
 	}
@@ -814,8 +815,8 @@ const imageDescriptionTokens = 2048
 func (h *harness) describeImage(ctx context.Context, encoded string) (string, error) {
 	for _, m := range h.offer.get() {
 		if m.vision {
-			return h.completion(ctx, m, object{"model": m.name, "messages": []object{{"role": "user", "content": []object{{"type": "text", "text": "Describe this image faithfully for a text-only assistant. Include visible text and details relevant to understanding it."}, {"type": "image_url", "image_url": object{"url": "data:image/jpeg;base64," + encoded}}}}}, "max_tokens": imageDescriptionTokens})
+			return h.completion(ctx, m, api.Object{"model": m.name, "messages": []api.Object{{"role": "user", "content": []api.Object{{"type": "text", "text": "Describe this image faithfully for a text-only assistant. Include visible text and details relevant to understanding it."}, {"type": "image_url", "image_url": api.Object{"url": "data:image/jpeg;base64," + encoded}}}}}, "max_tokens": imageDescriptionTokens})
 		}
 	}
-	return "", apiErr(404, "MODEL_UNAVAILABLE", "No vision model can describe the image")
+	return "", api.Err(404, "MODEL_UNAVAILABLE", "No vision model can describe the image")
 }

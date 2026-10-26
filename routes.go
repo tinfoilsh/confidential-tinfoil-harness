@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 type jsonEndpoint func(context.Context, *principal, contentKey, json.RawMessage) (any, error)
@@ -16,10 +18,10 @@ func decoded[T any](handle func(context.Context, *principal, contentKey, *T) (an
 	return func(ctx context.Context, p *principal, key contentKey, body json.RawMessage) (any, error) {
 		defer clear(key[:])
 		in := new(T)
-		if keyed, ok := any(in).(interface{ clearKey() }); ok {
-			defer keyed.clearKey()
+		if keyed, ok := any(in).(interface{ ClearKey() }); ok {
+			defer keyed.ClearKey()
 		}
-		if err := decodeBody(body, in); err != nil {
+		if err := api.DecodeBody(body, in); err != nil {
 			return nil, err
 		}
 		if check, ok := any(in).(validated); ok {
@@ -55,7 +57,7 @@ var contractCheck func(http.Handler) http.Handler
 // handlers are every route the harness serves, by method and path.
 func (h *harness) handlers() map[string]http.HandlerFunc {
 	handlers := map[string]http.HandlerFunc{
-		"GET /healthz":                       func(w http.ResponseWriter, r *http.Request) { respond(w, object{"ok": true}, nil) },
+		"GET /healthz":                       func(w http.ResponseWriter, r *http.Request) { api.Respond(w, api.Object{"ok": true}, nil) },
 		"POST /v1/threads/turn":              h.handleTurn,
 		"POST /v1/threads/import":            h.handleThreadImport,
 		"POST /v1/threads/follow":            h.handleFollow,
@@ -90,33 +92,33 @@ func (h *harness) jsonRoute(spec routeSpec) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p, err := h.caller(r, spec.public)
 		if err != nil {
-			respond(w, nil, err)
+			api.Respond(w, nil, err)
 			return
 		}
-		body, err := readBody(w, r, maxRequestBody)
+		body, err := api.ReadBody(w, r, api.MaxRequestBody)
 		defer clear(body)
 		if err != nil {
-			respond(w, nil, err)
+			api.Respond(w, nil, err)
 			return
 		}
 		var key contentKey
 		if spec.key {
-			var keyed keyRequest
-			defer keyed.clearKey()
-			if err := decodeRequest(body, &keyed); err != nil {
-				respond(w, nil, err)
+			var keyed api.KeyRequest
+			defer keyed.ClearKey()
+			if err := api.DecodeRequest(body, &keyed); err != nil {
+				api.Respond(w, nil, err)
 				return
 			}
 			key, err = decodeContentKey(keyed.Key)
-			keyed.clearKey()
+			keyed.ClearKey()
 			if err != nil {
-				respond(w, nil, err)
+				api.Respond(w, nil, err)
 				return
 			}
 			defer clear(key[:])
 		}
 		result, err := spec.handler(r.Context(), p, key, body)
-		respond(w, result, h.withQuota(p, rateLimit{}, err))
+		api.Respond(w, result, h.withQuota(p, api.RateLimit{}, err))
 	}
 }
 
@@ -136,44 +138,44 @@ func (h *harness) threadOperation(handler jsonEndpoint) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p, err := h.caller(r, true)
 		if err != nil {
-			respond(w, nil, err)
+			api.Respond(w, nil, err)
 			return
 		}
-		body, err := readBody(w, r, maxTurnBody)
+		body, err := api.ReadBody(w, r, maxTurnBody)
 		defer clear(body)
 		if err != nil {
-			respond(w, nil, err)
+			api.Respond(w, nil, err)
 			return
 		}
 		var target struct {
-			keyRequest
+			api.KeyRequest
 			Local bool `json:"local"`
 		}
-		defer target.clearKey()
-		if err := decodeRequest(body, &target); err != nil {
-			respond(w, nil, err)
+		defer target.ClearKey()
+		if err := api.DecodeRequest(body, &target); err != nil {
+			api.Respond(w, nil, err)
 			return
 		}
 		var key contentKey
 		if !target.Local {
 			if p.Anonymous {
-				respond(w, nil, errAnonymousCloud)
+				api.Respond(w, nil, errAnonymousCloud)
 				return
 			}
 			if key, err = decodeContentKey(target.Key); err != nil {
-				respond(w, nil, err)
+				api.Respond(w, nil, err)
 				return
 			}
 			defer clear(key[:])
 		}
-		target.clearKey()
+		target.ClearKey()
 		result, err := handler(r.Context(), p, key, body)
-		respond(w, result, h.withQuota(p, rateLimit{}, err))
+		api.Respond(w, result, h.withQuota(p, api.RateLimit{}, err))
 	}
 }
 
 // errAnonymousCloud refuses a signed-out caller a stored chat.
-var errAnonymousCloud = apiErr(401, "UNAUTHENTICATED", "Anonymous chats are kept on the device").withAction(actionStop)
+var errAnonymousCloud = api.Err(401, "UNAUTHENTICATED", "Anonymous chats are kept on the device").WithAction(api.ActionStop)
 
 var uploadSlots = make(chan struct{}, 4)
 
@@ -185,9 +187,9 @@ func boundedHandler(slots chan struct{}, handler http.HandlerFunc) http.HandlerF
 		case <-r.Context().Done():
 			return
 		default:
-			e := apiErr(503, "UPSTREAM_REFUSED", "The service is at capacity; retry shortly")
+			e := api.Err(503, "UPSTREAM_REFUSED", "The service is at capacity; retry shortly")
 			e.RetryAfter = 5
-			respond(w, nil, e)
+			api.Respond(w, nil, e)
 			return
 		}
 		handler(w, r)

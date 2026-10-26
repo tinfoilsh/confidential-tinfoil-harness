@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -32,8 +33,8 @@ const (
 )
 
 var (
-	errArchiveTooLarge = apiErr(413, "ARCHIVE_TOO_LARGE", "The archive needs more temporary space than this service has")
-	errScratchBusy     = &apiError{HTTP: 503, Code: "TEMP_SPACE_BUSY", Message: "Other archives are using this service's temporary space; retry shortly", Action: actionRetry, RetryAfter: 30}
+	errArchiveTooLarge = api.Err(413, "ARCHIVE_TOO_LARGE", "The archive needs more temporary space than this service has")
+	errScratchBusy     = &api.Error{HTTP: 503, Code: "TEMP_SPACE_BUSY", Message: "Other archives are using this service's temporary space; retry shortly", Action: api.ActionRetry, RetryAfter: 30}
 )
 
 type scratchSpace struct {

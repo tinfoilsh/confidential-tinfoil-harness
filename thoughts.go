@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"time"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 // A reply's reasoning is summarized while it thinks, as the web client did:
@@ -46,7 +48,7 @@ func (h *harness) thoughtSummaries(ctx context.Context, out *stream, assembler *
 		var result struct {
 			Summary string `json:"summary"`
 		}
-		err := h.serviceCall(ctx, "summarizer", "/summarize", object{"content": text, "style": thoughtsStyle}, &result)
+		err := h.serviceCall(ctx, "summarizer", "/summarize", api.Object{"content": text, "style": thoughtsStyle}, &result)
 		return result.Summary, err
 	}}
 }
@@ -121,7 +123,7 @@ func (s *thoughtSummaries) fire() {
 		}
 		s.inFlight = false
 		if summary = strings.TrimSpace(summary); err == nil && summary != "" {
-			s.out.frame(reasoningSummary{MessageID: message, BlockID: block, Content: summary}, timestamp())
+			s.out.frame(reasoningSummary{MessageID: message, BlockID: block, Content: summary}, api.Timestamp())
 		}
 	}()
 }

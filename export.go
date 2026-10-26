@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 func millis(value string) int64 {
@@ -33,7 +34,7 @@ const chatURL = "https://chat.tinfoil.sh"
 // image thumbnails and document text, so the transcript may omit image bytes.
 // No attachment is uploaded for it: sync holds no chat to keep one under.
 func (h *harness) shareThread(ctx context.Context, p *principal, _ contentKey, in *shareRequest) (any, error) {
-	defer in.clearKey()
+	defer in.ClearKey()
 	id := in.ThreadID
 	var t Thread
 	if in.Local {
@@ -43,7 +44,7 @@ func (h *harness) shareThread(ctx context.Context, p *principal, _ contentKey, i
 		}
 	} else {
 		key, err := decodeContentKey(in.Key)
-		in.clearKey()
+		in.ClearKey()
 		if err != nil {
 			return nil, err
 		}
@@ -65,7 +66,7 @@ func (h *harness) shareThread(ctx context.Context, p *principal, _ contentKey, i
 		}
 		payload.Messages = append(payload.Messages, shared)
 	}
-	ciphertext, shareKey, err := h.sealShare(ctx, p, raw(payload))
+	ciphertext, shareKey, err := h.sealShare(ctx, p, api.Raw(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -101,13 +102,13 @@ func (h *harness) shareRequest(ctx context.Context, p *principal, method, id str
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 	if resp.StatusCode/100 != 2 {
-		return nil, downstreamError(resp.StatusCode, b)
+		return nil, api.DownstreamError(resp.StatusCode, b)
 	}
 	return b, nil
 }
 
 func (h *harness) revokeShare(ctx context.Context, p *principal, _ contentKey, in *threadRequest) (any, error) {
-	if _, err := h.shareRequest(ctx, p, http.MethodDelete, in.ThreadID, nil); err != nil && asAPIError(err).HTTP != 404 {
+	if _, err := h.shareRequest(ctx, p, http.MethodDelete, in.ThreadID, nil); err != nil && api.AsError(err).HTTP != 404 {
 		return nil, err
 	}
 	return struct{}{}, nil
@@ -122,7 +123,7 @@ func (h *harness) shareStatus(ctx context.Context, p *principal, _ contentKey, i
 		Shared *bool `json:"shared"`
 	}
 	if json.Unmarshal(b, &status) != nil || status.Shared == nil {
-		return nil, apiErr(502, "UPSTREAM_REFUSED", "Invalid share status")
+		return nil, api.Err(502, "UPSTREAM_REFUSED", "Invalid share status")
 	}
 	return struct {
 		Shared bool `json:"shared"`
@@ -151,7 +152,7 @@ func (h *harness) openShare(ctx context.Context, _ *principal, _ contentKey, in 
 	id := in.ShareID
 	fragment, ok := strings.CutPrefix(in.Fragment, "v2:")
 	if !ok {
-		return nil, apiErr(400, "BAD_REQUEST", "A v2 share fragment is required")
+		return nil, api.Err(400, "BAD_REQUEST", "A v2 share fragment is required")
 	}
 	req, _ := http.NewRequestWithContext(ctx, "GET", h.controlplane+"/api/shares/"+url.PathEscape(id), nil)
 	resp, err := h.cpClient.Do(req)
@@ -164,7 +165,7 @@ func (h *harness) openShare(ctx context.Context, _ *principal, _ contentKey, in 
 		return nil, err
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, downstreamError(resp.StatusCode, ciphertext)
+		return nil, api.DownstreamError(resp.StatusCode, ciphertext)
 	}
 	plain, err := h.openSealedShare(ctx, fragment, ciphertext)
 	if err != nil {
@@ -175,7 +176,7 @@ func (h *harness) openShare(ctx context.Context, _ *principal, _ contentKey, in 
 		V float64 `json:"v"`
 	}
 	if trimmed := bytes.TrimSpace(plain); len(trimmed) == 0 || trimmed[0] != '{' || json.Unmarshal(trimmed, &version) != nil || int(version.V) != 1 {
-		return nil, apiErr(400, "BAD_REQUEST", "Invalid shared thread")
+		return nil, api.Err(400, "BAD_REQUEST", "Invalid shared thread")
 	}
 	return sharedThreadView(id, plain)
 }
@@ -196,7 +197,7 @@ const (
 )
 
 type exportOptions struct {
-	keyRequest
+	api.KeyRequest
 	Format string `json:"format"`
 }
 
@@ -218,17 +219,17 @@ func (h *harness) handleExport(w http.ResponseWriter, r *http.Request) {
 	// with or without chat access.
 	p, err := h.auth.authenticate(r, false)
 	if err != nil {
-		respond(w, nil, err)
+		api.Respond(w, nil, err)
 		return
 	}
 	size, err := requestSize(r, maxExportBody)
 	if err != nil {
-		respond(w, nil, err)
+		api.Respond(w, nil, err)
 		return
 	}
 	lease, err := h.scratch.lease(r.Context(), size)
 	if err != nil {
-		respond(w, nil, err)
+		api.Respond(w, nil, err)
 		return
 	}
 	defer lease.release()
@@ -236,17 +237,17 @@ func (h *harness) handleExport(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxExportBody)
 	form, err := readExportForm(r, lease, func(options exportOptions) error { return h.authorizeArchive(r.Context(), p, options.Key, "export") })
 	if err != nil {
-		respond(w, nil, err)
+		api.Respond(w, nil, err)
 		return
 	}
-	defer form.options.clearKey()
+	defer form.options.ClearKey()
 	lift()
 	var key *contentKey
 	if len(form.options.Key) != 0 {
 		decoded, err := decodeContentKey(form.options.Key)
-		form.options.clearKey()
+		form.options.ClearKey()
 		if err != nil {
-			respond(w, nil, err)
+			api.Respond(w, nil, err)
 			return
 		}
 		defer clear(decoded[:])
@@ -260,23 +261,23 @@ func (h *harness) handleExport(w http.ResponseWriter, r *http.Request) {
 		streamArchive(w, "tinfoil-chats.zip", func(out io.Writer) error { return h.writeConversations(ctx, p, key, form, lease, out) })
 	case "claude-projects":
 		if key == nil {
-			respond(w, nil, apiErr(401, "KEY_REQUIRED", "A content key is required"))
+			api.Respond(w, nil, api.Err(401, "KEY_REQUIRED", "A content key is required"))
 			return
 		}
 		projects, err := h.claudeProjects(ctx, p, *key)
 		if err == nil {
 			w.Header().Set("Content-Disposition", `attachment; filename="projects.json"`)
 		}
-		respond(w, projects, err)
+		api.Respond(w, projects, err)
 	default:
-		respond(w, nil, apiErr(400, "BAD_REQUEST", "format must be native, conversations or claude-projects"))
+		api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "format must be native, conversations or claude-projects"))
 	}
 }
 
 func readExportForm(r *http.Request, lease *scratchLease, authorize func(exportOptions) error) (_ *exportForm, err error) {
 	reader, err := r.MultipartReader()
 	if err != nil {
-		return nil, apiErr(400, "BAD_REQUEST", "Expected multipart form data")
+		return nil, api.Err(400, "BAD_REQUEST", "Expected multipart form data")
 	}
 	spool, err := lease.create()
 	if err != nil {
@@ -285,7 +286,7 @@ func readExportForm(r *http.Request, lease *scratchLease, authorize func(exportO
 	form := &exportForm{spool: spool, originals: map[string]spooledPart{}}
 	defer func() {
 		if err != nil {
-			form.options.clearKey()
+			form.options.ClearKey()
 		}
 	}()
 	hasOptions, ids := false, map[string]bool{}
@@ -300,7 +301,7 @@ func readExportForm(r *http.Request, lease *scratchLease, authorize func(exportO
 		switch part.FormName() {
 		case "options":
 			if hasOptions {
-				return nil, apiErr(400, "BAD_REQUEST", "Duplicate multipart field")
+				return nil, api.Err(400, "BAD_REQUEST", "Duplicate multipart field")
 			}
 			hasOptions = true
 			if err := decodeFormField(part, &form.options); err != nil {
@@ -311,17 +312,17 @@ func readExportForm(r *http.Request, lease *scratchLease, authorize func(exportO
 			}
 		case "thread":
 			if !hasOptions {
-				return nil, apiErr(400, "BAD_REQUEST", "options must precede the chats")
+				return nil, api.Err(400, "BAD_REQUEST", "options must precede the chats")
 			}
 			data, err := io.ReadAll(io.LimitReader(part, maxTurnBody+1))
 			if err != nil {
 				return nil, formError(err)
 			}
 			if len(data) > maxTurnBody {
-				return nil, apiErr(413, "PAYLOAD_TOO_LARGE", "A chat exceeds the size limit")
+				return nil, api.Err(413, "PAYLOAD_TOO_LARGE", "A chat exceeds the size limit")
 			}
-			if !isObject(data) {
-				return nil, apiErr(400, "BAD_REQUEST", "Each thread must be an object")
+			if !api.IsObject(data) {
+				return nil, api.Err(400, "BAD_REQUEST", "Each thread must be an object")
 			}
 			var named idRequest
 			json.Unmarshal(data, &named)
@@ -332,7 +333,7 @@ func readExportForm(r *http.Request, lease *scratchLease, authorize func(exportO
 				return nil, err
 			}
 			if ids[named.ID] {
-				return nil, apiErr(400, "BAD_REQUEST", "Each thread is sent once")
+				return nil, api.Err(400, "BAD_REQUEST", "Each thread is sent once")
 			}
 			ids[named.ID] = true
 			spooled, err := form.spoolPart(bytes.NewReader(data))
@@ -342,30 +343,30 @@ func readExportForm(r *http.Request, lease *scratchLease, authorize func(exportO
 			form.threads = append(form.threads, spooled)
 		case "file":
 			if !hasOptions {
-				return nil, apiErr(400, "BAD_REQUEST", "options must precede the files")
+				return nil, api.Err(400, "BAD_REQUEST", "options must precede the files")
 			}
 			id := part.FileName()
-			if err := requireID("file name", id); err != nil {
+			if err := api.RequireID("file name", id); err != nil {
 				return nil, err
 			}
 			if _, ok := form.originals[id]; ok {
-				return nil, apiErr(400, "BAD_REQUEST", "Each file is sent once")
+				return nil, api.Err(400, "BAD_REQUEST", "Each file is sent once")
 			}
 			spooled, err := form.spoolPart(io.LimitReader(part, int64(imageUploads.MaxBytes)+1))
 			if err != nil {
 				return nil, err
 			}
 			if spooled.size > int64(imageUploads.MaxBytes) {
-				return nil, apiErr(413, "ATTACHMENT_TOO_LARGE", "A file exceeds the size limit")
+				return nil, api.Err(413, "ATTACHMENT_TOO_LARGE", "A file exceeds the size limit")
 			}
 			form.originals[id] = spooled
 		default:
-			return nil, apiErr(400, "BAD_REQUEST", "Unknown multipart field: "+part.FormName())
+			return nil, api.Err(400, "BAD_REQUEST", "Unknown multipart field: "+part.FormName())
 		}
 		part.Close()
 	}
 	if !hasOptions {
-		return nil, apiErr(400, "BAD_REQUEST", "options are required")
+		return nil, api.Err(400, "BAD_REQUEST", "options are required")
 	}
 	return form, nil
 }
@@ -446,7 +447,7 @@ func streamArchive(w http.ResponseWriter, name string, write func(io.Writer) err
 	out := &archiveResponse{w: w, name: name}
 	if err := write(out); err != nil {
 		if !out.started {
-			respond(w, nil, err)
+			api.Respond(w, nil, err)
 			return
 		}
 		panic(http.ErrAbortHandler)
@@ -553,7 +554,7 @@ func (h *harness) writeBackup(ctx context.Context, p *principal, key *contentKey
 		return err
 	}
 	b.manifest.Counts.Relationships = rel.count()
-	return b.close(uuid.NewString(), nowUTC())
+	return b.close(uuid.NewString(), api.Now())
 }
 
 // backupChat writes a chat with each of its images beside it. An image or
@@ -741,14 +742,14 @@ func (h *harness) writeConversations(ctx context.Context, p *principal, key *con
 	if _, err := io.WriteString(text, end); err != nil {
 		return err
 	}
-	w, err := e.zip.CreateHeader(&zip.FileHeader{Name: "conversations.json", Method: zip.Deflate, Modified: nowUTC()})
+	w, err := e.zip.CreateHeader(&zip.FileHeader{Name: "conversations.json", Method: zip.Deflate, Modified: api.Now()})
 	if err != nil {
 		return err
 	}
 	if _, err := io.Copy(w, text.section(0, text.Size())); err != nil {
 		return err
 	}
-	e.manifest.CreatedAt = archiveTime(nowUTC())
+	e.manifest.CreatedAt = archiveTime(api.Now())
 	e.manifest.AttachmentCount = len(e.manifest.Attachments)
 	manifest, err := indentedJSON(e.manifest, "")
 	if err != nil {
@@ -966,8 +967,8 @@ func (h *harness) claudeProjects(ctx context.Context, p *principal, key contentK
 		for _, doc := range docs {
 			exported.Docs = append(exported.Docs, claudeDocument{UUID: doc.ID, Filename: doc.Filename, Content: doc.Content, CreatedAt: doc.CreatedAt})
 		}
-		if total += len(raw(exported)); total > maxProjectsExport {
-			return apiErr(413, "ATTACHMENT_TOO_LARGE", "The project export exceeds 64 MiB")
+		if total += len(api.Raw(exported)); total > maxProjectsExport {
+			return api.Err(413, "ATTACHMENT_TOO_LARGE", "The project export exceeds 64 MiB")
 		}
 		projects = append(projects, exported)
 		return nil

@@ -10,11 +10,13 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 // modelReasoning is one chunk of reasoning a model streams.
 func modelReasoning(text string) string {
-	return "data: " + string(raw(object{"choices": []object{{"delta": object{"reasoning_content": text}}}})) + "\n\n"
+	return "data: " + string(api.Raw(api.Object{"choices": []api.Object{{"delta": api.Object{"reasoning_content": text}}}})) + "\n\n"
 }
 
 // While a reply thinks, the harness summarizes its reasoning and sends the
@@ -43,7 +45,7 @@ func TestAThinkingReplysReasoningIsSummarized(t *testing.T) {
 			var in struct{ Content, Style string }
 			json.NewDecoder(r.Body).Decode(&in)
 			if in.Style != thoughtsStyle {
-				json.NewEncoder(w).Encode(object{"summary": "Title"})
+				json.NewEncoder(w).Encode(api.Object{"summary": "Title"})
 				return
 			}
 			mu.Lock()
@@ -59,7 +61,7 @@ func TestAThinkingReplysReasoningIsSummarized(t *testing.T) {
 				w.WriteHeader(http.StatusInternalServerError)
 				return
 			}
-			json.NewEncoder(w).Encode(object{"summary": " Weighing options "})
+			json.NewEncoder(w).Encode(api.Object{"summary": " Weighing options "})
 		}))
 		t.Cleanup(summarizer.Close)
 		h.services["summarizer"] = &downstreamService{URL: summarizer.URL, Client: summarizer.Client()}

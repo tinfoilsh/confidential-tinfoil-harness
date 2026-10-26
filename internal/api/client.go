@@ -1,4 +1,4 @@
-package main
+package api
 
 import (
 	"context"
@@ -8,8 +8,8 @@ import (
 	"sync"
 )
 
-func postJSON(ctx context.Context, client *http.Client, url, auth string, in, out any) error {
-	return postJSONWithHeaders(ctx, client, url, auth, nil, in, out)
+func PostJSON(ctx context.Context, client *http.Client, url, auth string, in, out any) error {
+	return PostJSONWithHeaders(ctx, client, url, auth, nil, in, out)
 }
 
 // requestBuffer lets a transport finish reading or replaying a request while
@@ -48,10 +48,10 @@ func (r *requestReader) Read(dst []byte) (int, error) {
 
 func (r *requestReader) Close() error { return nil }
 
-func postJSONWithHeaders(ctx context.Context, client *http.Client, url, auth string, headers map[string]string, in, out any) error {
+func PostJSONWithHeaders(ctx context.Context, client *http.Client, url, auth string, headers map[string]string, in, out any) error {
 	body, encoded := in.(json.RawMessage)
 	if !encoded {
-		body = raw(in)
+		body = Raw(in)
 	}
 	buffer := &requestBuffer{data: body}
 	defer buffer.clear()
@@ -76,11 +76,11 @@ func postJSONWithHeaders(ctx context.Context, client *http.Client, url, auth str
 	if resp.StatusCode/100 != 2 {
 		// A missing-attachment error lists every missing id.
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		return withRetryAfter(downstreamError(resp.StatusCode, b), resp.Header)
+		return WithRetryAfter(DownstreamError(resp.StatusCode, b), resp.Header)
 	}
 	if out == nil {
-		_, err = io.Copy(io.Discard, io.LimitReader(resp.Body, maxRequestBody))
+		_, err = io.Copy(io.Discard, io.LimitReader(resp.Body, MaxRequestBody))
 		return err
 	}
-	return json.NewDecoder(io.LimitReader(resp.Body, maxResponseBody)).Decode(out)
+	return json.NewDecoder(io.LimitReader(resp.Body, MaxResponseBody)).Decode(out)
 }

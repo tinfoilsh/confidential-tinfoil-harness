@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 // storedRow is a row as sync holds it: sealed JSON, opened only by the
@@ -72,20 +73,20 @@ func (s *syncClient) call(ctx context.Context, p *principal, path string, in, ou
 		defer clear(body)
 	}
 	if s == nil || s.Client == nil {
-		return apiErr(503, "UPSTREAM_REFUSED", "The sync enclave is unavailable")
+		return api.Err(503, "UPSTREAM_REFUSED", "The sync enclave is unavailable")
 	}
 	ctx, cancel := context.WithTimeout(ctx, syncTimeout)
 	defer cancel()
 	ctx = context.WithValue(ctx, apiKeyKey{}, "")
 	ctx = context.WithValue(ctx, usageContextKey{}, false)
-	return postJSONWithHeaders(ctx, s.Client, s.URL+path, string(cmp.Or(p.SyncToken, p.JWT)), map[string]string{"X-Sync-Protocol": syncProtocol}, in, out)
+	return api.PostJSONWithHeaders(ctx, s.Client, s.URL+path, string(cmp.Or(p.SyncToken, p.JWT)), map[string]string{"X-Sync-Protocol": syncProtocol}, in, out)
 }
 
 // keyedBody appends the key directly to an owned buffer, keeping its base64
 // form out of strings and encoding/json's pooled encoder buffers.
-func keyedBody(key contentKey, in object, multiple bool) json.RawMessage {
+func keyedBody(key contentKey, in api.Object, multiple bool) json.RawMessage {
 	defer clear(key[:])
-	body := raw(in)
+	body := api.Raw(in)
 	defer clear(body)
 	prefix, suffix := `"key":"`, `"}`
 	if multiple {
@@ -101,14 +102,14 @@ func keyedBody(key contentKey, in object, multiple bool) json.RawMessage {
 	return append(out, suffix...)
 }
 
-func (s *syncClient) callKey(ctx context.Context, p *principal, path string, key contentKey, in object, out any) error {
+func (s *syncClient) callKey(ctx context.Context, p *principal, path string, key contentKey, in api.Object, out any) error {
 	defer clear(key[:])
 	return s.call(ctx, p, path, keyedBody(key, in, false), out)
 }
 
 func (s *syncClient) authorizeRun(ctx context.Context, p *principal, key contentKey, threadID string, projectID *string) (storageGrant, error) {
 	defer clear(key[:])
-	in := object{"thread_id": threadID}
+	in := api.Object{"thread_id": threadID}
 	if projectID != nil {
 		in["project_id"] = projectID
 	}
@@ -117,7 +118,7 @@ func (s *syncClient) authorizeRun(ctx context.Context, p *principal, key content
 
 func (s *syncClient) authorizeStorage(ctx context.Context, p *principal, key contentKey, operation, projectID string) (secret, error) {
 	defer clear(key[:])
-	in := object{"operation": operation}
+	in := api.Object{"operation": operation}
 	if projectID != "" {
 		in["project_id"] = projectID
 	}
@@ -130,15 +131,15 @@ type storageGrant struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
-func (s *syncClient) storageCredential(ctx context.Context, p *principal, path string, key contentKey, input object) (storageGrant, error) {
+func (s *syncClient) storageCredential(ctx context.Context, p *principal, path string, key contentKey, input api.Object) (storageGrant, error) {
 	defer clear(key[:])
 	var out storageGrant
 	err := s.callKey(ctx, p, path, key, input, &out)
 	if err != nil {
 		return storageGrant{}, err
 	}
-	if out.Token == "" || !out.ExpiresAt.After(nowUTC().Add(runTimeout+commitTimeout)) {
-		return storageGrant{}, apiErr(502, "UPSTREAM_REFUSED", "The storage service returned an invalid run credential")
+	if out.Token == "" || !out.ExpiresAt.After(api.Now().Add(runTimeout+commitTimeout)) {
+		return storageGrant{}, api.Err(502, "UPSTREAM_REFUSED", "The storage service returned an invalid run credential")
 	}
 	return out, nil
 }
@@ -157,7 +158,7 @@ type pullItem struct {
 // pull returns the rows it could open and the error for each it could not.
 // errRowNotFetched is a row sync could not fetch within its deadline twice
 // running. A later request may fetch it.
-var errRowNotFetched = apiErr(502, "UPSTREAM_REFUSED", "The sync service could not fetch the data in time")
+var errRowNotFetched = api.Err(502, "UPSTREAM_REFUSED", "The sync service could not fetch the data in time")
 
 func (s *syncClient) pull(ctx context.Context, p *principal, key contentKey, scope string, ids []string) ([]storedRow, map[string]error, error) {
 	rows, failed := []storedRow{}, map[string]error{}
@@ -173,7 +174,7 @@ func (s *syncClient) pullBatch(ctx context.Context, p *principal, key contentKey
 	var result struct {
 		Items []pullItem `json:"items"`
 	}
-	err := s.call(ctx, p, "/v1/sync/pull", keyedBody(key, object{"scope": scope, "ids": ids}, true), &result)
+	err := s.call(ctx, p, "/v1/sync/pull", keyedBody(key, api.Object{"scope": scope, "ids": ids}, true), &result)
 	if err != nil {
 		return err
 	}
@@ -188,7 +189,7 @@ func (s *syncClient) pullBatch(ctx context.Context, p *principal, key contentKey
 				failed[item.ID] = errRowNotFetched
 			default:
 				// The item has no status of its own; its code says what failed.
-				failed[item.ID] = downstreamError(0, raw(object{"code": item.Code, "key_id": item.KeyID}))
+				failed[item.ID] = api.DownstreamError(0, api.Raw(api.Object{"code": item.Code, "key_id": item.KeyID}))
 			}
 			continue
 		}
@@ -222,7 +223,7 @@ func (s *syncClient) load(ctx context.Context, p *principal, key contentKey, sco
 			return &r, nil
 		}
 	}
-	return nil, apiErr(404, "THREAD_NOT_FOUND", "The requested data was not found")
+	return nil, api.Err(404, "THREAD_NOT_FOUND", "The requested data was not found")
 }
 
 // listStatus is one page of row ids, newest first.
@@ -233,7 +234,7 @@ func (s *syncClient) listStatus(ctx context.Context, p *principal, scope, cursor
 		} `json:"updates"`
 		Next string `json:"next_cursor"`
 	}
-	in := object{"scope": scope, "cursor": cursor, "limit": limit, "direction": "desc"}
+	in := api.Object{"scope": scope, "cursor": cursor, "limit": limit, "direction": "desc"}
 	if scope == "chat" && project != "" {
 		in["project_id"] = project
 	}
@@ -264,7 +265,7 @@ func (s *syncClient) ids(ctx context.Context, p *principal, scope, project strin
 			return all, nil
 		}
 		if next == cursor {
-			return nil, apiErr(502, "UPSTREAM_REFUSED", "The storage cursor did not advance")
+			return nil, api.Err(502, "UPSTREAM_REFUSED", "The storage cursor did not advance")
 		}
 		cursor = next
 	}
@@ -289,7 +290,7 @@ func (s *syncClient) push(ctx context.Context, p *principal, key contentKey, sco
 	if row.ETag != "" {
 		match = row.ETag
 	}
-	metadata := object{}
+	metadata := api.Object{}
 	if scope == "chat" || scope == "project_document" {
 		metadata["projectId"] = row.project
 	}
@@ -302,16 +303,16 @@ func (s *syncClient) push(ctx context.Context, p *principal, key contentKey, sco
 	var result struct {
 		ETag string `json:"etag"`
 	}
-	err := s.callKey(ctx, p, "/v1/sync/push", key, object{"scope": scope, "id": row.ID, "plaintext": base64.StdEncoding.EncodeToString(row.Data), "if_match": match, "idempotency_key": nonce, "metadata": metadata}, &result)
+	err := s.callKey(ctx, p, "/v1/sync/push", key, api.Object{"scope": scope, "id": row.ID, "plaintext": base64.StdEncoding.EncodeToString(row.Data), "if_match": match, "idempotency_key": nonce, "metadata": metadata}, &result)
 	return result.ETag, err
 }
 
 // An empty if_match has sync read the row's revision, delete at it, retry a
 // race, and treat a missing row as deleted.
 func (s *syncClient) remove(ctx context.Context, p *principal, key contentKey, scope, id string) error {
-	return s.callKey(ctx, p, "/v1/sync/delete", key, object{"scope": scope, "id": id, "if_match": "", "idempotency_key": uuid.NewString()}, nil)
+	return s.callKey(ctx, p, "/v1/sync/delete", key, api.Object{"scope": scope, "id": id, "if_match": "", "idempotency_key": uuid.NewString()}, nil)
 }
 
 func (s *syncClient) removeRevision(ctx context.Context, p *principal, key contentKey, id, revision string) error {
-	return s.callKey(ctx, p, "/v1/sync/delete", key, object{"scope": "chat", "id": id, "if_match": revision, "idempotency_key": uuid.NewString()}, nil)
+	return s.callKey(ctx, p, "/v1/sync/delete", key, api.Object{"scope": "chat", "id": id, "if_match": revision, "idempotency_key": uuid.NewString()}, nil)
 }

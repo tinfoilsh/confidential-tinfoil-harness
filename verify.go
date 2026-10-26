@@ -9,6 +9,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 type downstreamService struct {
@@ -94,7 +96,7 @@ func decodeValue(b []byte) any { var value any; json.Unmarshal(b, &value); retur
 func (h *harness) serviceCall(ctx context.Context, role, path string, in, out any) error {
 	s := h.services[role]
 	if s == nil {
-		return apiErr(503, "TOOL_UNAVAILABLE", role+" is unavailable")
+		return api.Err(503, "TOOL_UNAVAILABLE", role+" is unavailable")
 	}
-	return postJSON(ctx, s.Client, strings.TrimRight(s.URL, "/")+path, callerKey(ctx), in, out)
+	return api.PostJSON(ctx, s.Client, strings.TrimRight(s.URL, "/")+path, callerKey(ctx), in, out)
 }

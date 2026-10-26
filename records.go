@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 func (h *harness) apiRoutes() []routeSpec {
@@ -119,15 +121,15 @@ func (h *harness) getThread(ctx context.Context, p *principal, key contentKey, i
 }
 func (h *harness) updateThread(ctx context.Context, p *principal, key contentKey, in *updateThreadRequest) (any, error) {
 	if in.Model != nil && !h.catalog.get().offers(*in.Model) {
-		return nil, apiErr(404, "MODEL_UNAVAILABLE", "Unknown model")
+		return nil, api.Err(404, "MODEL_UNAVAILABLE", "Unknown model")
 	}
-	if project := valueOr(in.ProjectID.value, ""); project != "" {
+	if project := valueOr(in.ProjectID.Value, ""); project != "" {
 		if _, err := h.loadProject(ctx, p, key, project); err != nil {
 			return nil, err
 		}
 	}
 	var profile Profile
-	if in.PresetID.value != nil {
+	if in.PresetID.Value != nil {
 		var err error
 		if profile, err = h.sourceProfile(ctx, p, key, in.threadSource); err != nil {
 			return nil, err
@@ -136,8 +138,8 @@ func (h *harness) updateThread(ctx context.Context, p *principal, key contentKey
 	row, err := h.changeThread(ctx, p, key, in.threadSource, in.ID, func(t *Thread) error {
 		in.apply(t, h.catalog.get(), &profile)
 		t.Pinned = valueOr(in.Pinned, t.Pinned)
-		if in.ProjectID.set {
-			t.ProjectID = in.ProjectID.value
+		if in.ProjectID.Set {
+			t.ProjectID = in.ProjectID.Value
 		}
 		return nil
 	})
@@ -196,7 +198,7 @@ func (h *harness) changeThread(ctx context.Context, p *principal, key contentKey
 	if err := change(&row.Thread); err != nil {
 		return nil, err
 	}
-	row.UpdatedAt = timestamp()
+	row.UpdatedAt = api.Timestamp()
 	return row, nil
 }
 
@@ -246,7 +248,7 @@ func forkTitle(title string) string {
 func forkedCount(t *Thread, messageID string) (int, error) {
 	count := 1 + t.messageIndex(messageID)
 	if count == 0 {
-		return 0, apiErr(404, "THREAD_NOT_FOUND", "The message was not found")
+		return 0, api.Err(404, "THREAD_NOT_FOUND", "The message was not found")
 	}
 	return count, nil
 }
@@ -272,7 +274,7 @@ func (h *harness) forkThread(ctx context.Context, p *principal, key contentKey, 
 			return nil, err
 		}
 		fork := source.clone()
-		fork.ID, fork.Title, fork.Messages, fork.CreatedAt, fork.UpdatedAt = rowID(), forkTitle(source.Title), fork.Messages[:count], timestamp(), timestamp()
+		fork.ID, fork.Title, fork.Messages, fork.CreatedAt, fork.UpdatedAt = rowID(), forkTitle(source.Title), fork.Messages[:count], api.Timestamp(), api.Timestamp()
 		startFork(&fork)
 		return deviceReply(&threadRow{Thread: fork}), nil
 	}
@@ -304,7 +306,7 @@ func (h *harness) deleteMessage(ctx context.Context, p *principal, key contentKe
 	return h.changeMessages(ctx, p, key, in, func(t *Thread, index int) error {
 		// As on the web client, a chat keeps its last message.
 		if len(t.Messages) == 1 {
-			return apiErr(400, "BAD_REQUEST", "A chat keeps its last message")
+			return api.Err(400, "BAD_REQUEST", "A chat keeps its last message")
 		}
 		t.Messages = slices.Delete(t.Messages, index, index+1)
 		return nil
@@ -312,11 +314,11 @@ func (h *harness) deleteMessage(ctx context.Context, p *principal, key contentKe
 }
 func (h *harness) updateMessage(ctx context.Context, p *principal, key contentKey, in *messageRequest) (any, error) {
 	if in.Content == nil {
-		return nil, apiErr(400, "BAD_REQUEST", "content must be a string")
+		return nil, api.Err(400, "BAD_REQUEST", "content must be a string")
 	}
 	return h.changeMessages(ctx, p, key, in, func(t *Thread, index int) error {
 		if t.Messages[index].Role != "assistant" {
-			return apiErr(400, "BAD_REQUEST", "Only a reply is edited in place")
+			return api.Err(400, "BAD_REQUEST", "Only a reply is edited in place")
 		}
 		replaceReplyText(&t.Messages[index], *in.Content)
 		return nil
@@ -326,7 +328,7 @@ func (h *harness) changeMessages(ctx context.Context, p *principal, key contentK
 	row, err := h.changeThread(ctx, p, key, in.threadSource, in.ThreadID, func(t *Thread) error {
 		index := t.messageIndex(in.MessageID)
 		if index < 0 {
-			return apiErr(404, "THREAD_NOT_FOUND", "The message was not found")
+			return api.Err(404, "THREAD_NOT_FOUND", "The message was not found")
 		}
 		return change(t, index)
 	})
@@ -445,22 +447,22 @@ func (h *harness) getProject(ctx context.Context, p *principal, key contentKey, 
 }
 func (h *harness) createProject(ctx context.Context, p *principal, key contentKey, in *projectRequest) (any, error) {
 	if strings.TrimSpace(valueOr(in.Name, "")) == "" {
-		return nil, apiErr(400, "BAD_REQUEST", "A project name is required")
+		return nil, api.Err(400, "BAD_REQUEST", "A project name is required")
 	}
 	return h.mutateProject(ctx, p, key, rowID(), true, func(project *Project) {
-		project.Name, project.Description, project.SystemInstructions, project.Color = *in.Name, valueOr(in.Description, ""), valueOr(in.SystemInstructions, ""), in.Color.value
+		project.Name, project.Description, project.SystemInstructions, project.Color = *in.Name, valueOr(in.Description, ""), valueOr(in.SystemInstructions, ""), in.Color.Value
 	})
 }
 func (h *harness) updateProject(ctx context.Context, p *principal, key contentKey, in *projectRequest) (any, error) {
-	if err := requireID("id", in.ID); err != nil {
+	if err := api.RequireID("id", in.ID); err != nil {
 		return nil, err
 	}
 	return h.mutateProject(ctx, p, key, in.ID, false, func(project *Project) {
 		project.Name = valueOr(in.Name, project.Name)
 		project.Description = valueOr(in.Description, project.Description)
 		project.SystemInstructions = valueOr(in.SystemInstructions, project.SystemInstructions)
-		if in.Color.set {
-			project.Color = in.Color.value
+		if in.Color.Set {
+			project.Color = in.Color.Value
 		}
 	})
 }
