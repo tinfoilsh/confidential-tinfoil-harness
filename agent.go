@@ -452,11 +452,3 @@ func quote(s string) json.RawMessage {
 	encoded, _ := json.Marshal(s)
 	return encoded
 }
-
-type refusal struct {
-	status     int
-	detail     string
-	retryAfter int
-}
-
-func (r *refusal) Error() string { return fmt.Sprintf("gateway returned %d: %s", r.status, r.detail) }

@@ -9,12 +9,6 @@ import (
 	"time"
 )
 
-type usage struct {
-	Prompt     int64 `json:"prompt_tokens"`
-	Completion int64 `json:"completion_tokens"`
-	Total      int64 `json:"total_tokens"`
-}
-
 type stream struct {
 	run            *run
 	concreteModel  string
