@@ -59,7 +59,7 @@ func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *
 		result = api.Object{"error": api.AsError(err).Message}
 	}
 	r.replacement = domain.ReplacedWidget{Arguments: content, Result: api.Raw(result)}
-	r.out.emit(domain.ToolCallResult{MessageID: "msg_" + token(), ToolCallID: id, Role: "tool", Content: r.replacement.Result})
+	r.out.emit(domain.ToolCallResult{MessageID: "msg_" + api.Token(), ToolCallID: id, Role: "tool", Content: r.replacement.Result})
 	return nil
 }
 

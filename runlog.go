@@ -2,9 +2,6 @@ package main
 
 import (
 	"errors"
-	"fmt"
-	"log/slog"
-	"runtime/debug"
 	"sync"
 	"time"
 
@@ -22,21 +19,6 @@ var (
 	// errTooLong ends a run that outgrew the log this harness can hold for it.
 	errTooLong = api.Err(413, "RUN_LOG_FULL", "The run log is full")
 )
-
-// rescued logs a panic and turns it into an error worth surfacing. Without one
-// of these on every goroutine the harness spawns, a panic in any single run
-// takes the process, and with it every other run this enclave holds in memory.
-// The panic value may contain plaintext, so only the stack is logged.
-//
-// It takes the recovered value rather than recovering itself, because recover
-// works only in the function a defer names, which is one frame above this.
-func rescued(what string, p any) error {
-	if p == nil {
-		return nil
-	}
-	slog.Error("recovered a panic", "in", what, "stack", string(debug.Stack()))
-	return fmt.Errorf("%s failed", what)
-}
 
 type runlog struct {
 	mu     sync.Mutex

@@ -263,7 +263,7 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 	// An upload is only converted. Its client sends the descriptor back with
 	// the turn that attaches it, and that turn stores it with the chat.
 	if r.URL.Path == "/v1/attachments/upload" {
-		descriptor.ID = "att_" + token()
+		descriptor.ID = "att_" + api.Token()
 		api.Respond(w, struct {
 			Attachment domain.Attachment `json:"attachment"`
 		}{descriptor}, nil)

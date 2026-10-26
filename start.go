@@ -193,7 +193,7 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	}
 	ctx = auth.WithCallerKey(ctx, string(r.credential.Key))
 	ctx = auth.WithUsage(ctx, usageForRun(r))
-	ctx = context.WithValue(ctx, usageSinkKey{}, r.out)
+	ctx = withUsageSink(ctx, r.out)
 	if err := h.refuseFlagged(ctx, r, p); err != nil {
 		return err
 	}
@@ -267,7 +267,7 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	runCtx, cancel := context.WithTimeout(r.stopped, runTimeout)
 	runCtx = auth.WithCallerKey(runCtx, string(r.credential.Key))
 	runCtx = auth.WithUsage(runCtx, usageForRun(r))
-	runCtx = context.WithValue(runCtx, usageSinkKey{}, r.out)
+	runCtx = withUsageSink(runCtx, r.out)
 	r.out.mu.Lock()
 	r.out.thoughts = h.thoughtSummaries(runCtx, r.out, r.assembler)
 	r.out.mu.Unlock()
@@ -275,7 +275,7 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 	titleState := row.TitleState
 	go func() {
 		defer close(r.titleDone)
-		defer func() { rescued("title", recover()) }()
+		defer func() { api.Rescued("title", recover()) }()
 		// An ask's thread is discarded with its run.
 		if r.input.Kind != "ask" {
 			titleCtx, stop := context.WithTimeout(runCtx, 30*time.Second)
@@ -287,7 +287,7 @@ func (h *harness) launch(ctx context.Context, r *chatRun) error {
 		defer cancel()
 		var runErr error
 		defer func() {
-			if err := rescued("chat run", recover()); err != nil {
+			if err := api.Rescued("chat run", recover()); err != nil {
 				runErr = err
 			}
 			h.finishRun(r, runErr)

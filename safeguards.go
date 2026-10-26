@@ -92,7 +92,7 @@ func encodeSubmission(credential, conversationID string, messages []safeguardMes
 }
 
 func (s *submitter) deliver(body []byte) {
-	defer func() { rescued("safeguards submission", recover()) }()
+	defer func() { api.Rescued("safeguards submission", recover()) }()
 	req, err := http.NewRequest(http.MethodPost, s.endpoint, bytes.NewReader(body))
 	if err != nil {
 		return

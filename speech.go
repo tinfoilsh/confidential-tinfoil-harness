@@ -212,7 +212,7 @@ func streamSpeech(ctx context.Context, w http.ResponseWriter, router *downstream
 func synthesize(ctx context.Context, router *downstreamService, text string, out *speechAudio) {
 	var err error
 	defer func() {
-		if failure := rescued("speech synthesis", recover()); failure != nil {
+		if failure := api.Rescued("speech synthesis", recover()); failure != nil {
 			err = failure
 		}
 		out.add(nil, true, err)

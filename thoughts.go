@@ -115,7 +115,7 @@ func (s *thoughtSummaries) fire() {
 	}
 	epoch, message, block := s.epoch, s.message, s.block
 	go func() {
-		defer func() { rescued("reasoning summary", recover()) }()
+		defer func() { api.Rescued("reasoning summary", recover()) }()
 		summary, err := s.summarize(s.ctx, tail)
 		s.out.mu.Lock()
 		defer s.out.mu.Unlock()

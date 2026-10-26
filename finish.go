@@ -28,7 +28,7 @@ func (h *harness) finishRun(r *chatRun, runErr error) {
 	defer cancel()
 	ctx = auth.WithCallerKey(ctx, string(r.credential.Key))
 	ctx = auth.WithUsage(ctx, usageForRun(r))
-	ctx = context.WithValue(ctx, usageSinkKey{}, r.out)
+	ctx = withUsageSink(ctx, r.out)
 	r.out.mu.Lock()
 	messages := r.assembler.Messages()
 	spend, sources, reply := r.out.spend, r.out.sources, r.out.replyID
