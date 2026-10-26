@@ -209,7 +209,7 @@ func (h *harness) admit(ctx context.Context, p *auth.Principal, credential auth.
 	// local thread's memory while it waits in the queue.
 	clean.Key, clean.Thread, clean.Profile = nil, nil, nil
 	stopped, stop := context.WithCancel(context.Background())
-	r.log = newRun(token())
+	r.log = newRun(api.Token())
 	r.log.stop = stop
 	// The user message a turn adds is named by the client's request.
 	r.stopped, r.input, r.received, r.principal, r.key, r.messageID, r.credential, r.assembler = stopped, &clean, api.Timestamp(), p, key, r.nonce, credential, domain.NewMessageAssembler()

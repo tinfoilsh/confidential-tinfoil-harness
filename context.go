@@ -16,6 +16,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 	"golang.org/x/text/language"
 	"golang.org/x/text/language/display"
 )
@@ -182,8 +183,8 @@ func timeReminder(now time.Time, zone string) (string, error) {
 	return "<system-reminder>Current time: " + englishTime(now.In(loc), zone) + " (" + zone + ")</system-reminder>", nil
 }
 
-func (h *harness) buildRequest(thread *domain.Thread, profile *domain.Profile, project *domain.Project, documents []domain.ProjectDocument, in *turnRequest, runID string) (*request, *model, error) {
-	c := h.catalog.get()
+func (h *harness) buildRequest(thread *domain.Thread, profile *domain.Profile, project *domain.Project, documents []domain.ProjectDocument, in *turnRequest, runID string) (*request, *inference.Model, error) {
+	c := h.models.Catalog.Get()
 	options := in.Options
 	name := cmp.Or(thread.Model, "auto")
 	req := &request{threadID: thread.ID, runID: runID, model: name}
@@ -192,14 +193,14 @@ func (h *harness) buildRequest(thread *domain.Thread, profile *domain.Profile, p
 		req.conversation = in.ThreadID
 	}
 	def, display, policy, window := c.Definition(name), "Auto", "none", 0
-	var picked *model
-	for _, m := range h.offer.get() {
-		if m.name == name {
+	var picked *inference.Model
+	for _, m := range h.models.Offer.Get() {
+		if m.Name == name {
 			picked = m
 		}
 	}
 	if name == "auto" {
-		picked = h.autoModel
+		picked = h.models.Auto
 		for _, candidate := range c.Models {
 			limit := api.Int(candidate["budgetWindow"])
 			if window == 0 || limit < window {
@@ -222,7 +223,7 @@ func (h *harness) buildRequest(thread *domain.Thread, profile *domain.Profile, p
 		if def == nil {
 			return nil, nil, api.Err(404, "MODEL_UNAVAILABLE", "The selected model is unavailable")
 		}
-		display, window = pinnedName(name), api.Int(def["budgetWindow"])
+		display, window = inference.PinnedName(name), api.Int(def["budgetWindow"])
 		reason := api.Obj(api.Obj(def["chatConfig"])["reasoningConfig"])
 		policy = api.FirstString(reason["reasoningHistoryPolicy"], "none")
 		effort := cmp.Or(options.ReasoningEffort, domain.ValueOr(profile.ReasoningEffort, ""), "medium")
@@ -231,7 +232,7 @@ func (h *harness) buildRequest(thread *domain.Thread, profile *domain.Profile, p
 		}
 		req.params = domain.ModelParams(def, domain.ValueOr(options.Thinking, domain.ValueOr(profile.ThinkingEnabled, api.Bool(reason["defaultEnabled"], true))), effort)
 	}
-	if picked == nil || picked.client == nil {
+	if picked == nil || picked.Client == nil {
 		return nil, nil, api.Err(404, "MODEL_UNAVAILABLE", "The selected model has no attested transport")
 	}
 	zone := cmp.Or(options.Timezone, "UTC")

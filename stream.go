@@ -76,7 +76,14 @@ func (s *stream) progress(call, note string, done float64) {
 
 const activityTool = "TOOL"
 
-func (s *stream) meter(raw json.RawMessage) {
+// Accepted marks the model as having accepted a request of the run.
+func (s *stream) Accepted() {
+	s.mu.Lock()
+	s.modelAccepted = true
+	s.mu.Unlock()
+}
+
+func (s *stream) Meter(raw json.RawMessage) {
 	var turn api.Usage
 	if json.Unmarshal(raw, &turn) != nil {
 		return

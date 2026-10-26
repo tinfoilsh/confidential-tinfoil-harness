@@ -15,7 +15,7 @@ func (h *harness) favicon(ctx context.Context, p *auth.Principal, _ auth.Content
 	}
 	ctx = auth.WithCallerKey(ctx, string(credential.Key))
 	var result json.RawMessage
-	err = h.serviceCall(ctx, "metadata", "/favicon", pageRequest{URL: in.URL}, &result)
+	err = h.models.ServiceCall(ctx, "metadata", "/favicon", pageRequest{URL: in.URL}, &result)
 	return result, err
 }
 
@@ -33,7 +33,7 @@ func (h *harness) linkPreview(ctx context.Context, p *auth.Principal, _ auth.Con
 // preview shows them.
 func (h *harness) linkDetails(ctx context.Context, url string) (any, error) {
 	var response api.Object
-	if err := h.serviceCall(ctx, "metadata", "/metadata", api.Object{"url": url}, &response); err != nil {
+	if err := h.models.ServiceCall(ctx, "metadata", "/metadata", api.Object{"url": url}, &response); err != nil {
 		return nil, err
 	}
 	result := api.Obj(response["result"])

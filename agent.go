@@ -15,6 +15,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
@@ -30,7 +31,7 @@ const (
 	continueInstruction    = "Continue your previous response exactly where it left off. Do not repeat, summarize, or restate anything you already wrote, and do not add any preamble."
 )
 
-func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model) error {
+func (h *harness) loop(ctx context.Context, out *stream, req *request, m *inference.Model) error {
 	apiKey := auth.CallerKey(ctx)
 	inRun := usagereporting.Context{
 		ContextID:     req.runID,
@@ -44,7 +45,7 @@ func (h *harness) loop(ctx context.Context, out *stream, req *request, m *model)
 	ctx = auth.WithUsage(ctx, inRun)
 	first := auth.WithUsage(ctx, billing)
 
-	set, err := openTools(ctx, req, m.name, out.progress)
+	set, err := openTools(ctx, req, m.Name, out.progress)
 	if err != nil {
 		return fmt.Errorf("tools: %w", err)
 	}
@@ -173,7 +174,7 @@ func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) (mess
 	// One tool goroutine's panic is that call's failure, read by the model like
 	// any other. Nothing is emitted from here: a frame is what may have panicked.
 	defer func() {
-		if err := rescued("tool "+call.name, recover()); err != nil {
+		if err := api.Rescued("tool "+call.name, recover()); err != nil {
 			failure, _ := json.Marshal(map[string]string{"error": err.Error()})
 			message = answered(call.id, string(failure))
 		}
@@ -186,7 +187,7 @@ func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) (mess
 		}
 		// The caller never reports back, so only the model can be told the widget was not drawn.
 		if failure := domain.WidgetFailure(w, call.args); failure != nil {
-			out.emit(domain.ToolCallResult{MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: failure})
+			out.emit(domain.ToolCallResult{MessageID: "msg_" + api.Token(), ToolCallID: call.id, Role: "tool", Content: failure})
 			if !set.retry(call.name) {
 				return answered(call.id, `{"status":"executed"}`)
 			}
@@ -196,7 +197,7 @@ func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) (mess
 		if err != nil {
 			content = api.Object{"error": api.AsError(err).Message}
 		}
-		out.emit(domain.ToolCallResult{MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: api.Raw(content)})
+		out.emit(domain.ToolCallResult{MessageID: "msg_" + api.Token(), ToolCallID: call.id, Role: "tool", Content: api.Raw(content)})
 		return answered(call.id, "[rendered for the user]")
 	}
 	out.activity(call)
@@ -213,7 +214,7 @@ func invoke(ctx context.Context, out *stream, set *toolset, call toolCall) (mess
 	} else {
 		shown = domain.NormalizeToolResult(call.name, call.args, content)
 	}
-	out.emit(domain.ToolCallResult{MessageID: "msg_" + token(), ToolCallID: call.id, Role: "tool", Content: api.Raw(shown), Metadata: meta, Display: domain.SearchDisplay(call.name, call.args, api.Raw(shown))})
+	out.emit(domain.ToolCallResult{MessageID: "msg_" + api.Token(), ToolCallID: call.id, Role: "tool", Content: api.Raw(shown), Metadata: meta, Display: domain.SearchDisplay(call.name, call.args, api.Raw(shown))})
 	return answered(call.id, clip(read, maxToolOutput))
 }
 
@@ -227,10 +228,10 @@ func clip(out string, limit int) string {
 	return out
 }
 
-func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byte, widgets map[string]domain.Widget) ([]toolCall, string, error) {
-	endpoint := m.endpoint
+func (h *harness) turn(ctx context.Context, out *stream, m *inference.Model, payload []byte, widgets map[string]domain.Widget) ([]toolCall, string, error) {
+	endpoint := m.Endpoint
 	if endpoint == "" {
-		endpoint = h.gateway + "/v1/chat/completions"
+		endpoint = h.models.Gateway + "/v1/chat/completions"
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
@@ -239,7 +240,7 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 
-	resp, err := m.client.Do(req)
+	resp, err := m.Client.Do(req)
 	if err != nil {
 		return nil, "", fmt.Errorf("gateway: %w", err)
 	}
@@ -256,7 +257,7 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 	ended := false
 	var answer, reasoningText strings.Builder
 	reasoningField := "reasoning_content"
-	message := "msg_" + token()
+	message := "msg_" + api.Token()
 	out.mu.Lock()
 	if out.replyID == "" {
 		out.replyID = message
@@ -311,7 +312,7 @@ func (h *harness) turn(ctx context.Context, out *stream, m *model, payload []byt
 			out.mu.Unlock()
 		}
 		if len(chunk.Usage) > 0 {
-			out.meter(chunk.Usage)
+			out.Meter(chunk.Usage)
 		}
 		if len(chunk.Choices) == 0 {
 			continue
@@ -393,7 +394,7 @@ func parent(message string, answer *strings.Builder) string {
 // Arguments that arrive before the name are sent once the call opens.
 func announce(out *stream, message string, calls []toolCall, delta toolCallDelta, widgets map[string]domain.Widget) []toolCall {
 	for len(calls) <= delta.Index {
-		calls = append(calls, toolCall{id: "call_" + token()})
+		calls = append(calls, toolCall{id: "call_" + api.Token()})
 	}
 	call := &calls[delta.Index]
 	if delta.ID != "" {

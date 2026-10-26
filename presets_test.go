@@ -13,6 +13,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 )
 
 // savedPresets are prompts a user saved: one choosing an offered model with
@@ -35,9 +36,9 @@ func presetHarness(t *testing.T) (*harness, *memoryRows, auth.ContentKey, chan s
 		asked <- api.Str(body["model"])
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n")
 	})
-	client := h.offer.models[0].client
-	h.offer.models = append(h.offer.models, &model{name: "gemma4-31b", context: 8192, client: client}, &model{name: "gpt-oss-120b", context: 8192, client: client})
-	c := h.catalog.get()
+	client := h.models.Offer.Get()[0].Client
+	h.models.Offer.Set(append(h.models.Offer.Get(), &inference.Model{Name: "gemma4-31b", Context: 8192, Client: client}, &inference.Model{Name: "gpt-oss-120b", Context: 8192, Client: client}), h.models.Offer.SDK())
+	c := h.models.Catalog.Get()
 	c.Models = append(c.Models, api.Object{"modelName": "gemma4-31b", "name": "Gemma", "budgetWindow": 8192, "chatConfig": api.Object{}},
 		api.Object{"modelName": "gpt-oss-120b", "name": "Free", "paid": false, "budgetWindow": 8192, "chatConfig": api.Object{}})
 	return h, rows, key, asked

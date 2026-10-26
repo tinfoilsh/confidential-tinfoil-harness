@@ -8,6 +8,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 )
 
 func (h *harness) widgetResult(ctx context.Context, call toolCall) (any, error) {
@@ -21,7 +22,7 @@ func (h *harness) widgetResult(ctx context.Context, call toolCall) (any, error) 
 	return h.linkDetails(ctx, api.Str(args["url"]))
 }
 
-func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *model) error {
+func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *inference.Model) error {
 	var declaration domain.Widget
 	for _, w := range domain.WidgetCatalog() {
 		if w.Name == r.retryTarget.block.Name {
@@ -40,7 +41,7 @@ func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *
 	}
 	usage := usageForRun(r)
 	usage.BillCustomerRequest = true
-	content, err := h.completion(auth.WithUsage(ctx, usage), m, payload)
+	content, err := h.models.Completion(auth.WithUsage(ctx, usage), m, payload)
 	if err != nil {
 		return err
 	}
@@ -59,7 +60,7 @@ func (h *harness) retryWidget(ctx context.Context, r *chatRun, req *request, m *
 		result = api.Object{"error": api.AsError(err).Message}
 	}
 	r.replacement = domain.ReplacedWidget{Arguments: content, Result: api.Raw(result)}
-	r.out.emit(domain.ToolCallResult{MessageID: "msg_" + token(), ToolCallID: id, Role: "tool", Content: r.replacement.Result})
+	r.out.emit(domain.ToolCallResult{MessageID: "msg_" + api.Token(), ToolCallID: id, Role: "tool", Content: r.replacement.Result})
 	return nil
 }
 

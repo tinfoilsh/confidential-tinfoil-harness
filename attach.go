@@ -28,6 +28,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 	_ "golang.org/x/image/bmp"
 	"golang.org/x/image/draw"
 	_ "golang.org/x/image/tiff"
@@ -263,7 +264,7 @@ func (h *harness) handleUpload(w http.ResponseWriter, r *http.Request) {
 	// An upload is only converted. Its client sends the descriptor back with
 	// the turn that attaches it, and that turn stores it with the chat.
 	if r.URL.Path == "/v1/attachments/upload" {
-		descriptor.ID = "att_" + token()
+		descriptor.ID = "att_" + api.Token()
 		api.Respond(w, struct {
 			Attachment domain.Attachment `json:"attachment"`
 		}{descriptor}, nil)
@@ -476,7 +477,7 @@ func resizeImage(data []byte) ([]byte, []byte, error) {
 var conversionDeadline = 10 * time.Minute
 
 func (h *harness) convert(ctx context.Context, filename string, data []byte) ([]byte, error) {
-	router := h.services["router"]
+	router := h.models.Services["router"]
 	if router == nil {
 		return nil, api.Err(503, "TOOL_UNAVAILABLE", "Document conversion is unavailable")
 	}
@@ -509,7 +510,7 @@ func capacityDelay(err error) time.Duration {
 	return time.Duration(e.RetryAfter) * time.Second
 }
 
-func multipartCall(ctx context.Context, service *downstreamService, path, fileField, name string, data []byte, fields map[string]string) ([]byte, error) {
+func multipartCall(ctx context.Context, service *inference.Service, path, fileField, name string, data []byte, fields map[string]string) ([]byte, error) {
 	var buffer bytes.Buffer
 	writer := multipart.NewWriter(&buffer)
 	for key, value := range fields {
@@ -560,7 +561,7 @@ func (h *harness) transcribe(ctx context.Context, filename string, data []byte) 
 		return "", api.Err(415, "ATTACHMENT_UNSUPPORTED", "Unsupported recording type")
 	}
 	// The router reads the model from the form, as the web client's SDK sends it.
-	router := h.services["router"]
+	router := h.models.Services["router"]
 	if router == nil {
 		return "", api.Err(503, "TOOL_UNAVAILABLE", "Transcription is unavailable")
 	}
@@ -776,7 +777,7 @@ func turnAttachments(in *turnRequest, t *domain.Thread) ([]domain.Attachment, er
 // A local transcript may omit older images' bytes to stay small. The model
 // then reads such an image through its description, or not at all.
 func (h *harness) hydrateContext(ctx context.Context, p *auth.Principal, t *domain.Thread, keyless bool) error {
-	vision := h.catalog.get().Vision(t.Model)
+	vision := h.models.Catalog.Get().Vision(t.Model)
 	return t.EachAttachment(func(a *domain.Attachment) error {
 		if !a.IsImage() || !vision && a.Description != "" {
 			return nil
@@ -815,9 +816,9 @@ func (h *harness) hydrateContext(ctx context.Context, p *auth.Principal, t *doma
 const imageDescriptionTokens = 2048
 
 func (h *harness) describeImage(ctx context.Context, encoded string) (string, error) {
-	for _, m := range h.offer.get() {
-		if m.vision {
-			return h.completion(ctx, m, api.Object{"model": m.name, "messages": []api.Object{{"role": "user", "content": []api.Object{{"type": "text", "text": "Describe this image faithfully for a text-only assistant. Include visible text and details relevant to understanding it."}, {"type": "image_url", "image_url": api.Object{"url": "data:image/jpeg;base64," + encoded}}}}}, "max_tokens": imageDescriptionTokens})
+	for _, m := range h.models.Offer.Get() {
+		if m.Vision {
+			return h.models.Completion(ctx, m, api.Object{"model": m.Name, "messages": []api.Object{{"role": "user", "content": []api.Object{{"type": "text", "text": "Describe this image faithfully for a text-only assistant. Include visible text and details relevant to understanding it."}, {"type": "image_url", "image_url": api.Object{"url": "data:image/jpeg;base64," + encoded}}}}}, "max_tokens": imageDescriptionTokens})
 		}
 	}
 	return "", api.Err(404, "MODEL_UNAVAILABLE", "No vision model can describe the image")

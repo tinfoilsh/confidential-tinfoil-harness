@@ -13,6 +13,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 )
 
 func TestModelRefusalsReachTheRunWithTheirMeaning(t *testing.T) {
@@ -64,7 +65,7 @@ func TestServiceRefusalsKeepTheirRetryDelay(t *testing.T) {
 		io.WriteString(w, `{"error":{"message":"The model 'voxtral-small-24b' is temporarily unavailable. Please try again later.","type":"service_unavailable_error","code":"model_unavailable"}}`)
 	}))
 	defer router.Close()
-	h.services["router"] = &downstreamService{URL: router.URL, Client: router.Client()}
+	h.models.Services["router"] = &inference.Service{URL: router.URL, Client: router.Client()}
 	response := uploadRoute(h, "/v1/transcriptions", "memo.mp3", []byte("ID3 audio"), nil, "")
 	var body struct {
 		Error api.Error `json:"error"`

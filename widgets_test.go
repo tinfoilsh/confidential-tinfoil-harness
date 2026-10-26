@@ -14,6 +14,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 )
 
 func TestCanonicalizeWidgetArgumentsRecursive(t *testing.T) {
@@ -229,8 +230,8 @@ func TestARetriedLinkPreviewReadsItsPage(t *testing.T) {
 		json.NewEncoder(w).Encode(api.Object{"result": api.Object{"title": "The Post", "description": "About it", "site_name": "Example", "image": "https://example.com/i.png"}})
 	}))
 	defer metadata.Close()
-	h.services["metadata"] = &downstreamService{URL: metadata.URL, Client: metadata.Client()}
-	h.catalog.get().EnabledWidgets = []string{"render_link_preview"}
+	h.models.Services["metadata"] = &inference.Service{URL: metadata.URL, Client: metadata.Client()}
+	h.models.Catalog.Get().EnabledWidgets = []string{"render_link_preview"}
 	refused := domain.WidgetFailure(catalogWidgets("render_link_preview")["render_link_preview"], original)
 	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat")] = domain.StoredRow{ID: "chat", ETag: "1", Data: api.Raw(api.Object{"createdAt": api.Timestamp(), "title": "Links", "titleState": "manual", "model": "kimi-k3", "messages": []any{
 		api.Object{"id": "user", "role": "user", "content": "link the post", "createdAt": api.Timestamp()},
@@ -277,7 +278,7 @@ func TestALinkPreviewReadsItsPageDetails(t *testing.T) {
 		json.NewEncoder(w).Encode(api.Object{"result": api.Object{"title": "The Post", "description": "About it", "site_name": "Example", "image": "https://example.com/i.png", "favicon": "https://example.com/f.ico"}})
 	}))
 	defer metadata.Close()
-	h.services["metadata"] = &downstreamService{URL: metadata.URL, Client: metadata.Client()}
+	h.models.Services["metadata"] = &inference.Service{URL: metadata.URL, Client: metadata.Client()}
 	w := postRoute(h, "/v1/metadata/link", api.Object{"url": "https://example.com/post"}, "")
 	if want := `{"description":"About it","image":"https://example.com/i.png","siteName":"Example","title":"The Post","url":"https://example.com/post"}` + "\n"; w.Code != 200 || w.Body.String() != want {
 		t.Fatalf("the details: HTTP %d %s", w.Code, w.Body.String())

@@ -29,7 +29,7 @@ func TestResponseLanguageUsesTheDeviceUnlessTheProfileChoosesOne(t *testing.T) {
 		systems <- api.Str(api.Obj(lastRequest(r)[0])["content"])
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"Bonjour\"}}]}\n\ndata: [DONE]\n\n")
 	})
-	h.catalog.get().Prompt = "Respond in {LANGUAGE}."
+	h.models.Catalog.Get().Prompt = "Respond in {LANGUAGE}."
 	for _, tc := range []struct{ selected, locale, want string }{{"System", "fr-FR,fr;q=0.9", "French"}, {"German", "fr-FR", "German"}, {"System", "", "English"}} {
 		in := localInput("", nil)
 		in["profile"] = api.Object{"language": tc.selected}
@@ -126,7 +126,7 @@ func TestAProjectImageBecomesContextForItsChats(t *testing.T) {
 		requests <- api.Str(api.Obj(api.Arr(in["messages"])[0])["content"])
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"Three rooms\"}}]}\n\ndata: [DONE]\n\n")
 	})
-	h.offer.models[0].vision = true
+	h.models.Offer.Get()[0].Vision = true
 	rows.rows["user:alice/project/plan"] = domain.StoredRow{ID: "plan", ETag: "1", Data: api.Raw(domain.Project{ID: "plan", Name: "House"})}
 	var encodedImage bytes.Buffer
 	if err := png.Encode(&encodedImage, image.NewRGBA(image.Rect(0, 0, 20, 10))); err != nil {
