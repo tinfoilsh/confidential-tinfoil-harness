@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -422,5 +423,56 @@ func TestASlowSafeguardsSidecarHoldsUpNothing(t *testing.T) {
 	answer()
 	if got := drained(); len(got) != 2 {
 		t.Fatalf("the sidecar received %d submissions", len(got))
+	}
+}
+
+// Every route about a live run finds it under its caller, so another
+// account's request names nothing, and the same request nonce from another
+// account is that account's own new turn.
+func TestAnotherCallerReachesNothingOfALiveRun(t *testing.T) {
+	// Only the first account's reply is held; the other account's is answered.
+	held, release := heldModel()
+	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		for _, m := range lastRequest(r) {
+			if str(obj(m)["content"]) == "mine" {
+				io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n")
+				return
+			}
+		}
+		held(w, r)
+	})
+	p := &principal{ID: "alice", JWT: "clerk-alice"}
+	in := sendInput(key)
+	run, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { release(); <-run.finished })
+	awaitFrame(t, run.log, "RUN_STARTED")
+	queued := sendInput(key)
+	queued["threadId"] = run.thread.id
+	next, err := h.acceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[turnRequest](queued))
+	if err != nil || !next.queued {
+		t.Fatalf("turn not queued: %v", err)
+	}
+	for path, body := range map[string]object{
+		"/v1/threads/cancel":       {"key": key.base64(), "threadId": run.thread.id, "runId": run.log.id},
+		"/v1/threads/queue/send":   {"key": key.base64(), "threadId": run.thread.id, "queueId": next.log.id},
+		"/v1/threads/queue/remove": {"key": key.base64(), "threadId": run.thread.id, "queueId": next.log.id},
+		"/v1/threads/transcript":   {"key": key.base64(), "threadId": run.thread.id},
+	} {
+		if w := postRoute(h, path, body, "bob"); w.Code != 404 {
+			t.Fatalf("%s for another account's chat answered HTTP %d %s", path, w.Code, w.Body.String())
+		}
+	}
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", object{"key": key.base64(), "threadId": rowID(), "clientRequestId": in["clientRequestId"], "content": "mine", "kind": "send", "options": object{"model": "kimi-k3", "webSearch": false}}, "bob"))
+	if events[0].Type != "RUN_STARTED" || events[0].RunID == run.log.id || events[0].ThreadID == run.thread.id || events[len(events)-1].Type != "RUN_FINISHED" {
+		t.Fatalf("another account's turn with the same nonce was not its own: %v", events)
+	}
+	h.live.mu.Lock()
+	stillQueued := slices.Contains(run.thread.queue, next)
+	h.live.mu.Unlock()
+	if !stillQueued || run.thread.active != run {
+		t.Fatal("another account's requests changed the run")
 	}
 }
