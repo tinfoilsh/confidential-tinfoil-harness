@@ -179,7 +179,7 @@ func (s *memoryRows) Push(_ context.Context, p *auth.Principal, key auth.Content
 	n, _ := strconv.Atoi(current.ETag)
 	next := strconv.Itoa(n + 1)
 	stored := row.Copy()
-	stored.ETag, stored.Restore = next, false
+	stored.ETag = next
 	s.rows[name], s.sealed[name] = *stored, key
 	return next, nil
 }

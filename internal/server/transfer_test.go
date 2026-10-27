@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"net/http"
 	"reflect"
 	"strings"
 	"testing"
@@ -13,7 +12,6 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
 
 func TestTranscriptInlinesAttachmentsAndDetachesKeys(t *testing.T) {
@@ -220,31 +218,5 @@ func TestImportStatusReadsAsTheClientNamesIt(t *testing.T) {
 	want := api.Object{"status": "failed", "imported": float64(0), "failed": float64(1), "total": float64(1), "jobId": "job-1", "failureReason": "invalid_archive", "failureDetail": "Not a zip archive"}
 	if !reflect.DeepEqual(status, want) {
 		t.Fatalf("the status reads as %v, want %v", status, want)
-	}
-}
-
-func TestImportMayReuseADeletedChatID(t *testing.T) {
-	var metadata api.Object
-	client := &store.Client{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
-		var in api.Object
-		json.NewDecoder(r.Body).Decode(&in)
-		metadata = api.Obj(in["metadata"])
-		if in["if_match"] != nil {
-			t.Errorf("a restore must be a create: %v", in["if_match"])
-		}
-		return syncTestResponse(200, api.Object{"ok": true, "etag": "1"})
-	})}}
-	h, _, key := testChatHarness(t, nil)
-	h.store.Rows = client
-	if _, err := h.engine.ImportThread(context.Background(), &auth.Principal{ID: "alice", JWT: "jwt"}, key, requestOf[engine.ThreadImportRequest](api.Object{"threadId": "chat-1", "thread": api.Object{"messages": []any{}}})); err != nil {
-		t.Fatal(err)
-	}
-	if metadata["restoreDeleted"] != true {
-		t.Fatalf("metadata: %v", metadata)
-	}
-	row := &domain.StoredRow{ID: "chat-1", Data: api.Raw(api.Object{"messages": []any{}})}
-	client.Push(context.Background(), &auth.Principal{ID: "alice", JWT: "jwt"}, key, "chat", row, "nonce")
-	if _, ok := metadata["restoreDeleted"]; ok {
-		t.Fatal("an ordinary push asked to restore a deleted chat")
 	}
 }

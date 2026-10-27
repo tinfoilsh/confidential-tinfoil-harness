@@ -286,9 +286,6 @@ func (s *Client) Push(ctx context.Context, p *auth.Principal, key auth.ContentKe
 	if scope == "chat" || scope == "project_document" {
 		metadata["projectId"] = row.Project
 	}
-	if scope == "chat" && row.Restore {
-		metadata["restoreDeleted"] = true
-	}
 	if scope == "profile" {
 		metadata["profile_sync_protocol"] = 2
 	}

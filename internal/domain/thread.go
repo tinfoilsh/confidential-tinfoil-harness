@@ -214,9 +214,6 @@ type MessageUsage struct {
 type ThreadRow struct {
 	Thread
 	ETag string `json:"-"`
-	// restore lets a create reuse the id of a chat deleted from sync, as a
-	// chat moved to the device and back does.
-	Restore bool `json:"-"`
 }
 
 // Clone copies a thread deeply enough to change it apart from the original.

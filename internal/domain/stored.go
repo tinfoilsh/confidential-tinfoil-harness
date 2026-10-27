@@ -14,9 +14,6 @@ type StoredRow struct {
 	// from its sealed data; projectSet says sync reported one, even none.
 	Project    *string `json:"-"`
 	ProjectSet bool    `json:"-"`
-	// restore lets a create reuse the id of a chat deleted from sync, as a
-	// chat moved to the device and back does.
-	Restore bool `json:"-"`
 }
 
 func (row StoredRow) Copy() *StoredRow {
