@@ -5,10 +5,7 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/hmac"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -228,7 +225,7 @@ func promoteOneAttachment(
 	if !deps.Buckets.Configured() {
 		return errors.New("rewrap: buckets backend not configured")
 	}
-	resp, err := deps.Controlplane.GetLegacyAttachment(ctx, sess.RawJWT, sess.Claims.Subject, attID)
+	ciphertext, err := deps.Controlplane.GetLegacyAttachment(ctx, sess.RawJWT, sess.Claims.Subject, attID)
 	if err != nil {
 		if errors.Is(err, controlplane.ErrLegacyAttachmentNotFound) {
 			return nil
@@ -241,21 +238,12 @@ func promoteOneAttachment(
 		}
 		return fmt.Errorf("rewrap: fetch legacy attachment %s: %w", attID, err)
 	}
-	if err := verifyLegacyAttachmentClaim(
-		deps.SyncEnclaveSecret,
-		resp.Claim,
-		sess.Claims.Subject,
-		attID,
-		resp.Ciphertext,
-	); err != nil {
-		return fmt.Errorf("rewrap: legacy claim rejected for %s: %w", attID, err)
-	}
 	legacyKey, err := base64.StdEncoding.DecodeString(legacyKeyB64)
 	if err != nil || len(legacyKey) != 32 {
 		return fmt.Errorf("rewrap: invalid legacy attachment key for %s", attID)
 	}
 	defer seal.Zero(legacyKey)
-	plaintext, err := decryptLegacyAttachment(resp.Ciphertext, legacyKey)
+	plaintext, err := decryptLegacyAttachment(ciphertext, legacyKey)
 	if err != nil {
 		return fmt.Errorf("rewrap: decrypt legacy attachment %s: %w", attID, err)
 	}
@@ -297,57 +285,6 @@ func deleteBucketAttachments(ctx context.Context, deps Deps, owner string, ids [
 	for _, attID := range ids {
 		_ = deps.Buckets.Delete(cleanupCtx, owner, attID)
 	}
-}
-
-// legacyAttachmentClaimPayload is the canonical JSON the enclave HMACs
-// to reproduce the X-Legacy-Claim header CP stamped on the response.
-// Fields are alphabetical (json.Marshal preserves struct order, and the
-// CP side declares them in the same order) so both sides serialize to
-// identical bytes.
-type legacyAttachmentClaimPayload struct {
-	ClerkUserID string `json:"clerk_user_id"`
-	ID          string `json:"id"`
-	Scope       string `json:"scope"`
-	SHA256      string `json:"sha256"`
-}
-
-// verifyLegacyAttachmentClaim recomputes the CP-signed claim from the
-// authenticated user, the attachment id we asked for, and the bytes we
-// just received, and compares it to the value CP sent in X-Legacy-Claim.
-// A blank secret bypasses verification (only used by the unit-test
-// fixtures, where the CP stub doesn't stamp the header); production
-// always configures SYNC_ENCLAVE_SECRET.
-func verifyLegacyAttachmentClaim(
-	secret, providedClaim, clerkUserID, attID string,
-	ciphertext []byte,
-) error {
-	if secret == "" {
-		return nil
-	}
-	if providedClaim == "" {
-		return errors.New("missing X-Legacy-Claim header")
-	}
-	digest := sha256.Sum256(ciphertext)
-	payload, err := json.Marshal(legacyAttachmentClaimPayload{
-		ClerkUserID: clerkUserID,
-		ID:          attID,
-		Scope:       "attachment",
-		SHA256:      hex.EncodeToString(digest[:]),
-	})
-	if err != nil {
-		return fmt.Errorf("marshal claim: %w", err)
-	}
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write(payload)
-	expected := mac.Sum(nil)
-	provided, err := hex.DecodeString(providedClaim)
-	if err != nil {
-		return fmt.Errorf("malformed claim signature: %w", err)
-	}
-	if !hmac.Equal(provided, expected) {
-		return errors.New("claim signature mismatch")
-	}
-	return nil
 }
 
 // decryptLegacyAttachment reverses the webapp's encryptAttachment

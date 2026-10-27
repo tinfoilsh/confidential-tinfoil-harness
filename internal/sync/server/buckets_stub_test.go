@@ -25,7 +25,12 @@ type bucketsItem = bucketstub.Item
 // testBucketName is the bucket the buckets.Client under test is
 // configured with; the stub only serves paths under this bucket, so a
 // client that addressed a different bucket would 404.
-const testBucketName = "test-attachments-bucket"
+const (
+	testBucketName = "test-attachments-bucket"
+	// testServiceSecret signs the control plane stub's claims on legacy
+	// attachments and is what the fixture's client verifies them with.
+	testServiceSecret = "test-service-secret"
+)
 
 func newBucketsStub(t *testing.T) *bucketsStub {
 	t.Helper()

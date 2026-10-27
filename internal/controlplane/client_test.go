@@ -2,7 +2,10 @@ package controlplane
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -956,6 +959,44 @@ func TestGetLegacyAttachmentMapsGone(t *testing.T) {
 	_, err := c.GetLegacyAttachment(context.Background(), "j", "user_x", "already_v2")
 	if !errors.Is(err, ErrLegacyAttachmentGone) {
 		t.Fatalf("expected ErrLegacyAttachmentGone, got %v", err)
+	}
+}
+
+// A legacy attachment is only the caller's on the control plane's word,
+// signed under the service secret over the user, the id and the bytes.
+func TestGetLegacyAttachmentRequiresTheControlPlanesClaim(t *testing.T) {
+	const secret = "shared-secret"
+	ciphertext := []byte("sealed bytes")
+	claim := func(secret, user string) string {
+		digest := sha256.Sum256(ciphertext)
+		payload, _ := json.Marshal(legacyAttachmentClaim{ClerkUserID: user, ID: "att_1", Scope: "attachment", SHA256: hex.EncodeToString(digest[:])})
+		mac := hmac.New(sha256.New, []byte(secret))
+		mac.Write(payload)
+		return hex.EncodeToString(mac.Sum(nil))
+	}
+	for name, header := range map[string]string{
+		"no claim":           "",
+		"another secret":     claim("other-secret", "user_x"),
+		"another user":       claim(secret, "user_y"),
+		"a claim that is ok": claim(secret, "user_x"),
+	} {
+		st := newStub(t)
+		st.handle1("GET", "/api/storage/attachment/att_1", func(w http.ResponseWriter, r *http.Request) {
+			if header != "" {
+				w.Header().Set(HeaderLegacyClaim, header)
+			}
+			_, _ = w.Write(ciphertext)
+		})
+		got, err := NewClient(st.server.URL, nil, WithServiceSecret(secret)).GetLegacyAttachment(context.Background(), "j", "user_x", "att_1")
+		if name == "a claim that is ok" {
+			if err != nil || string(got) != string(ciphertext) {
+				t.Fatalf("%s: got %q, %v; want the bytes", name, got, err)
+			}
+			continue
+		}
+		if !errors.Is(err, ErrLegacyClaimInvalid) {
+			t.Fatalf("%s: served %q with %v; want ErrLegacyClaimInvalid", name, got, err)
+		}
 	}
 }
 
