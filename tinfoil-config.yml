@@ -16,7 +16,7 @@ networks:
 
 containers:
   - name: harness
-    image: "ghcr.io/tinfoilsh/confidential-tinfoil-harness@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    image: "ghcr.io/tinfoilsh/confidential-tinfoil-harness@sha256:82bb98e65264300802c01835bad3f86615ed0738958af9d162f994aa58c33c1f" # v0.1.26
     networks: [upstream]
     env:
       - TINFOIL_GATEWAY_URL: https://inference-gateway.tinfoil.sh
