@@ -25,22 +25,55 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/archives"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/buckets"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/buckets/bucketstub"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
 
-type fakeBlob struct {
-	chat, key string
-	data      []byte
+// storeAttachment holds an attachment as the harness stores one: its bytes
+// in buckets under the owner's tenant and the given key, and its index
+// entry under the chat.
+func (s *memoryRows) storeAttachment(user, chat, id string, key, data []byte) {
+	tenant, err := buckets.TenantForUser(user)
+	if err != nil {
+		panic(err)
+	}
+	s.bk.Put(id, bucketstub.Item{Tenant: tenant, Value: data, EncryptionKeys: [][]byte{key}})
+	s.cp.Mu.Lock()
+	defer s.cp.Mu.Unlock()
+	s.cp.AttachmentIndex[id], s.cp.AttachmentOwners[id] = chat, user
 }
 
-// fakeSync serves the attachment routes the way the sync enclave does: ids and
-// keys derive from the idempotency key and chat, and protocol 3 is required.
-// A fork copies a chat the test harness stores.
+// seedAttachment stores data as an attachment of user's chat under an id
+// and key of its own, and is that id and the key as a chat embeds it.
+func seedAttachment(rows *memoryRows, user, chat string, data []byte) (id, key string) {
+	sum := sha256.Sum256(append([]byte(chat+"\x00seed\x00"), data...))
+	id = hex.EncodeToString(sum[:18])
+	rows.storeAttachment(user, chat, id, sum[:], data)
+	return id, base64.StdEncoding.EncodeToString(sum[:])
+}
+
+// attachmentBytes is the bytes stored under an attachment, which its key
+// opens; a test fails when the harness stored none.
+func attachmentBytes(t *testing.T, rows *memoryRows, a domain.Attachment) []byte {
+	t.Helper()
+	item, ok := rows.bk.Item(a.ID)
+	key, err := base64.StdEncoding.DecodeString(a.EncryptionKey)
+	if !ok || err != nil || len(item.EncryptionKeys) != 1 || !bytes.Equal(item.EncryptionKeys[0], key) {
+		t.Fatalf("no attachment stored under %+v", a)
+	}
+	return item.Value
+}
+
+// attachmentsStored is how many attachments buckets holds.
+func attachmentsStored(rows *memoryRows) int { return len(rows.bk.Tokens()) }
+
+// fakeSync serves the sync enclave's import routes, which require protocol
+// 3, and runs the import jobs they start. A fork copies a chat the test
+// harness stores.
 type fakeSync struct {
 	mu       sync.Mutex
-	blobs    map[string]fakeBlob
-	puts     []api.Object
 	received map[string][]api.Object
 	server   *httptest.Server
 	imports  map[string]*fakeImport
@@ -48,7 +81,7 @@ type fakeSync struct {
 
 func newFakeSync(t *testing.T, h *harness) *fakeSync {
 	t.Helper()
-	f := &fakeSync{blobs: map[string]fakeBlob{}, received: map[string][]api.Object{}, imports: map[string]*fakeImport{}}
+	f := &fakeSync{received: map[string][]api.Object{}, imports: map[string]*fakeImport{}}
 	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Sync-Protocol") != "3" {
 			w.WriteHeader(426)
@@ -80,26 +113,6 @@ func newFakeSync(t *testing.T, h *harness) *fakeSync {
 			data["id"], data["title"], data["titleState"], data["createdAt"], data["updatedAt"], data["isLocalOnly"] = in["target_id"], in["title"], "manual", in["created_at"], in["created_at"], false
 			rows.rows[rowMapKey(p, "chat", api.Str(in["target_id"]))] = domain.StoredRow{ID: api.Str(in["target_id"]), ETag: "1", Data: api.Raw(data), Project: source.Project, ProjectSet: source.ProjectSet}
 			json.NewEncoder(w).Encode(api.Object{"ok": true, "id": in["target_id"], "etag": "1", "key_id": "key-id"})
-		case "/v1/attachment/put":
-			data, _ := base64.StdEncoding.DecodeString(api.Str(in["plaintext"]))
-			sum := sha256.Sum256([]byte(api.Str(in["idempotency_key"]) + "\x00" + api.Str(in["chat_id"])))
-			id, key := hex.EncodeToString(sum[:18]), base64.StdEncoding.EncodeToString(sum[:])
-			f.blobs[id] = fakeBlob{chat: api.Str(in["chat_id"]), key: key, data: data}
-			f.puts = append(f.puts, in)
-			json.NewEncoder(w).Encode(api.Object{"ok": true, "id": id, "att_key": key})
-		case "/v1/attachment/get":
-			blob, ok := f.blobs[api.Str(in["id"])]
-			if !ok {
-				w.WriteHeader(404)
-				io.WriteString(w, `{"ok":false,"code":"NOT_FOUND"}`)
-				return
-			}
-			if blob.key != api.Str(in["att_key"]) {
-				w.WriteHeader(400)
-				io.WriteString(w, `{"ok":false,"code":"BAD_REQUEST"}`)
-				return
-			}
-			json.NewEncoder(w).Encode(api.Object{"ok": true, "plaintext": base64.StdEncoding.EncodeToString(blob.data)})
 		case "/v1/import/create", "/v1/import/upload", "/v1/import/start", "/v1/import/status":
 			status, out := f.importStep(t, h, r, in)
 			w.WriteHeader(status)
@@ -117,30 +130,14 @@ func newFakeSync(t *testing.T, h *harness) *fakeSync {
 
 func TestPublicAttachmentPropagatesMissingBlob(t *testing.T) {
 	h, _, key := testChatHarness(t, nil)
-	fake := newFakeSync(t, h)
 	w := postRoute(h, "/v1/attachments/get-public", api.Object{"id": "missing", "attKey": keyBase64(key)}, "")
 	var response struct {
 		Error api.Error `json:"error"`
 	}
 	json.Unmarshal(w.Body.Bytes(), &response)
-	if w.Code != http.StatusNotFound || response.Error.Code != "THREAD_NOT_FOUND" || len(fake.requests("/v1/attachment/get-public")) != 1 {
+	if w.Code != http.StatusNotFound || response.Error.Code != "THREAD_NOT_FOUND" {
 		t.Fatalf("missing public blob: HTTP %d %s", w.Code, w.Body.String())
 	}
-}
-
-func (f *fakeSync) seed(chat string, data []byte) (string, string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	sum := sha256.Sum256(append([]byte(chat+"\x00seed\x00"), data...))
-	id, key := hex.EncodeToString(sum[:18]), base64.StdEncoding.EncodeToString(sum[:])
-	f.blobs[id] = fakeBlob{chat: chat, key: key, data: data}
-	return id, key
-}
-
-func (f *fakeSync) putCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return len(f.puts)
 }
 
 func (f *fakeSync) requests(path string) []api.Object {
@@ -162,7 +159,6 @@ func capturePrompt(prompt *string) http.HandlerFunc {
 func TestStoredUploadIsOffloadedUnderItsThread(t *testing.T) {
 	var prompt string
 	h, rows, key := testChatHarness(t, capturePrompt(&prompt))
-	fake := newFakeSync(t, h)
 	uploader, _, _ := testChatHarness(t, nil)
 	upload := uploadRoute(uploader, "/v1/attachments/upload", "notes.txt", []byte("remember the blue door"), nil, "alice")
 	if upload.Code != 200 {
@@ -183,18 +179,14 @@ func TestStoredUploadIsOffloadedUnderItsThread(t *testing.T) {
 	if !strings.Contains(prompt, "remember the blue door") {
 		t.Fatal("the document did not reach the model")
 	}
-	if fake.putCount() != 1 {
-		t.Fatalf("expected one blob, got %d", fake.putCount())
-	}
-	put := fake.puts[0]
-	payload, _ := base64.StdEncoding.DecodeString(api.Str(put["plaintext"]))
-	if put["chat_id"] != thread || string(payload) != `{"textContent":"remember the blue door"}` || put["idempotency_key"] != sent["id"] {
-		t.Fatalf("blob is not the document payload under its thread: %v %s", put, payload)
-	}
 	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", thread)
 	stored := api.Obj(api.Arr(api.Obj(api.Arr(rowJSON(row)["messages"])[0])["attachments"])[0])
 	if !domain.EnclaveAttachmentID.MatchString(api.Str(stored["id"])) || api.Str(stored["encryptionKey"]) == "" || stored["storageThreadId"] != thread {
 		t.Fatalf("row does not reference the stored blob: %v", stored)
+	}
+	held := mustRead(domain.ReadThreadRow(row)).Messages[0].Attachments[0]
+	if payload := attachmentBytes(t, rows, held); attachmentsStored(rows) != 1 || string(payload) != `{"textContent":"remember the blue door"}` || rows.cp.AttachmentIndex[held.ID] != thread {
+		t.Fatalf("blob is not the document payload under its thread: %s, %d stored, indexed under %q", payload, attachmentsStored(rows), rows.cp.AttachmentIndex[held.ID])
 	}
 	for _, field := range []string{"textContent", "pages", "base64", "legacyId"} {
 		if _, ok := stored[field]; ok {
@@ -212,8 +204,8 @@ func TestStoredUploadIsOffloadedUnderItsThread(t *testing.T) {
 	finishedRun(t, h, "/v1/threads/turn", edit)
 	row, _ = rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", thread)
 	kept := mustRead(domain.ReadThreadRow(row)).Messages[0].Attachments[0]
-	if kept.ID != stored["id"] || kept.EncryptionKey != stored["encryptionKey"] || fake.putCount() != 1 {
-		t.Fatalf("the edit did not keep the stored attachment: %+v after %d blobs", kept, fake.putCount())
+	if kept.ID != stored["id"] || kept.EncryptionKey != stored["encryptionKey"] || attachmentsStored(rows) != 1 {
+		t.Fatalf("the edit did not keep the stored attachment: %+v after %d blobs", kept, attachmentsStored(rows))
 	}
 }
 
@@ -237,14 +229,13 @@ func continueInput(key auth.ContentKey, thread string) api.Object {
 func TestOffloadedDocumentIsReadBackForEachTurn(t *testing.T) {
 	var prompt string
 	h, rows, key := testChatHarness(t, capturePrompt(&prompt))
-	fake := newFakeSync(t, h)
-	id, blobKey := fake.seed("chat-1", []byte(`{"textContent":"the quarterly numbers"}`))
+	id, blobKey := seedAttachment(rows, "alice", "chat-1", []byte(`{"textContent":"the quarterly numbers"}`))
 	storedThread(rows, "alice", "chat-1", api.Object{"id": id, "type": "document", "fileName": "report.pdf", "encryptionKey": blobKey})
 	eventsIn(t, postRoute(h, "/v1/threads/turn", continueInput(key, "chat-1"), "alice"))
 	if !strings.Contains(prompt, "the quarterly numbers") {
 		t.Fatal("the offloaded document was not read back")
 	}
-	if fake.putCount() != 0 {
+	if attachmentsStored(rows) != 1 {
 		t.Fatal("a document already stored under its thread was stored again")
 	}
 	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
@@ -257,8 +248,7 @@ func TestOffloadedDocumentIsReadBackForEachTurn(t *testing.T) {
 func TestMissingDocumentIsDescribedInsteadOfFailingTheTurn(t *testing.T) {
 	var prompt string
 	h, rows, key := testChatHarness(t, capturePrompt(&prompt))
-	newFakeSync(t, h)
-	storedThread(rows, "alice", "chat-1", api.Object{"id": strings.Repeat("a", 36), "type": "document", "fileName": "gone.pdf", "encryptionKey": "key"})
+	storedThread(rows, "alice", "chat-1", api.Object{"id": strings.Repeat("a", 36), "type": "document", "fileName": "gone.pdf", "encryptionKey": keyBase64(randomKey())})
 	events := eventsIn(t, postRoute(h, "/v1/threads/turn", continueInput(key, "chat-1"), "alice"))
 	if events[len(events)-1].Type != "RUN_FINISHED" || !strings.Contains(prompt, "gone.pdf is no longer available") {
 		t.Fatalf("a deleted document blocked the chat: %s", prompt)
@@ -268,22 +258,18 @@ func TestMissingDocumentIsDescribedInsteadOfFailingTheTurn(t *testing.T) {
 func TestInlineDocumentIsOffloadedUnderItsThread(t *testing.T) {
 	var prompt string
 	h, rows, key := testChatHarness(t, capturePrompt(&prompt))
-	fake := newFakeSync(t, h)
 	// The web and iOS apps kept a document's content in the row before storing it as a blob.
 	clientID := "3f2b8c1e-5d4a-4e6b-9c7d-1a2b3c4d5e6f"
 	storedThread(rows, "alice", "chat-1", api.Object{"id": clientID, "type": "document", "fileName": "deck.pdf", "textContent": "slide text", "pages": nil})
 	eventsIn(t, postRoute(h, "/v1/threads/turn", continueInput(key, "chat-1"), "alice"))
-	if fake.putCount() != 1 {
-		t.Fatalf("expected the document to be stored once, got %d", fake.putCount())
-	}
-	payload, _ := base64.StdEncoding.DecodeString(api.Str(fake.puts[0]["plaintext"]))
-	if fake.puts[0]["chat_id"] != "chat-1" || string(payload) != `{"textContent":"slide text"}` {
-		t.Fatalf("not stored as a payload under the thread: %s", payload)
-	}
 	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
 	stored := api.Obj(api.Arr(api.Obj(api.Arr(rowJSON(row)["messages"])[0])["attachments"])[0])
 	if !domain.EnclaveAttachmentID.MatchString(api.Str(stored["id"])) || api.Str(stored["encryptionKey"]) == "" || stored["storageThreadId"] != "chat-1" || stored["textContent"] != nil {
 		t.Fatalf("row does not reference the stored blob: %v", stored)
+	}
+	held := mustRead(domain.ReadThreadRow(row)).Messages[0].Attachments[0]
+	if payload := attachmentBytes(t, rows, held); attachmentsStored(rows) != 1 || string(payload) != `{"textContent":"slide text"}` || rows.cp.AttachmentIndex[held.ID] != "chat-1" {
+		t.Fatalf("not stored once as a payload under the thread: %s, %d stored", payload, attachmentsStored(rows))
 	}
 	if _, ok := stored["pages"]; ok {
 		t.Fatal("a null field was stored")
@@ -295,12 +281,11 @@ func TestInlineDocumentIsOffloadedUnderItsThread(t *testing.T) {
 
 func TestMissingAttachmentsAreRepairedBeforeRetrying(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	fake := newFakeSync(t, h)
-	docID, docKey := fake.seed("another-chat", []byte(`{"textContent":"filed elsewhere"}`))
+	docID, docKey := seedAttachment(rows, "alice", "another-chat", []byte(`{"textContent":"filed elsewhere"}`))
 	imageID := strings.Repeat("b", 36)
 	storedThread(rows, "alice", "chat-1",
 		api.Object{"id": docID, "type": "document", "fileName": "notes.md", "encryptionKey": docKey},
-		api.Object{"id": imageID, "type": "image", "fileName": "photo.png", "encryptionKey": "gone", "thumbnailBase64": "thumb"})
+		api.Object{"id": imageID, "type": "image", "fileName": "photo.png", "encryptionKey": keyBase64(randomKey()), "thumbnailBase64": "thumb"})
 	refused := 0
 	rows.refuse = func(row *domain.StoredRow) error {
 		for _, a := range mustRead(domain.ReadThreadRow(row)).Messages[0].Attachments {
@@ -320,7 +305,7 @@ func TestMissingAttachmentsAreRepairedBeforeRetrying(t *testing.T) {
 	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
 	chat := mustRead(domain.ReadThreadRow(row))
 	doc, image := chat.Messages[0].Attachments[0], chat.Messages[0].Attachments[1]
-	if doc.ID == docID || doc.StorageThreadID != "chat-1" || fake.blobs[doc.ID].chat != "chat-1" {
+	if doc.ID == docID || doc.StorageThreadID != "chat-1" || rows.cp.AttachmentIndex[doc.ID] != "chat-1" || string(attachmentBytes(t, rows, doc)) != `{"textContent":"filed elsewhere"}` {
 		t.Fatalf("the document was not stored under its chat: %+v", doc)
 	}
 	if image.EncryptionKey != "" || image.Thumbnail != "thumb" || chat.Title != "Renamed" {
@@ -330,41 +315,31 @@ func TestMissingAttachmentsAreRepairedBeforeRetrying(t *testing.T) {
 
 func TestLegacyKeyedAttachmentIsReadFromTheControlPlane(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	fake := newFakeSync(t, h)
 	legacyKey := bytes.Repeat([]byte{7}, 32)
 	block, _ := aes.NewCipher(legacyKey)
 	gcm, _ := cipher.NewGCM(block)
 	nonce := bytes.Repeat([]byte{1}, gcm.NonceSize())
 	sealed := append(nonce, gcm.Seal(nil, nonce, []byte("old photo"), nil)...)
-	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/storage/attachment/legacy-1" {
-			w.WriteHeader(404)
-			return
-		}
-		w.Write(sealed)
-	}))
-	defer cp.Close()
-	h.atControlplane(cp.URL)
-	// The web and iOS apps stored images at the control plane before the sync enclave.
+	// The web and iOS apps stored images at the control plane itself before
+	// the harness stored them.
+	rows.cp.Mu.Lock()
+	rows.cp.LegacyAttachments = map[string][]byte{"legacy-1": sealed}
+	rows.cp.Mu.Unlock()
 	storedThread(rows, "alice", "chat-1", api.Object{"id": "legacy-1", "type": "image", "fileName": "photo.png", "description": "a photo", "key": base64.StdEncoding.EncodeToString(legacyKey)})
 	eventsIn(t, postRoute(h, "/v1/threads/turn", continueInput(key, "chat-1"), "alice"))
-	if fake.putCount() != 1 {
-		t.Fatalf("legacy attachment was not moved under its thread: puts=%d", fake.putCount())
-	}
-	if payload, _ := base64.StdEncoding.DecodeString(api.Str(fake.puts[0]["plaintext"])); fake.puts[0]["chat_id"] != "chat-1" || string(payload) != "old photo" {
-		t.Fatalf("stored %q under %v", payload, fake.puts[0]["chat_id"])
-	}
 	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
 	stored := mustRead(domain.ReadThreadRow(row)).Messages[0].Attachments[0]
 	if stored.Key != "" || !domain.EnclaveAttachmentID.MatchString(stored.ID) {
 		t.Fatalf("legacy reference kept: %+v", stored)
 	}
+	if payload := attachmentBytes(t, rows, stored); attachmentsStored(rows) != 1 || string(payload) != "old photo" || rows.cp.AttachmentIndex[stored.ID] != "chat-1" {
+		t.Fatalf("legacy attachment was not moved under its thread: stored %q, %d objects", payload, attachmentsStored(rows))
+	}
 }
 
 func TestDocumentDownloadReturnsExtractedText(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	fake := newFakeSync(t, h)
-	id, blobKey := fake.seed("chat-1", []byte(`{"pages":[{"page":1,"text":"page one","image":"","is_scanned":false}]}`))
+	id, blobKey := seedAttachment(rows, "alice", "chat-1", []byte(`{"pages":[{"page":1,"text":"page one","image":"","is_scanned":false}]}`))
 	storedThread(rows, "alice", "chat-1", api.Object{"id": id, "type": "document", "fileName": "scan.pdf", "encryptionKey": blobKey})
 	w := postRoute(h, "/v1/attachments/get", api.Object{"key": keyBase64(key), "id": id, "threadId": "chat-1"}, "alice")
 	if w.Code != 200 || w.Body.String() != "page one" {
@@ -499,8 +474,8 @@ func TestALocalChatIsSharedFromItsTranscript(t *testing.T) {
 	if got := <-uploads; got != (upload{http.MethodPut, "/api/shares/0000000000005_local", "Bearer clerk-alice", "1", "sealed"}) {
 		t.Fatalf("share upload: %+v", got)
 	}
-	if fake.putCount() != 0 || rows.calls != 0 {
-		t.Fatalf("a local share stored %d attachments and made %d storage calls", fake.putCount(), rows.calls)
+	if attachmentsStored(rows) != 0 || rows.calls != 0 {
+		t.Fatalf("a local share stored %d attachments and made %d storage calls", attachmentsStored(rows), rows.calls)
 	}
 }
 
@@ -575,17 +550,17 @@ func TestAChatTheProfileListsReadsAsPinned(t *testing.T) {
 	}
 }
 
-// Sync moves a legacy image into its own storage under the same id and key,
-// and the control plane then answers 410 for it.
-func TestAPromotedLegacyImageIsReadThroughSync(t *testing.T) {
+// A legacy image moved into buckets under the same id and key, as a read
+// of its chat moves it, is read from there by the key the chat still
+// embeds under its old name.
+func TestAPromotedLegacyImageIsReadFromBuckets(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	fake := newFakeSync(t, h)
-	legacyKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
-	fake.blobs["legacy-2"] = fakeBlob{chat: "chat-1", key: legacyKey, data: []byte("promoted photo")}
-	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusGone) }))
-	defer cp.Close()
-	h.atControlplane(cp.URL)
-	storedThread(rows, "alice", "chat-1", api.Object{"id": "legacy-2", "type": "image", "fileName": "photo.png", "mimeType": "image/png", "key": legacyKey})
+	legacyKey := bytes.Repeat([]byte{7}, 32)
+	rows.storeAttachment("alice", "chat-1", "legacy-2", legacyKey, []byte("promoted photo"))
+	rows.cp.Mu.Lock()
+	rows.cp.GoneAttachments = map[string]bool{"legacy-2": true}
+	rows.cp.Mu.Unlock()
+	storedThread(rows, "alice", "chat-1", api.Object{"id": "legacy-2", "type": "image", "fileName": "photo.png", "mimeType": "image/png", "key": base64.StdEncoding.EncodeToString(legacyKey)})
 	w := postRoute(h, "/v1/attachments/get", api.Object{"key": keyBase64(key), "id": "legacy-2", "threadId": "chat-1"}, "alice")
 	if w.Code != 200 || w.Body.String() != "promoted photo" {
 		t.Fatalf("a promoted legacy image: HTTP %d %s", w.Code, w.Body.String())
@@ -597,8 +572,7 @@ func TestAPromotedLegacyImageIsReadThroughSync(t *testing.T) {
 func TestARetiredDocumentIsDescribedOnlyToTheModel(t *testing.T) {
 	var prompt string
 	h, rows, key := testChatHarness(t, capturePrompt(&prompt))
-	newFakeSync(t, h)
-	storedThread(rows, "alice", "chat-1", api.Object{"id": "legacy-doc", "type": "document", "fileName": "old.pdf", "encryptionKey": "gone"})
+	storedThread(rows, "alice", "chat-1", api.Object{"id": "legacy-doc", "type": "document", "fileName": "old.pdf", "encryptionKey": keyBase64(randomKey())})
 	finishedRun(t, h, "/v1/threads/turn", continueInput(key, "chat-1"))
 	if !strings.Contains(prompt, "old.pdf is no longer available") {
 		t.Fatalf("the model was not told the document is gone: %s", prompt)

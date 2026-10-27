@@ -234,7 +234,7 @@ func (f *fakeSync) storeImport(rows *memoryRows, p *auth.Principal, key auth.Con
 				return 0, err
 			}
 		case "chat":
-			chat, err := f.importedChat(data, entity.ProjectSourceID, id, blobs, read)
+			chat, err := importedChat(rows, p.ID, data, entity.ProjectSourceID, id, blobs, read)
 			if err != nil {
 				return 0, fmt.Errorf("chat %s: %v", entity.SourceID, err)
 			}
@@ -269,8 +269,9 @@ func (f *fakeSync) storeImport(rows *memoryRows, p *auth.Principal, key auth.Con
 	return stored, nil
 }
 
-// importedChat checks a chat payload and stores its images, as sync does.
-func (f *fakeSync) importedChat(data []byte, projectSource, id string, blobs map[string]bool, read func(string) ([]byte, error)) (map[string]json.RawMessage, error) {
+// importedChat checks a chat payload and stores its images under the chat
+// for user, as sync does.
+func importedChat(rows *memoryRows, user string, data []byte, projectSource, id string, blobs map[string]bool, read func(string) ([]byte, error)) (map[string]json.RawMessage, error) {
 	var chat map[string]json.RawMessage
 	var title string
 	var isLocalOnly *bool
@@ -334,7 +335,7 @@ func (f *fakeSync) importedChat(data []byte, projectSource, id string, blobs map
 			bytes, _ := read(described.ArchivePath)
 			sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d\x00%d", id, described.ArchivePath, i, j)))
 			blobID, blobKey := hex.EncodeToString(sum[:18]), base64.StdEncoding.EncodeToString(sum[:])
-			f.blobs[blobID] = fakeBlob{chat: id, key: blobKey, data: bytes}
+			rows.storeAttachment(user, id, blobID, sum[:], bytes)
 			attachment["id"], attachment["encryptionKey"], attachment["mimeType"] = api.Raw(blobID), api.Raw(blobKey), api.Raw(http.DetectContentType(bytes))
 			kept = append(kept, attachment)
 		}

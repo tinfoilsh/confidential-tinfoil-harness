@@ -59,6 +59,7 @@ type Store struct {
 	LegacyAttachments map[string][]byte // attachment id to ciphertext
 	GoneAttachments   map[string]bool   // attachment ids already moved to buckets
 	AttachmentIndex   map[string]string // attachment id to chat id
+	AttachmentOwners  map[string]string // attachment id to the user it was registered for
 	MigrationFailures map[string]int
 	NeedsMigration    []string
 	SourceRevision    int64
@@ -71,12 +72,16 @@ type Store struct {
 	Secret string
 
 	// Failure injection. A count is how many calls fail before the next
-	// succeeds; GetBlobFailures lists the statuses to answer in turn.
-	BeforePutBlob                 func(scope, id string)
-	BeforeDeleteBlob              func(scope, id string)
-	PutBlobFailures               map[string]int
-	GetBlobFailures               map[string][]int
-	DeleteAttachmentIndexFailures map[string]int
+	// succeeds; a list of statuses is answered in turn. A reservation
+	// purge refuses the reservation of an id while its earlier copy is
+	// still being purged.
+	BeforePutBlob                   func(scope, id string)
+	BeforeDeleteBlob                func(scope, id string)
+	PutBlobFailures                 map[string]int
+	GetBlobFailures                 map[string][]int
+	DeleteAttachmentIndexFailures   map[string]int
+	RegisterAttachmentIndexFailures map[string][]int
+	ReserveAttachmentPurges         map[string]int
 	// CaptureHeaders sees every request before it is served, outside Mu.
 	CaptureHeaders func(r *http.Request)
 
@@ -85,13 +90,17 @@ type Store struct {
 
 func New() *Store {
 	s := &Store{
-		Blobs:                         map[string]*Blob{},
-		Bundles:                       map[string]map[string]controlplane.CurrentKeyBundle{},
-		MigrationFailures:             map[string]int{},
-		PutBlobFailures:               map[string]int{},
-		GetBlobFailures:               map[string][]int{},
-		DeleteAttachmentIndexFailures: map[string]int{},
-		mux:                           http.NewServeMux(),
+		Blobs:                           map[string]*Blob{},
+		Bundles:                         map[string]map[string]controlplane.CurrentKeyBundle{},
+		AttachmentIndex:                 map[string]string{},
+		AttachmentOwners:                map[string]string{},
+		MigrationFailures:               map[string]int{},
+		PutBlobFailures:                 map[string]int{},
+		GetBlobFailures:                 map[string][]int{},
+		DeleteAttachmentIndexFailures:   map[string]int{},
+		RegisterAttachmentIndexFailures: map[string][]int{},
+		ReserveAttachmentPurges:         map[string]int{},
+		mux:                             http.NewServeMux(),
 	}
 	s.mux.HandleFunc("PUT /api/sync/blob/chat/{id}", s.handlePutBlob("chat"))
 	s.mux.HandleFunc("PUT /api/sync/blob/profile", s.handlePutBlob("profile"))
@@ -114,6 +123,7 @@ func New() *Store {
 	s.mux.HandleFunc("GET /api/storage/attachment/{aid}", s.handleLegacyAttachment)
 	s.mux.HandleFunc("POST /api/sync/attachment-index/{aid}", s.handleRegisterAttachmentIndex)
 	s.mux.HandleFunc("DELETE /api/sync/attachment-index/{aid}", s.handleDeleteAttachmentIndex)
+	s.mux.HandleFunc("GET /api/sync/attachment-owner/{aid}", s.handleAttachmentOwner)
 	s.mux.HandleFunc("POST /api/sync/pending-attachments/{aid}", s.handleReservePendingAttachment)
 	s.mux.HandleFunc("POST /api/sync/pending-attachments/sweep", s.handleSweepPendingAttachments)
 	return s
@@ -300,6 +310,7 @@ func (s *Store) handleDeleteBlob(scope string) http.HandlerFunc {
 				if cid == id {
 					wiped = append(wiped, aid)
 					delete(s.AttachmentIndex, aid)
+					delete(s.AttachmentOwners, aid)
 				}
 			}
 		}
@@ -477,7 +488,8 @@ func legacyClaim(secret, clerkUserID, aid string, ciphertext []byte) string {
 }
 
 // handleRegisterAttachmentIndex records an attachment as held in buckets
-// and drops the legacy bytes, so a later legacy read answers not found.
+// for the user the request names, and drops the legacy bytes, so a later
+// legacy read answers not found.
 func (s *Store) handleRegisterAttachmentIndex(w http.ResponseWriter, r *http.Request) {
 	aid := r.PathValue("aid")
 	var body struct {
@@ -487,10 +499,16 @@ func (s *Store) handleRegisterAttachmentIndex(w http.ResponseWriter, r *http.Req
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
+	if pending := s.RegisterAttachmentIndexFailures[aid]; len(pending) > 0 {
+		s.RegisterAttachmentIndexFailures[aid] = pending[1:]
+		w.WriteHeader(pending[0])
+		return
+	}
 	if s.AttachmentIndex == nil {
 		s.AttachmentIndex = map[string]string{}
 	}
 	s.AttachmentIndex[aid] = body.ChatID
+	s.AttachmentOwners[aid] = r.Header.Get(controlplane.HeaderClerkUserID)
 	delete(s.LegacyAttachments, aid)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -507,12 +525,29 @@ func (s *Store) handleDeleteAttachmentIndex(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	delete(s.AttachmentIndex, aid)
+	delete(s.AttachmentOwners, aid)
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// The pending-write ledger accepts every reservation and never has
-// anything to sweep.
+// handleAttachmentOwner names the user an indexed attachment belongs to.
+func (s *Store) handleAttachmentOwner(w http.ResponseWriter, r *http.Request) {
+	owner, ok := s.AttachmentOwners[r.PathValue("aid")]
+	if !ok || owner == "" {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"clerk_user_id": owner})
+}
+
+// The pending-write ledger accepts every reservation, except while an
+// earlier copy of the id is being purged, and never has anything to sweep.
 func (s *Store) handleReservePendingAttachment(w http.ResponseWriter, r *http.Request) {
+	aid := r.PathValue("aid")
+	if s.ReserveAttachmentPurges[aid] > 0 {
+		s.ReserveAttachmentPurges[aid]--
+		writeJSON(w, http.StatusConflict, map[string]string{"code": controlplane.StatusAttachmentPurgeInProgress})
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

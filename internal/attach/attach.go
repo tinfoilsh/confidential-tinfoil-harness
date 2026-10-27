@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"cmp"
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -18,7 +16,6 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
-	"net/url"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -37,10 +34,9 @@ import (
 )
 
 type Service struct {
-	Auth         *auth.Authenticator
-	Controlplane string
-	Models       *inference.Models
-	Store        *store.Store
+	Auth   *auth.Authenticator
+	Models *inference.Models
+	Store  *store.Store
 }
 
 // Text is read whole into a chat, so a text file may be larger than the
@@ -605,69 +601,16 @@ func (at *Service) attachment(ctx context.Context, p *auth.Principal, key auth.C
 	if descriptor == nil {
 		return nil, nil, api.Err(404, "THREAD_NOT_FOUND", "The attachment was not found")
 	}
-	b, err := at.Bytes(ctx, p, descriptor, false)
+	b, err := at.Bytes(ctx, p, descriptor)
 	return descriptor, b, err
 }
 
-func (at *Service) Bytes(ctx context.Context, p *auth.Principal, a *domain.Attachment, public bool) ([]byte, error) {
+// Bytes is an attachment's content: the copy it carries, or its blob.
+func (at *Service) Bytes(ctx context.Context, p *auth.Principal, a *domain.Attachment) ([]byte, error) {
 	if a.Base64 != "" {
 		return base64.StdEncoding.DecodeString(a.Base64)
 	}
-	data, err := at.Store.GetAttachment(ctx, p, a.ID, a.StorageKey(), public)
-	// Sync moves an image that only has a legacy key into its own storage
-	// under the same id and key, after which the control plane refuses it.
-	if err != nil && api.AsError(err).HTTP == http.StatusNotFound && !public && a.EncryptionKey == "" && a.Key != "" {
-		return at.legacyAttachmentBytes(ctx, a.ID, a.Key)
-	}
-	return data, err
-}
-
-var legacyAttachments = &http.Client{Timeout: 5 * time.Minute}
-
-// Images the web and iOS apps stored before the sync enclave existed carry
-// only a `key` and live encrypted at the control plane, as a 12-byte IV and
-// AES-256-GCM ciphertext. The web client reads them the same way.
-func (at *Service) legacyAttachmentBytes(ctx context.Context, id, encodedKey string) ([]byte, error) {
-	key, err := base64.StdEncoding.DecodeString(encodedKey)
-	if err != nil || len(key) != 32 {
-		return nil, api.Err(422, "ATTACHMENT_UNSUPPORTED", "An old attachment key is invalid")
-	}
-	defer clear(key)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, at.Controlplane+"/api/storage/attachment/"+url.PathEscape(id), nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := legacyAttachments.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
-		return nil, api.Err(404, "THREAD_NOT_FOUND", "The attachment was not found")
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*maxTextBytes))
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode/100 != 2 {
-		return nil, api.DownstreamError(resp.StatusCode, body)
-	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	if len(body) < gcm.NonceSize()+gcm.Overhead() {
-		return nil, api.Err(422, "ATTACHMENT_UNSUPPORTED", "An old attachment is truncated")
-	}
-	plain, err := gcm.Open(nil, body[:gcm.NonceSize()], body[gcm.NonceSize():], nil)
-	if err != nil {
-		return nil, api.Err(422, "ATTACHMENT_UNSUPPORTED", "An old attachment cannot be decrypted")
-	}
-	return plain, nil
+	return at.Store.GetAttachment(ctx, p, a.ID, a.StorageKey())
 }
 
 // OpaqueContentType is the type every downloaded attachment is sent as.
@@ -709,7 +652,7 @@ func (at *Service) HandleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 		}
 		// A share's client names the attachment and the key its link carries.
 		descriptor = &domain.Attachment{ID: in.ID, EncryptionKey: in.AttKey, Kind: cmp.Or(in.Kind, in.Type), FileName: in.FileName, MimeType: in.MimeType, TextContent: in.TextContent, Pages: in.Pages}
-		data, err = at.Bytes(r.Context(), &auth.Principal{Anonymous: true}, descriptor, true)
+		data, err = at.Bytes(r.Context(), &auth.Principal{Anonymous: true}, descriptor)
 	} else {
 		key, keyErr := auth.RequestKey(in.Key)
 		in.ClearKey()
@@ -794,7 +737,7 @@ func (at *Service) HydrateContext(ctx context.Context, p *auth.Principal, t *dom
 		if a.Base64 == "" && (keyless || a.StorageKey() == "") {
 			return nil
 		}
-		data, err := at.Bytes(ctx, p, a, false)
+		data, err := at.Bytes(ctx, p, a)
 		if Unreachable(err) {
 			return nil
 		}

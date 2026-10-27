@@ -16,9 +16,8 @@ import (
 
 func TestTranscriptInlinesAttachmentsAndDetachesKeys(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	fake := newFakeSync(t, h)
-	imageID, imageKey := fake.seed("chat-1", []byte("png bytes"))
-	docID, docKey := fake.seed("chat-1", []byte(`{"textContent":"the plan"}`))
+	imageID, imageKey := seedAttachment(rows, "alice", "chat-1", []byte("png bytes"))
+	docID, docKey := seedAttachment(rows, "alice", "chat-1", []byte(`{"textContent":"the plan"}`))
 	storedThread(rows, "alice", "chat-1",
 		api.Object{"id": imageID, "type": "image", "fileName": "photo.png", "mimeType": "image/png", "encryptionKey": imageKey, "thumbnailBase64": "thumb", "storageThreadId": "chat-1"},
 		api.Object{"id": docID, "type": "document", "fileName": "plan.pdf", "encryptionKey": docKey, "pageCount": 2})
@@ -59,8 +58,7 @@ func TestTranscriptInlinesAttachmentsAndDetachesKeys(t *testing.T) {
 
 func TestTranscriptRefusesToLoseContent(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	newFakeSync(t, h)
-	storedThread(rows, "alice", "gone", api.Object{"id": strings.Repeat("d", 36), "type": "image", "fileName": "lost.png", "encryptionKey": "gone"})
+	storedThread(rows, "alice", "gone", api.Object{"id": strings.Repeat("d", 36), "type": "image", "fileName": "lost.png", "encryptionKey": keyBase64(randomKey())})
 	if w := postRoute(h, "/v1/threads/transcript", api.Object{"key": keyBase64(key), "threadId": "gone"}, "alice"); w.Code != 409 || !strings.Contains(w.Body.String(), "ATTACHMENTS_UNAVAILABLE") {
 		t.Fatalf("a chat with an unreadable attachment moved: %d %s", w.Code, w.Body.String())
 	}
@@ -167,7 +165,6 @@ func TestFavoriteReturnsWithAChatMovedBackToTheCloud(t *testing.T) {
 
 func TestImportStoresTheDeviceChatUnderItsID(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	fake := newFakeSync(t, h)
 	thread := api.Object{"title": "From the device", "titleState": "manual", "createdAt": "2026-02-01T00:00:00Z", "messages": []any{
 		api.Object{"id": "m1", "role": "user", "content": "see these", "attachments": []any{
 			api.Object{"id": "local-image", "type": "image", "fileName": "a.png", "mimeType": "image/png", "base64": base64.StdEncoding.EncodeToString([]byte("image bytes")), "thumbnailBase64": "thumb"},
@@ -195,8 +192,8 @@ func TestImportStoresTheDeviceChatUnderItsID(t *testing.T) {
 			t.Fatalf("attachment not stored under the chat: %+v", a)
 		}
 	}
-	if fake.putCount() != 2 || string(fake.blobs[attachments[0].ID].data) != "image bytes" || string(fake.blobs[attachments[1].ID].data) != `{"textContent":"doc text"}` {
-		t.Fatalf("blobs: %d", fake.putCount())
+	if attachmentsStored(rows) != 2 || string(attachmentBytes(t, rows, attachments[0])) != "image bytes" || string(attachmentBytes(t, rows, attachments[1])) != `{"textContent":"doc text"}` {
+		t.Fatalf("blobs: %d", attachmentsStored(rows))
 	}
 	if w := postRoute(h, "/v1/threads/import", in, "alice"); w.Code != 409 || !strings.Contains(w.Body.String(), "THREAD_EXISTS") {
 		t.Fatalf("an import overwrote a cloud chat: %d %s", w.Code, w.Body.String())

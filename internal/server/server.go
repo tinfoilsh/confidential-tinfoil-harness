@@ -63,7 +63,7 @@ func Run() {
 		slog.Error("initialize chat service", "error", err)
 		os.Exit(1)
 	}
-	h.attachments = &attach.Service{Auth: h.auth, Controlplane: h.controlplane, Models: h.models, Store: h.store}
+	h.attachments = &attach.Service{Auth: h.auth, Models: h.models, Store: h.store}
 	h.store.Repair = h.attachments
 	h.engine = &engine.Engine{Safeguards: engine.NewSubmitter(os.Getenv("SAFEGUARDS_URL")), Store: h.store, Models: h.models, Attachments: h.attachments, Auth: h.auth}
 	h.archives = &archives.Service{Scratch: scratch, CPClient: &http.Client{Transport: &auth.CallerTransport{Inner: http.DefaultTransport}}, Store: h.store, Attachments: h.attachments, Auth: h.auth, Controlplane: h.controlplane}

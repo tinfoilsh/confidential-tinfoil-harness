@@ -39,7 +39,7 @@ func (eng *Engine) ThreadTranscript(ctx context.Context, p *auth.Principal, key 
 		if a.StorageKey() == "" {
 			return nil
 		}
-		data, err := eng.Attachments.Bytes(ctx, p, a, false)
+		data, err := eng.Attachments.Bytes(ctx, p, a)
 		if err == nil && a.IsImage() {
 			a.Base64 = base64.StdEncoding.EncodeToString(data)
 		} else if err == nil {

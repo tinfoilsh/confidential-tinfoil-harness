@@ -20,9 +20,10 @@ Prefer an end-to-end test through `postRoute`/`eventsIn` or the handler over a u
 
 Use these instead of building new fakes:
 
-- `testChatHarness`: a harness wired to a fake model server, a stub of the Tinfoil API and `memoryRows`.
-- `memoryRows`: the in-memory sync row store. Like sync, it refuses to load or push a row with a key other than the one that sealed it (409 `KEY_MISMATCH`), and deletes without checking the key. Rows a test seeds directly count as sealed with the harness's test key.
-- `newFakeSync` and `storedThread`: attachment blobs and stored chats. The fake sync also runs import jobs, checking a native cloud import as sync does before storing it in `memoryRows`.
+- `testChatHarness`: a harness wired to a fake model server, a stub of the Tinfoil API whose storage routes go to `cpstub`, a `bucketstub`, and `memoryRows`.
+- `memoryRows`: the in-memory sync row store. Like sync, it refuses to load or push a row with a key other than the one that sealed it (409 `KEY_MISMATCH`), and deletes without checking the key. Rows a test seeds directly count as sealed with the harness's test key. Its `cp` and `bk` are the control plane and buckets stubs the harness stores attachments through.
+- `storedThread`, `seedAttachment` and `attachmentBytes`: stored chats, and attachments held as the harness stores them (bytes in `bucketstub`, index in `cpstub`).
+- `newFakeSync`: the sync enclave's import jobs, checking a native cloud import as sync does before storing it in `memoryRows`.
 - `archiveRoute`, `importOf` and the archives in `internal/server/testdata`: multipart archive requests, an import's NDJSON lines, backups and exports written by the web app's own code (`web-*`, `tinfoil-export.zip`), and small exports in ChatGPT's and Claude's formats (`chatgpt-export.zip`, `claude-export.zip`, `claude-projects.json`).
 - `routerHarness`, `serveWebsearch`, `toolTurns`, `screenedBy`: the model router, the websearch enclave, a scripted tool turn, and the safeguards sidecar.
 

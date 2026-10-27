@@ -9,18 +9,24 @@ import (
 	"maps"
 	"net/http"
 	"slices"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/buckets"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 type Store struct {
 	Repair Repairer
 	Rows   RowStore
-	API    *Client
+	// Controlplane keeps the attachment index, the key registry and the
+	// change ledger; Buckets holds attachment bytes.
+	Controlplane *controlplane.Client
+	Buckets      *buckets.Client
+	// API is the sync enclave's HTTP API, for what has not moved here yet.
+	API *Client
 }
 
 // The store is the harness's typed view of sync: chats, the profile,
@@ -479,57 +485,6 @@ func (s *Store) CreateProjectDocument(ctx context.Context, p *auth.Principal, ke
 		return nil
 	})
 	return doc, err
-}
-
-// Attachments
-
-// PutAttachment stores a blob under a chat. Sync derives its id from the
-// idempotency key, chat and bytes, so storing the same attachment again
-// reuses its blob.
-func (s *Store) PutAttachment(ctx context.Context, p *auth.Principal, chatID, clientID string, data []byte) (string, string, error) {
-	in := api.Object{"chat_id": chatID, "plaintext": base64.StdEncoding.EncodeToString(data), "idempotency_key": clientID}
-	var stored struct {
-		ID  string `json:"id"`
-		Key string `json:"att_key"`
-	}
-	var err error
-	for attempt := 0; attempt < 3; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-time.After(time.Duration(attempt) * time.Second):
-			case <-ctx.Done():
-				return "", "", ctx.Err()
-			}
-		}
-		stored.ID, stored.Key = "", ""
-		// A purge of the same chat or a lost index write fails with a 502.
-		// The idempotency key makes the retry store the same blob.
-		if err = s.API.call(ctx, p, "/v1/attachment/put", in, &stored); err == nil || api.AsError(err).Status != 502 {
-			break
-		}
-	}
-	if err != nil {
-		return "", "", err
-	}
-	if !domain.EnclaveAttachmentID.MatchString(stored.ID) || stored.Key == "" {
-		return "", "", api.Err(502, "UPSTREAM_REFUSED", "The sync service returned an invalid attachment")
-	}
-	return stored.ID, stored.Key, nil
-}
-
-// GetAttachment reads a blob, or with public a blob a share holds.
-func (s *Store) GetAttachment(ctx context.Context, p *auth.Principal, id, attKey string, public bool) ([]byte, error) {
-	path := "/v1/attachment/get"
-	if public {
-		path += "-public"
-	}
-	var result struct {
-		Plaintext string `json:"plaintext"`
-	}
-	if err := s.API.call(ctx, p, path, api.Object{"id": id, "att_key": attKey}, &result); err != nil {
-		return nil, err
-	}
-	return base64.StdEncoding.DecodeString(result.Plaintext)
 }
 
 // Shares

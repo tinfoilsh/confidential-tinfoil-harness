@@ -421,7 +421,7 @@ func (ar *Service) cloudImage(ctx context.Context, p *auth.Principal) func(*doma
 		if a.Base64 == "" && a.StorageKey() == "" {
 			return nil, errAttachmentMissing
 		}
-		data, err := ar.Attachments.Bytes(ctx, p, a, false)
+		data, err := ar.Attachments.Bytes(ctx, p, a)
 		if attach.Unreachable(err) {
 			return nil, errAttachmentMissing
 		}
