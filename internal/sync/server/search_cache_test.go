@@ -12,8 +12,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/controlplane"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/searchindex"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/searchindex"
 )
 
 // rawPost is a goroutine-safe request helper: unlike fixture.post it

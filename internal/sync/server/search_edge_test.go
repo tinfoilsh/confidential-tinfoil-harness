@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/seal"
 	"net/http"
 	"strconv"
 	"strings"
@@ -16,9 +17,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/controlplane"
-	cryptopkg "github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/crypto"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/searchindex"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/searchindex"
 )
 
 func chatJSON(t *testing.T, id, title string, contents ...string) []byte {
@@ -289,7 +289,7 @@ func TestCorruptedIndexObjectsTriggerReindex(t *testing.T) {
 	tok := f.jwt()
 	f.pushChat(t, tok, "chat_duck", "Pond", "a duck swam by")
 
-	indexKey, err := cryptopkg.DeriveSearchIndexKey(f.userKey)
+	indexKey, err := seal.DeriveSearchIndexKey(f.userKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -475,14 +475,14 @@ func TestReindexBuildsKeywordIndexWhenEmbeddingDown(t *testing.T) {
 func TestAutomaticEmbeddingRepairPreservesLegacyKeyCoverage(t *testing.T) {
 	f := newSearchFixture(t)
 	tok := f.jwt()
-	legacyKeyBytes := bytes.Repeat([]byte{7}, cryptopkg.KeySize)
-	defer cryptopkg.Zero(legacyKeyBytes)
+	legacyKeyBytes := bytes.Repeat([]byte{7}, seal.KeySize)
+	defer seal.Zero(legacyKeyBytes)
 	legacyKey := base64.StdEncoding.EncodeToString(legacyKeyBytes)
-	legacyKeyIDBytes, err := cryptopkg.DeriveKeyID(legacyKeyBytes)
+	legacyKeyIDBytes, err := seal.DeriveKeyID(legacyKeyBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacyKeyID := cryptopkg.KeyIDHex(legacyKeyIDBytes)
+	legacyKeyID := seal.KeyIDHex(legacyKeyIDBytes)
 
 	searchBuckets := f.handler.deps.SearchBuckets
 	f.handler.deps.SearchBuckets = nil

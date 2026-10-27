@@ -4,10 +4,9 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/seal"
 	"sync"
 	"time"
-
-	cryptopkg "github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/crypto"
 )
 
 // MigrationJobBudget caps how long a detached migration job is
@@ -299,7 +298,7 @@ func validateMigrateAllRequest(req MigrateAllRequest) error {
 	if err != nil {
 		return badRequest("invalid target.key: " + err.Error())
 	}
-	cryptopkg.Zero(tgt)
+	seal.Zero(tgt)
 	return nil
 }
 

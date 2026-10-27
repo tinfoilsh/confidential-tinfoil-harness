@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/seal"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,11 +19,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/buckets"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/searchindex"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/auth"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/buckets"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/controlplane"
-	cryptopkg "github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/crypto"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/searchindex"
 	"golang.org/x/time/rate"
 )
 
@@ -32,7 +32,7 @@ func (f *searchFixture) searchSession() Session {
 
 func (f *searchFixture) indexKey(t *testing.T) []byte {
 	t.Helper()
-	indexKey, err := cryptopkg.DeriveSearchIndexKey(f.userKey)
+	indexKey, err := seal.DeriveSearchIndexKey(f.userKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -637,7 +637,7 @@ func TestReindexRestartPolicy(t *testing.T) {
 	if dedup.JobID != clean.JobID {
 		t.Fatalf("re-kick after clean success must return the retained job: got %s want %s", dedup.JobID, clean.JobID)
 	}
-	legacyKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, cryptopkg.KeySize))
+	legacyKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, seal.KeySize))
 	resp, body = f.post("/v1/search/reindex", SearchReindexRequest{Keys: []PullKey{
 		{Key: f.userKeyB64},
 		{Key: legacyKey},
@@ -877,7 +877,7 @@ func TestFinalReindexPageReportsNewerPublicationGap(t *testing.T) {
 func TestReindexRetryWithLegacyKeyRepairsCoverage(t *testing.T) {
 	f := newSearchFixture(t)
 	tok := f.jwt()
-	legacyKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, cryptopkg.KeySize))
+	legacyKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, seal.KeySize))
 	searchBuckets := f.handler.deps.SearchBuckets
 	f.handler.deps.SearchBuckets = nil
 	resp, body := f.post("/v1/sync/push", PushRequest{
@@ -962,7 +962,7 @@ func TestStartFreshClearsSearchState(t *testing.T) {
 	}
 	oldObject := f.searchObjectKey(t)
 
-	newKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{9}, cryptopkg.KeySize))
+	newKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{9}, seal.KeySize))
 	resp, body := f.post("/v1/key/register", KeyRegisterRequest{
 		Key:            newKey,
 		IfMatch:        "*",
@@ -992,13 +992,13 @@ func TestKeyRegistrationReplayKeepsRebuiltSearchIndex(t *testing.T) {
 	tok := f.jwt()
 	f.pushChat(t, tok, "chat_old", "Pond", "a duck swam by")
 
-	newKeyBytes := bytes.Repeat([]byte{9}, cryptopkg.KeySize)
+	newKeyBytes := bytes.Repeat([]byte{9}, seal.KeySize)
 	newKey := base64.StdEncoding.EncodeToString(newKeyBytes)
-	newKeyIDBytes, err := cryptopkg.DeriveKeyID(newKeyBytes)
+	newKeyIDBytes, err := seal.DeriveKeyID(newKeyBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
-	newKeyID := cryptopkg.KeyIDHex(newKeyIDBytes)
+	newKeyID := seal.KeyIDHex(newKeyIDBytes)
 	var calls int
 	f.cp.mu.Lock()
 	f.cp.registerHandler = func(w http.ResponseWriter, r *http.Request) {
@@ -1055,7 +1055,7 @@ func TestKeyRegistrationReplayKeepsRebuiltSearchIndex(t *testing.T) {
 
 func TestStartFreshWithoutSearchStorage(t *testing.T) {
 	f := newFixture(t)
-	newKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{9}, cryptopkg.KeySize))
+	newKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{9}, seal.KeySize))
 	resp, body := f.post("/v1/key/register", KeyRegisterRequest{
 		Key:            newKey,
 		IfMatch:        "*",

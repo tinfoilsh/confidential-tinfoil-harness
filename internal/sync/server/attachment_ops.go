@@ -7,14 +7,14 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/seal"
 	"io"
 	"time"
 
 	"golang.org/x/crypto/hkdf"
 
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/buckets"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/controlplane"
-	cryptopkg "github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/crypto"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/buckets"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane"
 )
 
 // bucketsRollbackTimeout caps the best-effort cleanup that runs
@@ -126,7 +126,7 @@ func deriveAttachmentMaterials(idempotencyKey, chatID, clerkSubject string, plai
 	}
 	key := make([]byte, attKeySize)
 	if _, err := io.ReadFull(hkdf.New(sha256.New, ikm, nil, []byte(attachmentKeyInfo)), key); err != nil {
-		cryptopkg.Zero(key)
+		seal.Zero(key)
 		return "", nil, err
 	}
 	return hex.EncodeToString(idBytes), key, nil
@@ -190,7 +190,7 @@ func AttachmentPut(ctx context.Context, deps Deps, sess Session, req AttachmentP
 	if err != nil {
 		return nil, badRequest("invalid plaintext base64")
 	}
-	defer cryptopkg.Zero(plaintext)
+	defer seal.Zero(plaintext)
 
 	var (
 		id     string
@@ -209,7 +209,7 @@ func AttachmentPut(ctx context.Context, deps Deps, sess Session, req AttachmentP
 	if err != nil {
 		return nil, &AppError{Status: 500, Code: CodeInternal, Message: "derive attachment materials: " + err.Error()}
 	}
-	defer cryptopkg.Zero(attKey)
+	defer seal.Zero(attKey)
 
 	// Stamp the pending-write guard before touching buckets. If the
 	// reservation itself fails (CP unreachable) we surface immediately
@@ -275,7 +275,7 @@ func AttachmentGet(ctx context.Context, deps Deps, req AttachmentGetRequest) (*A
 	if err != nil {
 		return nil, badRequest("invalid att_key base64")
 	}
-	defer cryptopkg.Zero(attKey)
+	defer seal.Zero(attKey)
 	if len(attKey) != attKeySize {
 		return nil, badRequest("att_key must be 32 bytes")
 	}
@@ -301,7 +301,7 @@ func AttachmentGet(ctx context.Context, deps Deps, req AttachmentGetRequest) (*A
 		}
 		return nil, &AppError{Status: 502, Code: CodeUpstream, Message: "buckets get failed: " + err.Error()}
 	}
-	defer cryptopkg.Zero(plaintext)
+	defer seal.Zero(plaintext)
 	return &AttachmentGetResponse{
 		OK:        true,
 		Plaintext: base64.StdEncoding.EncodeToString(plaintext),

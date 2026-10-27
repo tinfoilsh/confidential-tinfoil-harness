@@ -1,8 +1,3 @@
-// Package inference is the sync-enclave's attested client for the
-// Tinfoil confidential inference service's OpenAI-compatible
-// embeddings API. The Tinfoil SDK verifies the destination enclave
-// and encrypts request bodies to its attested key before chat text or
-// search queries leave this CVM.
 package inference
 
 import (
@@ -30,15 +25,15 @@ type embeddingService interface {
 	New(context.Context, openai.EmbeddingNewParams, ...option.RequestOption) (*openai.CreateEmbeddingResponse, error)
 }
 
-// Client calls the embeddings endpoint through the Tinfoil SDK's
+// Embedder calls the embeddings endpoint through the Tinfoil SDK's
 // attested, enclave-bound transport.
-type Client struct {
+type Embedder struct {
 	model      string
 	embeddings embeddingService
 }
 
-func NewClient(apiKey, model string) (*Client, error) {
-	client := &Client{model: model}
+func NewEmbedder(apiKey, model string) (*Embedder, error) {
+	client := &Embedder{model: model}
 	if apiKey == "" || model == "" {
 		return client, nil
 	}
@@ -50,7 +45,7 @@ func NewClient(apiKey, model string) (*Client, error) {
 		),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("inference: initialize attested client: %w", err)
+		return nil, fmt.Errorf("inference: initialize attested embedder: %w", err)
 	}
 	client.embeddings = &secureClient.Embeddings
 	return client, nil
@@ -59,14 +54,14 @@ func NewClient(apiKey, model string) (*Client, error) {
 // Configured reports whether the client has everything it needs to
 // issue embedding requests. Callers use this to gate search features
 // with a clean 503 instead of a confusing upstream error.
-func (c *Client) Configured() bool {
+func (c *Embedder) Configured() bool {
 	return c != nil && c.embeddings != nil && c.model != ""
 }
 
 // Model returns the embedding model identifier. The search index
 // records it so a model change invalidates stored vectors instead of
 // silently mixing incomparable embedding spaces.
-func (c *Client) Model() string {
+func (c *Embedder) Model() string {
 	if c == nil {
 		return ""
 	}
@@ -74,9 +69,9 @@ func (c *Client) Model() string {
 }
 
 // Embed returns one embedding vector per input, in input order.
-func (c *Client) Embed(ctx context.Context, inputs []string) ([][]float32, error) {
+func (c *Embedder) Embed(ctx context.Context, inputs []string) ([][]float32, error) {
 	if !c.Configured() {
-		return nil, errors.New("inference: client not configured")
+		return nil, errors.New("inference: embedder not configured")
 	}
 	if len(inputs) == 0 {
 		return nil, errors.New("inference: no inputs")

@@ -15,9 +15,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/controlplane"
-	cryptopkg "github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/crypto"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/envelope"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/seal"
 )
 
 // attachmentIVLen mirrors the webapp's IV size for legacy per-attachment
@@ -43,7 +42,7 @@ func rewrapBlob(
 	ctx context.Context,
 	deps Deps,
 	sess Session,
-	scope envelope.Scope,
+	scope seal.Scope,
 	id string,
 	plaintext []byte,
 	priorETag string,
@@ -51,14 +50,14 @@ func rewrapBlob(
 	targetKIDHex string,
 ) (string, error) {
 	finalPlaintext := plaintext
-	if scope == envelope.ScopeChat {
+	if scope == seal.ScopeChat {
 		mutated, err := rewrapChatAttachments(ctx, deps, sess, id, plaintext)
 		if err != nil {
 			return "", err
 		}
 		if mutated != nil {
 			finalPlaintext = mutated
-			defer cryptopkg.Zero(mutated)
+			defer seal.Zero(mutated)
 		}
 	}
 
@@ -68,17 +67,17 @@ func rewrapBlob(
 	// profile-singleton constant; if we forwarded CP's storage id we
 	// would build an AAD the next read could never reproduce.
 	aadID := aadIDForScope(scope, id)
-	aad := envelope.AAD{
+	aad := seal.AAD{
 		KeyIDHex:    targetKIDHex,
 		Scope:       scope,
 		ID:          aadID,
 		ClerkUserID: sess.Claims.Subject,
 	}
-	payloadAAD, err := envelope.CanonicalPayloadAAD(aad)
+	payloadAAD, err := seal.CanonicalPayloadAAD(aad)
 	if err != nil {
 		return "", err
 	}
-	envBlob, err := envelope.Encrypt(targetKey, finalPlaintext, aad)
+	envBlob, err := seal.Encrypt(targetKey, finalPlaintext, aad)
 	if err != nil {
 		return "", err
 	}
@@ -94,12 +93,12 @@ func rewrapBlob(
 		Rewrap:         true,
 		Ciphertext:     envBlob,
 	}
-	opKey, err := cryptopkg.DeriveOpHashKey(targetKey)
+	opKey, err := seal.DeriveOpHashKey(targetKey)
 	if err != nil {
 		return "", err
 	}
-	defer cryptopkg.Zero(opKey)
-	rewrapReq.OperationHash = cryptopkg.ComputeOperationHash(opKey, cryptopkg.CanonicalInput{
+	defer seal.Zero(opKey)
+	rewrapReq.OperationHash = seal.ComputeOperationHash(opKey, seal.CanonicalInput{
 		Method:         http.MethodPost,
 		Path:           controlplane.RewrapPath,
 		KeyIDHex:       targetKIDHex,
@@ -255,12 +254,12 @@ func promoteOneAttachment(
 	if err != nil || len(legacyKey) != 32 {
 		return fmt.Errorf("rewrap: invalid legacy attachment key for %s", attID)
 	}
-	defer cryptopkg.Zero(legacyKey)
+	defer seal.Zero(legacyKey)
 	plaintext, err := decryptLegacyAttachment(resp.Ciphertext, legacyKey)
 	if err != nil {
 		return fmt.Errorf("rewrap: decrypt legacy attachment %s: %w", attID, err)
 	}
-	defer cryptopkg.Zero(plaintext)
+	defer seal.Zero(plaintext)
 	if err := deps.Buckets.Put(ctx, sess.Claims.Subject, attID, plaintext, legacyKey); err != nil {
 		return fmt.Errorf("rewrap: promote attachment %s to buckets: %w", attID, err)
 	}
@@ -285,7 +284,7 @@ func promoteOneAttachment(
 // the controlplane remains the only authoritative source of ids.
 // Failures are swallowed; an orphan in buckets is unaddressable
 // without the per-attachment slot key, which lived in the
-// (now-deleted) chat envelope.
+// (now-deleted) chat seal.
 func deleteBucketAttachments(ctx context.Context, deps Deps, owner string, ids []string) {
 	if !deps.Buckets.Configured() {
 		return

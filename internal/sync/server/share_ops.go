@@ -9,22 +9,21 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/seal"
 	"io"
 	"net/http"
-
-	cryptopkg "github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/crypto"
 )
 
 // shareKeySize is the length of the randomly-generated AES-256 key
 // the enclave produces per share. Independent of the user's CEK.
-// Aliased to cryptopkg.KeySize so any drift in the AES-GCM primitive
+// Aliased to seal.KeySize so any drift in the AES-GCM primitive
 // shape lands here automatically.
-const shareKeySize = cryptopkg.KeySize
+const shareKeySize = seal.KeySize
 
 // shareIVSize is the AES-GCM nonce length used for share envelopes,
-// taken from the shared crypto primitive so seal() and open() never
+// taken from the shared crypto primitive so seal() and openShare() never
 // disagree with the rest of the codebase about nonce layout.
-const shareIVSize = cryptopkg.NonceSize
+const shareIVSize = seal.NonceSize
 
 // shareMaxPlaintextBytes caps decompressed share plaintext returned by
 // /v1/share/open. The encrypted request body is capped separately by
@@ -72,7 +71,7 @@ func ShareSeal(ctx context.Context, deps Deps, sess Session, req ShareSealReques
 	if err != nil {
 		return nil, badRequest("invalid plaintext base64")
 	}
-	defer cryptopkg.Zero(plaintext)
+	defer seal.Zero(plaintext)
 	// Mirror ShareOpen's decompression cap at seal time; otherwise
 	// this endpoint can mint shares that ShareOpen will then always
 	// reject as oversized, which is a silent footgun for the caller.
@@ -84,15 +83,15 @@ func ShareSeal(ctx context.Context, deps Deps, sess Session, req ShareSealReques
 	if err != nil {
 		return nil, &AppError{Status: http.StatusInternalServerError, Code: CodeInternal, Message: "gzip: " + err.Error()}
 	}
-	defer cryptopkg.Zero(compressed)
+	defer seal.Zero(compressed)
 
 	key := make([]byte, shareKeySize)
 	if _, err := rand.Read(key); err != nil {
 		return nil, &AppError{Status: http.StatusInternalServerError, Code: CodeInternal, Message: "rand: " + err.Error()}
 	}
-	defer cryptopkg.Zero(key)
+	defer seal.Zero(key)
 
-	ct, err := seal(key, compressed)
+	ct, err := sealShare(key, compressed)
 	if err != nil {
 		return nil, &AppError{Status: http.StatusInternalServerError, Code: CodeInternal, Message: "seal: " + err.Error()}
 	}
@@ -111,24 +110,24 @@ func ShareOpen(ctx context.Context, deps Deps, req ShareOpenRequest) (*ShareOpen
 	if err != nil {
 		return nil, badRequest("invalid share key: " + err.Error())
 	}
-	defer cryptopkg.Zero(key)
+	defer seal.Zero(key)
 
 	ct, err := base64.StdEncoding.DecodeString(req.Ciphertext)
 	if err != nil {
 		return nil, badRequest("invalid ciphertext base64")
 	}
 
-	compressed, err := open(key, ct)
+	compressed, err := openShare(key, ct)
 	if err != nil {
 		return nil, &AppError{Status: http.StatusBadRequest, Code: CodeBadRequest, Message: "share decrypt failed"}
 	}
-	defer cryptopkg.Zero(compressed)
+	defer seal.Zero(compressed)
 
 	plaintext, err := gunzipBytes(compressed)
 	if err != nil {
 		return nil, &AppError{Status: http.StatusBadRequest, Code: CodeBadRequest, Message: "share decompress failed"}
 	}
-	defer cryptopkg.Zero(plaintext)
+	defer seal.Zero(plaintext)
 
 	return &ShareOpenResponse{
 		OK:        true,
@@ -138,12 +137,12 @@ func ShareOpen(ctx context.Context, deps Deps, req ShareOpenRequest) (*ShareOpen
 
 // seal returns [12B IV || AES-GCM ciphertext(plaintext, IV, no AAD)].
 // Format matches the on-the-wire layout the webapp recipient expects.
-// Wraps `cryptopkg.Seal` (the shared AES-256-GCM primitive used by
+// Wraps `seal.Seal` (the shared AES-256-GCM primitive used by
 // the envelope package) so this file does not maintain a private copy
 // of the cipher setup — drift in security-critical code is the
 // reason we centralise here.
-func seal(key, plaintext []byte) ([]byte, error) {
-	nonce, ct, err := cryptopkg.Seal(key, plaintext, nil)
+func sealShare(key, plaintext []byte) ([]byte, error) {
+	nonce, ct, err := seal.GCMSeal(key, plaintext, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -153,17 +152,17 @@ func seal(key, plaintext []byte) ([]byte, error) {
 	return out, nil
 }
 
-// open inverts seal(); returns the plaintext. Wraps `cryptopkg.Open`
-// for the same reason seal() wraps cryptopkg.Seal. Any real
+// open inverts seal(); returns the plaintext. Wraps `seal.Open`
+// for the same reason seal() wraps seal.Seal. Any real
 // AES-GCM ciphertext is at least TagSize bytes (the authentication
 // tag is appended unconditionally), so the minimum legal blob is
 // IV + TagSize; anything shorter cannot have come from seal().
-func open(key, blob []byte) ([]byte, error) {
-	if len(blob) < shareIVSize+cryptopkg.TagSize {
+func openShare(key, blob []byte) ([]byte, error) {
+	if len(blob) < shareIVSize+seal.TagSize {
 		return nil, errors.New("share: ciphertext too short")
 	}
 	iv := blob[:shareIVSize]
-	return cryptopkg.Open(key, iv, blob[shareIVSize:], nil)
+	return seal.GCMOpen(key, iv, blob[shareIVSize:], nil)
 }
 
 func decodeHexKey(s string) ([]byte, error) {
@@ -202,11 +201,11 @@ func gunzipBytes(in []byte) ([]byte, error) {
 		// out may already hold partially-decompressed plaintext;
 		// zero it before surfacing the error so the bytes don't
 		// linger in memory until GC.
-		cryptopkg.Zero(out)
+		seal.Zero(out)
 		return nil, err
 	}
 	if len(out) > shareMaxPlaintextBytes {
-		cryptopkg.Zero(out)
+		seal.Zero(out)
 		return nil, errors.New("share: decompressed plaintext exceeds limit")
 	}
 	return out, nil

@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/controlplane"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/envelope"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/seal"
 )
 
 // chatActivityAt returns a chat's last conversation activity: the later
@@ -58,8 +58,8 @@ func chatActivityAt(plaintext []byte) (activityAt time.Time, ok bool) {
 // best-effort: the controlplane only applies it while the row is still
 // at etag and has no value, and a failure leaves the row sorting by its
 // write time until the next pull.
-func backfillChatActivity(ctx context.Context, deps Deps, sess Session, scope envelope.Scope, id string, blob *controlplane.GetBlobResponse, etag string, plaintext []byte) {
-	if scope != envelope.ScopeChat || blob.ActivityAt != nil {
+func backfillChatActivity(ctx context.Context, deps Deps, sess Session, scope seal.Scope, id string, blob *controlplane.GetBlobResponse, etag string, plaintext []byte) {
+	if scope != seal.ScopeChat || blob.ActivityAt != nil {
 		return
 	}
 	activityAt, ok := chatActivityAt(plaintext)

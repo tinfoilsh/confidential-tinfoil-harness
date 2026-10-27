@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/buckets"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/buckets"
 )
 
 // TestAttachmentGetResolvesOwnerFromControlplane proves the read path

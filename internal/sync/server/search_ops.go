@@ -19,12 +19,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/buckets"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/seal"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/searchindex"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/auth"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/buckets"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/controlplane"
-	cryptopkg "github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/crypto"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/envelope"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/searchindex"
 )
 
 // Chat search. The enclave maintains one encrypted index object per
@@ -76,7 +75,7 @@ const (
 )
 
 // Embedder is the embedding backend the search feature uses. In
-// production it is inference.Client; tests supply a stub.
+// production it is inference.Embedder; tests supply a stub.
 type Embedder interface {
 	Configured() bool
 	Model() string
@@ -207,17 +206,17 @@ func searchIndexNeedsRepair(ctx context.Context, deps Deps, sess Session, key st
 	if err != nil {
 		return false, badRequest("invalid key: " + err.Error())
 	}
-	defer cryptopkg.Zero(cek)
-	keyIDBytes, err := cryptopkg.DeriveKeyID(cek)
+	defer seal.Zero(cek)
+	keyIDBytes, err := seal.DeriveKeyID(cek)
 	if err != nil {
 		return false, err
 	}
-	keyID := cryptopkg.KeyIDHex(keyIDBytes)
-	indexKey, err := cryptopkg.DeriveSearchIndexKey(cek)
+	keyID := seal.KeyIDHex(keyIDBytes)
+	indexKey, err := seal.DeriveSearchIndexKey(cek)
 	if err != nil {
 		return false, err
 	}
-	defer cryptopkg.Zero(indexKey)
+	defer seal.Zero(indexKey)
 	state, err := deps.Controlplane.GetSearchIndexState(ctx, sess.RawJWT, sess.Claims.Subject)
 	if err != nil {
 		return false, err
@@ -288,7 +287,7 @@ const (
 )
 
 func searchChatSnapshotState(ctx context.Context, deps Deps, sess Session, chatID, etag string) (searchSnapshotState, error) {
-	scope := string(envelope.ScopeChat)
+	scope := string(seal.ScopeChat)
 	meta, err := deps.Controlplane.HeadBlob(ctx, scope, chatID, sess.RawJWT, sess.Claims.Subject)
 	if err == nil {
 		if meta.ETag != etag {
@@ -623,16 +622,16 @@ func indexCurrentChatForSearch(ctx context.Context, deps Deps, sess Session, cek
 
 func indexChatForSearchWithHook(ctx context.Context, deps Deps, sess Session, cek []byte, chatID string, plaintext []byte, etag string, committedAt time.Time, sourceRevision int64, hook searchWriteHook) error {
 	owner := sess.Claims.Subject
-	indexKey, err := cryptopkg.DeriveSearchIndexKey(cek)
+	indexKey, err := seal.DeriveSearchIndexKey(cek)
 	if err != nil {
 		return err
 	}
-	defer cryptopkg.Zero(indexKey)
-	keyIDBytes, err := cryptopkg.DeriveKeyID(cek)
+	defer seal.Zero(indexKey)
+	keyIDBytes, err := seal.DeriveKeyID(cek)
 	if err != nil {
 		return err
 	}
-	keyID := cryptopkg.KeyIDHex(keyIDBytes)
+	keyID := seal.KeyIDHex(keyIDBytes)
 
 	chunks := chatSearchChunks(plaintext)
 	entry := searchindex.Entry{
@@ -731,20 +730,20 @@ func indexChatForSearchWithHook(ctx context.Context, deps Deps, sess Session, ce
 // id while delete cleanup was waiting to run.
 func removeDeletedChatFromSearch(ctx context.Context, deps Deps, sess Session, cek []byte, chatID string, sourceRevision int64) error {
 	owner := sess.Claims.Subject
-	indexKey, err := cryptopkg.DeriveSearchIndexKey(cek)
+	indexKey, err := seal.DeriveSearchIndexKey(cek)
 	if err != nil {
 		return err
 	}
-	defer cryptopkg.Zero(indexKey)
-	keyIDBytes, err := cryptopkg.DeriveKeyID(cek)
+	defer seal.Zero(indexKey)
+	keyIDBytes, err := seal.DeriveKeyID(cek)
 	if err != nil {
 		return err
 	}
-	keyID := cryptopkg.KeyIDHex(keyIDBytes)
+	keyID := seal.KeyIDHex(keyIDBytes)
 
 	unlock := lockSearchIndex(owner)
 	defer unlock()
-	if _, err := deps.Controlplane.GetBlob(ctx, string(envelope.ScopeChat), chatID, sess.RawJWT, owner); err == nil {
+	if _, err := deps.Controlplane.GetBlob(ctx, string(seal.ScopeChat), chatID, sess.RawJWT, owner); err == nil {
 		return nil
 	} else {
 		var cpe *controlplane.Error
@@ -796,9 +795,9 @@ func removeDeletedChatFromSearch(ctx context.Context, deps Deps, sess Session, c
 // dropChatFromSearch is the best-effort delete-side hook: a stale
 // entry only means a deleted chat can still surface in results until
 // the next reindex, so failures are swallowed.
-func dropChatFromSearch(ctx context.Context, deps Deps, sess Session, scope envelope.Scope, chatID string, cek []byte, sourceRevision int64) {
+func dropChatFromSearch(ctx context.Context, deps Deps, sess Session, scope seal.Scope, chatID string, cek []byte, sourceRevision int64) {
 	defer func() { _ = recover() }()
-	if scope != envelope.ScopeChat || !searchConfigured(deps) {
+	if scope != seal.ScopeChat || !searchConfigured(deps) {
 		return
 	}
 	_ = removeDeletedChatFromSearch(ctx, deps, sess, cek, chatID, sourceRevision)
@@ -834,17 +833,17 @@ func SearchQuery(ctx context.Context, deps Deps, sess Session, req SearchQueryRe
 	if err != nil {
 		return nil, badRequest("invalid key: " + err.Error())
 	}
-	defer cryptopkg.Zero(cek)
-	keyIDBytes, err := cryptopkg.DeriveKeyID(cek)
+	defer seal.Zero(cek)
+	keyIDBytes, err := seal.DeriveKeyID(cek)
 	if err != nil {
 		return nil, err
 	}
-	keyID := cryptopkg.KeyIDHex(keyIDBytes)
-	indexKey, err := cryptopkg.DeriveSearchIndexKey(cek)
+	keyID := seal.KeyIDHex(keyIDBytes)
+	indexKey, err := seal.DeriveSearchIndexKey(cek)
 	if err != nil {
 		return nil, err
 	}
-	defer cryptopkg.Zero(indexKey)
+	defer seal.Zero(indexKey)
 	publication, err := deps.Controlplane.GetSearchIndexState(ctx, sess.RawJWT, sess.Claims.Subject)
 	if err != nil {
 		return nil, err
@@ -940,17 +939,17 @@ func runSearchEmbeddingRepair(ctx context.Context, deps Deps, sess Session, req 
 	if err != nil {
 		return badRequest("invalid key: " + err.Error())
 	}
-	defer cryptopkg.Zero(cek)
-	keyIDBytes, err := cryptopkg.DeriveKeyID(cek)
+	defer seal.Zero(cek)
+	keyIDBytes, err := seal.DeriveKeyID(cek)
 	if err != nil {
 		return err
 	}
-	keyID := cryptopkg.KeyIDHex(keyIDBytes)
-	indexKey, err := cryptopkg.DeriveSearchIndexKey(cek)
+	keyID := seal.KeyIDHex(keyIDBytes)
+	indexKey, err := seal.DeriveSearchIndexKey(cek)
 	if err != nil {
 		return err
 	}
-	defer cryptopkg.Zero(indexKey)
+	defer seal.Zero(indexKey)
 
 	publication, err := deps.Controlplane.GetSearchIndexState(ctx, sess.RawJWT, sess.Claims.Subject)
 	if err != nil {
@@ -995,7 +994,7 @@ func runSearchEmbeddingRepair(ctx context.Context, deps Deps, sess Session, req 
 			end = len(ids)
 		}
 		pull, err := Pull(ctx, deps, sess, PullRequest{
-			Scope: string(envelope.ScopeChat),
+			Scope: string(seal.ScopeChat),
 			IDs:   ids[start:end],
 			Keys:  req.Keys,
 		})
@@ -1031,7 +1030,7 @@ func runSearchEmbeddingRepair(ctx context.Context, deps Deps, sess Session, req 
 				continue
 			}
 			chunks := chatSearchChunks(plaintext)
-			cryptopkg.Zero(plaintext)
+			seal.Zero(plaintext)
 			pendingRepairs = append(pendingRepairs, pending{id: item.ID, etag: item.ETag, chunks: chunks})
 			texts = append(texts, chunks...)
 		}
@@ -1185,20 +1184,20 @@ func searchReindexPage(ctx context.Context, deps Deps, sess Session, keys []Pull
 	if err != nil {
 		return nil, badRequest("invalid key: " + err.Error())
 	}
-	defer cryptopkg.Zero(cek)
-	keyIDBytes, err := cryptopkg.DeriveKeyID(cek)
+	defer seal.Zero(cek)
+	keyIDBytes, err := seal.DeriveKeyID(cek)
 	if err != nil {
 		return nil, err
 	}
-	keyID := cryptopkg.KeyIDHex(keyIDBytes)
-	indexKey, err := cryptopkg.DeriveSearchIndexKey(cek)
+	keyID := seal.KeyIDHex(keyIDBytes)
+	indexKey, err := seal.DeriveSearchIndexKey(cek)
 	if err != nil {
 		return nil, err
 	}
-	defer cryptopkg.Zero(indexKey)
+	defer seal.Zero(indexKey)
 
 	pull, err := Pull(ctx, deps, sess, PullRequest{
-		Scope:  string(envelope.ScopeChat),
+		Scope:  string(seal.ScopeChat),
 		All:    true,
 		Cursor: cursor,
 		Limit:  reindexPageSize,
@@ -1228,7 +1227,7 @@ func searchReindexPage(ctx context.Context, deps Deps, sess Session, keys []Pull
 			continue
 		}
 		chunks := chatSearchChunks(plaintext)
-		cryptopkg.Zero(plaintext)
+		seal.Zero(plaintext)
 		page = append(page, pending{id: item.ID, etag: item.ETag, keyID: item.KeyID, chunks: chunks})
 		texts = append(texts, chunks...)
 	}
@@ -1400,19 +1399,19 @@ func loadSearchReindexCheckpoint(ctx context.Context, deps Deps, sess Session, e
 	if err != nil {
 		return "", time.Time{}, 0, false, badRequest("invalid key: " + err.Error())
 	}
-	defer cryptopkg.Zero(cek)
-	keyIDBytes, err := cryptopkg.DeriveKeyID(cek)
+	defer seal.Zero(cek)
+	keyIDBytes, err := seal.DeriveKeyID(cek)
 	if err != nil {
 		return "", time.Time{}, 0, false, err
 	}
-	if publication.KeyID != cryptopkg.KeyIDHex(keyIDBytes) || publication.Model != deps.Embedder.Model() {
+	if publication.KeyID != seal.KeyIDHex(keyIDBytes) || publication.Model != deps.Embedder.Model() {
 		return "", time.Time{}, 0, false, nil
 	}
-	indexKey, err := cryptopkg.DeriveSearchIndexKey(cek)
+	indexKey, err := seal.DeriveSearchIndexKey(cek)
 	if err != nil {
 		return "", time.Time{}, 0, false, err
 	}
-	defer cryptopkg.Zero(indexKey)
+	defer seal.Zero(indexKey)
 
 	unlock := rlockSearchIndex(sess.Claims.Subject)
 	defer unlock()
