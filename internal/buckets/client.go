@@ -299,7 +299,7 @@ func (c *Client) Delete(ctx context.Context, owner, accessToken string) error {
 var accessTokenPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,256}$`)
 
 func (c *Client) objectURL(accessToken string) (string, error) {
-	if !accessTokenPattern.MatchString(accessToken) {
+	if !accessTokenPattern.MatchString(accessToken) || accessToken == "." || accessToken == ".." {
 		return "", fmt.Errorf("buckets: invalid access token %q", accessToken)
 	}
 	return c.baseURL + "/" + c.bucket + "/" + accessToken, nil

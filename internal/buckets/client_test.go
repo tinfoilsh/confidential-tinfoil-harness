@@ -155,17 +155,26 @@ func TestClientRejectsInvalidOwner(t *testing.T) {
 // An access token addresses one object under the tenant; one that is
 // empty or reaches elsewhere in the path is refused before any request.
 func TestClientRejectsAnAccessTokenThatIsNotOneSegment(t *testing.T) {
-	st, c := newStubbedClient(t)
-	for _, token := range []string{"", "a/b", "../other", "x?y", "x#y"} {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+	c := NewClient(srv.URL, testBucket, srv.Client())
+	for _, token := range []string{"", ".", "..", "a/b", "../other", "x?y", "x#y"} {
 		if err := c.Put(context.Background(), testOwner, token, []byte("x"), make([]byte, encryptionKeySize)); err == nil {
 			t.Fatalf("token %q was accepted", token)
 		}
 		if _, err := c.Get(context.Background(), testOwner, token, make([]byte, encryptionKeySize)); err == nil {
 			t.Fatalf("token %q was accepted for a read", token)
 		}
+		if err := c.Delete(context.Background(), testOwner, token); err == nil {
+			t.Fatalf("token %q was accepted for a delete", token)
+		}
 	}
-	if tokens := st.Tokens(); len(tokens) != 0 {
-		t.Fatalf("objects were stored under invalid tokens: %v", tokens)
+	if requests != 0 {
+		t.Fatalf("%d requests reached the sidecar for invalid tokens", requests)
 	}
 }
 
