@@ -103,7 +103,9 @@ func TestConfigured(t *testing.T) {
 	if c.Configured() {
 		t.Fatal("empty model should not be configured")
 	}
-	if !testClient(embeddingServiceFunc(nil)).Configured() {
+	if !testClient(embeddingServiceFunc(func(context.Context, openai.EmbeddingNewParams, ...option.RequestOption) (*openai.CreateEmbeddingResponse, error) {
+		return &openai.CreateEmbeddingResponse{}, nil
+	})).Configured() {
 		t.Fatal("expected configured client")
 	}
 }

@@ -172,7 +172,11 @@ func (c *Client) Put(ctx context.Context, owner, accessToken string, plaintext, 
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.objectURL(accessToken), bytes.NewReader(plaintext))
+	target, err := c.objectURL(accessToken)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, target, bytes.NewReader(plaintext))
 	if err != nil {
 		return err
 	}
@@ -208,7 +212,11 @@ func (c *Client) GetLimited(ctx context.Context, owner, accessToken string, key 
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.objectURL(accessToken), nil)
+	target, err := c.objectURL(accessToken)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -265,7 +273,11 @@ func (c *Client) Delete(ctx context.Context, owner, accessToken string) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.objectURL(accessToken), nil)
+	target, err := c.objectURL(accessToken)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, target, nil)
 	if err != nil {
 		return err
 	}
@@ -282,8 +294,15 @@ func (c *Client) Delete(ctx context.Context, owner, accessToken string) error {
 	return c.expectOK(resp)
 }
 
-func (c *Client) objectURL(accessToken string) string {
-	return c.baseURL + "/" + c.bucket + "/" + accessToken
+// accessTokenPattern is what an access token may be: one path segment of
+// the characters the harness mints its ids and object keys from.
+var accessTokenPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,256}$`)
+
+func (c *Client) objectURL(accessToken string) (string, error) {
+	if !accessTokenPattern.MatchString(accessToken) {
+		return "", fmt.Errorf("buckets: invalid access token %q", accessToken)
+	}
+	return c.baseURL + "/" + c.bucket + "/" + accessToken, nil
 }
 
 func (c *Client) setTenantHeaders(req *http.Request, tenant string, key []byte) {

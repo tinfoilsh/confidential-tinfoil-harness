@@ -21,7 +21,7 @@ import (
 const shareKeySize = seal.KeySize
 
 // shareIVSize is the AES-GCM nonce length used for share envelopes,
-// taken from the shared crypto primitive so seal() and openShare() never
+// taken from the shared crypto primitive so sealShare() and openShare() never
 // disagree with the rest of the codebase about nonce layout.
 const shareIVSize = seal.NonceSize
 
@@ -135,9 +135,9 @@ func ShareOpen(ctx context.Context, deps Deps, req ShareOpenRequest) (*ShareOpen
 	}, nil
 }
 
-// seal returns [12B IV || AES-GCM ciphertext(plaintext, IV, no AAD)].
+// sealShare returns [12B IV || AES-GCM ciphertext(plaintext, IV, no AAD)].
 // Format matches the on-the-wire layout the webapp recipient expects.
-// Wraps `seal.Seal` (the shared AES-256-GCM primitive used by
+// Wraps `seal.GCMSeal` (the shared AES-256-GCM primitive used by
 // the envelope package) so this file does not maintain a private copy
 // of the cipher setup — drift in security-critical code is the
 // reason we centralise here.
@@ -152,11 +152,11 @@ func sealShare(key, plaintext []byte) ([]byte, error) {
 	return out, nil
 }
 
-// open inverts seal(); returns the plaintext. Wraps `seal.Open`
-// for the same reason seal() wraps seal.Seal. Any real
+// openShare inverts sealShare(); returns the plaintext. Wraps `seal.GCMOpen`
+// for the same reason sealShare() wraps seal.GCMSeal. Any real
 // AES-GCM ciphertext is at least TagSize bytes (the authentication
 // tag is appended unconditionally), so the minimum legal blob is
-// IV + TagSize; anything shorter cannot have come from seal().
+// IV + TagSize; anything shorter cannot have come from sealShare().
 func openShare(key, blob []byte) ([]byte, error) {
 	if len(blob) < shareIVSize+seal.TagSize {
 		return nil, errors.New("share: ciphertext too short")

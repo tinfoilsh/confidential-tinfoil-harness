@@ -3,7 +3,6 @@ package seal
 import (
 	"bytes"
 	"encoding/hex"
-	"strings"
 	"testing"
 )
 
@@ -139,7 +138,7 @@ func TestOperationHashVector(t *testing.T) {
 		IdempotencyKey: vectorIdemKey,
 		Body:           []byte(vectorBody),
 	})
-	if !strings.EqualFold(got, pinnedExpectedHex) {
+	if got != pinnedExpectedHex {
 		t.Fatalf("op-hash drift detected\n  got  %s\n  want %s", got, pinnedExpectedHex)
 	}
 }

@@ -17,7 +17,7 @@ import (
 const (
 	testOwner      = "user_test"
 	testOtherOwner = "user_other"
-	testToken      = "************************************"
+	testToken      = "123e4567-e89b-12d3-a456-426614174000"
 	testBucket     = "test-attachments-bucket"
 )
 
@@ -149,6 +149,23 @@ func TestClientRejectsInvalidOwner(t *testing.T) {
 	_, c := newStubbedClient(t)
 	if err := c.Put(context.Background(), "", testToken, []byte("x"), make([]byte, encryptionKeySize)); err == nil {
 		t.Fatal("expected an error for an empty owner")
+	}
+}
+
+// An access token addresses one object under the tenant; one that is
+// empty or reaches elsewhere in the path is refused before any request.
+func TestClientRejectsAnAccessTokenThatIsNotOneSegment(t *testing.T) {
+	st, c := newStubbedClient(t)
+	for _, token := range []string{"", "a/b", "../other", "x?y", "x#y"} {
+		if err := c.Put(context.Background(), testOwner, token, []byte("x"), make([]byte, encryptionKeySize)); err == nil {
+			t.Fatalf("token %q was accepted", token)
+		}
+		if _, err := c.Get(context.Background(), testOwner, token, make([]byte, encryptionKeySize)); err == nil {
+			t.Fatalf("token %q was accepted for a read", token)
+		}
+	}
+	if tokens := st.Tokens(); len(tokens) != 0 {
+		t.Fatalf("objects were stored under invalid tokens: %v", tokens)
 	}
 }
 

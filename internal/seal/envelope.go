@@ -76,12 +76,12 @@ var (
 // question "does this parse as a fully-formed v2 / v0 envelope?" and
 // fall back to v1 only when both strict parses fail.
 //
-//  1. Try parsing as a v2  v2 requires `"v":2` plus the
-//     `kid`, `alg`, `iv`, `ct` fields populated. A real v2 blob
-//     always succeeds here; a v1 binary blob has effectively zero
-//     probability of being a complete valid v2 JSON document with
-//     `"v":2`.
-//  2. Try parsing as a v0  v0 requires `iv` and `data`
+//  1. Try parsing as a v2 envelope: a JSON object with `"v":2`. A
+//     real v2 blob always succeeds here; a v1 binary blob has
+//     effectively zero probability of being a complete valid JSON
+//     document with `"v":2`. The fields the envelope needs are
+//     checked when it is opened.
+//  2. Try parsing as a v0 envelope. v0 requires `iv` and `data`
 //     fields and explicitly forbids a `v` field (otherwise we'd
 //     accept v2 as v0 too). Same probabilistic argument as v2.
 //  3. Otherwise, if the blob is at least IV+TAG bytes long, treat
@@ -231,7 +231,7 @@ func Encrypt(key []byte, plaintext []byte, aad AAD) ([]byte, error) {
 	return json.Marshal(env)
 }
 
-// DecryptV2 parses and decrypts a v2  The envelope's `kid` selects
+// DecryptV2 parses and decrypts a v2 envelope. The envelope's `kid` selects
 // which of the supplied keys unwraps the per-message data key; that data key
 // then opens the payload. Only one key is used, so the operation is
 // constant-cost. `aad` supplies the scope/id/clerk_user_id the two AAD layers
