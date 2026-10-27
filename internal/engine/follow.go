@@ -48,8 +48,7 @@ func (eng *Engine) HandleFollow(w http.ResponseWriter, r *http.Request) {
 	}
 	live.Log.Frames.Attach()
 	if !p.Anonymous && !live.ending {
-		p.SyncToken = live.Principal.SyncToken
-		p.SyncExpires = live.Principal.SyncExpires
+		p.Grant = live.Principal.Grant
 		live.Principal = p
 	}
 	eng.Live.mu.Unlock()

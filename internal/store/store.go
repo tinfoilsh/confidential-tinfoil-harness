@@ -568,11 +568,11 @@ func (s *Store) AuthorizeArchive(ctx context.Context, p *auth.Principal, keyByte
 		return err
 	}
 	defer clear(key[:])
-	token, err := s.Rows.AuthorizeStorage(ctx, p, key, operation, "")
+	grant, err := s.Rows.AuthorizeStorage(ctx, p, key, operation, "")
 	if err != nil {
 		return err
 	}
-	p.SyncToken = token
+	p.Grant = grant
 	return nil
 }
 

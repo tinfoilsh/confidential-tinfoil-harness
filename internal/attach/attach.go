@@ -219,7 +219,7 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 					api.Respond(w, nil, err)
 					return
 				}
-				p.SyncToken, err = at.Store.Rows.AuthorizeStorage(r.Context(), p, key, "project-upload", fields["projectId"])
+				p.Grant, err = at.Store.Rows.AuthorizeStorage(r.Context(), p, key, "project-upload", fields["projectId"])
 				if err != nil {
 					api.Respond(w, nil, err)
 					return

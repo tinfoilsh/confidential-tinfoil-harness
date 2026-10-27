@@ -49,12 +49,12 @@ type memoryRows struct {
 	calls  int
 }
 
-func (s *memoryRows) AuthorizeRun(_ context.Context, _ *auth.Principal, _ auth.ContentKey, id string, _ *string) (store.Grant, error) {
-	return store.Grant{Token: auth.Secret("run-for-" + id), ExpiresAt: api.Now().Add(time.Hour)}, nil
+func (s *memoryRows) AuthorizeRun(_ context.Context, _ *auth.Principal, _ auth.ContentKey, id string, project *string) (*auth.StorageGrant, error) {
+	return &auth.StorageGrant{ChatID: id, ProjectID: domain.ValueOr(project, ""), Token: auth.Secret("run-for-" + id), ExpiresAt: api.Now().Add(time.Hour)}, nil
 }
 
-func (s *memoryRows) AuthorizeStorage(_ context.Context, p *auth.Principal, _ auth.ContentKey, _, _ string) (auth.Secret, error) {
-	return auth.Secret("sync-archive:" + p.ID), nil
+func (s *memoryRows) AuthorizeStorage(_ context.Context, p *auth.Principal, _ auth.ContentKey, operation, project string) (*auth.StorageGrant, error) {
+	return &auth.StorageGrant{Operation: operation, ProjectID: project, Token: auth.Secret("sync-archive:" + p.ID), ExpiresAt: api.Now().Add(time.Hour)}, nil
 }
 
 func randomKey() auth.ContentKey { var k auth.ContentKey; rand.Read(k[:]); return k }

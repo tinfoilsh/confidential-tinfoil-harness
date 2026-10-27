@@ -2,7 +2,6 @@ package store
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -26,8 +25,8 @@ type Page struct {
 	Unreadable map[string]error
 }
 type RowStore interface {
-	AuthorizeRun(context.Context, *auth.Principal, auth.ContentKey, string, *string) (Grant, error)
-	AuthorizeStorage(context.Context, *auth.Principal, auth.ContentKey, string, string) (auth.Secret, error)
+	AuthorizeRun(context.Context, *auth.Principal, auth.ContentKey, string, *string) (*auth.StorageGrant, error)
+	AuthorizeStorage(context.Context, *auth.Principal, auth.ContentKey, string, string) (*auth.StorageGrant, error)
 	Load(context.Context, *auth.Principal, auth.ContentKey, string, string) (*domain.StoredRow, error)
 	Pull(context.Context, *auth.Principal, auth.ContentKey, string, []string) ([]domain.StoredRow, map[string]error, error)
 	List(context.Context, *auth.Principal, auth.ContentKey, string, string, string, int) (Page, error)
@@ -71,7 +70,11 @@ func (s *Client) call(ctx context.Context, p *auth.Principal, path string, in, o
 	defer cancel()
 	ctx = auth.WithCallerKey(ctx, "")
 	ctx = auth.WithoutUsage(ctx)
-	return api.PostJSONWithHeaders(ctx, s.Client, s.URL+path, string(cmp.Or(p.SyncToken, p.JWT)), map[string]string{"X-Sync-Protocol": syncProtocol}, in, out)
+	bearer := p.JWT
+	if p.Grant != nil && p.Grant.Token != "" {
+		bearer = p.Grant.Token
+	}
+	return api.PostJSONWithHeaders(ctx, s.Client, s.URL+path, string(bearer), map[string]string{"X-Sync-Protocol": syncProtocol}, in, out)
 }
 
 // keyedBody appends the key directly to an owned buffer, keeping its base64
@@ -99,41 +102,43 @@ func (s *Client) CallKey(ctx context.Context, p *auth.Principal, path string, ke
 	return s.call(ctx, p, path, keyedBody(key, in, false), out)
 }
 
-func (s *Client) AuthorizeRun(ctx context.Context, p *auth.Principal, key auth.ContentKey, threadID string, projectID *string) (Grant, error) {
+func (s *Client) AuthorizeRun(ctx context.Context, p *auth.Principal, key auth.ContentKey, threadID string, projectID *string) (*auth.StorageGrant, error) {
 	defer clear(key[:])
 	in := api.Object{"thread_id": threadID}
 	if projectID != nil {
 		in["project_id"] = projectID
 	}
-	return s.storageCredential(ctx, p, "/v1/runs/authorize", key, in)
+	grant := auth.StorageGrant{ChatID: threadID, ProjectID: domain.ValueOr(projectID, ""), KeyID: keyID(key)}
+	return s.storageCredential(ctx, p, "/v1/runs/authorize", key, in, grant)
 }
 
-func (s *Client) AuthorizeStorage(ctx context.Context, p *auth.Principal, key auth.ContentKey, operation, projectID string) (auth.Secret, error) {
+func (s *Client) AuthorizeStorage(ctx context.Context, p *auth.Principal, key auth.ContentKey, operation, projectID string) (*auth.StorageGrant, error) {
 	defer clear(key[:])
 	in := api.Object{"operation": operation}
 	if projectID != "" {
 		in["project_id"] = projectID
 	}
-	grant, err := s.storageCredential(ctx, p, "/v1/operations/authorize", key, in)
-	return grant.Token, err
+	grant := auth.StorageGrant{Operation: operation, ProjectID: projectID, KeyID: keyID(key)}
+	return s.storageCredential(ctx, p, "/v1/operations/authorize", key, in, grant)
 }
 
-type Grant struct {
-	Token     auth.Secret `json:"token"`
-	ExpiresAt time.Time   `json:"expires_at"`
-}
-
-func (s *Client) storageCredential(ctx context.Context, p *auth.Principal, path string, key auth.ContentKey, input api.Object) (Grant, error) {
+// storageCredential has the sync enclave mint the credential for grant, and
+// is the grant with that credential and its expiry.
+func (s *Client) storageCredential(ctx context.Context, p *auth.Principal, path string, key auth.ContentKey, input api.Object, grant auth.StorageGrant) (*auth.StorageGrant, error) {
 	defer clear(key[:])
-	var out Grant
+	var out struct {
+		Token     auth.Secret `json:"token"`
+		ExpiresAt time.Time   `json:"expires_at"`
+	}
 	err := s.CallKey(ctx, p, path, key, input, &out)
 	if err != nil {
-		return Grant{}, err
+		return nil, err
 	}
 	if out.Token == "" || !out.ExpiresAt.After(api.Now().Add(s.MinimumGrant)) {
-		return Grant{}, api.Err(502, "UPSTREAM_REFUSED", "The storage service returned an invalid run credential")
+		return nil, api.Err(502, "UPSTREAM_REFUSED", "The storage service returned an invalid run credential")
 	}
-	return out, nil
+	grant.Token, grant.ExpiresAt = out.Token, out.ExpiresAt
+	return &grant, nil
 }
 
 type pullItem struct {
