@@ -30,15 +30,16 @@ const (
 	testSecret = "test-enclave-secret"
 )
 
-// rowsHarness is a Rows over a stub of the control plane and of buckets,
-// for one caller with one content key.
+// rowsHarness is a Rows, and the Store over it, on a stub of the control
+// plane and of buckets, for one caller with one content key.
 type rowsHarness struct {
-	cp   *cpstub.Store
-	bk   *bucketstub.Store
-	rows *Rows
-	p    *auth.Principal
-	key  auth.ContentKey
-	kid  string
+	cp    *cpstub.Store
+	bk    *bucketstub.Store
+	rows  *Rows
+	store *Store
+	p     *auth.Principal
+	key   auth.ContentKey
+	kid   string
 }
 
 func newRowsHarness(t *testing.T) *rowsHarness {
@@ -53,13 +54,15 @@ func newRowsHarness(t *testing.T) *rowsHarness {
 	bkServer := httptest.NewServer(mux)
 	t.Cleanup(bkServer.Close)
 	key := randomKey()
+	rows := &Rows{Controlplane: controlplane.NewClient(cpServer.URL, nil, controlplane.WithServiceSecret(testSecret)), Buckets: buckets.NewClient(bkServer.URL, testBucket, nil)}
 	return &rowsHarness{
-		cp:   cp,
-		bk:   bk,
-		rows: &Rows{Controlplane: controlplane.NewClient(cpServer.URL, nil, controlplane.WithServiceSecret(testSecret)), Buckets: buckets.NewClient(bkServer.URL, testBucket, nil)},
-		p:    &auth.Principal{ID: "user_abc", JWT: "clerk-abc"},
-		key:  key,
-		kid:  keyID(key),
+		cp:    cp,
+		bk:    bk,
+		rows:  rows,
+		store: &Store{Rows: rows, Controlplane: rows.Controlplane, Buckets: rows.Buckets},
+		p:     &auth.Principal{ID: "user_abc", JWT: "clerk-abc"},
+		key:   key,
+		kid:   keyID(key),
 	}
 }
 
