@@ -152,10 +152,6 @@ type pullItem struct {
 	ProjectID  *string `json:"project_id"`
 }
 
-// errRowNotFetched is a row sync could not fetch within its deadline twice
-// running. A later request may fetch it.
-var errRowNotFetched = api.Err(502, "UPSTREAM_REFUSED", "The sync service could not fetch the data in time")
-
 // Pull returns the rows it could open and the error for each it could not.
 func (s *Client) Pull(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope string, ids []string) ([]domain.StoredRow, map[string]error, error) {
 	rows, failed := []domain.StoredRow{}, map[string]error{}
