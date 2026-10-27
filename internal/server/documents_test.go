@@ -70,6 +70,13 @@ func attachmentBytes(t *testing.T, rows *memoryRows, a domain.Attachment) []byte
 // attachmentsStored is how many attachments buckets holds.
 func attachmentsStored(rows *memoryRows) int { return len(rows.bk.Tokens()) }
 
+// indexedUnder is the chat the control plane indexes an attachment under.
+func (s *memoryRows) indexedUnder(id string) string {
+	s.cp.Mu.Lock()
+	defer s.cp.Mu.Unlock()
+	return s.cp.AttachmentIndex[id]
+}
+
 // sharedPayload opens a share as its reader does: the ciphertext the
 // harness uploaded, with the key its link carries.
 func sharedPayload(t *testing.T, link string, ciphertext []byte) []byte {
@@ -124,8 +131,7 @@ func (s *shareStore) uploaded(id string) ([]byte, int) {
 }
 
 // fakeSync serves the sync enclave's import routes, which require protocol
-// 3, and runs the import jobs they start. A fork copies a chat the test
-// harness stores.
+// 3, and runs the import jobs they start.
 type fakeSync struct {
 	mu       sync.Mutex
 	received map[string][]api.Object
@@ -148,25 +154,6 @@ func newFakeSync(t *testing.T, h *harness) *fakeSync {
 		defer f.mu.Unlock()
 		f.received[r.URL.Path] = append(f.received[r.URL.Path], in)
 		switch r.URL.Path {
-		case "/v1/sync/fork":
-			rows := h.store.Rows.(*memoryRows)
-			rows.mu.Lock()
-			defer rows.mu.Unlock()
-			p := &auth.Principal{ID: strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer clerk-")}
-			source, ok := rows.rows[rowMapKey(p, "chat", api.Str(in["source_id"]))]
-			if !ok {
-				w.WriteHeader(404)
-				io.WriteString(w, `{"ok":false,"code":"NOT_FOUND"}`)
-				return
-			}
-			data := rowJSON(&source)
-			for _, field := range []string{"clock", "clockVersion", "codeExecutionAccessToken", "messageCount", "syncVersion", "version", "writer"} {
-				delete(data, field)
-			}
-			data["messages"] = api.Arr(data["messages"])[:api.Int(in["message_count"])]
-			data["id"], data["title"], data["titleState"], data["createdAt"], data["updatedAt"], data["isLocalOnly"] = in["target_id"], in["title"], "manual", in["created_at"], in["created_at"], false
-			rows.rows[rowMapKey(p, "chat", api.Str(in["target_id"]))] = domain.StoredRow{ID: api.Str(in["target_id"]), ETag: "1", Data: api.Raw(data), Project: source.Project, ProjectSet: source.ProjectSet}
-			json.NewEncoder(w).Encode(api.Object{"ok": true, "id": in["target_id"], "etag": "1", "key_id": "key-id"})
 		case "/v1/import/create", "/v1/import/upload", "/v1/import/start", "/v1/import/status":
 			status, out := f.importStep(t, h, r, in)
 			w.WriteHeader(status)
@@ -237,8 +224,8 @@ func TestStoredUploadIsOffloadedUnderItsThread(t *testing.T) {
 		t.Fatalf("row does not reference the stored blob: %v", stored)
 	}
 	held := mustRead(domain.ReadThreadRow(row)).Messages[0].Attachments[0]
-	if payload := attachmentBytes(t, rows, held); attachmentsStored(rows) != 1 || string(payload) != `{"textContent":"remember the blue door"}` || rows.cp.AttachmentIndex[held.ID] != thread {
-		t.Fatalf("blob is not the document payload under its thread: %s, %d stored, indexed under %q", payload, attachmentsStored(rows), rows.cp.AttachmentIndex[held.ID])
+	if payload := attachmentBytes(t, rows, held); attachmentsStored(rows) != 1 || string(payload) != `{"textContent":"remember the blue door"}` || rows.indexedUnder(held.ID) != thread {
+		t.Fatalf("blob is not the document payload under its thread: %s, %d stored, indexed under %q", payload, attachmentsStored(rows), rows.indexedUnder(held.ID))
 	}
 	for _, field := range []string{"textContent", "pages", "base64", "legacyId"} {
 		if _, ok := stored[field]; ok {
@@ -320,7 +307,7 @@ func TestInlineDocumentIsOffloadedUnderItsThread(t *testing.T) {
 		t.Fatalf("row does not reference the stored blob: %v", stored)
 	}
 	held := mustRead(domain.ReadThreadRow(row)).Messages[0].Attachments[0]
-	if payload := attachmentBytes(t, rows, held); attachmentsStored(rows) != 1 || string(payload) != `{"textContent":"slide text"}` || rows.cp.AttachmentIndex[held.ID] != "chat-1" {
+	if payload := attachmentBytes(t, rows, held); attachmentsStored(rows) != 1 || string(payload) != `{"textContent":"slide text"}` || rows.indexedUnder(held.ID) != "chat-1" {
 		t.Fatalf("not stored once as a payload under the thread: %s, %d stored", payload, attachmentsStored(rows))
 	}
 	if _, ok := stored["pages"]; ok {
@@ -357,7 +344,7 @@ func TestMissingAttachmentsAreRepairedBeforeRetrying(t *testing.T) {
 	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
 	chat := mustRead(domain.ReadThreadRow(row))
 	doc, image := chat.Messages[0].Attachments[0], chat.Messages[0].Attachments[1]
-	if doc.ID == docID || doc.StorageThreadID != "chat-1" || rows.cp.AttachmentIndex[doc.ID] != "chat-1" || string(attachmentBytes(t, rows, doc)) != `{"textContent":"filed elsewhere"}` {
+	if doc.ID == docID || doc.StorageThreadID != "chat-1" || rows.indexedUnder(doc.ID) != "chat-1" || string(attachmentBytes(t, rows, doc)) != `{"textContent":"filed elsewhere"}` {
 		t.Fatalf("the document was not stored under its chat: %+v", doc)
 	}
 	if image.EncryptionKey != "" || image.Thumbnail != "thumb" || chat.Title != "Renamed" {
@@ -384,7 +371,7 @@ func TestLegacyKeyedAttachmentIsReadFromTheControlPlane(t *testing.T) {
 	if stored.Key != "" || !domain.EnclaveAttachmentID.MatchString(stored.ID) {
 		t.Fatalf("legacy reference kept: %+v", stored)
 	}
-	if payload := attachmentBytes(t, rows, stored); attachmentsStored(rows) != 1 || string(payload) != "old photo" || rows.cp.AttachmentIndex[stored.ID] != "chat-1" {
+	if payload := attachmentBytes(t, rows, stored); attachmentsStored(rows) != 1 || string(payload) != "old photo" || rows.indexedUnder(stored.ID) != "chat-1" {
 		t.Fatalf("legacy attachment was not moved under its thread: stored %q, %d objects", payload, attachmentsStored(rows))
 	}
 }
@@ -410,45 +397,57 @@ func TestDocumentDownloadReturnsExtractedText(t *testing.T) {
 
 func TestForkCopiesAChatThroughItsMessage(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	fake := newFakeSync(t, h)
 	p := &auth.Principal{ID: "alice"}
-	messages := []any{api.Object{"id": "m1", "role": "user", "content": "plan a trip"}, api.Object{"id": "m2", "role": "assistant", "content": "first, pack"}, api.Object{"id": "m3", "role": "user", "content": "go on"}}
-	rows.rows[rowMapKey(p, "chat", "chat-1")] = domain.StoredRow{ID: "chat-1", ETag: "4", Data: api.Raw(api.Object{"title": "Trip", "titleState": "generated", "createdAt": "2026-01-01T00:00:00Z", "presetId": "builtin:tutor", "model": "kimi-k3", "webSearchEnabled": false,
+	project := "project-1"
+	imageID, imageKey := seedAttachment(rows, "alice", "chat-1", []byte("png bytes"))
+	messages := []any{
+		api.Object{"id": "m1", "role": "user", "content": "plan a trip", "attachments": []any{api.Object{"id": imageID, "type": "image", "fileName": "map.png", "mimeType": "image/png", "encryptionKey": imageKey, "thumbnailBase64": "thumb"}}},
+		api.Object{"id": "m2", "role": "assistant", "content": "first, pack"}, api.Object{"id": "m3", "role": "user", "content": "go on"}}
+	source := domain.StoredRow{ID: "chat-1", ETag: "4", Project: &project, ProjectSet: true, Data: api.Raw(api.Object{"title": "Trip", "titleState": "generated", "createdAt": "2026-01-01T00:00:00Z", "presetId": "builtin:tutor", "model": "kimi-k3", "webSearchEnabled": false,
 		"pinned": true, "contextUsage": api.Object{"usedTokens": 900}, "harnessRequests": api.Object{"nonce": api.Object{"runId": "run", "digest": "digest"}}, "messages": messages})}
+	rows.rows[rowMapKey(p, "chat", "chat-1")] = source
 	for _, tc := range []struct {
 		in   api.Object
 		code int
 	}{{api.Object{"threadId": "chat-1", "messageId": "m4"}, 404}, {api.Object{"threadId": "chat-1"}, 400}} {
 		tc.in["key"] = keyBase64(key)
-		if w := postRoute(h, "/v1/threads/fork", tc.in, "alice"); w.Code != tc.code || len(fake.requests("/v1/sync/fork")) != 0 {
+		if w := postRoute(h, "/v1/threads/fork", tc.in, "alice"); w.Code != tc.code || len(rows.rows) != 1 || attachmentsStored(rows) != 1 {
 			t.Fatalf("%v: HTTP %d, want %d without a fork", tc.in, w.Code, tc.code)
 		}
 	}
 	w := postRoute(h, "/v1/threads/fork", api.Object{"key": keyBase64(key), "threadId": "chat-1", "messageId": "m2"}, "alice")
-	forks := fake.requests("/v1/sync/fork")
-	if w.Code != 200 || len(forks) != 1 {
-		t.Fatalf("fork: HTTP %d %s after %d sync forks", w.Code, w.Body.String(), len(forks))
-	}
-	request, target := forks[0], api.Str(forks[0]["target_id"])
-	created, err := time.Parse(time.RFC3339Nano, api.Str(request["created_at"]))
-	if !regexp.MustCompile(`^\d{13}_[0-9a-f-]{36}$`).MatchString(target) || err != nil || time.Since(created) > time.Minute || api.Str(request["idempotency_key"]) == "" {
-		t.Fatalf("fork request: %v", request)
-	}
-	want := api.Object{"source_id": "chat-1", "target_id": target, "key": keyBase64(key), "message_count": float64(2), "title": "Trip (fork)", "created_at": request["created_at"], "idempotency_key": request["idempotency_key"]}
-	if !reflect.DeepEqual(request, want) {
-		t.Fatalf("fork request %v, want %v", request, want)
-	}
 	var summary api.Object
 	json.Unmarshal(w.Body.Bytes(), &summary)
-	if summary["id"] != target || summary["title"] != "Trip (fork)" || summary["createdAt"] != domain.ISOTime(request["created_at"]) || summary["pinned"] != false || summary["activeRun"] != nil || summary["contextUsage"] != nil {
+	target := api.Str(summary["id"])
+	created, err := time.Parse(time.RFC3339Nano, api.Str(summary["createdAt"]))
+	if w.Code != 200 || !regexp.MustCompile(`^\d{13}_[0-9a-f-]{36}$`).MatchString(target) || err != nil || time.Since(created) > time.Minute {
+		t.Fatalf("fork: HTTP %d %s", w.Code, w.Body.String())
+	}
+	if summary["title"] != "Trip (fork)" || summary["pinned"] != false || summary["activeRun"] != nil || summary["contextUsage"] != nil {
 		t.Fatalf("fork summary: %v", summary)
 	}
-	row, _ := rows.Load(context.Background(), p, key, "chat", target)
-	if fork := mustRead(domain.ReadThreadRow(row)); fork.Pinned || fork.ContextUsage != nil || fork.ActiveRun != nil || rowJSON(row)["harnessRequests"] != nil {
+	row, err := rows.Load(context.Background(), p, key, "chat", target)
+	if err != nil || row.ETag != "1" || !row.ProjectSet || domain.ValueOr(row.Project, "") != project {
+		t.Fatalf("the fork's row = %+v (%v), want a new row under the source's project", row, err)
+	}
+	fork := mustRead(domain.ReadThreadRow(row))
+	if fork.Pinned || fork.ContextUsage != nil || fork.ActiveRun != nil || fork.TitleState != "manual" || rowJSON(row)["harnessRequests"] != nil {
 		t.Fatalf("the fork kept the source's bookkeeping: %s", row.Data)
 	}
-	if fork := mustRead(domain.ReadThreadRow(row)); domain.ValueOr(fork.PresetID, "") != "builtin:tutor" || len(fork.Messages) != 2 || fork.Messages[0].ID != "m1" || fork.Messages[1].ID != "m2" {
+	if domain.ValueOr(fork.PresetID, "") != "builtin:tutor" || len(fork.Messages) != 2 || fork.Messages[0].ID != "m1" || fork.Messages[1].ID != "m2" || fork.CreatedAt != api.Str(summary["createdAt"]) {
 		t.Fatalf("the fork lost the conversation: %v", row.Data)
+	}
+	// The fork's attachment is its own copy, under the fork with a key of
+	// its own, and the source keeps what it had.
+	copied := fork.Messages[0].Attachments[0]
+	if copied.ID == imageID || copied.EncryptionKey == imageKey || copied.StorageThreadID != target || copied.Thumbnail != "thumb" || copied.Base64 != "" {
+		t.Fatalf("the fork's attachment = %+v", copied)
+	}
+	if attachmentsStored(rows) != 2 || string(attachmentBytes(t, rows, copied)) != "png bytes" || rows.indexedUnder(copied.ID) != target || rows.indexedUnder(imageID) != "chat-1" {
+		t.Fatalf("attachments after the fork: %d stored, the copy indexed under %q", attachmentsStored(rows), rows.indexedUnder(copied.ID))
+	}
+	if kept := rows.rows[rowMapKey(p, "chat", "chat-1")]; !reflect.DeepEqual(kept, source) {
+		t.Fatalf("the source changed: %+v", kept)
 	}
 }
 

@@ -223,12 +223,6 @@ func (s *Store) ChatIDs(ctx context.Context, p *auth.Principal, project string) 
 	return s.Rows.IDs(ctx, p, "chat", project)
 }
 
-// ForkStored has sync copy a chat's first count messages, with their
-// attachments, into a new chat.
-func (s *Store) ForkStored(ctx context.Context, p *auth.Principal, key auth.ContentKey, source, target, title string, count int) error {
-	return s.API.CallKey(ctx, p, "/v1/sync/fork", key, api.Object{"source_id": source, "target_id": target, "message_count": count, "title": title, "created_at": api.Timestamp(), "idempotency_key": uuid.NewString()}, nil)
-}
-
 // SearchResults are the chats a search found, in its order, and how many of
 // them sync or this harness cannot open, which are left out. A chat deleted
 // since it was indexed is not a result. One sync could not fetch in time
