@@ -1,0 +1,540 @@
+package server
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+
+	cryptopkg "github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/crypto"
+)
+
+// ImportStallTimeout is how long a running import may go without
+// recording progress before it is canceled. Progress is any job state
+// change (an entity imported, skipped, or failed, a phase change, or a
+// recorded warning), so a large archive is bounded by its own size
+// rather than by a wall clock, while a wedged dependency still ends the
+// job. Every controlplane and bucket call the loop makes is itself
+// bounded by a request timeout well inside this window.
+const ImportStallTimeout = 10 * time.Minute
+
+// errImportStalled is the cancellation cause the stall watchdog sets so
+// the failure classifier can report the job as timed out.
+var errImportStalled = errors.New("import: no progress within the stall timeout")
+
+// ImportJobRetention keeps a finished job addressable for late status
+// polls before it is reaped.
+const ImportJobRetention = 5 * time.Minute
+
+// ImportStagingRetention is how long an incomplete upload may sit in
+// staging without progress before its staged chunks are deleted.
+const ImportStagingRetention = 30 * time.Minute
+
+const importChunkPendingPrefix = "pending:"
+
+type ImportJobStatus string
+
+const (
+	ImportJobIdle      ImportJobStatus = "idle"
+	ImportJobStaging   ImportJobStatus = "staging"
+	ImportJobRunning   ImportJobStatus = "running"
+	ImportJobCompleted ImportJobStatus = "completed"
+	ImportJobFailed    ImportJobStatus = "failed"
+)
+
+// ImportJobState holds one user's in-flight import. Secrets (stagingKey,
+// cek) live only here and are zeroed when the job leaves memory.
+type ImportJobState struct {
+	ID            string
+	UserID        string
+	UploadID      string
+	Source        string
+	TotalBytes    int64
+	TotalChunks   int
+	ArchiveSHA256 string
+	StartedAt     time.Time
+
+	mu              sync.Mutex
+	stagingKey      []byte
+	received        map[int]string
+	cek             []byte
+	status          ImportJobStatus
+	imported        int
+	failed          int
+	total           int
+	phase           string
+	counts          map[string]ImportKindCounts
+	projectMappings map[string]string
+	warnings        []string
+	errs            []string
+	failureReason   ImportFailureReason
+	failureDetail   ImportFailureDetail
+	startedRun      bool
+	updatedAt       time.Time
+
+	done chan struct{}
+}
+
+type ImportJobSnapshot struct {
+	ID              string
+	Status          ImportJobStatus
+	Imported        int
+	Failed          int
+	Total           int
+	Phase           string
+	Counts          map[string]ImportKindCounts
+	Warnings        []string
+	Errors          []string
+	ProjectMappings map[string]string
+	FailureReason   ImportFailureReason
+	FailureDetail   ImportFailureDetail
+}
+
+func (j *ImportJobState) Snapshot() ImportJobSnapshot {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	errs := append([]string(nil), j.errs...)
+	warnings := append([]string(nil), j.warnings...)
+	counts := make(map[string]ImportKindCounts, len(j.counts))
+	for kind, count := range j.counts {
+		counts[kind] = count
+	}
+	projectMappings := make(map[string]string, len(j.projectMappings))
+	for sourceID, destinationID := range j.projectMappings {
+		projectMappings[sourceID] = destinationID
+	}
+	return ImportJobSnapshot{
+		ID:              j.ID,
+		Status:          j.status,
+		Imported:        j.imported,
+		Failed:          j.failed,
+		Total:           j.total,
+		Phase:           j.phase,
+		Counts:          counts,
+		Warnings:        warnings,
+		Errors:          errs,
+		ProjectMappings: projectMappings,
+		FailureReason:   j.failureReason,
+		FailureDetail:   j.failureDetail,
+	}
+}
+
+// recordChunk makes chunk staging idempotent: replaying the same index
+// with the same hash succeeds; a different hash for an already-seen
+// index is rejected so a flipped chunk cannot corrupt the archive.
+func (j *ImportJobState) beginChunk(index int, chunkSHA string) (alreadyHave bool, err error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.startedRun {
+		return false, fmt.Errorf("import: job already started")
+	}
+	if prev, ok := j.received[index]; ok {
+		if strings.TrimPrefix(prev, importChunkPendingPrefix) != chunkSHA {
+			return false, fmt.Errorf("import: chunk %d hash conflict", index)
+		}
+		if strings.HasPrefix(prev, importChunkPendingPrefix) {
+			return false, fmt.Errorf("import: chunk %d upload already in progress", index)
+		}
+		return true, nil
+	}
+	j.received[index] = importChunkPendingPrefix + chunkSHA
+	j.updatedAt = time.Now().UTC()
+	return false, nil
+}
+
+func (j *ImportJobState) finishChunk(index int, chunkSHA string) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.received[index] == importChunkPendingPrefix+chunkSHA {
+		j.received[index] = chunkSHA
+		j.updatedAt = time.Now().UTC()
+	}
+}
+
+func (j *ImportJobState) clearPendingChunk(index int, chunkSHA string) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.received[index] == importChunkPendingPrefix+chunkSHA {
+		delete(j.received, index)
+		j.updatedAt = time.Now().UTC()
+	}
+}
+
+func (j *ImportJobState) allChunksReceived() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if len(j.received) != j.TotalChunks {
+		return false
+	}
+	for _, status := range j.received {
+		if strings.HasPrefix(status, importChunkPendingPrefix) {
+			return false
+		}
+	}
+	return len(j.received) == j.TotalChunks
+}
+
+func (j *ImportJobState) addError(msg string) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if len(j.errs) < MaxImportJobErrors {
+		j.errs = append(j.errs, msg)
+	}
+	j.updatedAt = time.Now().UTC()
+}
+
+func (j *ImportJobState) addWarning(msg string) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if len(j.warnings) < MaxImportJobErrors {
+		j.warnings = append(j.warnings, msg)
+	}
+	j.updatedAt = time.Now().UTC()
+}
+
+func (j *ImportJobState) setPhase(phase string) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.phase = phase
+	j.updatedAt = time.Now().UTC()
+}
+
+func (j *ImportJobState) setKindCount(kind string, count ImportKindCounts) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.counts == nil {
+		j.counts = make(map[string]ImportKindCounts)
+	}
+	j.counts[kind] = count
+	j.updatedAt = time.Now().UTC()
+}
+
+func (j *ImportJobState) setProjectMapping(sourceID, destinationID string) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.projectMappings == nil {
+		j.projectMappings = make(map[string]string)
+	}
+	j.projectMappings[sourceID] = destinationID
+	j.updatedAt = time.Now().UTC()
+}
+
+func (j *ImportJobState) setProgress(imported, failed, total int) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.imported = imported
+	j.failed = failed
+	j.total = total
+	j.updatedAt = time.Now().UTC()
+}
+
+// lastProgress is the time of the job's most recent state change. The
+// stall watchdog compares it against ImportStallTimeout.
+func (j *ImportJobState) lastProgress() time.Time {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.updatedAt
+}
+
+func (j *ImportJobState) finish(status ImportJobStatus) {
+	j.finishWithReason(status, "", "")
+}
+
+// fail records why the job ended so the status response and the
+// controlplane notification can tell the user what went wrong.
+func (j *ImportJobState) fail(reason ImportFailureReason, detail ImportFailureDetail) {
+	j.finishWithReason(ImportJobFailed, reason, detail)
+}
+
+func (j *ImportJobState) finishWithReason(status ImportJobStatus, reason ImportFailureReason, detail ImportFailureDetail) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.status == ImportJobCompleted || j.status == ImportJobFailed {
+		return
+	}
+	j.status = status
+	j.failureReason = reason
+	j.failureDetail = detail
+	j.updatedAt = time.Now().UTC()
+	cryptopkg.Zero(j.cek)
+	cryptopkg.Zero(j.stagingKey)
+	close(j.done)
+}
+
+func (j *ImportJobState) failIfStaleStaging(retention time.Duration, now time.Time) (time.Duration, bool) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.status != ImportJobStaging {
+		return 0, false
+	}
+	if remaining := retention - now.Sub(j.updatedAt); remaining > 0 {
+		return remaining, false
+	}
+	j.status = ImportJobFailed
+	j.updatedAt = now.UTC()
+	cryptopkg.Zero(j.cek)
+	cryptopkg.Zero(j.stagingKey)
+	close(j.done)
+	return 0, true
+}
+
+func (j *ImportJobState) Done() <-chan struct{} { return j.done }
+
+// ImportCoordinator owns the in-memory set of import jobs, one per user.
+type ImportCoordinator struct {
+	mu               sync.Mutex
+	jobs             map[string]*ImportJobState
+	retention        time.Duration
+	stagingRetention time.Duration
+	stallTimeout     time.Duration
+	runner           func(ctx context.Context, deps Deps, sess Session, job *ImportJobState) error
+}
+
+func NewImportCoordinator() *ImportCoordinator {
+	return &ImportCoordinator{
+		jobs:             map[string]*ImportJobState{},
+		retention:        ImportJobRetention,
+		stagingRetention: ImportStagingRetention,
+		stallTimeout:     ImportStallTimeout,
+		runner:           runImportJob,
+	}
+}
+
+// Create allocates a fresh job for the user. It rejects a second create
+// while a job is still staging or running so one user can only import
+// one archive at a time; a finished job is replaced.
+func (c *ImportCoordinator) Create(userID string, req ImportCreateRequest) (*ImportJobState, error) {
+	if err := validateImportCreate(req); err != nil {
+		return nil, err
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if existing, ok := c.jobs[userID]; ok {
+		snap := existing.Snapshot()
+		if snap.Status == ImportJobStaging || snap.Status == ImportJobRunning {
+			return nil, &AppError{Status: 409, Code: CodeIdempotencyConflict, Message: "an import is already in progress"}
+		}
+	}
+
+	stagingKey, err := cryptopkg.RandomKey()
+	if err != nil {
+		return nil, err
+	}
+	job := &ImportJobState{
+		ID:            newImportID(),
+		UserID:        userID,
+		UploadID:      newImportID(),
+		Source:        req.Source,
+		TotalBytes:    req.TotalBytes,
+		TotalChunks:   req.TotalChunks,
+		ArchiveSHA256: req.ArchiveSHA256,
+		StartedAt:     time.Now().UTC(),
+		stagingKey:    stagingKey,
+		received:      make(map[int]string, req.TotalChunks),
+		status:        ImportJobStaging,
+		updatedAt:     time.Now().UTC(),
+		done:          make(chan struct{}),
+	}
+	c.jobs[userID] = job
+	return job, nil
+}
+
+func (c *ImportCoordinator) Get(userID string) *ImportJobState {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.jobs[userID]
+}
+
+// Start launches the detached job goroutine. It returns false when the
+// job has already been started, making start idempotent against retries.
+func (c *ImportCoordinator) Start(parentCtx context.Context, deps Deps, sess Session, job *ImportJobState, cek []byte) bool {
+	job.mu.Lock()
+	if job.startedRun {
+		job.mu.Unlock()
+		cryptopkg.Zero(cek)
+		return false
+	}
+	if job.status != ImportJobStaging {
+		job.mu.Unlock()
+		cryptopkg.Zero(cek)
+		return false
+	}
+	job.startedRun = true
+	job.cek = cek
+	job.status = ImportJobRunning
+	job.updatedAt = time.Now().UTC()
+	job.mu.Unlock()
+
+	go c.run(parentCtx, deps, sess, job)
+	return true
+}
+
+func (c *ImportCoordinator) ScheduleStagingCleanup(parentCtx context.Context, deps Deps, job *ImportJobState) {
+	delay := c.stagingRetention
+	if delay < 0 {
+		delay = 0
+	}
+	time.AfterFunc(delay, func() {
+		c.reapStaleStaging(parentCtx, deps, job)
+	})
+}
+
+func (c *ImportCoordinator) reapStaleStaging(parentCtx context.Context, deps Deps, job *ImportJobState) {
+	retention := c.stagingRetention
+	if retention < 0 {
+		retention = 0
+	}
+	c.mu.Lock()
+	if c.jobs[job.UserID] != job {
+		c.mu.Unlock()
+		return
+	}
+	remaining, failed := job.failIfStaleStaging(retention, time.Now())
+	if remaining > 0 {
+		c.mu.Unlock()
+		time.AfterFunc(remaining, func() {
+			c.reapStaleStaging(parentCtx, deps, job)
+		})
+		return
+	}
+	if !failed {
+		c.mu.Unlock()
+		return
+	}
+	delete(c.jobs, job.UserID)
+	c.mu.Unlock()
+
+	c.cleanupStaging(context.WithoutCancel(parentCtx), deps, job)
+}
+
+func (c *ImportCoordinator) run(parentCtx context.Context, deps Deps, sess Session, job *ImportJobState) {
+	ctx := context.WithoutCancel(parentCtx)
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	stopWatchdog := c.watchStall(ctx, job, cancel)
+	err := c.runGuarded(ctx, deps, sess, job)
+	stopWatchdog()
+	if err != nil {
+		reason := classifyImportFailure(ctx, err)
+		detail := importFailureDetail(err, reason)
+		job.addError(importFailureMessage(reason))
+		snap := job.Snapshot()
+		notifyImportFailed(ctx, deps, job.UserID, job.ID, job.Source, snap.Imported, snap.Failed, reason, detail)
+		job.fail(reason, detail)
+	} else {
+		job.finish(ImportJobCompleted)
+	}
+
+	c.cleanupStaging(ctx, deps, job)
+
+	retention := c.retention
+	if retention <= 0 {
+		c.deleteIfSame(job)
+		return
+	}
+	time.AfterFunc(retention, func() { c.deleteIfSame(job) })
+}
+
+// watchStall cancels ctx with errImportStalled once the job has gone
+// stallTimeout without recording progress. The timer re-arms from the
+// last progress timestamp instead of polling, so a job that keeps
+// moving is never interrupted and a wedged one is caught within one
+// timeout of its last update. The returned func stops the watchdog.
+func (c *ImportCoordinator) watchStall(ctx context.Context, job *ImportJobState, cancel context.CancelCauseFunc) func() {
+	timeout := c.stallTimeout
+	if timeout <= 0 {
+		return func() {}
+	}
+	stop := make(chan struct{})
+	go func() {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+				remaining := timeout - time.Since(job.lastProgress())
+				if remaining <= 0 {
+					cancel(errImportStalled)
+					return
+				}
+				timer.Reset(remaining)
+			}
+		}
+	}()
+	return func() { close(stop) }
+}
+
+// runGuarded converts a panic in the detached job into an ordinary
+// error. The HTTP middleware's recover does not cover this goroutine,
+// so without it one malformed archive would take down the enclave and
+// every other user's in-flight import with it.
+func (c *ImportCoordinator) runGuarded(ctx context.Context, deps Deps, sess Session, job *ImportJobState) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = importFailure(ImportFailureWorker, errors.New("import worker stopped unexpectedly"))
+		}
+	}()
+	return c.runner(ctx, deps, sess, job)
+}
+
+// cleanupStaging deletes every staged chunk for the job. Buckets delete
+// is idempotent, so this is safe on success, failure, and timeout.
+func (c *ImportCoordinator) cleanupStaging(ctx context.Context, deps Deps, job *ImportJobState) {
+	if deps.Buckets == nil || !deps.Buckets.Configured() {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bucketsRollbackTimeout)
+	defer cancel()
+	for i := 0; i < job.TotalChunks; i++ {
+		_ = deps.Buckets.Delete(cleanupCtx, job.UserID, importChunkToken(job.UploadID, i))
+	}
+}
+
+func (c *ImportCoordinator) deleteIfSame(job *ImportJobState) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.jobs[job.UserID] == job {
+		delete(c.jobs, job.UserID)
+	}
+}
+
+func newImportID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return time.Now().UTC().Format("20060102T150405.000000000")
+	}
+	return hex.EncodeToString(b[:])
+}
+
+func validateImportCreate(req ImportCreateRequest) error {
+	switch req.Source {
+	case "chatgpt", "claude", "tinfoil", "tinfoil_backup":
+	default:
+		return badRequest("invalid source")
+	}
+	if req.TotalBytes <= 0 || req.TotalBytes > MaxImportArchiveBytes {
+		return badRequest("invalid total_bytes")
+	}
+	if req.TotalChunks <= 0 {
+		return badRequest("invalid total_chunks")
+	}
+	expected := int((req.TotalBytes + MaxImportChunkBytes - 1) / MaxImportChunkBytes)
+	if req.TotalChunks != expected {
+		return badRequest("total_chunks does not match total_bytes")
+	}
+	archiveHash, err := hex.DecodeString(req.ArchiveSHA256)
+	if err != nil || len(archiveHash) != sha256.Size {
+		return badRequest("invalid archive_sha256")
+	}
+	return nil
+}

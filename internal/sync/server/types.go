@@ -1,0 +1,370 @@
+package server
+
+import "github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/controlplane"
+
+// Wire shapes for /v1/* endpoints. Each request type is decoded from the
+// JSON body; each response type is encoded into the JSON body. Error
+// responses are emitted by writeError and follow the AppError shape.
+
+type PushRequest struct {
+	Scope          string         `json:"scope"`
+	ID             string         `json:"id,omitempty"`
+	Key            string         `json:"key"`       // base64 32-byte raw key
+	Plaintext      string         `json:"plaintext"` // base64 plaintext bytes
+	IfMatch        *string        `json:"if_match"`  // ETag CAS; null = create
+	IdempotencyKey string         `json:"idempotency_key"`
+	Metadata       map[string]any `json:"metadata,omitempty"`
+}
+
+type PushResponse struct {
+	OK    bool   `json:"ok"`
+	ETag  string `json:"etag"`
+	KeyID string `json:"key_id"`
+	// SearchIndexed reports whether the inline search-index update
+	// succeeded for a chat push: false means the blob stored fine but
+	// the chat won't surface in search until a reindex. A pointer so
+	// the failure signal survives JSON encoding (omitempty would drop
+	// a bare false); absent means search was not applicable to this
+	// push (non-chat scope or search backend unconfigured).
+	SearchIndexed *bool `json:"search_indexed,omitempty"`
+}
+
+// ForkRequest copies the first MessageCount messages of an existing
+// chat into a brand-new chat row. The enclave unseals the source under
+// the CEK, re-uploads every referenced image so the fork owns its own
+// attachment blobs, and seals the result under the same CEK. Only the
+// enclave sees plaintext, so the client never has to download and
+// re-upload attachment bytes to branch a conversation.
+type ForkRequest struct {
+	SourceID string `json:"source_id"`
+	TargetID string `json:"target_id"`
+	Key      string `json:"key"` // base64 32-byte raw key
+	// MessageCount is how many leading messages the fork keeps; it
+	// must be at least 1 and at most the source's message count.
+	MessageCount int    `json:"message_count"`
+	Title        string `json:"title"`
+	// CreatedAt (RFC 3339) becomes the fork's createdAt/updatedAt. The
+	// caller supplies it so a retried fork seals byte-identical
+	// plaintext and replays under its idempotency key instead of
+	// tripping an operation-hash mismatch.
+	CreatedAt      string `json:"created_at"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+type ForkResponse struct {
+	OK            bool   `json:"ok"`
+	ID            string `json:"id"`
+	ETag          string `json:"etag"`
+	KeyID         string `json:"key_id"`
+	SearchIndexed *bool  `json:"search_indexed,omitempty"`
+}
+
+type PullKey struct {
+	Key   string `json:"key"`    // base64 32-byte raw key
+	KeyID string `json:"key_id"` // optional; enclave verifies/derives
+}
+
+type PullRequest struct {
+	Scope  string   `json:"scope"`
+	IDs    []string `json:"ids,omitempty"`
+	All    bool     `json:"all,omitempty"`
+	Cursor string   `json:"cursor,omitempty"`
+	Limit  int      `json:"limit,omitempty"`
+	// Keys is the ordered list of candidate decryption keys. The
+	// first entry is treated as the caller's current primary CEK and
+	// is used as the rewrap target when the enclave finds a legacy
+	// v0/v1 row. Inline re-sealing is best-effort; if it cannot
+	// complete, the response keeps needs_rewrap=true so the caller can
+	// drive the migration path.
+	Keys []PullKey `json:"keys"`
+}
+
+type PullItem struct {
+	ID        string `json:"id"`
+	OK        bool   `json:"ok"`
+	Plaintext string `json:"plaintext,omitempty"`
+	KeyID     string `json:"key_id,omitempty"`
+	ETag      string `json:"etag,omitempty"`
+	// PreviousETag is present only when this pull lazily rewrapped the
+	// row. ETag is then the post-rewrap value and PreviousETag is the
+	// value observed before the compare-and-set rewrap.
+	PreviousETag string  `json:"previous_etag,omitempty"`
+	ProjectIDSet bool    `json:"project_id_set,omitempty"`
+	ProjectID    *string `json:"project_id,omitempty"`
+	NeedsRewrap  bool    `json:"needs_rewrap,omitempty"`
+	Code         string  `json:"code,omitempty"`
+	Reason       string  `json:"reason,omitempty"`
+
+	cause error
+}
+
+type PullResponse struct {
+	Items      []PullItem `json:"items"`
+	NextCursor string     `json:"next_cursor,omitempty"`
+}
+
+type ListStatusRequest struct {
+	Scope     string `json:"scope"`
+	Cursor    string `json:"cursor,omitempty"`
+	Limit     int    `json:"limit,omitempty"`
+	ProjectID string `json:"project_id,omitempty"`
+	// Direction controls sort order: "" or "asc" walks oldest -> newest
+	// (the default), "desc" walks newest -> oldest. The control plane
+	// validates the value; the enclave just forwards it.
+	Direction string `json:"direction,omitempty"`
+}
+
+type ListStatusResponse struct {
+	Updates    []ListStatusUpdate `json:"updates"`
+	Deletes    []ListStatusDelete `json:"deletes"`
+	NextCursor string             `json:"next_cursor,omitempty"`
+}
+
+type ListStatusUpdate struct {
+	ID        string  `json:"id"`
+	ETag      string  `json:"etag"`
+	KeyID     string  `json:"key_id"`
+	ProjectID *string `json:"project_id,omitempty"`
+	UpdatedAt string  `json:"updated_at"`
+	// ActivityAt is a chat's list-ordering time: its last conversation
+	// activity, or UpdatedAt when none was recorded.
+	ActivityAt string `json:"activity_at,omitempty"`
+	Cursor     string `json:"cursor,omitempty"`
+}
+
+type ListStatusDelete struct {
+	ID        string `json:"id"`
+	Scope     string `json:"scope"`
+	DeletedAt string `json:"deleted_at"`
+	Cursor    string `json:"cursor,omitempty"`
+}
+
+type RevisionSummaryRequest struct{}
+
+type RevisionEventsRequest struct {
+	AfterRevision   string `json:"after_revision"`
+	ThroughRevision string `json:"through_revision"`
+	Cursor          string `json:"cursor,omitempty"`
+	Limit           *int   `json:"limit,omitempty"`
+}
+
+type RevisionSnapshotRequest struct {
+	Cursor string `json:"cursor,omitempty"`
+	Limit  *int   `json:"limit,omitempty"`
+}
+
+type RevisionSummaryResponse = controlplane.RevisionSummaryResponse
+type RevisionEventsResponse = controlplane.RevisionEventsResponse
+type RevisionSnapshotResponse = controlplane.RevisionSnapshotResponse
+
+type DeleteRequest struct {
+	Scope          string  `json:"scope"`
+	ID             string  `json:"id"`
+	IfMatch        *string `json:"if_match"`
+	IdempotencyKey string  `json:"idempotency_key"`
+	// Key is the user's CEK (base64), required to derive the
+	// op-hash subkey. Delete carries no body so the
+	// canonical tuple's BODY is empty, but the MAC keying still
+	// has to use the CEK so the controlplane cannot brute-force
+	// the (small) (METHOD, PATH, IF_MATCH, IDEM) space.
+	Key string `json:"key"`
+}
+
+type DeleteAllProjectsRequest struct {
+	Key            string `json:"key"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+type DeleteAllProjectsResponse struct {
+	OK      bool `json:"ok"`
+	Deleted int  `json:"deleted"`
+}
+
+type OKResponse struct {
+	OK bool `json:"ok"`
+}
+
+type KeyRegisterRequest struct {
+	Key            string                  `json:"key"`
+	IfMatch        string                  `json:"if_match"`
+	CreatedVia     string                  `json:"created_via"`
+	IdempotencyKey string                  `json:"idempotency_key"`
+	InitialBundle  *KeyRegisterBundleInput `json:"initial_bundle,omitempty"`
+}
+
+type KeyRegisterBundleInput struct {
+	CredentialID  string `json:"credential_id"`
+	KEKIV         string `json:"kek_iv"`
+	EncryptedKeys string `json:"encrypted_keys"`
+}
+
+type KeyRegisterResponse struct {
+	OK                bool   `json:"ok"`
+	KeyID             string `json:"key_id"`
+	SearchIndexFenced bool   `json:"-"`
+}
+
+type AddBundleRequest struct {
+	KeyID          string `json:"key_id"`
+	Key            string `json:"key"`
+	CredentialID   string `json:"credential_id"`
+	KEKIV          string `json:"kek_iv"`
+	EncryptedKeys  string `json:"encrypted_keys"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+type RemoveBundleRequest struct {
+	KeyID          string `json:"key_id"`
+	Key            string `json:"key"`
+	CredentialID   string `json:"credential_id"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+// KeyCurrentRequest is an empty body POST; declared so the typed
+// decoder rejects unknown fields the way every other handler does.
+type KeyCurrentRequest struct{}
+
+type KeyCurrentBundle struct {
+	CredentialID  string `json:"credential_id"`
+	KEKIV         string `json:"kek_iv"`
+	EncryptedKeys string `json:"encrypted_keys"`
+	CreatedAt     string `json:"created_at,omitempty"`
+	UpdatedAt     string `json:"updated_at,omitempty"`
+}
+
+// KeyCurrentResponse mirrors the webapp's KeyCurrentResponse: a
+// nullable KeyID plus a map of credential_id → bundle body. The
+// webapp normalizes a 404 from the enclave into the same shape with
+// KeyID=null at the SDK boundary, so we surface the missing-key
+// state as a 404 here.
+type KeyCurrentResponse struct {
+	KeyID      *string                     `json:"key_id"`
+	ETag       string                      `json:"etag,omitempty"`
+	Bundles    map[string]KeyCurrentBundle `json:"bundles"`
+	CreatedVia string                      `json:"created_via,omitempty"`
+	CreatedAt  string                      `json:"created_at,omitempty"`
+	// HasData reports whether the user owns encrypted blobs not sealed
+	// under the reported key. When KeyID is null it means the user has
+	// legacy (key_id IS NULL) data, so the client should route to
+	// recovery rather than first-time setup.
+	HasData bool `json:"has_data"`
+}
+
+type MigrateRequest struct {
+	Scope  string        `json:"scope"`
+	IDs    []string      `json:"ids,omitempty"`
+	Limit  int           `json:"limit,omitempty"`
+	Keys   []PullKey     `json:"keys"`
+	Target MigrateTarget `json:"target"`
+}
+
+type MigrateTarget struct {
+	Key string `json:"key"`
+}
+
+type MigrateResponse struct {
+	Migrated           int      `json:"migrated"`
+	RetryableRemaining int      `json:"retryable_remaining"`
+	BlockedUnmigrated  int      `json:"blocked_unmigrated"`
+	Blocked            []string `json:"blocked"`
+}
+
+// MigrateAllRequest tells the enclave to drain every scope under the
+// supplied target CEK in one call. The enclave loops over scopes and
+// pages internally; callers do not paginate. A wall-clock budget caps
+// each call so it stays within the HTTP write-timeout.
+type MigrateAllRequest struct {
+	Keys   []PullKey     `json:"keys"`
+	Target MigrateTarget `json:"target"`
+}
+
+type MigrateAllScopeReport struct {
+	Scope              string   `json:"scope"`
+	Migrated           int      `json:"migrated"`
+	RetryableRemaining int      `json:"retryable_remaining"`
+	BlockedUnmigrated  int      `json:"blocked_unmigrated"`
+	Blocked            []string `json:"blocked,omitempty"`
+}
+
+type MigrateAllResponse struct {
+	Migrated           int                     `json:"migrated"`
+	RetryableRemaining int                     `json:"retryable_remaining"`
+	BlockedUnmigrated  int                     `json:"blocked_unmigrated"`
+	Partial            bool                    `json:"partial"`
+	Scopes             []MigrateAllScopeReport `json:"scopes"`
+}
+
+// MigrateAllStatusResponse is what /v1/blobs/migrate-all and
+// /v1/blobs/migrate-status return. It is a strict superset of
+// MigrateAllResponse so existing clients that only inspect
+// migrated/retryable_remaining/partial keep working: while the
+// background job is in flight Partial is held at true so the
+// webapp's drain loop keeps polling.
+type MigrateAllStatusResponse struct {
+	JobID              string                  `json:"job_id,omitempty"`
+	Status             string                  `json:"status"`
+	StartedAt          string                  `json:"started_at,omitempty"`
+	UpdatedAt          string                  `json:"updated_at,omitempty"`
+	Migrated           int                     `json:"migrated"`
+	RetryableRemaining int                     `json:"retryable_remaining"`
+	BlockedUnmigrated  int                     `json:"blocked_unmigrated"`
+	Partial            bool                    `json:"partial"`
+	Scopes             []MigrateAllScopeReport `json:"scopes"`
+	Error              string                  `json:"error,omitempty"`
+}
+
+type SearchQueryRequest struct {
+	Key   string `json:"key"` // base64 32-byte CEK
+	Query string `json:"query"`
+	Limit int    `json:"limit,omitempty"`
+}
+
+type SearchQueryResult struct {
+	ID    string  `json:"id"`
+	Score float64 `json:"score"`
+}
+
+type SearchQueryResponse struct {
+	Results      []SearchQueryResult `json:"results"`
+	TotalIndexed int                 `json:"total_indexed"`
+	// NeedsReindex is true when no readable index exists for the
+	// caller's current key (never built, wrong key, or embedding model
+	// changed); the client should drive /v1/search/reindex.
+	NeedsReindex bool `json:"needs_reindex,omitempty"`
+
+	repairEmbeddings bool
+}
+
+// SearchReindexRequest kicks off a background job that rebuilds the
+// caller's search index from the stored chat blobs. The enclave pages
+// through the chats internally; callers poll /v1/search/reindex-status
+// (or re-POST reindex, which returns the in-flight job) until the
+// status is terminal.
+type SearchReindexRequest struct {
+	Keys []PullKey `json:"keys"`
+
+	embeddingRepairOnly bool
+}
+
+// SearchReindexStatusResponse is the wire shape returned by both the
+// reindex kickoff and the status poll. Status values match the
+// migration job lifecycle: idle, running, completed, failed.
+type SearchReindexStatusResponse struct {
+	JobID        string `json:"job_id,omitempty"`
+	Status       string `json:"status"`
+	Indexed      int    `json:"indexed"`
+	Failed       int    `json:"failed"`
+	TotalIndexed int    `json:"total_indexed"`
+	// Partial is true whenever the run did not establish complete
+	// coverage. Failed counts distinguish skipped chats from a clean,
+	// resumable wall-clock checkpoint.
+	Partial   bool   `json:"partial"`
+	StartedAt string `json:"started_at,omitempty"`
+	UpdatedAt string `json:"updated_at,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+type HealthResponse struct {
+	Status string `json:"status"`
+	GitSHA string `json:"git_sha,omitempty"`
+}

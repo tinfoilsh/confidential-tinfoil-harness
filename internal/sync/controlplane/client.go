@@ -1,0 +1,1854 @@
+package controlplane
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// Client talks to the controlplane on behalf of an authenticated user.
+// User-driven calls forward the user's JWT verbatim in the
+// Authorization header plus the enclave service credential required
+// by the /api/sync surface. A small set of enclave-internal
+// maintenance calls (attachment and search-index cleanup) skip the
+// JWT because they have no associated user request; they
+// authenticate to the controlplane with the service credential
+// alone.
+type Client struct {
+	baseURL       string
+	httpClient    *http.Client
+	serviceSecret string
+}
+
+type Option func(*Client)
+
+func WithServiceSecret(secret string) Option {
+	return func(c *Client) {
+		c.serviceSecret = secret
+	}
+}
+
+func NewClient(baseURL string, httpClient *http.Client, opts ...Option) *Client {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 30 * time.Second}
+	}
+	c := &Client{
+		baseURL:    strings.TrimRight(baseURL, "/"),
+		httpClient: httpClient,
+	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
+}
+
+// Header* and Status* below mirror the canonical wire contract
+// defined in github.com/tinfoilsh/controlplane/pkg/contract
+// (headers.go, sentinels.go, wirecodes.go). Keeping a local copy
+// rather than importing the controlplane module preserves the
+// enclave's standalone build surface (see go.mod — no controlplane
+// dependency by design); the pin test in client_contract_test.go
+// fails CI if any constant drifts from the canonical value.
+//
+// HeaderContentType / HeaderServiceSecret / HeaderAuth are enclave-only
+// (not part of the public /api/sync/* contract) and live here for
+// convenience; the same applies to StatusLegacyBlobNotMigrated, which
+// the enclave returns to its own clients but the controlplane does not
+// emit.
+const (
+	HeaderAuth                = "Authorization"
+	HeaderKeyID               = "X-Key-Id"
+	HeaderIfMatch             = "If-Match"
+	HeaderIdempotency         = "X-Idempotency-Key"
+	HeaderOperationHash       = "X-Operation-Hash"
+	HeaderSyncProtocol        = "X-Sync-Protocol"
+	HeaderProfileSyncProtocol = "X-Profile-Sync-Protocol"
+	HeaderProjectID           = "X-Project-Id"
+	HeaderProjectIDSet        = "X-Project-Id-Set"
+	HeaderAttachmentRefs      = "X-Attachment-Refs"
+	HeaderActivityAt          = "X-Activity-At"
+	HeaderETag                = "ETag"
+	HeaderRequestID           = "X-Request-ID"
+	HeaderSearchIndexFenced   = "X-Search-Index-Fenced"
+	HeaderContentType         = "Content-Type"
+	HeaderServiceSecret       = "X-Sync-Enclave-Secret"
+	// HeaderClerkUserID carries the user id the enclave already
+	// verified out of the user's JWT. Paired with HeaderServiceSecret
+	// it stands in for a fresh Clerk bearer token on the
+	// controlplane, so long migrations do not break when the proxied
+	// JWT expires mid-loop.
+	HeaderClerkUserID = "X-Clerk-User-Id"
+)
+
+const (
+	IfMatchCreateOnly     = "0"
+	IfMatchAnyKey         = "*"
+	SyncProtocolV3        = 3
+	ProfileSyncProtocolV2 = 2
+)
+
+const (
+	StatusPreconditionRequired       = "PRECONDITION_REQUIRED"
+	StatusStaleKey                   = "STALE_KEY"
+	StatusStaleBlob                  = "STALE_BLOB"
+	StatusMissingAttachment          = "MISSING_ATTACHMENT"
+	StatusAttachmentPurgeInProgress  = "ATTACHMENT_PURGE_IN_PROGRESS"
+	StatusExistingDataUnderOtherKey  = "EXISTING_DATA_UNDER_OTHER_KEY"
+	StatusIdempotencyConflict        = "IDEMPOTENCY_CONFLICT"
+	StatusSearchIndexConflict        = "SEARCH_INDEX_CONFLICT"
+	StatusProfileSyncUpgradeRequired = "PROFILE_SYNC_UPGRADE_REQUIRED"
+	StatusSyncSnapshotRequired       = "SYNC_SNAPSHOT_REQUIRED"
+	StatusLegacyBlobNotMigrated      = "LEGACY_BLOB_NOT_MIGRATED"
+)
+
+// maxLegacyAttachmentBytes caps the body read for legacy attachment
+// downloads. var (not const) so package tests can shrink it to keep
+// oversized-body regressions cheap to exercise.
+var maxLegacyAttachmentBytes = 64 << 20
+
+var maxSyncJSONResponseBytes = 32 << 20
+
+const (
+	PutBlobAttemptTimeout = 20 * time.Second
+	PutBlobMaxAttempts    = 2
+)
+
+// Error is a structured error returned from the controlplane. It contains
+// the parsed error code plus any contextual fields the controlplane sent.
+type Error struct {
+	StatusCode   int    `json:"-"`
+	Code         string `json:"code"`
+	Message      string `json:"message,omitempty"`
+	CurrentKeyID string `json:"current_key_id,omitempty"`
+	CurrentETag  string `json:"current_etag,omitempty"`
+	// CurrentRevision and OldestReplayableRevision accompany
+	// SYNC_SNAPSHOT_REQUIRED so a client that fell behind the replay
+	// window can bootstrap a snapshot without an extra summary call.
+	CurrentRevision          string `json:"current_revision,omitempty"`
+	OldestReplayableRevision string `json:"oldest_replayable_revision,omitempty"`
+	// MinimumProtocol accompanies upgrade-required errors (e.g.
+	// PROFILE_SYNC_UPGRADE_REQUIRED) and names the lowest protocol
+	// version the controlplane still accepts.
+	MinimumProtocol int `json:"minimum_protocol,omitempty"`
+	// MissingAttachments accompanies MISSING_ATTACHMENT: the ids the
+	// pushed chat referenced that the controlplane does not hold.
+	MissingAttachments []string        `json:"missing_attachments,omitempty"`
+	RetryAfterSeconds  int64           `json:"retry_after_seconds,omitempty"`
+	Raw                json.RawMessage `json:"-"`
+}
+
+func (e *Error) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	if e.Code != "" {
+		return fmt.Sprintf("controlplane: %s (status %d)", e.Code, e.StatusCode)
+	}
+	if e.Message != "" {
+		return fmt.Sprintf("controlplane: %s (status %d)", e.Message, e.StatusCode)
+	}
+	return fmt.Sprintf("controlplane: status %d", e.StatusCode)
+}
+
+// BlobMeta describes one row's controlplane-visible metadata. ETag is the
+// CAS token; KeyID is the row's last writer's KeyID. ProjectID is a
+// chat-scope side-channel that lets clients observe cross-project moves
+// without decrypting the row.
+type BlobMeta struct {
+	ID        string    `json:"id"`
+	ETag      string    `json:"etag"`
+	KeyID     string    `json:"key_id"`
+	ProjectID *string   `json:"project_id,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
+	// ActivityAt is a chat row's list-ordering time: its last
+	// conversation activity, or UpdatedAt when none was recorded.
+	ActivityAt *time.Time `json:"activity_at,omitempty"`
+	Cursor     string     `json:"cursor,omitempty"`
+}
+
+type BlobDelete struct {
+	ID        string    `json:"id"`
+	Scope     string    `json:"scope"`
+	DeletedAt time.Time `json:"deleted_at"`
+	Cursor    string    `json:"cursor,omitempty"`
+}
+
+type ListStatusResponse struct {
+	Updates    []BlobMeta   `json:"updates"`
+	Deletes    []BlobDelete `json:"deletes"`
+	NextCursor string       `json:"next_cursor,omitempty"`
+}
+
+const (
+	RevisionSummaryPath   = "/api/sync/revision-summary"
+	RevisionEventsPath    = "/api/sync/revision-events"
+	RevisionSnapshotPath  = "/api/sync/revision-snapshot"
+	DeleteAllProjectsPath = "/api/sync/blob/projects"
+)
+
+type RevisionSummaryResponse struct {
+	CurrentRevision          string `json:"current_revision"`
+	OldestReplayableRevision string `json:"oldest_replayable_revision"`
+}
+
+type RevisionEvent struct {
+	Revision  string  `json:"revision"`
+	Kind      string  `json:"kind"`
+	ID        string  `json:"id"`
+	ETag      string  `json:"etag,omitempty"`
+	KeyID     string  `json:"key_id,omitempty"`
+	ProjectID *string `json:"project_id"`
+	UpdatedAt string  `json:"updated_at"`
+}
+
+type RevisionEventsResponse struct {
+	Events     []RevisionEvent `json:"events"`
+	NextCursor string          `json:"next_cursor,omitempty"`
+}
+
+type RevisionSnapshotItem struct {
+	ID        string  `json:"id"`
+	ETag      string  `json:"etag"`
+	KeyID     string  `json:"key_id"`
+	ProjectID *string `json:"project_id"`
+	UpdatedAt string  `json:"updated_at"`
+	// ActivityAt is the chat's list-ordering time: its last
+	// conversation activity, or UpdatedAt when none was recorded.
+	ActivityAt string `json:"activity_at,omitempty"`
+}
+
+type RevisionSnapshotResponse struct {
+	Items            []RevisionSnapshotItem `json:"items"`
+	SnapshotRevision string                 `json:"snapshot_revision"`
+	NextCursor       string                 `json:"next_cursor,omitempty"`
+}
+
+type PutBlobRequest struct {
+	Scope string
+	ID    string
+	JWT   string
+	// ClerkUserID is the verified subject from the user JWT at the
+	// enclave's auth boundary. Forwarded as X-Clerk-User-Id so the
+	// controlplane can accept the call via service auth and skip
+	// re-verifying the proxied JWT, which may expire mid-migration.
+	ClerkUserID         string
+	KeyIDHex            string
+	IfMatch             string
+	IdempotencyKey      string
+	OperationHash       string
+	RequestID           string
+	ProfileSyncProtocol int
+	Rewrap              bool
+	Ciphertext          []byte
+	// ProjectIDSet means "overwrite the controlplane's project_id
+	// column with ProjectID". When ProjectIDSet is false the column
+	// is left untouched. Nil ProjectID + ProjectIDSet=true clears
+	// the column. Only meaningful for chat scope.
+	ProjectIDSet bool
+	ProjectID    *string
+	// AttachmentRefs lists the buckets-backed attachment ids the chat
+	// plaintext references. Sent as X-Attachment-Refs on every chat
+	// push (empty list included) so the controlplane can track which
+	// index rows are live and purge the rest. Nil means "do not send
+	// the header", which is only correct for non-chat scopes.
+	AttachmentRefs []string
+	// ActivityAt is the chat's last conversation activity derived from
+	// the plaintext, sent as X-Activity-At. Nil omits the header, which
+	// makes the controlplane order the row by its write time.
+	ActivityAt *time.Time
+}
+
+type PutBlobResponse struct {
+	ETag           string `json:"etag"`
+	KeyID          string `json:"key_id"`
+	SourceRevision int64  `json:"source_revision,omitempty"`
+}
+
+type PutBlobAmbiguity string
+
+const (
+	PutBlobTransportFailure PutBlobAmbiguity = "transport_failure"
+	PutBlobUpstreamFailure  PutBlobAmbiguity = "upstream_failure"
+	PutBlobResponseRead     PutBlobAmbiguity = "response_read_failure"
+	PutBlobResponseDecode   PutBlobAmbiguity = "response_decode_failure"
+	PutBlobInvalidResponse  PutBlobAmbiguity = "invalid_response"
+)
+
+// AmbiguousPutBlobError identifies an attempt whose write may have committed
+// even though the client could not confirm its outcome.
+type AmbiguousPutBlobError struct {
+	Kind PutBlobAmbiguity
+	Err  error
+}
+
+func (e *AmbiguousPutBlobError) Error() string {
+	return fmt.Sprintf("controlplane: ambiguous PutBlob outcome (%s): %v", e.Kind, e.Err)
+}
+
+func (e *AmbiguousPutBlobError) Unwrap() error { return e.Err }
+
+// PutBlobOutcomeUnknownError means a dispatched write could not be confirmed,
+// so the caller must reconcile before writing again.
+type PutBlobOutcomeUnknownError struct {
+	Err error
+}
+
+func (e *PutBlobOutcomeUnknownError) Error() string {
+	return fmt.Sprintf("controlplane: PutBlob outcome unknown: %v", e.Err)
+}
+
+func (e *PutBlobOutcomeUnknownError) Unwrap() error { return e.Err }
+
+type GetBlobResponse struct {
+	Ciphertext   []byte
+	ETag         string
+	KeyID        string
+	ProjectIDSet bool
+	ProjectID    *string
+	// ActivityAt is the chat row's recorded activity time. Nil means the
+	// row predates activity tracking and sorts by its write time.
+	ActivityAt *time.Time
+}
+
+func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
+	if c.serviceSecret != "" {
+		req.Header.Set(HeaderServiceSecret, c.serviceSecret)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("controlplane: request: %w", err)
+	}
+	return resp, nil
+}
+
+// addAuth stamps the Authorization header and, when the caller passes
+// the user id verified at the enclave's auth boundary, the
+// X-Clerk-User-Id header that lets controlplane accept the request
+// via service auth without re-verifying a JWT that may expire
+// mid-migration. The user id is REQUIRED to be the verified
+// `sess.Claims.Subject` from the caller — never extracted from the
+// JWT payload here, so a malformed or attacker-supplied token cannot
+// influence the asserted identity.
+func (c *Client) addAuth(req *http.Request, rawJWT, clerkUserID string) {
+	if rawJWT != "" {
+		req.Header.Set(HeaderAuth, "Bearer "+rawJWT)
+	}
+	if clerkUserID != "" {
+		req.Header.Set(HeaderClerkUserID, clerkUserID)
+	}
+}
+
+func (c *Client) urlFor(scope, id string) (string, error) {
+	path, err := PathFor(scope, id)
+	if err != nil {
+		return "", err
+	}
+	return c.baseURL + path, nil
+}
+
+// PathFor returns the controlplane path (no scheme/host) for a given
+// scope+id. Exported so callers — most importantly the operation-hash
+// builder — can produce a canonical tuple that exactly matches what
+// will be sent on the wire.
+//
+// All blob traffic lives under /api/sync/blob/* — a dedicated surface
+// for the enclave that does not overlap with the legacy /api/storage/*
+// and /api/profile/* endpoints the webapp drives directly today.
+func PathFor(scope, id string) (string, error) {
+	switch scope {
+	case "chat":
+		return "/api/sync/blob/chat/" + url.PathEscape(id), nil
+	case "profile":
+		return "/api/sync/blob/profile", nil
+	case "project":
+		return "/api/sync/blob/project/" + url.PathEscape(id), nil
+	case "project_document":
+		parent, doc, ok := splitProjectDocID(id)
+		if !ok {
+			return "", fmt.Errorf("controlplane: invalid project_document id %q", id)
+		}
+		return "/api/sync/blob/project_document/" + url.PathEscape(parent) + "/" + url.PathEscape(doc), nil
+	}
+	return "", fmt.Errorf("controlplane: unknown scope %q", scope)
+}
+
+func splitProjectDocID(id string) (parent, doc string, ok bool) {
+	idx := strings.Index(id, "/")
+	if idx <= 0 || idx == len(id)-1 {
+		return "", "", false
+	}
+	return id[:idx], id[idx+1:], true
+}
+
+func (c *Client) PutBlob(ctx context.Context, req PutBlobRequest) (*PutBlobResponse, error) {
+	if req.Rewrap {
+		return c.rewrapBlob(ctx, req)
+	}
+	for attempt := 0; attempt < PutBlobMaxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		resp, err := c.putBlobOnce(ctx, req)
+		if err == nil {
+			return resp, nil
+		}
+		var ambiguous *AmbiguousPutBlobError
+		if !errors.As(err, &ambiguous) {
+			return nil, err
+		}
+		if ctx.Err() != nil || attempt == PutBlobMaxAttempts-1 {
+			return nil, &PutBlobOutcomeUnknownError{Err: err}
+		}
+	}
+	panic("unreachable")
+}
+
+func (c *Client) putBlobOnce(ctx context.Context, req PutBlobRequest) (*PutBlobResponse, error) {
+	endpoint, err := c.urlFor(req.Scope, req.ID)
+	if err != nil {
+		return nil, err
+	}
+	attemptCtx, cancel := context.WithTimeout(ctx, PutBlobAttemptTimeout)
+	defer cancel()
+	httpReq, err := http.NewRequestWithContext(attemptCtx, http.MethodPut, endpoint, bytes.NewReader(req.Ciphertext))
+	if err != nil {
+		return nil, err
+	}
+	// Disable net/http's transparent body replay so the bounded loop above is
+	// the only layer that can issue a second controlplane write.
+	httpReq.GetBody = nil
+	c.addAuth(httpReq, req.JWT, req.ClerkUserID)
+	httpReq.Header.Set(HeaderContentType, "application/octet-stream")
+	httpReq.Header.Set(HeaderKeyID, req.KeyIDHex)
+	if req.IfMatch != "" {
+		httpReq.Header.Set(HeaderIfMatch, req.IfMatch)
+	}
+	if req.IdempotencyKey != "" {
+		httpReq.Header.Set(HeaderIdempotency, req.IdempotencyKey)
+	}
+	if req.OperationHash != "" {
+		httpReq.Header.Set(HeaderOperationHash, req.OperationHash)
+	}
+	if req.RequestID != "" {
+		httpReq.Header.Set(HeaderRequestID, req.RequestID)
+	}
+	if req.ProfileSyncProtocol > 0 {
+		httpReq.Header.Set(HeaderProfileSyncProtocol, strconv.Itoa(req.ProfileSyncProtocol))
+	}
+	if req.ProjectIDSet {
+		httpReq.Header.Set(HeaderProjectIDSet, "1")
+		if req.ProjectID != nil {
+			httpReq.Header.Set(HeaderProjectID, *req.ProjectID)
+		}
+	}
+	if req.AttachmentRefs != nil {
+		httpReq.Header.Set(HeaderAttachmentRefs, strings.Join(req.AttachmentRefs, ","))
+	}
+	if req.ActivityAt != nil {
+		httpReq.Header.Set(HeaderActivityAt, req.ActivityAt.UTC().Format(time.RFC3339Nano))
+	}
+	resp, err := c.doRequest(httpReq)
+	if err != nil {
+		return nil, &AmbiguousPutBlobError{Kind: PutBlobTransportFailure, Err: err}
+	}
+	defer resp.Body.Close()
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 400 {
+		cpErr := parseError(resp.StatusCode, body)
+		if isRetryablePutBlobStatus(resp.StatusCode) {
+			return nil, &AmbiguousPutBlobError{Kind: PutBlobUpstreamFailure, Err: cpErr}
+		}
+		return nil, cpErr
+	}
+	if readErr != nil {
+		return nil, &AmbiguousPutBlobError{Kind: PutBlobResponseRead, Err: readErr}
+	}
+	var out PutBlobResponse
+	dec := json.NewDecoder(bytes.NewReader(body))
+	if err := dec.Decode(&out); err != nil {
+		return nil, &AmbiguousPutBlobError{Kind: PutBlobResponseDecode, Err: err}
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return nil, &AmbiguousPutBlobError{Kind: PutBlobResponseDecode, Err: errors.New("trailing data in PutBlob response")}
+	}
+	headerETag := resp.Header.Get(HeaderETag)
+	if out.ETag == "" && headerETag == "" {
+		return nil, &AmbiguousPutBlobError{Kind: PutBlobInvalidResponse, Err: errors.New("missing ETag in PutBlob response")}
+	}
+	if out.ETag != "" && headerETag != "" && out.ETag != headerETag {
+		return nil, &AmbiguousPutBlobError{Kind: PutBlobInvalidResponse, Err: errors.New("inconsistent ETag in PutBlob response")}
+	}
+	if out.ETag == "" {
+		out.ETag = headerETag
+	}
+	headerKeyID := resp.Header.Get(HeaderKeyID)
+	if out.KeyID != "" && headerKeyID != "" && out.KeyID != headerKeyID {
+		return nil, &AmbiguousPutBlobError{Kind: PutBlobInvalidResponse, Err: errors.New("inconsistent KeyID in PutBlob response")}
+	}
+	if out.KeyID == "" {
+		out.KeyID = headerKeyID
+	}
+	if out.KeyID == "" {
+		out.KeyID = req.KeyIDHex
+	}
+	return &out, nil
+}
+
+func isRetryablePutBlobStatus(status int) bool {
+	return status >= 500 && status <= 599
+}
+
+// rewrapBlob targets the dedicated /api/sync/rewrap endpoint. Unlike
+// PutBlob's primary path, rewrap is a JSON POST with the ciphertext
+// base64-encoded inside the body. The controlplane handler updates
+// the row's `data` + `key_id` + `etag` without bumping `sync_version`
+// or `updated_at` — a rewrap is invisible to user-facing sync.
+// RewrapPath is the controlplane path for the dedicated rewrap
+// endpoint. Exported so the enclave can hash the same canonical path
+// when computing X-Operation-Hash.
+const RewrapPath = "/api/sync/rewrap"
+
+// RewrapBody marshals the body the rewrap call sends to the
+// controlplane. Exported so the enclave can compute X-Operation-Hash
+// over exactly the bytes that will hit the wire.
+func RewrapBody(req PutBlobRequest) ([]byte, error) {
+	return json.Marshal(map[string]string{
+		"scope":          req.Scope,
+		"id":             req.ID,
+		"key_id":         req.KeyIDHex,
+		"if_match":       req.IfMatch,
+		"ciphertext_b64": base64.StdEncoding.EncodeToString(req.Ciphertext),
+	})
+}
+
+func (c *Client) rewrapBlob(ctx context.Context, req PutBlobRequest) (*PutBlobResponse, error) {
+	body, err := RewrapBody(req)
+	if err != nil {
+		return nil, err
+	}
+	endpoint := c.baseURL + RewrapPath
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	c.addAuth(httpReq, req.JWT, req.ClerkUserID)
+	httpReq.Header.Set(HeaderContentType, "application/json")
+	if req.IdempotencyKey != "" {
+		httpReq.Header.Set(HeaderIdempotency, req.IdempotencyKey)
+	}
+	if req.OperationHash != "" {
+		httpReq.Header.Set(HeaderOperationHash, req.OperationHash)
+	}
+	resp, err := c.doRequest(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 400 {
+		return nil, parseError(resp.StatusCode, respBody)
+	}
+	var out struct {
+		OK    bool   `json:"ok"`
+		ETag  string `json:"etag"`
+		KeyID string `json:"key_id"`
+	}
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return nil, fmt.Errorf("controlplane: decode rewrap: %w", err)
+	}
+	if out.ETag == "" {
+		return nil, errors.New("controlplane: missing etag in rewrap response")
+	}
+	if out.KeyID == "" {
+		out.KeyID = req.KeyIDHex
+	}
+	return &PutBlobResponse{ETag: out.ETag, KeyID: out.KeyID}, nil
+}
+
+func (c *Client) GetBlob(ctx context.Context, scope, id, jwt, clerkUserID string) (*GetBlobResponse, error) {
+	endpoint, err := c.urlFor(scope, id)
+	if err != nil {
+		return nil, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	c.addAuth(httpReq, jwt, clerkUserID)
+	resp, err := c.doRequest(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 400 {
+		return nil, parseError(resp.StatusCode, body)
+	}
+	out := &GetBlobResponse{
+		Ciphertext: body,
+		ETag:       resp.Header.Get(HeaderETag),
+		KeyID:      resp.Header.Get(HeaderKeyID),
+	}
+	if scope == "chat" && resp.Header.Get(HeaderProjectIDSet) == "1" {
+		out.ProjectIDSet = true
+		if projectID := resp.Header.Get(HeaderProjectID); projectID != "" {
+			out.ProjectID = &projectID
+		}
+	}
+	if scope == "chat" {
+		if activityAt, err := time.Parse(time.RFC3339Nano, resp.Header.Get(HeaderActivityAt)); err == nil {
+			out.ActivityAt = &activityAt
+		}
+	}
+	return out, nil
+}
+
+func (c *Client) HeadBlob(ctx context.Context, scope, id, jwt, clerkUserID string) (*BlobMeta, error) {
+	endpoint, err := c.urlFor(scope, id)
+	if err != nil {
+		return nil, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodHead, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	c.addAuth(httpReq, jwt, clerkUserID)
+	resp, err := c.doRequest(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return nil, parseError(resp.StatusCode, body)
+	}
+	return &BlobMeta{
+		ID:    id,
+		ETag:  resp.Header.Get(HeaderETag),
+		KeyID: resp.Header.Get(HeaderKeyID),
+	}, nil
+}
+
+type DeleteBlobRequest struct {
+	Scope          string
+	ID             string
+	JWT            string
+	ClerkUserID    string
+	IfMatch        string
+	IdempotencyKey string
+	OperationHash  string
+}
+
+// DeleteBlobResponse mirrors the controlplane's `writeDeleteResponse*`
+// shape. For chat deletes the controlplane returns the v2 attachment
+// ids it dropped, so the enclave can wipe the matching buckets blobs.
+// For non-chat scopes the field is empty.
+type DeleteBlobResponse struct {
+	OK                 bool     `json:"ok"`
+	WipedV2Attachments []string `json:"wiped_v2_attachments,omitempty"`
+	SourceRevision     int64    `json:"source_revision,omitempty"`
+}
+
+func (c *Client) DeleteBlob(ctx context.Context, req DeleteBlobRequest) (*DeleteBlobResponse, error) {
+	endpoint, err := c.urlFor(req.Scope, req.ID)
+	if err != nil {
+		return nil, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	c.addAuth(httpReq, req.JWT, req.ClerkUserID)
+	if req.IfMatch != "" {
+		httpReq.Header.Set(HeaderIfMatch, req.IfMatch)
+	}
+	if req.IdempotencyKey != "" {
+		httpReq.Header.Set(HeaderIdempotency, req.IdempotencyKey)
+	}
+	if req.OperationHash != "" {
+		httpReq.Header.Set(HeaderOperationHash, req.OperationHash)
+	}
+	resp, err := c.doRequest(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 400 {
+		return nil, parseError(resp.StatusCode, body)
+	}
+	out := &DeleteBlobResponse{}
+	if len(body) > 0 {
+		// The controlplane may return an empty body on older
+		// deploys; treat that as a successful no-attachments delete
+		// rather than an error.
+		if err := json.Unmarshal(body, out); err != nil {
+			return nil, fmt.Errorf("controlplane: decode delete response: %w", err)
+		}
+	}
+	return out, nil
+}
+
+type DeleteAllProjectsRequest struct {
+	JWT            string
+	ClerkUserID    string
+	KeyIDHex       string
+	IdempotencyKey string
+	OperationHash  string
+}
+
+type DeleteAllProjectsResponse struct {
+	OK      bool `json:"ok"`
+	Deleted int  `json:"deleted"`
+}
+
+func (c *Client) DeleteAllProjects(ctx context.Context, req DeleteAllProjectsRequest) (*DeleteAllProjectsResponse, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+DeleteAllProjectsPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	c.addAuth(httpReq, req.JWT, req.ClerkUserID)
+	httpReq.Header.Set(HeaderKeyID, req.KeyIDHex)
+	httpReq.Header.Set(HeaderIdempotency, req.IdempotencyKey)
+	httpReq.Header.Set(HeaderOperationHash, req.OperationHash)
+	resp, err := c.doRequest(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 400 {
+		return nil, parseError(resp.StatusCode, body)
+	}
+	if readErr != nil {
+		return nil, fmt.Errorf("controlplane: read delete-all-projects response: %w", readErr)
+	}
+	var out DeleteAllProjectsResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("controlplane: decode delete-all-projects response: %w", err)
+	}
+	return &out, nil
+}
+
+func (c *Client) ListStatus(ctx context.Context, scope, cursor string, limit int, jwt, clerkUserID, projectID, direction string) (*ListStatusResponse, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	endpoint := c.baseURL + "/api/sync/list-status"
+	q := url.Values{}
+	q.Set("scope", scope)
+	q.Set("limit", fmt.Sprintf("%d", limit))
+	if cursor != "" {
+		q.Set("cursor", cursor)
+	}
+	if projectID != "" {
+		q.Set("project_id", projectID)
+	}
+	if direction != "" {
+		q.Set("direction", direction)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"?"+q.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	c.addAuth(httpReq, jwt, clerkUserID)
+	resp, err := c.doRequest(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 400 {
+		return nil, parseError(resp.StatusCode, body)
+	}
+	var out ListStatusResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("controlplane: decode list-status: %w", err)
+	}
+	return &out, nil
+}
+
+func (c *Client) RevisionSummary(ctx context.Context, jwt, clerkUserID string) (*RevisionSummaryResponse, error) {
+	var out RevisionSummaryResponse
+	if err := c.getSyncJSON(ctx, RevisionSummaryPath, nil, jwt, clerkUserID, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) RevisionEvents(ctx context.Context, afterRevision, throughRevision, cursor string, limit *int, jwt, clerkUserID string) (*RevisionEventsResponse, error) {
+	query := url.Values{}
+	query.Set("after_revision", afterRevision)
+	query.Set("through_revision", throughRevision)
+	if cursor != "" {
+		query.Set("cursor", cursor)
+	}
+	if limit != nil {
+		query.Set("limit", strconv.Itoa(*limit))
+	}
+	var out RevisionEventsResponse
+	if err := c.getSyncJSON(ctx, RevisionEventsPath, query, jwt, clerkUserID, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) RevisionSnapshot(ctx context.Context, cursor string, limit *int, jwt, clerkUserID string) (*RevisionSnapshotResponse, error) {
+	query := url.Values{}
+	if cursor != "" {
+		query.Set("cursor", cursor)
+	}
+	if limit != nil {
+		query.Set("limit", strconv.Itoa(*limit))
+	}
+	var out RevisionSnapshotResponse
+	if err := c.getSyncJSON(ctx, RevisionSnapshotPath, query, jwt, clerkUserID, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) getSyncJSON(ctx context.Context, path string, query url.Values, jwt, clerkUserID string, out any) error {
+	endpoint := c.baseURL + path
+	if len(query) > 0 {
+		endpoint += "?" + query.Encode()
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	c.addAuth(httpReq, jwt, clerkUserID)
+	resp, err := c.doRequest(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxSyncJSONResponseBytes)+1))
+	if err != nil {
+		return err
+	}
+	if len(body) > maxSyncJSONResponseBytes {
+		return fmt.Errorf("controlplane: response for %s exceeds %d bytes", path, maxSyncJSONResponseBytes)
+	}
+	if resp.StatusCode >= 400 {
+		return parseError(resp.StatusCode, body)
+	}
+	if err := json.Unmarshal(body, out); err != nil {
+		return fmt.Errorf("controlplane: decode %s: %w", path, err)
+	}
+	return nil
+}
+
+const SearchIndexStatePath = "/api/sync/search-index"
+
+type SearchIndexState struct {
+	SourceRevision          int64  `json:"source_revision"`
+	PublicationGeneration   int64  `json:"publication_generation"`
+	FenceGeneration         int64  `json:"fence_generation"`
+	PublishedSourceRevision int64  `json:"published_source_revision"`
+	ObjectKey               string `json:"object_key,omitempty"`
+	KeyID                   string `json:"key_id,omitempty"`
+	Model                   string `json:"model,omitempty"`
+	Incomplete              bool   `json:"incomplete"`
+	PublicationIncomplete   bool   `json:"publication_incomplete"`
+}
+
+type PublishSearchIndexRequest struct {
+	JWT                   string
+	ClerkUserID           string
+	ExpectedGeneration    int64
+	ExpectedFence         int64
+	CoveredSourceRevision int64
+	ObjectKey             string
+	KeyID                 string
+	Model                 string
+	Incomplete            bool
+}
+
+type SearchIndexConflictError struct {
+	State SearchIndexState
+}
+
+func (e *SearchIndexConflictError) Error() string {
+	return "controlplane: search index publication conflict"
+}
+
+func (c *Client) GetSearchIndexState(ctx context.Context, jwt, clerkUserID string) (*SearchIndexState, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+SearchIndexStatePath, nil)
+	if err != nil {
+		return nil, err
+	}
+	c.addAuth(httpReq, jwt, clerkUserID)
+	resp, err := c.doRequest(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 400 {
+		return nil, parseError(resp.StatusCode, body)
+	}
+	var state SearchIndexState
+	if err := json.Unmarshal(body, &state); err != nil {
+		return nil, fmt.Errorf("controlplane: decode search index state: %w", err)
+	}
+	return &state, nil
+}
+
+func (c *Client) PublishSearchIndex(ctx context.Context, req PublishSearchIndexRequest) (*SearchIndexState, error) {
+	body, err := json.Marshal(map[string]any{
+		"expected_generation":     req.ExpectedGeneration,
+		"expected_fence":          req.ExpectedFence,
+		"covered_source_revision": req.CoveredSourceRevision,
+		"object_key":              req.ObjectKey,
+		"key_id":                  req.KeyID,
+		"model":                   req.Model,
+		"incomplete":              req.Incomplete,
+	})
+	if err != nil {
+		return nil, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPut, c.baseURL+SearchIndexStatePath, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	c.addAuth(httpReq, req.JWT, req.ClerkUserID)
+	httpReq.Header.Set(HeaderContentType, "application/json")
+	resp, err := c.doRequest(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusConflict {
+		var conflict struct {
+			Code  string           `json:"code"`
+			State SearchIndexState `json:"state"`
+		}
+		if err := json.Unmarshal(respBody, &conflict); err == nil && conflict.Code == StatusSearchIndexConflict {
+			return nil, &SearchIndexConflictError{State: conflict.State}
+		}
+	}
+	if resp.StatusCode >= 400 {
+		return nil, parseError(resp.StatusCode, respBody)
+	}
+	var state SearchIndexState
+	if err := json.Unmarshal(respBody, &state); err != nil {
+		return nil, fmt.Errorf("controlplane: decode published search index state: %w", err)
+	}
+	return &state, nil
+}
+
+type ListNeedsMigrationResponse struct {
+	IDs                []string `json:"ids"`
+	RetryableRemaining int      `json:"retryable_remaining"`
+	BlockedUnmigrated  int      `json:"blocked_unmigrated"`
+}
+
+func (c *Client) ListNeedsMigration(ctx context.Context, scope string, limit int, jwt, clerkUserID string) (*ListNeedsMigrationResponse, error) {
+	endpoint := c.baseURL + "/api/sync/needs-migration"
+	q := url.Values{}
+	q.Set("scope", scope)
+	q.Set("limit", fmt.Sprintf("%d", limit))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"?"+q.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	c.addAuth(httpReq, jwt, clerkUserID)
+	resp, err := c.doRequest(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 400 {
+		return nil, parseError(resp.StatusCode, body)
+	}
+	var out ListNeedsMigrationResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("controlplane: decode needs-migration: %w", err)
+	}
+	return &out, nil
+}
+
+// RecordMigrationFailure tells the controlplane that a migration attempt
+// for the given (scope, id) failed because none of the supplied keys could
+// decrypt the legacy blob. The controlplane stamps the row with the current
+// timestamp so it is excluded from the next batch until the 24h cooldown
+// elapses.
+func (c *Client) RecordMigrationFailure(ctx context.Context, scope, id, jwt, clerkUserID string) error {
+	endpoint := c.baseURL + "/api/sync/migration-failure"
+	body, _ := json.Marshal(map[string]string{"scope": scope, "id": id})
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	c.addAuth(httpReq, jwt, clerkUserID)
+	httpReq.Header.Set(HeaderContentType, "application/json")
+	resp, err := c.doRequest(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return parseError(resp.StatusCode, respBody)
+	}
+	return nil
+}
+
+// ChatActivityPath is the controlplane endpoint that fills in the
+// activity time of a chat row written before it was tracked.
+const ChatActivityPath = "/api/sync/chat-activity"
+
+// BackfillChatActivity records the activity time derived from a chat
+// whose row has none. The controlplane applies it only while the row is
+// still at etag and has no activity time, so losing that race is not an
+// error.
+func (c *Client) BackfillChatActivity(ctx context.Context, jwt, clerkUserID, id, etag string, activityAt time.Time) error {
+	body, err := json.Marshal(map[string]string{
+		"id":          id,
+		"etag":        etag,
+		"activity_at": activityAt.UTC().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		return err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+ChatActivityPath, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	c.addAuth(httpReq, jwt, clerkUserID)
+	httpReq.Header.Set(HeaderContentType, "application/json")
+	resp, err := c.doRequest(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return parseError(resp.StatusCode, respBody)
+	}
+	return nil
+}
+
+// --- key registry ----------------------------------------------------------
+
+type CurrentKeyResponse struct {
+	KeyID      string                      `json:"key_id"`
+	ETag       string                      `json:"etag"`
+	Bundles    map[string]CurrentKeyBundle `json:"bundles"`
+	CreatedVia string                      `json:"created_via"`
+	// CreatedAt and RegisteredAt are decoded as the controlplane's
+	// already-formatted RFC3339 strings, not time.Time. The no-key
+	// response carries an empty `created_at`, which fails time.Time
+	// decoding; keeping them as strings tolerates that and avoids a
+	// lossy parse-then-reformat round-trip on the way to the client.
+	CreatedAt string `json:"created_at"`
+	HasData   bool   `json:"has_data"`
+}
+
+type CurrentKeyBundle struct {
+	CredentialID  string `json:"credential_id"`
+	KEKIV         string `json:"kek_iv"`
+	EncryptedKeys string `json:"encrypted_keys"`
+	RegisteredAt  string `json:"registered_at"`
+}
+
+func (c *Client) GetCurrentKey(ctx context.Context, jwt, clerkUserID string) (*CurrentKeyResponse, error) {
+	endpoint := c.baseURL + "/api/sync/keys/current"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	c.addAuth(httpReq, jwt, clerkUserID)
+	resp, err := c.doRequest(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if resp.StatusCode >= 400 {
+		return nil, parseError(resp.StatusCode, body)
+	}
+	var out CurrentKeyResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("controlplane: decode current-key: %w", err)
+	}
+	return &out, nil
+}
+
+type RegisterKeyRequest struct {
+	JWT            string
+	ClerkUserID    string
+	KeyIDHex       string
+	IfMatch        string
+	CreatedVia     string
+	IdempotencyKey string
+	OperationHash  string
+	InitialBundle  *RegisterKeyBundle
+}
+
+type RegisterKeyBundle struct {
+	CredentialID  string `json:"credential_id"`
+	KEKIV         string `json:"kek_iv"`
+	EncryptedKeys string `json:"encrypted_keys"`
+}
+
+// RegisterKeyBody returns the JSON body bytes that will be sent for the
+// given RegisterKey request. Exported so callers can hash the exact
+// bytes that go on the wire as part of the operation-hash canonical tuple.
+func RegisterKeyBody(req RegisterKeyRequest) ([]byte, error) {
+	payload := map[string]any{
+		"key_id":      req.KeyIDHex,
+		"created_via": req.CreatedVia,
+	}
+	if req.InitialBundle != nil {
+		payload["initial_bundle"] = req.InitialBundle
+	}
+	return json.Marshal(payload)
+}
+
+// RegisterKeyPath is the controlplane path the RegisterKey call targets.
+const RegisterKeyPath = "/api/sync/keys"
+
+// RegisterKeyResponse mirrors the wire body the controlplane emits on
+// a successful `POST /api/sync/keys`. `WipedV2Attachments` is
+// populated only when the call hit the start-fresh bypass; on every
+// other path it is nil/empty.
+type RegisterKeyResponse struct {
+	OK                 bool     `json:"ok"`
+	KeyID              string   `json:"key_id"`
+	ETag               string   `json:"etag"`
+	SearchIndexFenced  bool     `json:"-"`
+	WipedV2Attachments []string `json:"wiped_v2_attachments,omitempty"`
+}
+
+func (c *Client) RegisterKey(ctx context.Context, req RegisterKeyRequest) (*RegisterKeyResponse, error) {
+	endpoint := c.baseURL + RegisterKeyPath
+	body, err := RegisterKeyBody(req)
+	if err != nil {
+		return nil, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	c.addAuth(httpReq, req.JWT, req.ClerkUserID)
+	httpReq.Header.Set(HeaderContentType, "application/json")
+	if req.IfMatch != "" {
+		httpReq.Header.Set(HeaderIfMatch, req.IfMatch)
+	}
+	if req.IdempotencyKey != "" {
+		httpReq.Header.Set(HeaderIdempotency, req.IdempotencyKey)
+	}
+	if req.OperationHash != "" {
+		httpReq.Header.Set(HeaderOperationHash, req.OperationHash)
+	}
+	resp, err := c.doRequest(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 400 {
+		return nil, parseError(resp.StatusCode, respBody)
+	}
+	out := &RegisterKeyResponse{}
+	if len(respBody) > 0 {
+		if err := json.Unmarshal(respBody, out); err != nil {
+			return nil, fmt.Errorf("controlplane: decode register-key response: %w", err)
+		}
+	}
+	out.SearchIndexFenced = strings.EqualFold(resp.Header.Get(HeaderSearchIndexFenced), "true")
+	return out, nil
+}
+
+type AddBundleRequest struct {
+	JWT            string
+	ClerkUserID    string
+	KeyIDHex       string
+	CredentialID   string
+	KEKIV          string
+	EncryptedKeys  string
+	IdempotencyKey string
+	OperationHash  string
+}
+
+// AddBundleBody marshals the body of an add-bundle request. Exposed so
+// the enclave can hash exactly what will hit the wire when computing
+// X-Operation-Hash.
+func AddBundleBody(req AddBundleRequest) ([]byte, error) {
+	return json.Marshal(map[string]string{
+		"credential_id":  req.CredentialID,
+		"kek_iv":         req.KEKIV,
+		"encrypted_keys": req.EncryptedKeys,
+	})
+}
+
+// AddBundlePath is the controlplane path for the add-bundle endpoint.
+// Used by the enclave to keep the op-hash canonical path aligned
+// with the actual wire path.
+func AddBundlePath(keyIDHex string) string {
+	return "/api/sync/keys/" + url.PathEscape(keyIDHex) + "/bundles"
+}
+
+func (c *Client) AddBundle(ctx context.Context, req AddBundleRequest) error {
+	endpoint := c.baseURL + AddBundlePath(req.KeyIDHex)
+	body, err := AddBundleBody(req)
+	if err != nil {
+		return err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	c.addAuth(httpReq, req.JWT, req.ClerkUserID)
+	httpReq.Header.Set(HeaderContentType, "application/json")
+	if req.IdempotencyKey != "" {
+		httpReq.Header.Set(HeaderIdempotency, req.IdempotencyKey)
+	}
+	if req.OperationHash != "" {
+		httpReq.Header.Set(HeaderOperationHash, req.OperationHash)
+	}
+	resp, err := c.doRequest(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 400 {
+		return parseError(resp.StatusCode, respBody)
+	}
+	return nil
+}
+
+type RemoveBundleRequest struct {
+	JWT            string
+	ClerkUserID    string
+	KeyIDHex       string
+	CredentialID   string
+	IdempotencyKey string
+	OperationHash  string
+}
+
+// RemoveBundlePath returns the canonical wire path for a remove-bundle
+// request so callers can compute the op-hash over the same string.
+func RemoveBundlePath(keyIDHex, credentialID string) string {
+	return "/api/sync/keys/" + url.PathEscape(keyIDHex) + "/bundles/" + url.PathEscape(credentialID)
+}
+
+func (c *Client) RemoveBundle(ctx context.Context, req RemoveBundleRequest) error {
+	endpoint := c.baseURL + RemoveBundlePath(req.KeyIDHex, req.CredentialID)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	c.addAuth(httpReq, req.JWT, req.ClerkUserID)
+	if req.IdempotencyKey != "" {
+		httpReq.Header.Set(HeaderIdempotency, req.IdempotencyKey)
+	}
+	if req.OperationHash != "" {
+		httpReq.Header.Set(HeaderOperationHash, req.OperationHash)
+	}
+	resp, err := c.doRequest(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 400 {
+		return parseError(resp.StatusCode, respBody)
+	}
+	return nil
+}
+
+func parseError(status int, body []byte) error {
+	if len(body) == 0 {
+		return &Error{StatusCode: status}
+	}
+	var e Error
+	if err := json.Unmarshal(body, &e); err != nil {
+		return &Error{StatusCode: status, Message: string(body), Raw: body}
+	}
+	e.StatusCode = status
+	e.Raw = body
+	return &e
+}
+
+// IsCode reports whether err is a controlplane error with the given code.
+func IsCode(err error, code string) bool {
+	var e *Error
+	if !errors.As(err, &e) {
+		return false
+	}
+	return e.Code == code
+}
+
+// GetLegacyAttachment fetches the raw ciphertext for a v0/v1
+// attachment from controlplane's BYTEA-backed storage. Used by the
+// rewrap path to migrate attachments into buckets.tinfoil.sh: the
+// enclave reads the ciphertext, decrypts it with the per-attachment
+// key embedded in the chat JSON, re-uploads through buckets, and
+// then registers a v2 index row (which nulls the BYTEA column).
+// A 404 surfaces as ErrLegacyAttachmentNotFound so the caller can
+// treat already-migrated rows as a no-op.
+//
+// Returns the ciphertext alongside the controlplane's X-Legacy-Claim
+// header so the caller can verify CP signed off on this specific
+// (user, attachment) pair before promoting it to v2.
+var ErrLegacyAttachmentNotFound = errors.New("controlplane: legacy attachment not found")
+
+// ErrLegacyAttachmentGone is returned when the controlplane answers
+// 410: the attachment has already been promoted to v2 buckets storage,
+// so there is no legacy ciphertext left to re-seal. The rewrap caller
+// treats this exactly like not-found — a no-op skip — because the
+// chat's embedded per-attachment key already addresses the v2 slot.
+var ErrLegacyAttachmentGone = errors.New("controlplane: legacy attachment already migrated to v2")
+
+// HeaderLegacyClaim names the response header carrying the CP-signed
+// claim that authorizes a legacy attachment re-seal for a specific
+// user. Lives in controlplane/client.go so both enclave and CP can
+// import the canonical constant.
+const HeaderLegacyClaim = "X-Legacy-Claim"
+
+// LegacyAttachmentResponse is the result of GetLegacyAttachment. Claim
+// is empty when CP did not stamp the header (only possible in dev
+// mode with no shared secret configured); the caller MUST treat the
+// missing header as a hard failure in production.
+type LegacyAttachmentResponse struct {
+	Ciphertext []byte
+	Claim      string
+}
+
+func (c *Client) GetLegacyAttachment(ctx context.Context, jwt, clerkUserID, attachmentID string) (LegacyAttachmentResponse, error) {
+	if attachmentID == "" {
+		return LegacyAttachmentResponse{}, fmt.Errorf("controlplane: attachment id is required")
+	}
+	endpoint := c.baseURL + "/api/storage/attachment/" + url.PathEscape(attachmentID)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return LegacyAttachmentResponse{}, err
+	}
+	c.addAuth(httpReq, jwt, clerkUserID)
+	resp, err := c.doRequest(httpReq)
+	if err != nil {
+		return LegacyAttachmentResponse{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return LegacyAttachmentResponse{}, ErrLegacyAttachmentNotFound
+	}
+	if resp.StatusCode == http.StatusGone {
+		return LegacyAttachmentResponse{}, ErrLegacyAttachmentGone
+	}
+	if resp.StatusCode/100 != 2 {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return LegacyAttachmentResponse{}, parseError(resp.StatusCode, raw)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxLegacyAttachmentBytes)+1))
+	if err != nil {
+		return LegacyAttachmentResponse{}, err
+	}
+	if len(body) > maxLegacyAttachmentBytes {
+		return LegacyAttachmentResponse{}, fmt.Errorf("controlplane: legacy attachment exceeds %d bytes", maxLegacyAttachmentBytes)
+	}
+	return LegacyAttachmentResponse{
+		Ciphertext: body,
+		Claim:      resp.Header.Get(HeaderLegacyClaim),
+	}, nil
+}
+
+// RegisterAttachmentIndex records ownership of a v2 attachment with
+// controlplane. The ciphertext itself lives in buckets.tinfoil.sh
+// under a path the enclave derived from (CEK, attachmentID); the
+// controlplane only learns "this attachment id exists for this chat,
+// owned by this user, in v2 format." JWT is forwarded so the
+// controlplane resolves the user from claims, exactly like every
+// other sync route.
+func (c *Client) RegisterAttachmentIndex(ctx context.Context, jwt, clerkUserID, attachmentID, chatID string) error {
+	return c.postAttachmentChatID(
+		ctx,
+		jwt,
+		clerkUserID,
+		attachmentID,
+		chatID,
+		"/api/sync/attachment-index/",
+		"attachment index",
+	)
+}
+
+// ImportOutcomeStatus tells the controlplane whether an import job
+// finished or stopped early so it can pick the matching email.
+type ImportOutcomeStatus string
+
+const (
+	ImportOutcomeCompleted ImportOutcomeStatus = "completed"
+	ImportOutcomeFailed    ImportOutcomeStatus = "failed"
+)
+
+// ImportOutcome is the payload for the import notification callback.
+// FailureReason and FailureDetail are only set when Status is
+// ImportOutcomeFailed and carry the enclave's user-safe classification
+// and the check that fired, never raw error text.
+type ImportOutcome struct {
+	ClerkUserID   string
+	JobID         string
+	Source        string
+	Status        ImportOutcomeStatus
+	Imported      int
+	Failed        int
+	FailureReason string
+	FailureDetail string
+}
+
+// NotifyImportOutcome asks the controlplane to email the user that an
+// off-device chat import finished or failed. The enclave has no JWT to
+// forward for a detached job (it may have expired mid-import), so this
+// is a service-secret call that asserts the user only via
+// X-Clerk-User-Id.
+func (c *Client) NotifyImportOutcome(ctx context.Context, outcome ImportOutcome) error {
+	if outcome.ClerkUserID == "" {
+		return fmt.Errorf("controlplane: clerk user id is required")
+	}
+	payload := map[string]any{
+		"jobId":         outcome.JobID,
+		"source":        outcome.Source,
+		"status":        string(outcome.Status),
+		"importedCount": outcome.Imported,
+		"failedCount":   outcome.Failed,
+	}
+	if outcome.Status == ImportOutcomeFailed && outcome.FailureReason != "" {
+		payload["failureReason"] = outcome.FailureReason
+		if outcome.FailureDetail != "" {
+			payload["failureDetail"] = outcome.FailureDetail
+		}
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	clerkUserID := outcome.ClerkUserID
+	endpoint := c.baseURL + "/api/sync/notify-import-complete"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	c.addAuth(httpReq, "", clerkUserID)
+	resp, err := c.doRequest(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return parseError(resp.StatusCode, raw)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
+}
+
+func (c *Client) DeleteAttachmentIndex(ctx context.Context, jwt, clerkUserID, attachmentID string) error {
+	if attachmentID == "" {
+		return fmt.Errorf("controlplane: attachment id is required")
+	}
+	endpoint := c.baseURL + "/api/sync/attachment-index/" + url.PathEscape(attachmentID)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	c.addAuth(httpReq, jwt, clerkUserID)
+	resp, err := c.doRequest(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return parseError(resp.StatusCode, raw)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
+}
+
+// ReservePendingAttachmentWrite asks controlplane to stamp a guard
+// row before the enclave writes bytes to buckets. A duplicate
+// reservation for the same id is a no-op, so retries of the same
+// upload don't proliferate guard rows. The companion call
+// RegisterAttachmentIndex clears the row inside the same DB
+// transaction; the sweeper drains anything that times out.
+func (c *Client) ReservePendingAttachmentWrite(ctx context.Context, jwt, clerkUserID, attachmentID, chatID string) error {
+	return c.postAttachmentChatID(
+		ctx,
+		jwt,
+		clerkUserID,
+		attachmentID,
+		chatID,
+		"/api/sync/pending-attachments/",
+		"pending attachment",
+	)
+}
+
+// postAttachmentChatID is the shared transport for the two
+// attachment-scoped POSTs that take a `{chat_id}` body keyed by
+// attachment id in the URL (attachment-index registration and the
+// pending-write ledger reservation). Factored out so the two paths
+// can't drift in headers, auth, or success-body handling.
+func (c *Client) postAttachmentChatID(
+	ctx context.Context,
+	jwt, clerkUserID, attachmentID, chatID, pathPrefix, opLabel string,
+) error {
+	if attachmentID == "" {
+		return fmt.Errorf("controlplane: attachment id is required")
+	}
+	if chatID == "" {
+		return fmt.Errorf("controlplane: chat id is required")
+	}
+	body, err := json.Marshal(struct {
+		ChatID string `json:"chat_id"`
+	}{ChatID: chatID})
+	if err != nil {
+		return fmt.Errorf("controlplane: marshal %s: %w", opLabel, err)
+	}
+	endpoint := c.baseURL + pathPrefix + url.PathEscape(attachmentID)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	c.addAuth(httpReq, jwt, clerkUserID)
+	httpReq.Header.Set(HeaderContentType, "application/json")
+	resp, err := c.doRequest(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return parseError(resp.StatusCode, raw)
+	}
+	// Drain the success body so the HTTP/1.1 connection can be reused.
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
+}
+
+// PendingAttachmentRow is one entry from a sweep response: the
+// abandoned attachment id, its owner, and the chat it was meant for.
+// The enclave's sweeper uses (clerk_user_id, attachment_id) to drive
+// the buckets-side cleanup before logging the reconciliation.
+type PendingAttachmentRow struct {
+	AttachmentID string `json:"attachment_id"`
+	ChatID       string `json:"chat_id"`
+	ClerkUserID  string `json:"clerk_user_id"`
+}
+
+// SweepPendingAttachmentWrites pulls the next batch of expired guard
+// rows from controlplane. The rows are deleted from the pending
+// ledger by the same call, so the caller is the sole owner of the
+// cleanup obligation for the returned ids. Enclave-only — the route
+// is gated by the sync enclave service secret on the CP side.
+func (c *Client) SweepPendingAttachmentWrites(ctx context.Context, limit int) ([]PendingAttachmentRow, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	endpoint := c.baseURL + "/api/sync/pending-attachments/sweep?limit=" + strconv.Itoa(limit)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.doRequest(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 400 {
+		return nil, parseError(resp.StatusCode, body)
+	}
+	if readErr != nil {
+		return nil, fmt.Errorf("controlplane: read pending attachments sweep: %w", readErr)
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil, nil
+	}
+	var out struct {
+		Rows []PendingAttachmentRow `json:"rows"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("controlplane: decode pending attachments sweep: %w", err)
+	}
+	return out.Rows, nil
+}
+
+// OrphanAttachmentRow pairs an orphaned v2 attachment id with its
+// owning user so the reaper can address the buckets object under the
+// owner's per-user tenant prefix.
+type OrphanAttachmentRow struct {
+	AttachmentID string `json:"attachment_id"`
+	ClerkUserID  string `json:"clerk_user_id"`
+}
+
+type SearchIndexDeletion struct {
+	ID          string `json:"id"`
+	ClerkUserID string `json:"clerk_user_id"`
+	ObjectKey   string `json:"object_key"`
+}
+
+type SearchIndexDeletionClaim struct {
+	ClaimToken string                `json:"claim_token"`
+	Deletions  []SearchIndexDeletion `json:"deletions"`
+}
+
+func (c *Client) ClaimSearchIndexDeletions(ctx context.Context, batchSize int) (*SearchIndexDeletionClaim, error) {
+	body, err := json.Marshal(struct {
+		BatchSize int `json:"batch_size"`
+	}{BatchSize: batchSize})
+	if err != nil {
+		return nil, err
+	}
+	endpoint := c.baseURL + "/api/sync/search-index-deletions/claim"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set(HeaderContentType, "application/json")
+	resp, err := c.doRequest(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 400 {
+		return nil, parseError(resp.StatusCode, raw)
+	}
+	if readErr != nil {
+		return nil, fmt.Errorf("controlplane: read search index deletion claim: %w", readErr)
+	}
+	var out SearchIndexDeletionClaim
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("controlplane: decode search index deletion claim: %w", err)
+	}
+	return &out, nil
+}
+
+func (c *Client) AckSearchIndexDeletions(ctx context.Context, claimToken string, ids []string) error {
+	body, err := json.Marshal(struct {
+		ClaimToken string   `json:"claim_token"`
+		IDs        []string `json:"ids"`
+	}{
+		ClaimToken: claimToken,
+		IDs:        ids,
+	})
+	if err != nil {
+		return err
+	}
+	endpoint := c.baseURL + "/api/sync/search-index-deletions/ack"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set(HeaderContentType, "application/json")
+	resp, err := c.doRequest(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 400 {
+		return parseError(resp.StatusCode, raw)
+	}
+	if readErr != nil {
+		return fmt.Errorf("controlplane: read search index deletion ack: %w", readErr)
+	}
+	return nil
+}
+
+type AttachmentPurge struct {
+	AttachmentID string `json:"attachment_id"`
+	ClerkUserID  string `json:"clerk_user_id"`
+	ChatID       string `json:"chat_id"`
+}
+
+type AttachmentPurgeClaim struct {
+	ClaimToken string            `json:"claim_token"`
+	Purges     []AttachmentPurge `json:"purges"`
+}
+
+// postJSON is the shared shape of the small control-channel calls the
+// background workers make: JSON in, JSON (or nothing) out, controlplane
+// error envelope on 4xx/5xx.
+func (c *Client) postJSON(ctx context.Context, path string, in any, out any) error {
+	body, err := json.Marshal(in)
+	if err != nil {
+		return err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set(HeaderContentType, "application/json")
+	resp, err := c.doRequest(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 400 {
+		return parseError(resp.StatusCode, raw)
+	}
+	if readErr != nil {
+		return fmt.Errorf("controlplane: read %s: %w", path, readErr)
+	}
+	if out == nil || len(bytes.TrimSpace(raw)) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		return fmt.Errorf("controlplane: decode %s: %w", path, err)
+	}
+	return nil
+}
+
+// PurgeUnreferencedAttachments asks the controlplane to move index rows
+// that have been unreferenced past its grace window into the purge
+// queue. Returns how many were queued this call.
+func (c *Client) PurgeUnreferencedAttachments(ctx context.Context, batchSize int) (int, error) {
+	var out struct {
+		Queued int `json:"queued"`
+	}
+	err := c.postJSON(ctx, "/api/sync/attachment-purges/purge", struct {
+		BatchSize int `json:"batch_size"`
+	}{BatchSize: batchSize}, &out)
+	return out.Queued, err
+}
+
+func (c *Client) ClaimAttachmentPurges(ctx context.Context, batchSize int) (*AttachmentPurgeClaim, error) {
+	var out AttachmentPurgeClaim
+	err := c.postJSON(ctx, "/api/sync/attachment-purges/claim", struct {
+		BatchSize int `json:"batch_size"`
+	}{BatchSize: batchSize}, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) AckAttachmentPurges(ctx context.Context, claimToken string, attachmentIDs []string) error {
+	return c.postJSON(ctx, "/api/sync/attachment-purges/ack", struct {
+		ClaimToken    string   `json:"claim_token"`
+		AttachmentIDs []string `json:"attachment_ids"`
+	}{ClaimToken: claimToken, AttachmentIDs: attachmentIDs}, nil)
+}
+
+func (c *Client) DeleteOrphanedV2Attachments(ctx context.Context, limit int) ([]OrphanAttachmentRow, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	endpoint := c.baseURL + "/api/sync/orphan-attachments?limit=" + strconv.Itoa(limit)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.doRequest(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 400 {
+		return nil, parseError(resp.StatusCode, body)
+	}
+	// A read error on a 2xx response must not silently turn into the
+	// empty-body "no orphans" path below — a connection that died
+	// mid-stream would otherwise look identical to a real 204 and we
+	// would skip whatever ids the controlplane was about to send.
+	if readErr != nil {
+		return nil, fmt.Errorf("controlplane: read orphan attachments: %w", readErr)
+	}
+	// 204 No Content and any other empty 2xx response means
+	// "no orphans found"; treat it as a successful zero-row sweep
+	// instead of a decode error.
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil, nil
+	}
+	var out struct {
+		Attachments []OrphanAttachmentRow `json:"attachments"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("controlplane: decode orphan attachments: %w", err)
+	}
+	return out.Attachments, nil
+}
+
+// ErrAttachmentNotFound is returned by ResolveAttachmentOwner when the
+// controlplane has no index row for the requested attachment id.
+var ErrAttachmentNotFound = errors.New("controlplane: attachment not found")
+
+// ResolveAttachmentOwner returns the clerk user id that owns the given
+// v2 attachment id. The read paths (/v1/attachment/get and the
+// unauthenticated /v1/attachment/get-public) use it to derive the
+// buckets tenant prefix from a trusted source instead of the caller.
+// Enclave-only: authenticated with the service secret. A 404 surfaces
+// as ErrAttachmentNotFound so the caller can return a clean 404.
+func (c *Client) ResolveAttachmentOwner(ctx context.Context, attachmentID string) (string, error) {
+	if attachmentID == "" {
+		return "", errors.New("controlplane: attachment id is required")
+	}
+	endpoint := c.baseURL + "/api/sync/attachment-owner/" + url.PathEscape(attachmentID)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := c.doRequest(httpReq)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode == http.StatusNotFound {
+		return "", ErrAttachmentNotFound
+	}
+	if resp.StatusCode >= 400 {
+		return "", parseError(resp.StatusCode, body)
+	}
+	if readErr != nil {
+		return "", fmt.Errorf("controlplane: read attachment owner: %w", readErr)
+	}
+	var out struct {
+		ClerkUserID string `json:"clerk_user_id"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return "", fmt.Errorf("controlplane: decode attachment owner: %w", err)
+	}
+	if out.ClerkUserID == "" {
+		return "", ErrAttachmentNotFound
+	}
+	return out.ClerkUserID, nil
+}
