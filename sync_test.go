@@ -359,7 +359,9 @@ func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 			data["messages"] = nil
 		},
 	}
-	readable := map[string]bool{"legacy": true, "current": true}
+	// A member another client of the same rows added does not make a record
+	// unreadable; a missing or nulled one the format requires does.
+	readable := map[string]bool{"legacy": true, "current": true, "extra": true}
 	refused := func(w *httptest.ResponseRecorder) bool {
 		e := api.Obj(api.Obj(api.Parsed(w.Body.Bytes()))["error"])
 		return w.Code == http.StatusConflict && e["code"] == "RECORD_UNSUPPORTED" && e["action"] == "stop"
@@ -392,7 +394,7 @@ func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 	for _, thread := range list.Threads {
 		listed = append(listed, thread.ID)
 	}
-	if slices.Sort(listed); !slices.Equal(listed, []string{"current", "legacy"}) {
+	if slices.Sort(listed); !slices.Equal(listed, []string{"current", "extra", "legacy"}) {
 		t.Errorf("the list holds %v", listed)
 	}
 	rows.rows[rowMapKey(p, "project", "later")] = domain.StoredRow{ID: "later", ETag: "1", Data: api.Raw(api.Object{"name": "Trip", "recordVersion": domain.RecordVersion + 1})}

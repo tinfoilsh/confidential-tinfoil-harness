@@ -34,7 +34,9 @@ info:
     - A change to what a ThreadRecord or a stored row holds changes its
       recordVersion. The harness reads a record in its current version as
       written, reads one without a version as an older client kept it, and
-      refuses any other with RECORD_UNSUPPORTED.
+      refuses any other with RECORD_UNSUPPORTED. A member of a stored row it
+      does not name is read past, since other clients of the same rows write
+      members of their own.
     - The harness ignores request members it does not know, except in a
       profile patch, which refuses them.
     - Optional behavior is announced in the session's `features`. A client

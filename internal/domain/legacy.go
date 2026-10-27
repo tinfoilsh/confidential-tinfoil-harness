@@ -41,11 +41,12 @@ func currentFormat(data []byte) (bool, error) {
 }
 
 // readCurrent reads a record in the current format into v, refusing one
-// that leaves out a member the format requires or holds one it does not
-// have.
+// that leaves out a member the format requires or gives a member a value of
+// another type. A member the format does not name is read past: the other
+// clients of the same rows write members of their own, and keep a record's
+// format marker when they write it back.
 func readCurrent(data []byte, v any, required ...string) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
 	if decoder.Decode(v) != nil || decoder.More() || !holds(data, required) {
 		return errRecordUnsupported
 	}
