@@ -328,11 +328,12 @@ func TestStoredRowsNameTheirFormat(t *testing.T) {
 
 // A record is read by the format it names: the current one as written, and
 // one older clients wrote, naming none, through the legacy reader. One naming
-// another format is refused, as is one in the current format holding a
-// member that format does not have, or leaving out or nulling one it
-// requires. A list or a backup leaves out what it cannot read; a project's
-// turns read every document, so a project with one it cannot read is
-// refused.
+// another format is refused, as is one in the current format leaving out or
+// nulling a member it requires, or giving one a value of another type; a
+// member the format does not name, which another client of the same rows
+// may have added, is read past. A list or a
+// backup leaves out what it cannot read; a project's turns read every
+// document, so a project with one it cannot read is refused.
 func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	p := &auth.Principal{ID: "alice"}
@@ -358,8 +359,14 @@ func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 			current(data)
 			data["messages"] = nil
 		},
+		"mistyped": func(data api.Object) {
+			current(data)
+			data["pinned"] = "yes"
+		},
 	}
-	readable := map[string]bool{"legacy": true, "current": true}
+	// A member another client of the same rows added does not make a record
+	// unreadable; a missing or nulled one the format requires does.
+	readable := map[string]bool{"legacy": true, "current": true, "extra": true}
 	refused := func(w *httptest.ResponseRecorder) bool {
 		e := api.Obj(api.Obj(api.Parsed(w.Body.Bytes()))["error"])
 		return w.Code == http.StatusConflict && e["code"] == "RECORD_UNSUPPORTED" && e["action"] == "stop"
@@ -380,7 +387,13 @@ func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 		thread := api.Object{"id": id, "title": "On my device", "messages": []any{api.Object{"id": "m1", "role": "user", "content": "hi"}}}
 		edit(thread)
 		w = postRoute(h, "/v1/threads/turn", localInput(id, thread), "alice")
-		if readable[format] && w.Code != http.StatusOK || !readable[format] && !refused(w) {
+		// A transcript its client sends with a member of another type is the
+		// request's fault, refused before any record is read.
+		if format == "mistyped" {
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("a turn of the mistyped device chat: HTTP %d %s", w.Code, w.Body)
+			}
+		} else if readable[format] && w.Code != http.StatusOK || !readable[format] && !refused(w) {
 			t.Errorf("a turn of the %s device chat: HTTP %d %s", format, w.Code, w.Body)
 		}
 	}
@@ -392,7 +405,7 @@ func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 	for _, thread := range list.Threads {
 		listed = append(listed, thread.ID)
 	}
-	if slices.Sort(listed); !slices.Equal(listed, []string{"current", "legacy"}) {
+	if slices.Sort(listed); !slices.Equal(listed, []string{"current", "extra", "legacy"}) {
 		t.Errorf("the list holds %v", listed)
 	}
 	rows.rows[rowMapKey(p, "project", "later")] = domain.StoredRow{ID: "later", ETag: "1", Data: api.Raw(api.Object{"name": "Trip", "recordVersion": domain.RecordVersion + 1})}
