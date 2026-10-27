@@ -329,8 +329,9 @@ func TestStoredRowsNameTheirFormat(t *testing.T) {
 // A record is read by the format it names: the current one as written, and
 // one older clients wrote, naming none, through the legacy reader. One naming
 // another format is refused, as is one in the current format leaving out or
-// nulling a member it requires; a member the format does not name, which
-// another client of the same rows may have added, is read past. A list or a
+// nulling a member it requires, or giving one a value of another type; a
+// member the format does not name, which another client of the same rows
+// may have added, is read past. A list or a
 // backup leaves out what it cannot read; a project's turns read every
 // document, so a project with one it cannot read is refused.
 func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
@@ -358,6 +359,10 @@ func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 			current(data)
 			data["messages"] = nil
 		},
+		"mistyped": func(data api.Object) {
+			current(data)
+			data["pinned"] = "yes"
+		},
 	}
 	// A member another client of the same rows added does not make a record
 	// unreadable; a missing or nulled one the format requires does.
@@ -382,7 +387,13 @@ func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 		thread := api.Object{"id": id, "title": "On my device", "messages": []any{api.Object{"id": "m1", "role": "user", "content": "hi"}}}
 		edit(thread)
 		w = postRoute(h, "/v1/threads/turn", localInput(id, thread), "alice")
-		if readable[format] && w.Code != http.StatusOK || !readable[format] && !refused(w) {
+		// A transcript its client sends with a member of another type is the
+		// request's fault, refused before any record is read.
+		if format == "mistyped" {
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("a turn of the mistyped device chat: HTTP %d %s", w.Code, w.Body)
+			}
+		} else if readable[format] && w.Code != http.StatusOK || !readable[format] && !refused(w) {
 			t.Errorf("a turn of the %s device chat: HTTP %d %s", format, w.Code, w.Body)
 		}
 	}
