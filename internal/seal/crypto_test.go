@@ -3,7 +3,6 @@ package seal
 import (
 	"bytes"
 	"crypto/rand"
-	"encoding/hex"
 	"testing"
 )
 
@@ -141,11 +140,9 @@ func TestKeyIDKnownVector(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := KeyIDHex(id)
-	if len(got) != 32 {
-		t.Fatalf("bad length")
-	}
-	if _, err := hex.DecodeString(got); err != nil {
-		t.Fatalf("not hex: %v", err)
+	// The same vector the clients pin: a key id is derived by each of them,
+	// so a change here would strand every registered key.
+	if got, want := KeyIDHex(id), "960e28ca37b723e7abc19995dbef143f"; got != want {
+		t.Fatalf("key id = %s, want %s", got, want)
 	}
 }
