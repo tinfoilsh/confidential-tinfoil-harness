@@ -1,6 +1,6 @@
 # Layout
 
-Package `main` is the routes and the wiring; each layer under `internal/` depends only on the ones above it. `api` is what every route shares; `auth` is who a request is from; `domain` is what a chat is made of; `inference` is the models the harness serves and how it reaches them; `store` reads and writes what sync keeps for a caller; `attach` is what a chat carries besides text; `importer` reads other assistants' exports; `archives` moves chats in and out whole; `engine` carries out turns and holds the live runs. A change goes in the lowest layer that has what it needs, and nothing reaches back up.
+Package `main` starts `internal/server`, which holds the routes, wiring, and integration tests; each layer under `internal/` depends only on the ones above it. `api` is what every route shares; `auth` is who a request is from; `domain` is what a chat is made of; `inference` is the models the harness serves and how it reaches them; `store` reads and writes what sync keeps for a caller; `attach` is what a chat carries besides text; `importer` reads other assistants' exports; `archives` moves chats in and out whole; `engine` carries out turns and holds the live runs. A change goes in the lowest layer that has what it needs, and nothing reaches back up.
 
 # Protocol
 
@@ -23,7 +23,7 @@ Use these instead of building new fakes:
 - `testChatHarness`: a harness wired to a fake model server, a stub of the Tinfoil API and `memoryRows`.
 - `memoryRows`: the in-memory sync row store. Like sync, it refuses to load or push a row with a key other than the one that sealed it (409 `KEY_MISMATCH`), and deletes without checking the key. Rows a test seeds directly count as sealed with the harness's test key.
 - `newFakeSync` and `storedThread`: attachment blobs and stored chats. The fake sync also runs import jobs, checking a native cloud import as sync does before storing it in `memoryRows`.
-- `archiveRoute`, `importOf` and the archives in `testdata`: multipart archive requests, an import's NDJSON lines, backups and exports written by the web app's own code (`web-*`, `tinfoil-export.zip`), and small exports in ChatGPT's and Claude's formats (`chatgpt-export.zip`, `claude-export.zip`, `claude-projects.json`).
+- `archiveRoute`, `importOf` and the archives in `internal/server/testdata`: multipart archive requests, an import's NDJSON lines, backups and exports written by the web app's own code (`web-*`, `tinfoil-export.zip`), and small exports in ChatGPT's and Claude's formats (`chatgpt-export.zip`, `claude-export.zip`, `claude-projects.json`).
 - `routerHarness`, `serveWebsearch`, `toolTurns`, `screenedBy`: the model router, the websearch enclave, a scripted tool turn, and the safeguards sidecar.
 
 ## Patterns that were removed

@@ -27,7 +27,7 @@ Anonymous chat works only from a deployed harness, because Tinfoil validates `fr
 - The other `TINFOIL_*_ENCLAVE` hosts: used once their attestation succeeds
 - `SAFEGUARDS_URL`: the [safeguards](https://github.com/tinfoilsh/confidential-safeguards) sidecar that classifies completed first-party chats
 
-A chat model is offered only when Tinfoil's model catalog lists it, its repository is pinned in [main.go](main.go), and a replica serving it is available.
+A chat model is offered only when Tinfoil's model catalog lists it, its repository is pinned in [internal/inference/inference.go](internal/inference/inference.go), and a replica serving it is available.
 
 ## Reporting Vulnerabilities
 
