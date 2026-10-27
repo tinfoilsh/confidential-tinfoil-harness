@@ -328,11 +328,11 @@ func TestStoredRowsNameTheirFormat(t *testing.T) {
 
 // A record is read by the format it names: the current one as written, and
 // one older clients wrote, naming none, through the legacy reader. One naming
-// another format is refused, as is one in the current format holding a
-// member that format does not have, or leaving out or nulling one it
-// requires. A list or a backup leaves out what it cannot read; a project's
-// turns read every document, so a project with one it cannot read is
-// refused.
+// another format is refused, as is one in the current format leaving out or
+// nulling a member it requires; a member the format does not name, which
+// another client of the same rows may have added, is read past. A list or a
+// backup leaves out what it cannot read; a project's turns read every
+// document, so a project with one it cannot read is refused.
 func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	p := &auth.Principal{ID: "alice"}
