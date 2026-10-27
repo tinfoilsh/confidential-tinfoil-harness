@@ -5,7 +5,7 @@ import (
 	"crypto/sha256"
 	"sync"
 
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/searchindex"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/searchindex"
 )
 
 // searchCacheBudgetBytes bounds the decoded-index cache. Accounting

@@ -1,4 +1,4 @@
-package envelope
+package seal
 
 import (
 	"bytes"
@@ -10,13 +10,11 @@ import (
 	"errors"
 	"strings"
 	"testing"
-
-	cryptopkg "github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/crypto"
 )
 
 func newRawKey(t *testing.T) []byte {
 	t.Helper()
-	k := make([]byte, cryptopkg.KeySize)
+	k := make([]byte, KeySize)
 	if _, err := rand.Read(k); err != nil {
 		t.Fatal(err)
 	}
@@ -26,11 +24,11 @@ func newRawKey(t *testing.T) []byte {
 func newKey(t *testing.T) Key {
 	t.Helper()
 	raw := newRawKey(t)
-	id, err := cryptopkg.DeriveKeyID(raw)
+	id, err := DeriveKeyID(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return Key{Bytes: raw, KeyIDHex: cryptopkg.KeyIDHex(id)}
+	return Key{Bytes: raw, KeyIDHex: KeyIDHex(id)}
 }
 
 func keyFromHex(t *testing.T, rawHex string) Key {
@@ -39,11 +37,11 @@ func keyFromHex(t *testing.T, rawHex string) Key {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := cryptopkg.DeriveKeyID(raw)
+	id, err := DeriveKeyID(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return Key{Bytes: raw, KeyIDHex: cryptopkg.KeyIDHex(id)}
+	return Key{Bytes: raw, KeyIDHex: KeyIDHex(id)}
 }
 
 func TestCanonicalPayloadAADStable(t *testing.T) {
@@ -236,7 +234,7 @@ func TestV2EnvelopeIsGzippedBeforeEncrypt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dek, err := cryptopkg.Open(k.Bytes, wrapIV, wrappedDEK, wrapAAD)
+	dek, err := GCMOpen(k.Bytes, wrapIV, wrappedDEK, wrapAAD)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +250,7 @@ func TestV2EnvelopeIsGzippedBeforeEncrypt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	inner, err := cryptopkg.Open(dek, iv, ct, payloadAAD)
+	inner, err := GCMOpen(dek, iv, ct, payloadAAD)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,15 +275,15 @@ func TestV2DecryptRejectsCorruptGzip(t *testing.T) {
 	}
 	// Build a well-formed v2 envelope whose payload plaintext is NOT gzip.
 	// The decrypt path must hard-fail rather than hand back non-gzip bytes.
-	dek, err := cryptopkg.RandomKey()
+	dek, err := RandomKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	payloadIV, payloadCT, err := cryptopkg.Seal(dek, []byte(`{"hello":"world"}`), payloadAAD)
+	payloadIV, payloadCT, err := GCMSeal(dek, []byte(`{"hello":"world"}`), payloadAAD)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrapIV, wrappedDEK, err := cryptopkg.Seal(k.Bytes, dek, wrapAAD)
+	wrapIV, wrappedDEK, err := GCMSeal(k.Bytes, dek, wrapAAD)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -482,7 +480,7 @@ func TestDetectAllFormats(t *testing.T) {
 	// Production v1 wire format: random IV byte at offset 0 followed by
 	// AES-GCM ciphertext of gzipped JSON. Anything that is not JSON and
 	// is at least IV+TAG bytes long must register as v1.
-	v1 := make([]byte, cryptopkg.NonceSize+cryptopkg.TagSize+8)
+	v1 := make([]byte, NonceSize+TagSize+8)
 	for i := range v1 {
 		v1[i] = byte(i + 1)
 	}
@@ -515,7 +513,7 @@ func TestDetect_V1WithJSONPrefixNonce(t *testing.T) {
 	// Pin the first two nonce bytes to `{` and `"` to exercise the
 	// adversarial case; the remaining bytes are any value that
 	// doesn't accidentally parse as JSON.
-	blob := make([]byte, cryptopkg.NonceSize+cryptopkg.TagSize+8)
+	blob := make([]byte, NonceSize+TagSize+8)
 	for i := range blob {
 		blob[i] = byte(i + 1)
 	}
@@ -540,7 +538,7 @@ func TestDetect_TruncatedV2FallsThroughToV1(t *testing.T) {
 	truncated := []byte(`{"v":2,"kid":"aaaa`)
 	// Long enough to look like a v1 blob byte-count wise; the test
 	// asserts the dispatch decision, not the decrypt outcome.
-	pad := make([]byte, cryptopkg.NonceSize+cryptopkg.TagSize)
+	pad := make([]byte, NonceSize+TagSize)
 	truncated = append(truncated, pad...)
 	if got := Detect(truncated); got != VersionV1 {
 		t.Fatalf("truncated v2 must fall through to v1 (so DecryptLegacy is tried), got %v", got)
@@ -564,7 +562,7 @@ func TestDetect_V0RequiresIvAndDataFields(t *testing.T) {
 func TestDecryptLegacyV0RoundTrip(t *testing.T) {
 	k := newKey(t)
 	pt := []byte("legacy v0 plaintext")
-	nonce, ct, err := cryptopkg.Seal(k.Bytes, pt, nil)
+	nonce, ct, err := GCMSeal(k.Bytes, pt, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -591,7 +589,7 @@ func TestDecryptLegacyV0RoundTrip(t *testing.T) {
 func TestDecryptLegacyV0HexIV(t *testing.T) {
 	k := newKey(t)
 	pt := []byte("legacy v0 hex iv")
-	nonce, ct, err := cryptopkg.Seal(k.Bytes, pt, nil)
+	nonce, ct, err := GCMSeal(k.Bytes, pt, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -630,7 +628,7 @@ func TestDecryptLegacyV1RoundTrip(t *testing.T) {
 	if err := zw.Close(); err != nil {
 		t.Fatal(err)
 	}
-	nonce, ct, err := cryptopkg.Seal(k.Bytes, gzbuf.Bytes(), nil)
+	nonce, ct, err := GCMSeal(k.Bytes, gzbuf.Bytes(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -707,7 +705,7 @@ func TestDecryptLegacyTriesAllKeys(t *testing.T) {
 	wrong := newKey(t)
 	right := newKey(t)
 	pt := []byte("multi-key try")
-	nonce, ct, err := cryptopkg.Seal(right.Bytes, pt, nil)
+	nonce, ct, err := GCMSeal(right.Bytes, pt, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -729,7 +727,7 @@ func TestDecryptLegacyFailsWhenNoKeyWorks(t *testing.T) {
 	owner := newKey(t)
 	other := newKey(t)
 	pt := []byte("x")
-	nonce, ct, err := cryptopkg.Seal(owner.Bytes, pt, nil)
+	nonce, ct, err := GCMSeal(owner.Bytes, pt, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -749,7 +747,7 @@ func TestEncryptRejectsBadInputs(t *testing.T) {
 		t.Fatalf("expected key size error")
 	}
 	badKID := AAD{KeyIDHex: "short", Scope: ScopeChat, ID: "x", ClerkUserID: "u"}
-	if _, err := Encrypt(make([]byte, cryptopkg.KeySize), []byte("x"), badKID); err == nil {
+	if _, err := Encrypt(make([]byte, KeySize), []byte("x"), badKID); err == nil {
 		t.Fatalf("expected kid error")
 	}
 }

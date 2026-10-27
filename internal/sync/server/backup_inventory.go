@@ -7,7 +7,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/controlplane"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane"
 )
 
 const (

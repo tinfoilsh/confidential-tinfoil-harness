@@ -1,4 +1,4 @@
-package crypto
+package seal
 
 import (
 	"bytes"
@@ -83,14 +83,14 @@ func TestAESGCMRoundTrip(t *testing.T) {
 	key := mustRandKey(t)
 	pt := []byte("hello tinfoil")
 	aad := []byte(`{"domain":"tinfoil-sync-envelope-v2"}`)
-	nonce, ct, err := Seal(key, pt, aad)
+	nonce, ct, err := GCMSeal(key, pt, aad)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(nonce) != NonceSize {
 		t.Fatalf("nonce size %d", len(nonce))
 	}
-	out, err := Open(key, nonce, ct, aad)
+	out, err := GCMOpen(key, nonce, ct, aad)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,23 +101,23 @@ func TestAESGCMRoundTrip(t *testing.T) {
 
 func TestAESGCMAADMismatchFails(t *testing.T) {
 	key := mustRandKey(t)
-	nonce, ct, err := Seal(key, []byte("x"), []byte("aad-1"))
+	nonce, ct, err := GCMSeal(key, []byte("x"), []byte("aad-1"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(key, nonce, ct, []byte("aad-2")); err == nil {
+	if _, err := GCMOpen(key, nonce, ct, []byte("aad-2")); err == nil {
 		t.Fatalf("expected AAD mismatch failure")
 	}
 }
 
 func TestAESGCMTamperFails(t *testing.T) {
 	key := mustRandKey(t)
-	nonce, ct, err := Seal(key, []byte("payload"), nil)
+	nonce, ct, err := GCMSeal(key, []byte("payload"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ct[0] ^= 0xff
-	if _, err := Open(key, nonce, ct, nil); err == nil {
+	if _, err := GCMOpen(key, nonce, ct, nil); err == nil {
 		t.Fatalf("expected tamper failure")
 	}
 }

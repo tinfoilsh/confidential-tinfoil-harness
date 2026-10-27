@@ -1,4 +1,4 @@
-// Package buckets is the sync-enclave's client for the colocated
+// Package buckets is the harness's client for the colocated
 // tinfoil-buckets-sidecar, an S3-compatible service that runs on
 // enclave loopback. Each user's attachments live under their own
 // tenant namespace (`user-<clerkId>/<attId>`):

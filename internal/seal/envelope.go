@@ -1,4 +1,4 @@
-package envelope
+package seal
 
 import (
 	"bytes"
@@ -9,8 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/crypto"
 )
 
 type Version int
@@ -78,12 +76,12 @@ var (
 // question "does this parse as a fully-formed v2 / v0 envelope?" and
 // fall back to v1 only when both strict parses fail.
 //
-//  1. Try parsing as a v2 envelope. v2 requires `"v":2` plus the
+//  1. Try parsing as a v2  v2 requires `"v":2` plus the
 //     `kid`, `alg`, `iv`, `ct` fields populated. A real v2 blob
 //     always succeeds here; a v1 binary blob has effectively zero
 //     probability of being a complete valid v2 JSON document with
 //     `"v":2`.
-//  2. Try parsing as a v0 envelope. v0 requires `iv` and `data`
+//  2. Try parsing as a v0  v0 requires `iv` and `data`
 //     fields and explicitly forbids a `v` field (otherwise we'd
 //     accept v2 as v0 too). Same probabilistic argument as v2.
 //  3. Otherwise, if the blob is at least IV+TAG bytes long, treat
@@ -109,7 +107,7 @@ func Detect(blob []byte) Version {
 	if looksLikeV0(blob) {
 		return VersionV0
 	}
-	if len(blob) >= crypto.NonceSize+crypto.TagSize {
+	if len(blob) >= NonceSize+TagSize {
 		return VersionV1
 	}
 	return VersionUnknown
@@ -173,16 +171,16 @@ type DecryptResult struct {
 // caller is responsible for zeroing plaintext after the returned envelope is
 // transmitted; the envelope JSON itself contains only ciphertext.
 //
-// Pipeline: gzip(plaintext) → AES-GCM-Seal(DEK, …) for the payload, and
-// AES-GCM-Seal(CEK, DEK, …) for the wrapped key. Splitting the content key
+// Pipeline: gzip(plaintext) → AES-GCM-GCMSeal(DEK, …) for the payload, and
+// AES-GCM-GCMSeal(CEK, DEK, …) for the wrapped key. Splitting the content key
 // from the CEK lets rewrap reseal only the small data key and leave the
 // (potentially large) payload ciphertext untouched, which is also why the
 // payload AAD is independent of the CEK key id. Compression happens
 // before encryption because ciphertext will not compress at any downstream
 // layer.
 func Encrypt(key []byte, plaintext []byte, aad AAD) ([]byte, error) {
-	if len(key) != crypto.KeySize {
-		return nil, crypto.ErrKeySize
+	if len(key) != KeySize {
+		return nil, ErrKeySize
 	}
 	payloadAAD, err := CanonicalPayloadAAD(aad)
 	if err != nil {
@@ -207,17 +205,17 @@ func Encrypt(key []byte, plaintext []byte, aad AAD) ([]byte, error) {
 	// plaintext until ciphertext is produced; zero it on the way
 	// out so we don't leave plaintext-derived material lying in
 	// enclave memory longer than necessary.
-	defer crypto.Zero(compressed)
-	dek, err := crypto.RandomKey()
+	defer Zero(compressed)
+	dek, err := RandomKey()
 	if err != nil {
 		return nil, err
 	}
-	defer crypto.Zero(dek)
-	payloadIV, payloadCT, err := crypto.Seal(dek, compressed, payloadAAD)
+	defer Zero(dek)
+	payloadIV, payloadCT, err := GCMSeal(dek, compressed, payloadAAD)
 	if err != nil {
 		return nil, err
 	}
-	wrapIV, wrappedDEK, err := crypto.Seal(key, dek, wrapAAD)
+	wrapIV, wrappedDEK, err := GCMSeal(key, dek, wrapAAD)
 	if err != nil {
 		return nil, err
 	}
@@ -233,7 +231,7 @@ func Encrypt(key []byte, plaintext []byte, aad AAD) ([]byte, error) {
 	return json.Marshal(env)
 }
 
-// DecryptV2 parses and decrypts a v2 envelope. The envelope's `kid` selects
+// DecryptV2 parses and decrypts a v2  The envelope's `kid` selects
 // which of the supplied keys unwraps the per-message data key; that data key
 // then opens the payload. Only one key is used, so the operation is
 // constant-cost. `aad` supplies the scope/id/clerk_user_id the two AAD layers
@@ -252,7 +250,7 @@ func DecryptV2(blob []byte, keys []Key, aad AAD) (DecryptResult, error) {
 	if len(env.KID) != 32 || !isLowerHex(env.KID) {
 		return DecryptResult{}, ErrV2Malformed
 	}
-	if len(env.IV) != crypto.NonceSize*2 || len(env.WIV) != crypto.NonceSize*2 {
+	if len(env.IV) != NonceSize*2 || len(env.WIV) != NonceSize*2 {
 		return DecryptResult{}, ErrV2Malformed
 	}
 	iv, err := hex.DecodeString(env.IV)
@@ -310,27 +308,27 @@ func DecryptV2(blob []byte, keys []Key, aad AAD) (DecryptResult, error) {
 	if err != nil {
 		return DecryptResult{}, err
 	}
-	dek, err := crypto.Open(match.Bytes, wrapIV, wrappedDEK, wrapAAD)
+	dek, err := GCMOpen(match.Bytes, wrapIV, wrappedDEK, wrapAAD)
 	if err != nil {
 		return DecryptResult{}, err
 	}
-	defer crypto.Zero(dek)
+	defer Zero(dek)
 	// The authenticated unwrap proves the DEK bytes are exactly what was
 	// sealed, so a wrong length signals a broken seal-side invariant rather
 	// than tampering. Fail closed with a specific error here instead of
 	// letting the payload open below surface a generic key-size error.
-	if len(dek) != crypto.KeySize {
+	if len(dek) != KeySize {
 		return DecryptResult{}, ErrV2Malformed
 	}
 	payloadAAD, err := CanonicalPayloadAAD(aad)
 	if err != nil {
 		return DecryptResult{}, err
 	}
-	compressed, err := crypto.Open(dek, iv, ct, payloadAAD)
+	compressed, err := GCMOpen(dek, iv, ct, payloadAAD)
 	if err != nil {
 		return DecryptResult{}, err
 	}
-	defer crypto.Zero(compressed)
+	defer Zero(compressed)
 	pt, err := gunzip(compressed)
 	if err != nil {
 		return DecryptResult{}, fmt.Errorf("%w: %v", ErrV2Malformed, err)
@@ -364,7 +362,7 @@ func decryptV0(blob []byte, keys []Key) (DecryptResult, error) {
 	if raw.IV == "" || raw.Data == "" {
 		return DecryptResult{}, ErrV0Malformed
 	}
-	iv, err := decodeBase64OrHex(raw.IV, crypto.NonceSize)
+	iv, err := decodeBase64OrHex(raw.IV, NonceSize)
 	if err != nil {
 		return DecryptResult{}, fmt.Errorf("%w: %v", ErrV0Malformed, err)
 	}
@@ -377,10 +375,10 @@ func decryptV0(blob []byte, keys []Key) (DecryptResult, error) {
 		}
 	}
 	for _, k := range keys {
-		if len(k.Bytes) != crypto.KeySize {
+		if len(k.Bytes) != KeySize {
 			continue
 		}
-		pt, err := crypto.Open(k.Bytes, iv, ct, nil)
+		pt, err := GCMOpen(k.Bytes, iv, ct, nil)
 		if err == nil {
 			return DecryptResult{
 				Plaintext:   pt,
@@ -400,20 +398,20 @@ func decryptV0(blob []byte, keys []Key) (DecryptResult, error) {
 // We split off the IV, AES-GCM-Open the rest, then gunzip the plaintext.
 // Legacy v1 blobs were written without AAD, so callers pass nil here.
 func decryptV1(blob []byte, keys []Key) (DecryptResult, error) {
-	if len(blob) < crypto.NonceSize+crypto.TagSize {
+	if len(blob) < NonceSize+TagSize {
 		return DecryptResult{}, ErrV1Malformed
 	}
-	iv := blob[:crypto.NonceSize]
-	ct := blob[crypto.NonceSize:]
+	iv := blob[:NonceSize]
+	ct := blob[NonceSize:]
 	for _, k := range keys {
-		if len(k.Bytes) != crypto.KeySize {
+		if len(k.Bytes) != KeySize {
 			continue
 		}
-		compressed, err := crypto.Open(k.Bytes, iv, ct, nil)
+		compressed, err := GCMOpen(k.Bytes, iv, ct, nil)
 		if err != nil {
 			continue
 		}
-		defer crypto.Zero(compressed)
+		defer Zero(compressed)
 		pt, err := gunzip(compressed)
 		if err != nil {
 			return DecryptResult{}, fmt.Errorf("%w: %v", ErrV1Malformed, err)

@@ -1,4 +1,4 @@
-package crypto
+package seal
 
 import (
 	"crypto/sha256"

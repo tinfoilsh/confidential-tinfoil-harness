@@ -13,11 +13,10 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/buckets"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/seal"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/auth"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/buckets"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/controlplane"
-	cryptopkg "github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/crypto"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/envelope"
 )
 
 // Deps bundles everything operations need from the surrounding process.
@@ -67,7 +66,7 @@ const (
 // local, keep remote, or discard local edits). The enclave never
 // merges, never silently overwrites.
 func Push(ctx context.Context, deps Deps, sess Session, req PushRequest) (*PushResponse, error) {
-	scope := envelope.Scope(req.Scope)
+	scope := seal.Scope(req.Scope)
 	if !scope.Valid() {
 		return nil, badRequest("invalid scope")
 	}
@@ -86,32 +85,32 @@ func Push(ctx context.Context, deps Deps, sess Session, req PushRequest) (*PushR
 	if err != nil {
 		return nil, badRequest("invalid key: " + err.Error())
 	}
-	defer cryptopkg.Zero(key)
+	defer seal.Zero(key)
 
 	plaintext, err := base64.StdEncoding.DecodeString(req.Plaintext)
 	if err != nil {
 		return nil, badRequest("invalid plaintext base64")
 	}
-	defer cryptopkg.Zero(plaintext)
+	defer seal.Zero(plaintext)
 
-	kidBytes, err := cryptopkg.DeriveKeyID(key)
+	kidBytes, err := seal.DeriveKeyID(key)
 	if err != nil {
 		return nil, err
 	}
-	kidHex := cryptopkg.KeyIDHex(kidBytes)
+	kidHex := seal.KeyIDHex(kidBytes)
 
-	aad := envelope.AAD{
+	aad := seal.AAD{
 		KeyIDHex:    kidHex,
 		Scope:       scope,
 		ID:          req.ID,
 		ClerkUserID: sess.Claims.Subject,
 	}
-	payloadAAD, err := envelope.CanonicalPayloadAAD(aad)
+	payloadAAD, err := seal.CanonicalPayloadAAD(aad)
 	if err != nil {
 		return nil, badRequest("invalid envelope inputs: " + err.Error())
 	}
 
-	envBlob, err := envelope.Encrypt(key, plaintext, aad)
+	envBlob, err := seal.Encrypt(key, plaintext, aad)
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +143,7 @@ func Push(ctx context.Context, deps Deps, sess Session, req PushRequest) (*PushR
 	// writer (clients, imports, forks) reports it the same way.
 	var attachmentRefs []string
 	var activityAt *time.Time
-	if scope == envelope.ScopeChat {
+	if scope == seal.ScopeChat {
 		attachmentRefs = chatAttachmentRefs(plaintext)
 		if len(attachmentRefs) > maxAttachmentRefsPerChat {
 			return nil, badRequest(fmt.Sprintf("chat references more than %d attachments", maxAttachmentRefsPerChat))
@@ -177,7 +176,7 @@ func Push(ctx context.Context, deps Deps, sess Session, req PushRequest) (*PushR
 		// succeeded, so an indexing failure degrades search instead
 		// of failing the push. The reindex path repairs any gap.
 		var searchIndexed *bool
-		if scope == envelope.ScopeChat && searchConfigured(deps) {
+		if scope == seal.ScopeChat && searchConfigured(deps) {
 			indexed := true
 			if idxErr := indexCurrentChatForSearch(ctx, deps, sess, key, req.ID, plaintext, resp.ETag, committedAt, resp.SourceRevision); idxErr != nil {
 				indexed = false
@@ -266,16 +265,16 @@ func operationHashForBlob(cek []byte, method, scope, id, keyIDHex, ifMatch, idem
 	if err != nil {
 		return "", err
 	}
-	opKey, err := cryptopkg.DeriveOpHashKey(cek)
+	opKey, err := seal.DeriveOpHashKey(cek)
 	if err != nil {
 		return "", err
 	}
-	defer cryptopkg.Zero(opKey)
+	defer seal.Zero(opKey)
 	profileSyncProtocolValue := ""
 	if profileSyncProtocol > 0 {
 		profileSyncProtocolValue = strconv.Itoa(profileSyncProtocol)
 	}
-	return cryptopkg.ComputeOperationHash(opKey, cryptopkg.CanonicalInput{
+	return seal.ComputeOperationHash(opKey, seal.CanonicalInput{
 		Method:              method,
 		Path:                path,
 		KeyIDHex:            keyIDHex,
@@ -309,7 +308,7 @@ const (
 // independent: a single bad blob does not fail the batch. Items are
 // fetched concurrently but returned in request order.
 func Pull(ctx context.Context, deps Deps, sess Session, req PullRequest) (*PullResponse, error) {
-	scope := envelope.Scope(req.Scope)
+	scope := seal.Scope(req.Scope)
 	if !scope.Valid() {
 		return nil, badRequest("invalid scope")
 	}
@@ -355,11 +354,11 @@ func Pull(ctx context.Context, deps Deps, sess Session, req PullRequest) (*PullR
 	// without the caller having to opt in. Deriving the key-id once
 	// keeps the per-item loop cheap.
 	targetKey := keys[0].Bytes
-	targetKIDBytes, err := cryptopkg.DeriveKeyID(targetKey)
+	targetKIDBytes, err := seal.DeriveKeyID(targetKey)
 	if err != nil {
 		return nil, err
 	}
-	targetKIDHex := cryptopkg.KeyIDHex(targetKIDBytes)
+	targetKIDHex := seal.KeyIDHex(targetKIDBytes)
 
 	// Inline rewrap promotes legacy rows to v2 on first read, but the
 	// controlplane gates every rewrap CAS on the user's registered
@@ -417,9 +416,9 @@ func pullOne(
 	ctx context.Context,
 	deps Deps,
 	sess Session,
-	scope envelope.Scope,
+	scope seal.Scope,
 	id string,
-	keys []envelope.Key,
+	keys []seal.Key,
 	targetKey []byte,
 	targetKIDHex string,
 	canRewrap bool,
@@ -436,20 +435,20 @@ func pullOne(
 		return PullItem{ID: id, OK: false, Code: CodeNetwork, cause: err}
 	}
 
-	switch envelope.Detect(blob.Ciphertext) {
-	case envelope.VersionV2:
-		dec, err := envelope.DecryptV2(blob.Ciphertext, keys, envelope.AAD{
+	switch seal.Detect(blob.Ciphertext) {
+	case seal.VersionV2:
+		dec, err := seal.DecryptV2(blob.Ciphertext, keys, seal.AAD{
 			Scope:       scope,
 			ID:          aadIDForScope(scope, id),
 			ClerkUserID: sess.Claims.Subject,
 		})
 		if err != nil {
-			if errors.Is(err, envelope.ErrNoMatchingKey) {
+			if errors.Is(err, seal.ErrNoMatchingKey) {
 				return PullItem{ID: id, OK: false, Code: CodeUnknownKey, KeyID: dec.KeyIDHex, ETag: blob.ETag}
 			}
 			return PullItem{ID: id, OK: false, Code: CodeBadRequest, Reason: err.Error()}
 		}
-		defer cryptopkg.Zero(dec.Plaintext)
+		defer seal.Zero(dec.Plaintext)
 		backfillChatActivity(ctx, deps, sess, scope, id, blob, blob.ETag, dec.Plaintext)
 		return PullItem{
 			ID: id, OK: true,
@@ -460,12 +459,12 @@ func pullOne(
 			ProjectID:    blob.ProjectID,
 			NeedsRewrap:  false,
 		}
-	case envelope.VersionV0, envelope.VersionV1:
-		dec, err := envelope.DecryptLegacy(blob.Ciphertext, keys)
+	case seal.VersionV0, seal.VersionV1:
+		dec, err := seal.DecryptLegacy(blob.Ciphertext, keys)
 		if err != nil {
 			return PullItem{ID: id, OK: false, Code: CodeUnknownKey, Reason: "no_key_decrypted_legacy"}
 		}
-		defer cryptopkg.Zero(dec.Plaintext)
+		defer seal.Zero(dec.Plaintext)
 		if canRewrap {
 			if newETag, rewrapErr := rewrapBlob(ctx, deps, sess, scope, id, dec.Plaintext, blob.ETag, targetKey, targetKIDHex); rewrapErr == nil {
 				backfillChatActivity(ctx, deps, sess, scope, id, blob, newETag, dec.Plaintext)
@@ -502,10 +501,10 @@ func pullOne(
 }
 
 func ListStatus(ctx context.Context, deps Deps, sess Session, req ListStatusRequest) (*ListStatusResponse, error) {
-	if !envelope.Scope(req.Scope).Valid() {
+	if !seal.Scope(req.Scope).Valid() {
 		return nil, badRequest("invalid scope")
 	}
-	if req.ProjectID != "" && envelope.Scope(req.Scope) != envelope.ScopeChat {
+	if req.ProjectID != "" && seal.Scope(req.Scope) != seal.ScopeChat {
 		return nil, badRequest("project_id filter is only valid for chat scope")
 	}
 	if req.Direction != "" && req.Direction != "asc" && req.Direction != "desc" {
@@ -549,7 +548,7 @@ func ListStatus(ctx context.Context, deps Deps, sess Session, req ListStatusRequ
 }
 
 func Delete(ctx context.Context, deps Deps, sess Session, req DeleteRequest) (*OKResponse, error) {
-	scope := envelope.Scope(req.Scope)
+	scope := seal.Scope(req.Scope)
 	if !scope.Valid() {
 		return nil, badRequest("invalid scope")
 	}
@@ -564,13 +563,13 @@ func Delete(ctx context.Context, deps Deps, sess Session, req DeleteRequest) (*O
 	if err != nil {
 		return nil, badRequest("invalid key: " + err.Error())
 	}
-	defer cryptopkg.Zero(key)
+	defer seal.Zero(key)
 
-	kidBytes, err := cryptopkg.DeriveKeyID(key)
+	kidBytes, err := seal.DeriveKeyID(key)
 	if err != nil {
 		return nil, err
 	}
-	kidHex := cryptopkg.KeyIDHex(kidBytes)
+	kidHex := seal.KeyIDHex(kidBytes)
 
 	// If the caller passed a concrete ifMatch, run a single CAS-delete
 	// against that etag — a STALE_BLOB surfaces to the caller because
@@ -583,7 +582,7 @@ func Delete(ctx context.Context, deps Deps, sess Session, req DeleteRequest) (*O
 		sourceRevision := int64(0)
 		if cpResp != nil {
 			sourceRevision = cpResp.SourceRevision
-			if scope == envelope.ScopeChat {
+			if scope == seal.ScopeChat {
 				deleteBucketAttachments(ctx, deps, sess.Claims.Subject, cpResp.WipedV2Attachments)
 			}
 		}
@@ -621,7 +620,7 @@ func Delete(ctx context.Context, deps Deps, sess Session, req DeleteRequest) (*O
 		resp, cpResp, err := deleteOnce(ctx, deps, sess, attemptReq, key, kidHex, blob.ETag)
 		if err == nil {
 			sourceRevision := int64(0)
-			if scope == envelope.ScopeChat && cpResp != nil {
+			if scope == seal.ScopeChat && cpResp != nil {
 				// cpResp.WipedV2Attachments is the controlplane's
 				// authoritative list of v2 attachment ids that
 				// belonged to this (user, chat); the SQL that
@@ -675,13 +674,13 @@ func DeleteAllProjects(ctx context.Context, deps Deps, sess Session, req DeleteA
 	if err != nil {
 		return nil, badRequest("invalid key: " + err.Error())
 	}
-	defer cryptopkg.Zero(key)
+	defer seal.Zero(key)
 
-	kidBytes, err := cryptopkg.DeriveKeyID(key)
+	kidBytes, err := seal.DeriveKeyID(key)
 	if err != nil {
 		return nil, err
 	}
-	kidHex := cryptopkg.KeyIDHex(kidBytes)
+	kidHex := seal.KeyIDHex(kidBytes)
 	opHash, err := operationHashForKey(key, http.MethodDelete, controlplane.DeleteAllProjectsPath, kidHex, req.IdempotencyKey, nil)
 	if err != nil {
 		return nil, err
@@ -719,13 +718,13 @@ func RegisterKey(ctx context.Context, deps Deps, sess Session, req KeyRegisterRe
 	if err != nil {
 		return nil, badRequest("invalid key: " + err.Error())
 	}
-	defer cryptopkg.Zero(key)
+	defer seal.Zero(key)
 
-	kidBytes, err := cryptopkg.DeriveKeyID(key)
+	kidBytes, err := seal.DeriveKeyID(key)
 	if err != nil {
 		return nil, err
 	}
-	kidHex := cryptopkg.KeyIDHex(kidBytes)
+	kidHex := seal.KeyIDHex(kidBytes)
 
 	var bundle *controlplane.RegisterKeyBundle
 	if req.InitialBundle != nil {
@@ -757,12 +756,12 @@ func RegisterKey(ctx context.Context, deps Deps, sess Session, req KeyRegisterRe
 	if err != nil {
 		return nil, err
 	}
-	opKey, err := cryptopkg.DeriveOpHashKey(key)
+	opKey, err := seal.DeriveOpHashKey(key)
 	if err != nil {
 		return nil, err
 	}
-	defer cryptopkg.Zero(opKey)
-	cpReq.OperationHash = cryptopkg.ComputeOperationHash(opKey, cryptopkg.CanonicalInput{
+	defer seal.Zero(opKey)
+	cpReq.OperationHash = seal.ComputeOperationHash(opKey, seal.CanonicalInput{
 		Method:         http.MethodPost,
 		Path:           controlplane.RegisterKeyPath,
 		KeyIDHex:       kidHex,
@@ -814,12 +813,12 @@ func AddBundle(ctx context.Context, deps Deps, sess Session, req AddBundleReques
 	if err != nil {
 		return nil, badRequest("invalid key: " + err.Error())
 	}
-	defer cryptopkg.Zero(key)
-	kidBytes, err := cryptopkg.DeriveKeyID(key)
+	defer seal.Zero(key)
+	kidBytes, err := seal.DeriveKeyID(key)
 	if err != nil {
 		return nil, err
 	}
-	if kidHex := cryptopkg.KeyIDHex(kidBytes); kidHex != req.KeyID {
+	if kidHex := seal.KeyIDHex(kidBytes); kidHex != req.KeyID {
 		return nil, badRequest("key does not match key_id")
 	}
 	opHash, err := operationHashForKey(key, http.MethodPost, controlplane.AddBundlePath(req.KeyID), req.KeyID, req.IdempotencyKey, body)
@@ -855,12 +854,12 @@ func RemoveBundle(ctx context.Context, deps Deps, sess Session, req RemoveBundle
 	if err != nil {
 		return nil, badRequest("invalid key: " + err.Error())
 	}
-	defer cryptopkg.Zero(key)
-	kidBytes, err := cryptopkg.DeriveKeyID(key)
+	defer seal.Zero(key)
+	kidBytes, err := seal.DeriveKeyID(key)
 	if err != nil {
 		return nil, err
 	}
-	if kidHex := cryptopkg.KeyIDHex(kidBytes); kidHex != req.KeyID {
+	if kidHex := seal.KeyIDHex(kidBytes); kidHex != req.KeyID {
 		return nil, badRequest("key does not match key_id")
 	}
 	opHash, err := operationHashForKey(key, http.MethodDelete, controlplane.RemoveBundlePath(req.KeyID, req.CredentialID), req.KeyID, req.IdempotencyKey, nil)
@@ -876,12 +875,12 @@ func RemoveBundle(ctx context.Context, deps Deps, sess Session, req RemoveBundle
 }
 
 func operationHashForKey(cek []byte, method, path, keyIDHex, idempotencyKey string, body []byte) (string, error) {
-	opKey, err := cryptopkg.DeriveOpHashKey(cek)
+	opKey, err := seal.DeriveOpHashKey(cek)
 	if err != nil {
 		return "", err
 	}
-	defer cryptopkg.Zero(opKey)
-	return cryptopkg.ComputeOperationHash(opKey, cryptopkg.CanonicalInput{
+	defer seal.Zero(opKey)
+	return seal.ComputeOperationHash(opKey, seal.CanonicalInput{
 		Method:         method,
 		Path:           path,
 		KeyIDHex:       keyIDHex,
@@ -893,7 +892,7 @@ func operationHashForKey(cek []byte, method, path, keyIDHex, idempotencyKey stri
 
 // KeyCurrent fetches the user's current KeyID + bundles from the
 // controlplane and re-shapes the response into the webapp's
-// expected envelope. Per the webapp SDK convention, a missing key
+// expected seal. Per the webapp SDK convention, a missing key
 // surfaces as KeyID=nil + empty bundles via a 404 from the
 // controlplane; we re-emit that 404 here.
 func KeyCurrent(ctx context.Context, deps Deps, sess Session, _ KeyCurrentRequest) (*KeyCurrentResponse, error) {
@@ -945,7 +944,7 @@ func KeyCurrent(ctx context.Context, deps Deps, sess Session, _ KeyCurrentReques
 }
 
 func Migrate(ctx context.Context, deps Deps, sess Session, req MigrateRequest) (*MigrateResponse, error) {
-	scope := envelope.Scope(req.Scope)
+	scope := seal.Scope(req.Scope)
 	if !scope.Valid() {
 		return nil, badRequest("invalid scope")
 	}
@@ -959,13 +958,13 @@ func Migrate(ctx context.Context, deps Deps, sess Session, req MigrateRequest) (
 	if err != nil {
 		return nil, badRequest("invalid target.key: " + err.Error())
 	}
-	defer cryptopkg.Zero(targetKey)
+	defer seal.Zero(targetKey)
 
-	targetKIDBytes, err := cryptopkg.DeriveKeyID(targetKey)
+	targetKIDBytes, err := seal.DeriveKeyID(targetKey)
 	if err != nil {
 		return nil, err
 	}
-	targetKIDHex := cryptopkg.KeyIDHex(targetKIDBytes)
+	targetKIDHex := seal.KeyIDHex(targetKIDBytes)
 
 	keys, cleanup, err := decodeKeys(req.Keys)
 	if err != nil {
@@ -1076,11 +1075,11 @@ func migrateAllWithProgress(ctx context.Context, deps Deps, sess Session, req Mi
 	}
 
 	deadline := time.Now().Add(MigrateAllBudget)
-	scopes := []envelope.Scope{
-		envelope.ScopeProfile,
-		envelope.ScopeChat,
-		envelope.ScopeProject,
-		envelope.ScopeProjectDocument,
+	scopes := []seal.Scope{
+		seal.ScopeProfile,
+		seal.ScopeChat,
+		seal.ScopeProject,
+		seal.ScopeProjectDocument,
 	}
 
 	out := &MigrateAllResponse{Scopes: make([]MigrateAllScopeReport, 0, len(scopes))}
@@ -1202,13 +1201,13 @@ func ensureCurrentKeyRegistered(
 	if err != nil {
 		return badRequest("invalid target.key: " + err.Error())
 	}
-	defer cryptopkg.Zero(targetBytes)
+	defer seal.Zero(targetBytes)
 
-	targetKIDBytes, err := cryptopkg.DeriveKeyID(targetBytes)
+	targetKIDBytes, err := seal.DeriveKeyID(targetBytes)
 	if err != nil {
 		return err
 	}
-	targetKIDHex := cryptopkg.KeyIDHex(targetKIDBytes)
+	targetKIDHex := seal.KeyIDHex(targetKIDBytes)
 
 	if current != nil && current.KeyID != "" {
 		if current.KeyID != targetKIDHex {
@@ -1269,9 +1268,9 @@ func migrateOne(
 	ctx context.Context,
 	deps Deps,
 	sess Session,
-	scope envelope.Scope,
+	scope seal.Scope,
 	id string,
-	keys []envelope.Key,
+	keys []seal.Key,
 	targetKey []byte,
 	targetKIDHex string,
 ) bool {
@@ -1287,8 +1286,8 @@ func migrateOne(
 		if err != nil {
 			return false
 		}
-		version := envelope.Detect(blob.Ciphertext)
-		if version == envelope.VersionV2 && blob.KeyID == targetKIDHex {
+		version := seal.Detect(blob.Ciphertext)
+		if version == seal.VersionV2 && blob.KeyID == targetKIDHex {
 			// Already sealed under the target key by a concurrent
 			// migration pass or a user push. The row is in the desired
 			// end state, so count it migrated rather than re-sealing it
@@ -1301,7 +1300,7 @@ func migrateOne(
 			return false
 		}
 		_, rerr := rewrapBlob(ctx, deps, sess, scope, id, plaintext, blob.ETag, targetKey, targetKIDHex)
-		cryptopkg.Zero(plaintext)
+		seal.Zero(plaintext)
 		if rerr == nil {
 			return true
 		}
@@ -1318,7 +1317,7 @@ const migrateRewrapMaxRetries = 3
 const profileSyncProtocolMetadataKey = "profile_sync_protocol"
 
 func profileSyncProtocolFromMetadata(scope string, metadata map[string]any) (int, error) {
-	if scope != string(envelope.ScopeProfile) {
+	if scope != string(seal.ScopeProfile) {
 		return 0, nil
 	}
 	raw, ok := metadata[profileSyncProtocolMetadataKey]
@@ -1346,7 +1345,7 @@ func profileSyncProtocolFromMetadata(scope string, metadata map[string]any) (int
 // malformed values. A `projectId` set to nil or the empty string is
 // treated as an explicit clear (the row becomes unassigned).
 func projectIDFromMetadata(scope string, metadata map[string]any) (set bool, value *string) {
-	if scope != string(envelope.ScopeChat) {
+	if scope != string(seal.ScopeChat) {
 		return false, nil
 	}
 	raw, ok := metadata["projectId"]
@@ -1380,9 +1379,9 @@ func projectIDFromMetadata(scope string, metadata map[string]any) (set bool, val
 // The client-facing Push path deliberately does not use this: it keeps
 // the fail-closed AAD guard so a client that forgets to send the
 // profile singleton id gets a loud error instead of a silent normalize.
-func aadIDForScope(scope envelope.Scope, storageID string) string {
-	if scope == envelope.ScopeProfile {
-		return envelope.ProfileSingletonID
+func aadIDForScope(scope seal.Scope, storageID string) string {
+	if scope == seal.ScopeProfile {
+		return seal.ProfileSingletonID
 	}
 	return storageID
 }
@@ -1390,10 +1389,10 @@ func aadIDForScope(scope envelope.Scope, storageID string) string {
 // decryptAnyVersion picks the right decrypt path for whichever
 // envelope version the ciphertext is in. Returns the plaintext (caller
 // owns the buffer and must zeroize) and ok=true on success.
-func decryptAnyVersion(ciphertext []byte, keys []envelope.Key, scope envelope.Scope, id, clerkUserID string) ([]byte, bool) {
-	switch envelope.Detect(ciphertext) {
-	case envelope.VersionV2:
-		dec, err := envelope.DecryptV2(ciphertext, keys, envelope.AAD{
+func decryptAnyVersion(ciphertext []byte, keys []seal.Key, scope seal.Scope, id, clerkUserID string) ([]byte, bool) {
+	switch seal.Detect(ciphertext) {
+	case seal.VersionV2:
+		dec, err := seal.DecryptV2(ciphertext, keys, seal.AAD{
 			Scope:       scope,
 			ID:          aadIDForScope(scope, id),
 			ClerkUserID: clerkUserID,
@@ -1402,8 +1401,8 @@ func decryptAnyVersion(ciphertext []byte, keys []envelope.Key, scope envelope.Sc
 			return nil, false
 		}
 		return dec.Plaintext, true
-	case envelope.VersionV0, envelope.VersionV1:
-		dec, err := envelope.DecryptLegacy(ciphertext, keys)
+	case seal.VersionV0, seal.VersionV1:
+		dec, err := seal.DecryptLegacy(ciphertext, keys)
 		if err != nil {
 			return nil, false
 		}
@@ -1427,43 +1426,43 @@ func decodeKey(s string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(b) != cryptopkg.KeySize {
-		return nil, fmt.Errorf("key must be %d bytes, got %d", cryptopkg.KeySize, len(b))
+	if len(b) != seal.KeySize {
+		return nil, fmt.Errorf("key must be %d bytes, got %d", seal.KeySize, len(b))
 	}
 	return b, nil
 }
 
-func decodeKeys(in []PullKey) ([]envelope.Key, func(), error) {
-	out := make([]envelope.Key, 0, len(in))
+func decodeKeys(in []PullKey) ([]seal.Key, func(), error) {
+	out := make([]seal.Key, 0, len(in))
 	for i, k := range in {
 		raw, err := decodeKey(k.Key)
 		if err != nil {
 			for _, prev := range out {
-				cryptopkg.Zero(prev.Bytes)
+				seal.Zero(prev.Bytes)
 			}
 			return nil, nil, badRequest(fmt.Sprintf("keys[%d]: %v", i, err))
 		}
-		kidBytes, err := cryptopkg.DeriveKeyID(raw)
+		kidBytes, err := seal.DeriveKeyID(raw)
 		if err != nil {
 			for _, prev := range out {
-				cryptopkg.Zero(prev.Bytes)
+				seal.Zero(prev.Bytes)
 			}
-			cryptopkg.Zero(raw)
+			seal.Zero(raw)
 			return nil, nil, err
 		}
-		kidHex := cryptopkg.KeyIDHex(kidBytes)
+		kidHex := seal.KeyIDHex(kidBytes)
 		if k.KeyID != "" && k.KeyID != kidHex {
 			for _, prev := range out {
-				cryptopkg.Zero(prev.Bytes)
+				seal.Zero(prev.Bytes)
 			}
-			cryptopkg.Zero(raw)
+			seal.Zero(raw)
 			return nil, nil, badRequest(fmt.Sprintf("keys[%d]: key_id mismatch (claimed %s, derived %s)", i, k.KeyID, kidHex))
 		}
-		out = append(out, envelope.Key{Bytes: raw, KeyIDHex: kidHex})
+		out = append(out, seal.Key{Bytes: raw, KeyIDHex: kidHex})
 	}
 	cleanup := func() {
 		for _, k := range out {
-			cryptopkg.Zero(k.Bytes)
+			seal.Zero(k.Bytes)
 		}
 	}
 	return out, cleanup, nil

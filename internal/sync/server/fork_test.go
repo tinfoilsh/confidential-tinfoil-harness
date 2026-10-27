@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/buckets"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/envelope"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/buckets"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/seal"
 )
 
 type forkTestSource struct {
@@ -360,7 +360,7 @@ func TestForkPayloadIsDeterministicForRetries(t *testing.T) {
 		MessageCount: 1, Title: "fork", CreatedAt: "2026-03-04T05:06:07Z", IdempotencyKey: "idem-fork",
 	}
 	createdAt, _ := time.Parse(time.RFC3339Nano, req.CreatedAt)
-	key := envelope.Key{Bytes: f.userKey, KeyIDHex: f.userKeyID}
+	key := seal.Key{Bytes: f.userKey, KeyIDHex: f.userKeyID}
 
 	build := func() ([]byte, []string) {
 		source, projectID, err := readForkSource(context.Background(), f.handler.deps, sess, req.SourceID, key)

@@ -12,9 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/seal"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/auth"
-	cryptopkg "github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/crypto"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/envelope"
 )
 
 // buildLegacyChatBlob seals a JSON chat row under the fixture's
@@ -23,7 +22,7 @@ import (
 func buildLegacyChatBlob(t *testing.T, f *fixture, id string) *cpBlob {
 	t.Helper()
 	pt := []byte(`{"id":"` + id + `","title":"legacy","messages":[]}`)
-	nonce, ct, err := cryptopkg.Seal(f.userKey, pt, nil)
+	nonce, ct, err := seal.GCMSeal(f.userKey, pt, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -410,9 +409,9 @@ func TestMigrateOneTreatsConcurrentV2AsMigrated(t *testing.T) {
 	f.cp.blobs["chat/c1"] = buildLegacyChatBlob(t, f, "c1")
 	f.cp.mu.Unlock()
 
-	v2blob, err := envelope.Encrypt(f.userKey, chatJSON, envelope.AAD{
+	v2blob, err := seal.Encrypt(f.userKey, chatJSON, seal.AAD{
 		KeyIDHex:    f.userKeyID,
-		Scope:       envelope.ScopeChat,
+		Scope:       seal.ScopeChat,
 		ID:          "c1",
 		ClerkUserID: f.userSub,
 	})

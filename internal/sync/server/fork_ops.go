@@ -11,10 +11,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/buckets"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/controlplane"
-	cryptopkg "github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/crypto"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/envelope"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/buckets"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/seal"
 )
 
 const (
@@ -84,12 +83,12 @@ func Fork(ctx context.Context, deps Deps, sess Session, req ForkRequest) (*ForkR
 	if err != nil {
 		return nil, badRequest("invalid key: " + err.Error())
 	}
-	defer cryptopkg.Zero(key)
-	kidBytes, err := cryptopkg.DeriveKeyID(key)
+	defer seal.Zero(key)
+	kidBytes, err := seal.DeriveKeyID(key)
 	if err != nil {
 		return nil, err
 	}
-	kidHex := cryptopkg.KeyIDHex(kidBytes)
+	kidHex := seal.KeyIDHex(kidBytes)
 
 	// Sealing under a key that is not the registered current key would
 	// strand the fork behind a CAS the client can never satisfy.
@@ -97,11 +96,11 @@ func Fork(ctx context.Context, deps Deps, sess Session, req ForkRequest) (*ForkR
 		return nil, err
 	}
 
-	source, projectID, err := readForkSource(ctx, deps, sess, req.SourceID, envelope.Key{Bytes: key, KeyIDHex: kidHex})
+	source, projectID, err := readForkSource(ctx, deps, sess, req.SourceID, seal.Key{Bytes: key, KeyIDHex: kidHex})
 	if err != nil {
 		return nil, err
 	}
-	defer cryptopkg.Zero(source)
+	defer seal.Zero(source)
 
 	var chat nativeChatPayload
 	if err := json.Unmarshal(source, &chat); err != nil {
@@ -156,8 +155,8 @@ func Fork(ctx context.Context, deps Deps, sess Session, req ForkRequest) (*ForkR
 // (empty when unassigned). The controlplane column is authoritative
 // for project membership because moves update it without re-sealing
 // the row. The caller owns the returned plaintext and must zeroize it.
-func readForkSource(ctx context.Context, deps Deps, sess Session, sourceID string, key envelope.Key) ([]byte, string, error) {
-	blob, err := deps.Controlplane.GetBlob(ctx, string(envelope.ScopeChat), sourceID, sess.RawJWT, sess.Claims.Subject)
+func readForkSource(ctx context.Context, deps Deps, sess Session, sourceID string, key seal.Key) ([]byte, string, error) {
+	blob, err := deps.Controlplane.GetBlob(ctx, string(seal.ScopeChat), sourceID, sess.RawJWT, sess.Claims.Subject)
 	if err != nil {
 		var cpe *controlplane.Error
 		if errors.As(err, &cpe) && cpe.StatusCode == http.StatusNotFound {
@@ -165,7 +164,7 @@ func readForkSource(ctx context.Context, deps Deps, sess Session, sourceID strin
 		}
 		return nil, "", err
 	}
-	plaintext, ok := decryptAnyVersion(blob.Ciphertext, []envelope.Key{key}, envelope.ScopeChat, sourceID, sess.Claims.Subject)
+	plaintext, ok := decryptAnyVersion(blob.Ciphertext, []seal.Key{key}, seal.ScopeChat, sourceID, sess.Claims.Subject)
 	if !ok {
 		return nil, "", &AppError{Status: http.StatusConflict, Code: CodeUnknownKey, Reason: "source_not_decryptable"}
 	}
@@ -257,7 +256,7 @@ func copyForkAttachment(ctx context.Context, deps Deps, sess Session, req ForkRe
 	if err != nil || len(sourceKey) != attKeySize {
 		return nil, badRequest("fork: source attachment key is invalid")
 	}
-	defer cryptopkg.Zero(sourceKey)
+	defer seal.Zero(sourceKey)
 
 	plaintext, err := deps.Buckets.GetLimited(ctx, sess.Claims.Subject, sourceAttachmentID, sourceKey, maxForkAttachmentBytes)
 	if err != nil {
@@ -272,7 +271,7 @@ func copyForkAttachment(ctx context.Context, deps Deps, sess Session, req ForkRe
 		}
 		return nil, &AppError{Status: http.StatusBadGateway, Code: CodeUpstream, Message: "buckets get failed: " + err.Error()}
 	}
-	defer cryptopkg.Zero(plaintext)
+	defer seal.Zero(plaintext)
 
 	return AttachmentPut(ctx, deps, sess, AttachmentPutRequest{
 		ChatID:         req.TargetID,
