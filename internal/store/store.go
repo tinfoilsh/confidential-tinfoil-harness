@@ -3,7 +3,6 @@ package store
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"maps"
@@ -29,8 +28,8 @@ type Store struct {
 	API *Client
 }
 
-// The store is the harness's typed view of sync: chats, the profile,
-// projects and their documents, attachment blobs, shares, search and keys.
+// The store is the harness's typed view of what a caller keeps: chats, the
+// profile, projects and their documents, attachments, search and keys.
 // Nothing else calls sync. Rows are read through the legacy reader, so a
 // row any client wrote reads in the current format.
 
@@ -485,31 +484,6 @@ func (s *Store) CreateProjectDocument(ctx context.Context, p *auth.Principal, ke
 		return nil
 	})
 	return doc, err
-}
-
-// Shares
-
-// SealShare seals a share's payload under a key the link carries.
-func (s *Store) SealShare(ctx context.Context, p *auth.Principal, plaintext []byte) ([]byte, string, error) {
-	var sealed struct {
-		Ciphertext string `json:"ciphertext"`
-		ShareKey   string `json:"share_key"`
-	}
-	if err := s.API.call(ctx, p, "/v1/share/seal", api.Object{"plaintext": base64.StdEncoding.EncodeToString(plaintext)}, &sealed); err != nil {
-		return nil, "", err
-	}
-	ciphertext, err := base64.StdEncoding.DecodeString(sealed.Ciphertext)
-	return ciphertext, sealed.ShareKey, err
-}
-
-func (s *Store) OpenSealedShare(ctx context.Context, shareKey string, ciphertext []byte) ([]byte, error) {
-	var opened struct {
-		Plaintext string `json:"plaintext"`
-	}
-	if err := s.API.call(ctx, &auth.Principal{Anonymous: true}, "/v1/share/open", api.Object{"share_key": shareKey, "ciphertext": base64.StdEncoding.EncodeToString(ciphertext)}, &opened); err != nil {
-		return nil, err
-	}
-	return base64.StdEncoding.DecodeString(opened.Plaintext)
 }
 
 // Keys and imports

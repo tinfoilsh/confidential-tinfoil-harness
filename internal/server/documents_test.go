@@ -28,6 +28,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/buckets"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/buckets/bucketstub"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/seal"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
 
@@ -68,6 +69,59 @@ func attachmentBytes(t *testing.T, rows *memoryRows, a domain.Attachment) []byte
 
 // attachmentsStored is how many attachments buckets holds.
 func attachmentsStored(rows *memoryRows) int { return len(rows.bk.Tokens()) }
+
+// sharedPayload opens a share as its reader does: the ciphertext the
+// harness uploaded, with the key its link carries.
+func sharedPayload(t *testing.T, link string, ciphertext []byte) []byte {
+	t.Helper()
+	_, key, ok := strings.Cut(link, "#v2:")
+	plaintext, err := seal.OpenShare(key, ciphertext)
+	if !ok || err != nil {
+		t.Fatalf("the share at %s cannot be opened: %v", link, err)
+	}
+	return plaintext
+}
+
+// shareStore is a control plane that keeps the shares uploaded to it, by
+// chat, and serves them back to readers.
+type shareStore struct {
+	mu     sync.Mutex
+	shares map[string][]byte
+}
+
+func fakeShares(t *testing.T, h *harness) *shareStore {
+	t.Helper()
+	s := &shareStore{shares: map[string][]byte{}}
+	cp := httptest.NewServer(s)
+	t.Cleanup(cp.Close)
+	h.atControlplane(cp.URL)
+	h.archives.CPClient = &http.Client{Transport: &auth.CallerTransport{Inner: cp.Client().Transport}}
+	return s
+}
+
+func (s *shareStore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id := strings.TrimPrefix(r.URL.Path, "/api/shares/")
+	switch r.Method {
+	case http.MethodPut:
+		s.shares[id], _ = io.ReadAll(r.Body)
+	case http.MethodGet:
+		if body, ok := s.shares[id]; ok {
+			w.Write(body)
+		} else {
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}
+}
+
+// uploaded is the share of a chat as it was uploaded, and how many
+// shares were.
+func (s *shareStore) uploaded(id string) ([]byte, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.shares[id], len(s.shares)
+}
 
 // fakeSync serves the sync enclave's import routes, which require protocol
 // 3, and runs the import jobs they start. A fork copies a chat the test
@@ -117,8 +171,6 @@ func newFakeSync(t *testing.T, h *harness) *fakeSync {
 			status, out := f.importStep(t, h, r, in)
 			w.WriteHeader(status)
 			json.NewEncoder(w).Encode(out)
-		case "/v1/share/seal":
-			json.NewEncoder(w).Encode(api.Object{"ok": true, "share_key": strings.Repeat("ab", 32), "ciphertext": base64.StdEncoding.EncodeToString([]byte("sealed"))})
 		default:
 			w.WriteHeader(404)
 		}
@@ -410,12 +462,14 @@ func TestForkTitlesNameTheirSource(t *testing.T) {
 
 func TestALocalChatIsSharedFromItsTranscript(t *testing.T) {
 	h, rows, _ := testChatHarness(t, nil)
-	fake := newFakeSync(t, h)
-	type upload struct{ method, path, auth, format, body string }
+	type upload struct {
+		method, path, auth, format string
+		body                       []byte
+	}
 	uploads := make(chan upload, 4)
 	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		uploads <- upload{r.Method, r.URL.Path, r.Header.Get("Authorization"), r.Header.Get("X-Format-Version"), string(body)}
+		uploads <- upload{r.Method, r.URL.Path, r.Header.Get("Authorization"), r.Header.Get("X-Format-Version"), body}
 	}))
 	defer cp.Close()
 	h.atControlplane(cp.URL)
@@ -449,11 +503,18 @@ func TestALocalChatIsSharedFromItsTranscript(t *testing.T) {
 	w := share(api.Object{"local": true, "threadId": "0000000000005_local", "thread": thread}, "alice")
 	var result api.Object
 	json.Unmarshal(w.Body.Bytes(), &result)
-	if w.Code != 200 || !strings.HasSuffix(api.Str(result["url"]), "/share/0000000000005_local#v2:"+strings.Repeat("ab", 32)) {
+	link := api.Str(result["url"])
+	if _, fragment, ok := strings.Cut(link, "/share/0000000000005_local#v2:"); w.Code != 200 || !ok || len(fragment) != 64 {
 		t.Fatalf("local share: HTTP %d %s", w.Code, w.Body.String())
 	}
-	seals := fake.requests("/v1/share/seal")
-	plaintext, _ := base64.StdEncoding.DecodeString(api.Str(seals[0]["plaintext"]))
+	if len(uploads) != 1 {
+		t.Fatalf("%d share uploads", len(uploads))
+	}
+	got := <-uploads
+	if got.method != http.MethodPut || got.path != "/api/shares/0000000000005_local" || got.auth != "Bearer clerk-alice" || got.format != "1" {
+		t.Fatalf("share upload: %+v", got)
+	}
+	plaintext := sharedPayload(t, link, got.body)
 	want := api.Object{"v": 1, "title": "Local chat", "createdAt": 1767225600000, "messages": []any{
 		api.Object{"role": "user", "content": "what is this?", "timestamp": 1767225601000, "timeline": nil, "quote": "earlier", "attachments": []any{
 			api.Object{"id": "img", "kind": "image", "fileName": "photo.png", "mimeType": "image/png", "thumbnail": "dGh1bWI="},
@@ -461,18 +522,12 @@ func TestALocalChatIsSharedFromItsTranscript(t *testing.T) {
 		}},
 		api.Object{"role": "assistant", "content": "a photo", "timestamp": 1767225602000, "timeline": []any{api.Object{"id": "b1", "type": "content", "content": "a photo"}}, "modelDisplayName": "Kimi K3", "annotations": citations},
 	}}
-	if len(seals) != 1 || !reflect.DeepEqual(api.Parsed(plaintext), api.Parsed(api.Raw(want))) {
-		t.Fatalf("sealed %d payloads, the last %s", len(seals), plaintext)
+	if !reflect.DeepEqual(api.Parsed(plaintext), api.Parsed(api.Raw(want))) {
+		t.Fatalf("the share holds %s", plaintext)
 	}
 	// The opened share lists the reply's citations as its sources.
 	if opened := mustRead(archives.SharedThreadView("0000000000005_local", plaintext)).Messages[1].Annotations; !reflect.DeepEqual(api.Parsed(api.Raw(opened)), api.Parsed(api.Raw(citations))) {
 		t.Fatalf("the opened share cites %s", api.Raw(opened))
-	}
-	if len(uploads) != 1 {
-		t.Fatalf("%d share uploads", len(uploads))
-	}
-	if got := <-uploads; got != (upload{http.MethodPut, "/api/shares/0000000000005_local", "Bearer clerk-alice", "1", "sealed"}) {
-		t.Fatalf("share upload: %+v", got)
 	}
 	if attachmentsStored(rows) != 0 || rows.calls != 0 {
 		t.Fatalf("a local share stored %d attachments and made %d storage calls", attachmentsStored(rows), rows.calls)
@@ -481,22 +536,28 @@ func TestALocalChatIsSharedFromItsTranscript(t *testing.T) {
 
 func TestAStoredChatIsSharedFromItsRow(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	fake := newFakeSync(t, h)
 	storedThread(rows, "alice", "chat-1")
-	cp := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	defer cp.Close()
-	h.atControlplane(cp.URL)
-	h.archives.CPClient = &http.Client{Transport: &auth.CallerTransport{Inner: cp.Client().Transport}}
-	if _, err := h.archives.ShareThread(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, auth.ContentKey{}, requestOf[archives.ShareRequest](api.Object{"key": keyBase64(key), "threadId": "chat-1"})); err != nil {
-		t.Fatal(err)
+	shares := fakeShares(t, h)
+	w := postRoute(h, "/v1/threads/share", api.Object{"key": keyBase64(key), "threadId": "chat-1"}, "alice")
+	var result api.Object
+	json.Unmarshal(w.Body.Bytes(), &result)
+	link := api.Str(result["url"])
+	uploaded, count := shares.uploaded("chat-1")
+	if w.Code != 200 || count != 1 {
+		t.Fatalf("share: HTTP %d %s after %d uploads", w.Code, w.Body.String(), count)
 	}
-	var shared api.Object
-	if seals := fake.requests("/v1/share/seal"); len(seals) == 1 {
-		plaintext, _ := base64.StdEncoding.DecodeString(api.Str(seals[0]["plaintext"]))
-		json.Unmarshal(plaintext, &shared)
-	}
+	shared := api.Obj(api.Parsed(sharedPayload(t, link, uploaded)))
 	if messages := api.Arr(shared["messages"]); shared["title"] != "Old" || len(messages) != 2 || api.Obj(messages[0])["content"] != "look at this" || api.Obj(messages[1])["content"] != "ok" {
 		t.Fatalf("shared %v", shared)
+	}
+	// A reader opens the share with the link alone, and nothing else does.
+	_, fragment, _ := strings.Cut(link, "#")
+	var opened domain.SharedThread
+	if w := postRoute(h, "/v1/shares/open", api.Object{"shareId": "chat-1", "fragment": fragment}, ""); w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &opened) != nil || opened.Title != "Old" || len(opened.Messages) != 2 || domain.ValueOr(opened.Messages[0].Content, "") != "look at this" {
+		t.Fatalf("open: HTTP %d %s", w.Code, w.Body.String())
+	}
+	if w := postRoute(h, "/v1/shares/open", api.Object{"shareId": "chat-1", "fragment": "v2:" + strings.Repeat("0", 64)}, ""); w.Code != 400 || !strings.Contains(w.Body.String(), "BAD_REQUEST") {
+		t.Fatalf("open with another key: HTTP %d %s", w.Code, w.Body.String())
 	}
 }
 

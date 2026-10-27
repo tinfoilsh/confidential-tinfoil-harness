@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -20,6 +21,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/seal"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
 
@@ -65,7 +67,10 @@ func (ar *Service) ShareThread(ctx context.Context, p *auth.Principal, _ auth.Co
 		}
 		payload.Messages = append(payload.Messages, shared)
 	}
-	ciphertext, shareKey, err := ar.Store.SealShare(ctx, p, api.Raw(payload))
+	ciphertext, shareKey, err := seal.SealShare(api.Raw(payload))
+	if errors.Is(err, seal.ErrShareTooLarge) {
+		return nil, api.Err(413, "PAYLOAD_TOO_LARGE", "The chat is too large to share")
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -166,9 +171,9 @@ func (ar *Service) OpenShare(ctx context.Context, _ *auth.Principal, _ auth.Cont
 	if resp.StatusCode/100 != 2 {
 		return nil, api.DownstreamError(resp.StatusCode, ciphertext)
 	}
-	plain, err := ar.Store.OpenSealedShare(ctx, fragment, ciphertext)
+	plain, err := seal.OpenShare(fragment, ciphertext)
 	if err != nil {
-		return nil, err
+		return nil, api.Err(400, "BAD_REQUEST", "Invalid shared thread")
 	}
 	defer clear(plain)
 	var version struct {
