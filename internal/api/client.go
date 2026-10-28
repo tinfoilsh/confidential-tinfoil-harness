@@ -8,10 +8,6 @@ import (
 	"sync"
 )
 
-func PostJSON(ctx context.Context, client *http.Client, url, auth string, in, out any) error {
-	return PostJSONWithHeaders(ctx, client, url, auth, nil, in, out)
-}
-
 // requestBuffer lets a transport finish reading or replaying a request while
 // cleanup erases its bytes. RoundTrip may return before its body reader stops.
 type requestBuffer struct {
@@ -48,7 +44,9 @@ func (r *requestReader) Read(dst []byte) (int, error) {
 
 func (r *requestReader) Close() error { return nil }
 
-func PostJSONWithHeaders(ctx context.Context, client *http.Client, url, auth string, headers map[string]string, in, out any) error {
+// PostJSON posts in as JSON, under auth when given, and decodes the answer
+// into out. A refusal is mapped to the harness's errors.
+func PostJSON(ctx context.Context, client *http.Client, url, auth string, in, out any) error {
 	body, encoded := in.(json.RawMessage)
 	if !encoded {
 		body = Raw(in)
@@ -62,9 +60,6 @@ func PostJSONWithHeaders(ctx context.Context, client *http.Client, url, auth str
 	}
 	req.ContentLength, req.GetBody = int64(len(body)), buffer.open
 	req.Header.Set("Content-Type", "application/json")
-	for name, value := range headers {
-		req.Header.Set(name, value)
-	}
 	if auth != "" {
 		req.Header.Set("Authorization", "Bearer "+auth)
 	}
@@ -74,7 +69,6 @@ func PostJSONWithHeaders(ctx context.Context, client *http.Client, url, auth str
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		// A missing-attachment error lists every missing id.
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		return WithRetryAfter(DownstreamError(resp.StatusCode, b), resp.Header)
 	}

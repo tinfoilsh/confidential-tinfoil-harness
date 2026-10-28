@@ -151,6 +151,62 @@ func TestACancelEndsTheRunningJobAndLetsTheNextStart(t *testing.T) {
 	}
 }
 
+func TestGetFindsAnOwnersJobWhileItRunsAndWhileItIsKept(t *testing.T) {
+	kept := New[int](ample, time.Hour)
+	if kept.Get("alice") != nil {
+		t.Fatal("an owner without a job has one")
+	}
+	release := make(chan struct{})
+	job, _ := kept.Start(context.Background(), "alice", func(context.Context, func(int)) (int, error) {
+		<-release
+		return 1, nil
+	})
+	if found := kept.Get("alice"); found != job || found.ID() == "" {
+		t.Fatalf("get while running = %v (id %q), want the running job with an id", found, job.ID())
+	}
+	if kept.Get("bob") != nil {
+		t.Fatal("another owner found alice's job")
+	}
+	close(release)
+	<-job.Done()
+	if found := kept.Get("alice"); found != job {
+		t.Fatal("the ended job is not found within the retention")
+	}
+	other, _ := kept.Start(context.Background(), "bob", func(context.Context, func(int)) (int, error) { return 2, nil })
+	if other.ID() == job.ID() {
+		t.Fatal("two jobs share an id")
+	}
+
+	forgetting := New[int](ample, 0)
+	job, _ = forgetting.Start(context.Background(), "alice", func(context.Context, func(int)) (int, error) { return 1, nil })
+	<-job.Done()
+	if forgetting.Get("alice") != nil {
+		t.Fatal("an ended job is found after the retention")
+	}
+}
+
+func TestRestartReplacesAnEndedJobAndJoinsARunningOne(t *testing.T) {
+	r := New[int](ample, time.Hour)
+	first, _ := r.Start(context.Background(), "alice", func(context.Context, func(int)) (int, error) { return 1, nil })
+	<-first.Done()
+	release := make(chan struct{})
+	second, started := r.Restart(context.Background(), "alice", func(context.Context, func(int)) (int, error) {
+		<-release
+		return 2, nil
+	})
+	if !started || second == first || r.Get("alice") != second {
+		t.Fatalf("a restart after an ended job: started=%v same job=%v found=%v", started, second == first, r.Get("alice") == second)
+	}
+	if again, started := r.Restart(context.Background(), "alice", func(context.Context, func(int)) (int, error) { return 3, nil }); started || again != second {
+		t.Fatalf("a restart while running: started=%v same job=%v", started, again == second)
+	}
+	close(release)
+	<-second.Done()
+	if status := second.Status(); status.State != Complete || status.Report != 2 {
+		t.Fatalf("the restarted job's status = %+v", status)
+	}
+}
+
 func TestTheBudgetCancelsTheWork(t *testing.T) {
 	r := New[int](time.Millisecond, 0)
 	job, _ := r.Start(context.Background(), "alice", func(ctx context.Context, _ func(int)) (int, error) {

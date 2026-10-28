@@ -152,10 +152,11 @@ type DeviceTranscript struct {
 	ProjectID    *string       `json:"projectId,omitempty"`
 	ContextUsage *ContextUsage `json:"contextUsage,omitempty"`
 	HiddenCount  int           `json:"harnessHiddenCount,omitempty"`
+	ImportedFrom *ImportOrigin `json:"_restore,omitempty"`
 }
 
 // SharePayload is what a share link opens, sealed under its key: each
-// attachment's thumbnail or text, and the key of its blob, which sync keeps
+// attachment's thumbnail or text, and the key of its blob, which buckets keeps
 // for the share.
 type SharePayload struct {
 	V         int            `json:"v"`

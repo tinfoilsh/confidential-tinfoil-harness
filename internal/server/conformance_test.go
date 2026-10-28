@@ -51,7 +51,7 @@ type fixtureChat struct {
 }
 
 // A client that applies a run's frames shows the chat the harness keeps: a
-// stored chat as sync holds it after the run, a device chat as its run
+// stored chat as the cloud holds it after the run, a device chat as its run
 // returns it. A stream a client receives twice, as following a run without a
 // cursor replays it, shows the same chat.
 func TestRunsShowTheChatTheHarnessKeeps(t *testing.T) {

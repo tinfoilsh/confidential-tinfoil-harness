@@ -5,6 +5,8 @@ package jobs
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"runtime/debug"
@@ -51,19 +53,51 @@ func New[R any](budget, retention time.Duration) *Runner[R] {
 // with the budget as its deadline; it reports progress through report; a
 // panic is logged with its stack and ends it as failed.
 func (r *Runner[R]) Start(ctx context.Context, owner string, work func(ctx context.Context, report func(R)) (R, error)) (*Job[R], bool) {
+	return r.start(ctx, owner, work, false)
+}
+
+// Restart is Start for an owner whose last job gives way once it has
+// ended: a running job is returned as Start returns it, an ended one is
+// forgotten and the new one started.
+func (r *Runner[R]) Restart(ctx context.Context, owner string, work func(ctx context.Context, report func(R)) (R, error)) (*Job[R], bool) {
+	return r.start(ctx, owner, work, true)
+}
+
+func (r *Runner[R]) start(ctx context.Context, owner string, work func(ctx context.Context, report func(R)) (R, error), replaceEnded bool) (*Job[R], bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if job, ok := r.jobs[owner]; ok {
-		return job, false
+		if !replaceEnded || job.Status().State == Running {
+			return job, false
+		}
+		delete(r.jobs, owner)
 	}
 	now := time.Now()
-	job := &Job[R]{status: Status[R]{State: Running, StartedAt: now, UpdatedAt: now}, done: make(chan struct{})}
+	job := &Job[R]{id: newID(), status: Status[R]{State: Running, StartedAt: now, UpdatedAt: now}, done: make(chan struct{})}
 	// The job's context is made here, so a cancel can end it before its
 	// goroutine has run.
 	ctx, job.cancel = context.WithTimeout(context.WithoutCancel(ctx), r.budget)
 	r.jobs[owner] = job
 	go r.run(ctx, owner, job, work)
 	return job, true
+}
+
+// Get is the job owner has, running or ended within the retention, or nil.
+func (r *Runner[R]) Get(owner string) *Job[R] {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.jobs[owner]
+}
+
+// idBytes is the length of a job's id before hex.
+const idBytes = 16
+
+// newID names a job so a client can tell the one it started from the
+// owner's next.
+func newID() string {
+	var b [idBytes]byte
+	rand.Read(b[:])
+	return hex.EncodeToString(b[:])
 }
 
 // Cancel ends owner's job, running or ended, and forgets it, so the next
@@ -122,11 +156,15 @@ func guarded[R any](ctx context.Context, report func(R), work func(context.Conte
 
 // Job is one owner's background work.
 type Job[R any] struct {
+	id     string
 	mu     sync.Mutex
 	status Status[R]
 	done   chan struct{}
 	cancel context.CancelFunc
 }
+
+// ID names the job, unlike any other's.
+func (j *Job[R]) ID() string { return j.id }
 
 // Status is where the job stands now.
 func (j *Job[R]) Status() Status[R] {

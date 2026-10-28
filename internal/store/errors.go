@@ -16,7 +16,7 @@ var (
 	errRunScope = errors.New("store: the operation is outside the grant's storage scope")
 	// ErrRowNotFetched is a row the control plane could not serve twice
 	// running. A later request may fetch it.
-	ErrRowNotFetched = api.Err(502, "UPSTREAM_REFUSED", "The sync service could not fetch the data in time")
+	ErrRowNotFetched = api.Err(502, "UPSTREAM_REFUSED", "The storage service could not fetch the data in time")
 	// errRowUnreadable is a row the control plane holds in no format this
 	// harness opens: an envelope it does not know, or one that fails its
 	// authentication.
@@ -55,7 +55,7 @@ func FromControlplane(err error) *api.Error {
 		e := api.Err(409, "KEY_MISMATCH", "The stored data uses another content key")
 		e.KeyID = cpe.CurrentKeyID
 		return e
-	case controlplane.StatusStaleBlob, "SYNC_CONFLICT":
+	case controlplane.StatusStaleBlob:
 		return api.Err(409, "REVISION_CONFLICT", "The stored row changed")
 	case controlplane.StatusMissingAttachment:
 		e := api.Err(409, "MISSING_ATTACHMENT", "The chat references attachments that are not stored with it")

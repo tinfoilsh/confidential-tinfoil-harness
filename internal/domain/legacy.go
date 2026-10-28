@@ -19,7 +19,7 @@ import (
 // client's blank record of a new chat, and the legacy reader reads it into
 // the current format. One in any other format is refused.
 //
-// The legacy reader reads rows of any age: chats the apps stored in sync,
+// The legacy reader reads rows of any age: chats the apps stored in the cloud,
 // device chats the old web client kept, old shares, and profiles and
 // projects old clients wrote. A field of the wrong type reads as absent, so
 // one odd field never hides a chat.
@@ -70,7 +70,7 @@ func holds(data []byte, members []string) bool {
 }
 
 // The members a record in the current format requires, as
-// protocol/openapi.yaml names them. Sync files a chat's project apart from
+// protocol/openapi.yaml names them. The control plane files a chat's project apart from
 // it, and leaves projectId out of a fork outside a project.
 var (
 	currentChat     = []string{"id", "title", "titleState", "model", "presetId", "pinned", "webSearchEnabled", "messages"}
@@ -284,8 +284,8 @@ func ReadThread(id string, data []byte) (Thread, error) {
 	case !current:
 		return upgradeThread(id, data, ""), nil
 	}
-	// Sync marks a chat it copies, as a fork, as kept in the cloud. The mark
-	// is sync's, and the harness leaves it out.
+	// Older clients marked a chat as kept in the cloud. The mark is theirs,
+	// and the harness leaves it out.
 	var stored struct {
 		Thread
 		IsLocalOnly *bool `json:"isLocalOnly"`
@@ -335,7 +335,7 @@ func readThreadWith(id string, data []byte, created string, images BackupImages)
 	return t
 }
 
-// ReadThreadRow reads a stored chat. Sync files a chat under its project
+// ReadThreadRow reads a stored chat. The control plane files a chat under its project
 // apart from the sealed row, and that filing is the chat's project.
 func ReadThreadRow(row *StoredRow) (*ThreadRow, error) {
 	t, err := ReadThread(row.ID, row.Data)
@@ -363,7 +363,7 @@ func ReadDeviceThread(id string, data []byte) (Thread, error) {
 		}
 		t.ID = id
 	}
-	t.ActiveRun, t.HiddenCount, t.ProjectID, t.ContextUsage = nil, 0, nil, nil
+	t.ActiveRun, t.HiddenCount, t.ProjectID, t.ContextUsage, t.ImportedFrom = nil, 0, nil, nil, nil
 	return t, nil
 }
 
@@ -648,7 +648,7 @@ func ReadProject(row *StoredRow) (Project, error) {
 	return project, nil
 }
 
-// ReadProjectDocument reads a project document row, which sync files under
+// ReadProjectDocument reads a project document row, which is filed under
 // the project's id.
 func ReadProjectDocument(row *StoredRow, projectID string) (ProjectDocument, error) {
 	var doc ProjectDocument

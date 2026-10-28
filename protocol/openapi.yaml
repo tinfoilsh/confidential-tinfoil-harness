@@ -80,7 +80,7 @@ tags:
   - name: projects
     description: Projects and their documents.
   - name: keys
-    description: The account's content key and its passkey bundles, which sync keeps.
+    description: The account's content key and its passkey bundles, as the control plane keeps them.
   - name: attachments
     description: Uploads and attachment downloads.
   - name: archives
@@ -274,7 +274,7 @@ paths:
                 limit: {type: integer}
       responses:
         "200":
-          description: The stored chats that match, how many more match that the harness could not open, and whether the search index is still being built. A chat sync could not fetch in time fails the search with UPSTREAM_REFUSED, and a failed rebuild of the search index with SEARCH_INDEX_FAILED.
+          description: The stored chats that match, how many more match that the harness could not open, and whether the search index is still being built. A chat the control plane could not serve in time fails the search with UPSTREAM_REFUSED, and a failed rebuild of the search index with SEARCH_INDEX_FAILED.
           content:
             application/json:
               schema:

@@ -1,6 +1,8 @@
 # Release automation replaces the image digest before measuring this workload.
 cvm-version: 0.14.15
-cpus: 2
+# The harness seals rows, stores attachments, keeps the search index and
+# runs cloud imports itself, which take CPU beside the model turns.
+cpus: 8
 memory: 65536
 
 shim:
@@ -29,7 +31,6 @@ containers:
       - TINFOIL_CONTROLPLANE_URL: https://api.tinfoil.sh
       - CLERK_ISSUER: https://clerk.tinfoil.sh
       - TINFOIL_TOOLS_ENCLAVE: websearch.tinfoil.sh
-      - TINFOIL_SYNC_ENCLAVE: sync.tinfoil.sh
       - TINFOIL_ROUTER_ENCLAVE: inference.tinfoil.sh
       - TINFOIL_SUMMARIZER_ENCLAVE: summarizer.tinfoil.sh
       - TINFOIL_METADATA_ENCLAVE: opengraph-metadata.tinfoil.sh

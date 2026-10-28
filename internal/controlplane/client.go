@@ -77,7 +77,6 @@ const (
 	HeaderIfMatch             = "If-Match"
 	HeaderIdempotency         = "X-Idempotency-Key"
 	HeaderOperationHash       = "X-Operation-Hash"
-	HeaderSyncProtocol        = "X-Sync-Protocol"
 	HeaderProfileSyncProtocol = "X-Profile-Sync-Protocol"
 	HeaderProjectID           = "X-Project-Id"
 	HeaderProjectIDSet        = "X-Project-Id-Set"
@@ -1409,7 +1408,7 @@ func (c *Client) legacyClaimValid(claim, clerkUserID, attachmentID string, ciphe
 // controlplane only learns "this attachment id exists for this chat,
 // owned by this user, in v2 format." JWT is forwarded so the
 // controlplane resolves the user from claims, exactly like every
-// other sync route.
+// other storage route.
 func (c *Client) RegisterAttachmentIndex(ctx context.Context, jwt, clerkUserID, attachmentID, chatID string) error {
 	return c.postAttachmentChatID(
 		ctx,
@@ -1591,7 +1590,7 @@ type PendingAttachmentRow struct {
 // rows from controlplane. The rows are deleted from the pending
 // ledger by the same call, so the caller is the sole owner of the
 // cleanup obligation for the returned ids. Enclave-only — the route
-// is gated by the sync enclave service secret on the CP side.
+// is gated by the service secret on the CP side.
 func (c *Client) SweepPendingAttachmentWrites(ctx context.Context, limit int) ([]PendingAttachmentRow, error) {
 	if limit <= 0 {
 		limit = 200

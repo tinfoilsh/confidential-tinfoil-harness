@@ -67,10 +67,12 @@ func Run() {
 		os.Exit(1)
 	}
 	go h.search.RunDeletionWorker(ctx)
+	go h.store.RunAttachmentMaintenance(ctx)
 	h.attachments = &attach.Service{Auth: h.auth, Models: h.models, Store: h.store}
 	h.store.Repair = h.attachments
 	h.engine = &engine.Engine{Safeguards: engine.NewSubmitter(os.Getenv("SAFEGUARDS_URL")), Store: h.store, Models: h.models, Attachments: h.attachments, Auth: h.auth}
-	h.archives = &archives.Service{Scratch: scratch, CPClient: &http.Client{Transport: &auth.CallerTransport{Inner: http.DefaultTransport}}, Store: h.store, Attachments: h.attachments, Auth: h.auth, Controlplane: h.controlplane}
+	h.archives = &archives.Service{Scratch: scratch, CPClient: &http.Client{Transport: &auth.CallerTransport{Inner: http.DefaultTransport}}, Store: h.store, Attachments: h.attachments, Auth: h.auth, Controlplane: h.controlplane,
+		Imports: jobs.New[archives.ImportReport](archives.ImportBudget, archives.ImportRetention)}
 
 	srv := &http.Server{Addr: listenAddr, Handler: h.routes(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: time.Minute}
 	stop := make(chan os.Signal, 1)

@@ -49,10 +49,9 @@ func TestUpstreamRefusalsKeepTheirMeaning(t *testing.T) {
 		{"document failure", `{"error":"Document processing exceeded the time limit. Try splitting the document into smaller files.","object":"error","message":"Document processing exceeded the time limit. Try splitting the document into smaller files.","type":"server_error","code":"document_parser_timeout","param":null}`, 502, 502, "UPSTREAM_REFUSED", "Document processing exceeded the time limit. Try splitting the document into smaller files.", "document_parser_timeout", "revise"},
 		{"server internals", `{"error":{"message":"Traceback: secret internals","type":"server_error"}}`, 500, 502, "UPSTREAM_REFUSED", "A downstream service refused the request", "", "retry"},
 		{"rejected credential", `{"error":{"message":"Incorrect API key provided.","type":"invalid_request_error","code":"invalid_api_key"}}`, 401, 401, "UNAUTHENTICATED", "Authentication is required", "", "reauthenticate"},
-		{"sync row missing", `{"ok":false,"code":"NOT_FOUND"}`, 404, 404, "THREAD_NOT_FOUND", "The requested data was not found", "", "stop"},
-		{"sync revision", `{"ok":false,"code":"STALE_BLOB"}`, 412, 409, "REVISION_CONFLICT", "The stored row changed", "", "reload"},
+		{"missing share", `{"ok":false,"code":"NOT_FOUND"}`, 404, 404, "THREAD_NOT_FOUND", "The requested data was not found", "", "stop"},
 		{"refusal without a message", `{"error":{"type":"invalid_request_error"}}`, 400, 502, "UPSTREAM_REFUSED", "A downstream service refused the request", "", "stop"},
-		{"sync refusal", `{"ok":false,"code":"BAD_REQUEST"}`, 400, 502, "UPSTREAM_REFUSED", "A downstream service refused the request", "", "stop"},
+		{"refusal in another shape", `{"ok":false,"code":"BAD_REQUEST"}`, 400, 502, "UPSTREAM_REFUSED", "A downstream service refused the request", "", "stop"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := DownstreamError(tc.status, []byte(tc.body))

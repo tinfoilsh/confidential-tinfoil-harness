@@ -5,9 +5,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,34 +30,34 @@ import (
 
 // An import reads an uploaded archive in the harness: a native backup of
 // any version, or a ChatGPT, Claude or Tinfoil export. What goes to the
-// cloud is written as a native cloud import, which sync's import job
-// stores. Chats for the device are streamed back as NDJSON, one thread per
-// line, and nothing of them is kept.
+// cloud is written to a cloud archive, which a background job stores.
+// Chats for the device are streamed back as NDJSON, one thread per line,
+// and nothing of them is kept.
 
 const (
 	// maxImportBody bounds an upload: the archive and its options.
 	maxImportBody = 512<<20 + 1<<20
-	// maxCloudImport is the largest archive sync's import job takes.
-	maxCloudImport = 512 << 20
-	// ImportChunk is the size sync's import job takes an archive in.
-	ImportChunk = 8 << 20
 	// importSpaceFactor is the space an import expects to need: its upload
-	// and the cloud import written from it, which is no larger than the
+	// and the cloud archive written from it, which is no larger than the
 	// upload it comes from.
 	importSpaceFactor = 2
-	// Sync's import job refuses an archive past these.
+	// An import refuses an archive past these.
 	maxImportChats       = 100_000
 	maxImportMessages    = 2_000_000
 	maxImportAttachments = 100_000
-	cloudImportFormat    = "tinfoil-native-cloud-import"
-	cloudImportSource    = "tinfoil_backup"
+	// cloudImportFormat names the rows an import stores, as the rows
+	// earlier imports stored are named.
+	cloudImportFormat = "tinfoil-native-cloud-import"
+	// cloudImportSource is what the control plane is told an import was
+	// of: the archive the harness wrote, whatever its upload was.
+	cloudImportSource = "tinfoil_backup"
 )
 
 // importNamespace names the ids an import derives, so importing the same
 // conversation again gives it the same ids.
 var importNamespace = uuid.NewSHA1(uuid.NameSpaceURL, []byte("https://chat.tinfoil.sh/import"))
 
-// sniffedImages are the image types an import stores, as sync accepts them.
+// sniffedImages are the image types an import stores.
 var sniffedImages = []string{"image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp"}
 
 type importOptions struct {
@@ -95,7 +93,17 @@ func (ar *Service) HandleImport(w http.ResponseWriter, r *http.Request) {
 		if len(options.Key) == 0 {
 			return api.Err(401, "KEY_REQUIRED", "A content key is required")
 		}
-		return ar.Store.AuthorizeArchive(r.Context(), p, options.Key, "import")
+		if err := ar.Store.AuthorizeArchive(r.Context(), p, options.Key, "import"); err != nil {
+			return err
+		}
+		// The cloud takes new rows only under the registered key, so an
+		// archive sealed under another is refused before it is read.
+		key, err := auth.DecodeContentKey(options.Key)
+		if err != nil {
+			return err
+		}
+		defer clear(key[:])
+		return ar.Store.CheckRegisteredKey(r.Context(), p, key)
 	})
 	defer options.ClearKey()
 	if err != nil {
@@ -279,7 +287,7 @@ func (j *importRun) complete(ctx context.Context) error {
 	if err := j.cloud.finish(); err != nil {
 		return err
 	}
-	job, err := j.h.stageImport(ctx, j.p, *j.key, j.cloud.file)
+	job, err := j.h.startImport(ctx, j.p, *j.key, j.cloud.file, j.source)
 	if err != nil {
 		return err
 	}
@@ -492,13 +500,12 @@ func (j *importRun) project(project *importer.Project) error {
 	if err != nil {
 		return err
 	}
-	if err := cloud.entity("project", project.Key, "", cloudProject{Name: cmp.Or(project.Name, "Imported Project"), Description: project.Description, SystemInstructions: project.Instructions, Memory: []json.RawMessage{}}); err != nil {
+	if err := cloud.entity("project", project.Key, "", cloudProject{Name: cmp.Or(project.Name, "Imported Project"), Description: project.Description, SystemInstructions: project.Instructions}); err != nil {
 		return err
 	}
 	for i, doc := range project.Documents {
-		size := int64(len(doc.Content))
 		source := project.Key + "/" + cmp.Or(doc.Key, strconv.Itoa(i))
-		if err := cloud.entity("document", source, project.Key, cloudDocument{Filename: doc.FileName, ContentType: "text/markdown", SourceSizeBytes: size, SizeBytes: size, Content: doc.Content}); err != nil {
+		if err := cloud.entity("document", source, project.Key, cloudDocument{Filename: doc.FileName, ContentType: "text/markdown", SizeBytes: len(doc.Content), Content: doc.Content}); err != nil {
 			return err
 		}
 	}
@@ -509,7 +516,7 @@ func (j *importRun) project(project *importer.Project) error {
 // state, server keys, messages of other roles, and attachments without
 // their content. It counts what it leaves out.
 func (j *importRun) prepare(t *domain.Thread) error {
-	t.ActiveRun, t.ContextUsage, t.HiddenCount, t.Flagged = nil, nil, 0, false
+	t.ActiveRun, t.ContextUsage, t.HiddenCount, t.Flagged, t.ImportedFrom = nil, nil, 0, false, nil
 	t.LastRequestID, t.LastRequestKind = "", ""
 	if _, err := time.Parse(time.RFC3339Nano, t.CreatedAt); err != nil {
 		t.CreatedAt = cmp.Or(domain.ISOTime(t.UpdatedAt), api.Timestamp())
@@ -704,104 +711,75 @@ func (s *importStream) finish(jobID *string, warnings []string, err error) {
 // errAttachmentMissing is an attachment whose bytes its source does not hold.
 var errAttachmentMissing = api.Err(404, "THREAD_NOT_FOUND", "The attachment was not found")
 
-// A native cloud import is the archive sync's import job stores: one entry
-// per project, document and chat, each chat image's bytes as a blob, and a
-// manifest listing them. Sync maps every source id to an id of its own and
-// skips an entity it stored from the same source before.
+// A cloud archive holds what an import puts in the cloud, for the job
+// that stores it: one entry per project, document and chat, each chat
+// image's bytes as a blob, and a manifest listing the entities with where
+// each came from.
 type cloudArchive struct {
 	file     *scratchFile
 	zip      *zip.Writer
 	manifest cloudManifest
+	blobs    int
 }
 
 type cloudManifest struct {
-	Format         string        `json:"format"`
-	Version        int           `json:"version"`
-	SourceBackupID string        `json:"source_backup_id"`
-	Counts         cloudCounts   `json:"counts"`
-	Entities       []cloudEntity `json:"entities"`
-	Blobs          []cloudBlob   `json:"blobs"`
+	Format   string        `json:"format"`
+	Version  int           `json:"version"`
+	Source   string        `json:"source"`
+	Entities []cloudEntity `json:"entities"`
 }
 
-type cloudCounts struct {
-	Projects  int `json:"projects"`
-	Documents int `json:"documents"`
-	Chats     int `json:"chats"`
-	Blobs     int `json:"blobs"`
-}
-
+// cloudEntity is one project, document or chat: the source's id for it,
+// the source's id for its project, and the entry that holds it.
 type cloudEntity struct {
 	Kind            string `json:"kind"`
-	SourceID        string `json:"source_id"`
-	ProjectSourceID string `json:"project_source_id,omitempty"`
+	SourceID        string `json:"sourceId"`
+	ProjectSourceID string `json:"projectSourceId,omitempty"`
 	Path            string `json:"path"`
-	SHA256          string `json:"sha256"`
-	SizeBytes       int    `json:"size_bytes"`
 }
 
-type cloudBlob struct {
-	Path      string `json:"path"`
-	SHA256    string `json:"sha256"`
-	SizeBytes int    `json:"size_bytes"`
-}
-
-// cloudProject and cloudDocument hold exactly the fields sync's import
-// takes for them.
+// cloudProject and cloudDocument hold what the cloud keeps of each.
 type cloudProject struct {
-	Name               string            `json:"name"`
-	Description        string            `json:"description,omitempty"`
-	SystemInstructions string            `json:"systemInstructions,omitempty"`
-	Color              string            `json:"color,omitempty"`
-	Memory             []json.RawMessage `json:"memory"`
+	Name               string `json:"name"`
+	Description        string `json:"description,omitempty"`
+	SystemInstructions string `json:"systemInstructions,omitempty"`
+	Color              string `json:"color,omitempty"`
 }
 
 type cloudDocument struct {
-	Filename        string `json:"filename"`
-	ContentType     string `json:"contentType"`
-	SourceSizeBytes int64  `json:"sourceSizeBytes"`
-	SizeBytes       int64  `json:"sizeBytes"`
-	Content         string `json:"content"`
+	Filename    string `json:"filename"`
+	ContentType string `json:"contentType"`
+	SizeBytes   int    `json:"sizeBytes"`
+	Content     string `json:"content"`
 }
 
-// cloudChat is a thread with the fields sync's import reads: each message's
-// time, each attachment's type, and the blob that holds an image.
+// cloudChat is a prepared thread with each image's bytes in a blob of the
+// archive, named by the attachment, instead of inline.
 type cloudChat struct {
 	domain.Thread
-	Messages    []cloudMessage `json:"messages"`
-	IsLocalOnly bool           `json:"isLocalOnly"`
+	Messages []cloudMessage `json:"messages"`
 }
 
 type cloudMessage struct {
 	domain.Message
-	Timestamp   string            `json:"timestamp"`
 	Attachments []cloudAttachment `json:"attachments,omitzero"`
 }
 
 type cloudAttachment struct {
 	domain.Attachment
-	Type        string `json:"type"`
 	ArchivePath string `json:"archivePath,omitempty"`
 }
 
 func newCloudArchive(file *scratchFile, source string) *cloudArchive {
-	return &cloudArchive{file: file, zip: zip.NewWriter(file), manifest: cloudManifest{Format: cloudImportFormat, Version: 1, SourceBackupID: source, Entities: []cloudEntity{}, Blobs: []cloudBlob{}}}
+	return &cloudArchive{file: file, zip: zip.NewWriter(file), manifest: cloudManifest{Format: cloudImportFormat, Version: 1, Source: source, Entities: []cloudEntity{}}}
 }
 
 func (c *cloudArchive) entity(kind, sourceID, projectSourceID string, payload any) error {
-	data := api.Raw(payload)
 	name := "entities/" + kind + "/" + strconv.Itoa(len(c.manifest.Entities)) + ".json"
-	if err := writeEntry(c.zip, name, data, true); err != nil {
+	if err := writeEntry(c.zip, name, api.Raw(payload), true); err != nil {
 		return err
 	}
-	c.manifest.Entities = append(c.manifest.Entities, cloudEntity{Kind: kind, SourceID: sourceID, ProjectSourceID: projectSourceID, Path: name, SHA256: api.HashHex(data), SizeBytes: len(data)})
-	switch kind {
-	case "project":
-		c.manifest.Counts.Projects++
-	case "document":
-		c.manifest.Counts.Documents++
-	case "chat":
-		c.manifest.Counts.Chats++
-	}
+	c.manifest.Entities = append(c.manifest.Entities, cloudEntity{Kind: kind, SourceID: sourceID, ProjectSourceID: projectSourceID, Path: name})
 	return nil
 }
 
@@ -810,21 +788,20 @@ func (c *cloudArchive) chat(sourceID, projectSourceID string, t *domain.Thread) 
 	payload := cloudChat{Thread: *t, Messages: make([]cloudMessage, 0, len(t.Messages))}
 	payload.ProjectID = nil
 	for _, m := range t.Messages {
-		message := cloudMessage{Message: m, Timestamp: m.CreatedAt}
+		message := cloudMessage{Message: m}
 		for _, a := range m.Attachments {
-			attachment := cloudAttachment{Attachment: a, Type: "document"}
+			attachment := cloudAttachment{Attachment: a}
 			if a.IsImage() {
 				data, err := base64.StdEncoding.DecodeString(a.Base64)
 				if err != nil {
 					return api.Err(400, "IMPORT_INVALID", "An image is not valid base64")
 				}
-				name := "blobs/" + strconv.Itoa(len(c.manifest.Blobs)) + ".bin"
+				name := "blobs/" + strconv.Itoa(c.blobs) + ".bin"
 				if err := writeEntry(c.zip, name, data, false); err != nil {
 					return err
 				}
-				c.manifest.Blobs = append(c.manifest.Blobs, cloudBlob{Path: name, SHA256: api.HashHex(data), SizeBytes: len(data)})
-				c.manifest.Counts.Blobs++
-				attachment.Type, attachment.ArchivePath, attachment.Base64 = "image", name, ""
+				c.blobs++
+				attachment.ArchivePath, attachment.Base64 = name, ""
 			}
 			message.Attachments = append(message.Attachments, attachment)
 		}
@@ -838,93 +815,4 @@ func (c *cloudArchive) finish() error {
 		return err
 	}
 	return c.zip.Close()
-}
-
-// Sync takes an archive in chunks, then starts the job that stores it.
-
-type importCreate struct {
-	Source        string `json:"source"`
-	TotalBytes    int64  `json:"total_bytes"`
-	TotalChunks   int64  `json:"total_chunks"`
-	ArchiveSHA256 string `json:"archive_sha256"`
-}
-
-type importChunkUpload struct {
-	UploadID    string `json:"upload_id"`
-	ChunkIndex  int64  `json:"chunk_index"`
-	ChunkSHA256 string `json:"chunk_sha256"`
-	Data        string `json:"data"`
-}
-
-func (ar *Service) stageImport(ctx context.Context, p *auth.Principal, key auth.ContentKey, archive *scratchFile) (string, error) {
-	defer clear(key[:])
-	size := archive.Size()
-	if size > maxCloudImport {
-		return "", api.Err(413, "IMPORT_TOO_LARGE", "The chats for the cloud exceed what one import takes")
-	}
-	hash := sha256.New()
-	if _, err := io.Copy(hash, archive.section(0, size)); err != nil {
-		return "", err
-	}
-	chunks := (size + ImportChunk - 1) / ImportChunk
-	var created struct {
-		JobID    string `json:"job_id"`
-		UploadID string `json:"upload_id"`
-	}
-	if err := ar.Store.SyncImport(ctx, p, "create", importCreate{Source: cloudImportSource, TotalBytes: size, TotalChunks: chunks, ArchiveSHA256: hex.EncodeToString(hash.Sum(nil))}, &created); err != nil {
-		return "", err
-	}
-	for i := int64(0); i < chunks; i++ {
-		data := make([]byte, min(ImportChunk, size-i*ImportChunk))
-		if _, err := archive.ReadAt(data, i*ImportChunk); err != nil && err != io.EOF {
-			return "", err
-		}
-		err := ar.Store.SyncImport(ctx, p, "upload", importChunkUpload{UploadID: created.UploadID, ChunkIndex: i, ChunkSHA256: api.HashHex(data), Data: base64.StdEncoding.EncodeToString(data)}, nil)
-		clear(data)
-		if err != nil {
-			return "", err
-		}
-	}
-	return created.JobID, ar.Store.API.CallKey(ctx, p, "/v1/import/start", key, api.Object{"job_id": created.JobID}, nil)
-}
-
-// importKindCounts is what sync's job did with one kind of item.
-type importKindCounts struct {
-	Imported int `json:"imported"`
-	Skipped  int `json:"skipped"`
-	Failed   int `json:"failed"`
-	Blocked  int `json:"blocked"`
-}
-
-// importStatusView is a job's status as sync reports it, in the client's
-// names.
-type importStatusView struct {
-	JobID         string                      `json:"jobId"`
-	Status        string                      `json:"status"`
-	Phase         string                      `json:"phase,omitempty"`
-	Imported      int                         `json:"imported"`
-	Failed        int                         `json:"failed"`
-	Total         int                         `json:"total"`
-	Counts        map[string]importKindCounts `json:"counts,omitempty"`
-	Warnings      []string                    `json:"warnings,omitempty"`
-	Errors        []string                    `json:"errors,omitempty"`
-	FailureReason string                      `json:"failureReason,omitempty"`
-	FailureDetail string                      `json:"failureDetail,omitempty"`
-}
-
-func (ar *Service) ImportStatus(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *importStatusRequest) (any, error) {
-	var status struct {
-		importStatusView
-		FailureReason string `json:"failure_reason"`
-		FailureDetail string `json:"failure_detail"`
-	}
-	if err := ar.Store.SyncImport(ctx, p, "status", struct {
-		JobID string `json:"job_id"`
-	}{in.JobID}, &status); err != nil {
-		return nil, err
-	}
-	view := status.importStatusView
-	view.JobID = in.JobID
-	view.FailureReason, view.FailureDetail = status.FailureReason, status.FailureDetail
-	return view, nil
 }

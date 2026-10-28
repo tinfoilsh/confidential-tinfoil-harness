@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -171,12 +172,21 @@ func (l *Lease) Release() {
 	l.held = 0
 }
 
+// detach takes f out of the lease, which no longer deletes it or holds its
+// space: whoever takes it releases it, after the request it was written in.
+func (l *Lease) detach(f *scratchFile) {
+	l.files = slices.DeleteFunc(l.files, func(file *os.File) bool { return file == f.file })
+	l.held -= f.held
+}
+
 // scratchFile is a temporary file written through its lease. It is read
 // back at offsets.
 type scratchFile struct {
 	file  *os.File
 	lease *Lease
-	size  int64
+	// size is what the file holds, and held the space taken for it, which
+	// a write that fell short leaves apart.
+	size, held int64
 }
 
 func (l *Lease) create() (*scratchFile, error) {
@@ -192,9 +202,18 @@ func (f *scratchFile) Write(p []byte) (int, error) {
 	if err := f.lease.Take(int64(len(p))); err != nil {
 		return 0, err
 	}
+	f.held += int64(len(p))
 	n, err := f.file.Write(p)
 	f.size += int64(n)
 	return n, err
+}
+
+// release deletes a detached file and frees its space.
+func (f *scratchFile) release() {
+	f.file.Close()
+	os.Remove(f.file.Name())
+	f.lease.space.sem.Release(f.held)
+	f.held = 0
 }
 
 func (f *scratchFile) ReadAt(p []byte, offset int64) (int, error) {

@@ -14,8 +14,8 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
-// Since sync protocol 3 a stored document's blob holds its extracted content
-// as JSON, and the chat row keeps only metadata and the blob key. Sync deletes
+// A stored document's blob holds its extracted content as JSON, and the
+// chat row keeps only metadata and the blob key. The control plane deletes
 // any blob a chat stops referencing, so every attachment a row names must be
 // stored under that row's chat. Every client reads and writes this format.
 
@@ -118,7 +118,7 @@ func (at *Service) placeAttachment(ctx context.Context, p *auth.Principal, threa
 			}
 		}
 		if Unreachable(err) {
-			// Sync rejects a push naming an id that is not an enclave id, so
+			// The control plane rejects a push naming an id that is not an enclave id, so
 			// such a reference is retired now. Any other unavailable one fails
 			// the push as missing, and RepairAttachments then retires it.
 			if !domain.EnclaveAttachmentID.MatchString(a.ID) {
@@ -183,8 +183,8 @@ func (at *Service) InflateDocument(ctx context.Context, p *auth.Principal, a *do
 	return nil
 }
 
-// RepairAttachments makes a row pushable when sync names references it does
-// not hold under the row's chat: a row the web or iOS app wrote before sync
+// RepairAttachments makes a row pushable when the control plane names
+// references it does not hold under the row's chat: a row the web or iOS app wrote before the store
 // checked references may point at blobs filed under another chat or deleted
 // since.
 func (at *Service) RepairAttachments(ctx context.Context, p *auth.Principal, t *domain.Thread, missing []string) error {

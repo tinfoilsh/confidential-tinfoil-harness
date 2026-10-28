@@ -157,6 +157,56 @@ func importLines(t *testing.T, w *httptest.ResponseRecorder) imported {
 	return out
 }
 
+// cloudImportHarness is a chat harness whose test key is the registered
+// content key, which a cloud import stores under.
+func cloudImportHarness(t *testing.T) (*harness, *memoryRows, auth.ContentKey) {
+	t.Helper()
+	h, rows, key := testChatHarness(t, nil)
+	rows.cp.Mu.Lock()
+	rows.cp.CurrentKeyID = keyIDOf(key)
+	rows.cp.Mu.Unlock()
+	return h, rows, key
+}
+
+// importStatus is an import job as its client polls it.
+type importStatus struct {
+	JobID  string `json:"jobId"`
+	Status string `json:"status"`
+	archives.ImportReport
+}
+
+// importStatusOf reads a job's status as a client does.
+func importStatusOf(t *testing.T, h *harness, user, jobID string) (importStatus, *httptest.ResponseRecorder) {
+	t.Helper()
+	w := postRoute(h, "/v1/import/status", api.Object{"jobId": jobID}, user)
+	var status importStatus
+	if w.Code == 200 {
+		if err := json.Unmarshal(w.Body.Bytes(), &status); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return status, w
+}
+
+// importEnded is the status of a user's import once its job has ended,
+// which a client polls for; an import that failed fails the test.
+func importEnded(t *testing.T, h *harness, user string, done *archives.ImportDone) importStatus {
+	t.Helper()
+	if done == nil || done.JobID == nil {
+		t.Fatalf("the import started no cloud job: %+v", done)
+	}
+	job := h.archives.Imports.Get(user)
+	if job == nil || job.ID() != *done.JobID {
+		t.Fatalf("the harness runs no job %s for %s", *done.JobID, user)
+	}
+	<-job.Done()
+	status, w := importStatusOf(t, h, user, *done.JobID)
+	if w.Code != 200 || status.Status != "completed" || status.FailureReason != "" {
+		t.Fatalf("import status: HTTP %d %s", w.Code, w.Body.String())
+	}
+	return status
+}
+
 // storedChats are a user's stored chats read as the harness reads them.
 func storedChats(rows *memoryRows, user string) map[string]domain.Thread {
 	chats := map[string]domain.Thread{}
@@ -286,14 +336,15 @@ func TestNativeBackupRoundTrips(t *testing.T) {
 		t.Fatalf("manifest: %+v", manifest)
 	}
 
-	restored, restoredRows, _ := testChatHarness(t, nil)
-	newFakeSync(t, restored)
+	restored, restoredRows, _ := cloudImportHarness(t)
 	result := importOf(t, restored, "alice", w.Body.Bytes(), "tinfoil-backup.zip", api.Object{"target": "cloud", "key": keyBase64(key)})
 	if result.done.JobID == nil || len(result.threads) != 1 || !reflect.DeepEqual(result.done.Warnings, []string{"The backup left out 1 items when it was made."}) {
 		t.Fatalf("restore: %+v %v", result.done, result.threads)
 	}
-	if status := postRoute(restored, "/v1/import/status", api.Object{"jobId": *result.done.JobID}, "alice"); !strings.Contains(status.Body.String(), `"status":"completed"`) {
-		t.Fatalf("job status: %s", status.Body.String())
+	status := importEnded(t, restored, "alice", result.done)
+	if status.Phase != "complete" || status.Imported != 3 || status.Failed != 0 || status.Total != 3 || len(status.Warnings) != 0 ||
+		!reflect.DeepEqual(status.Counts, map[string]archives.ImportKindCounts{"project": {Imported: 1}, "document": {Imported: 1}, "chat": {Imported: 1}}) {
+		t.Fatalf("job status: %+v", status)
 	}
 	thread := result.threads[0]
 	photo, scan := thread.Messages[0].Attachments[0], thread.Messages[0].Attachments[1]
@@ -310,8 +361,12 @@ func TestNativeBackupRoundTrips(t *testing.T) {
 
 	chats := storedChats(restoredRows, "alice")
 	chat, ok := chats["Evidence"]
-	if !ok || len(chat.Messages) != 2 || !chat.Pinned || chat.Model != "kimi-k3" || chat.TitleState != "manual" {
+	if !ok || len(chat.Messages) != 2 || !chat.Pinned || chat.Model != "kimi-k3" || chat.TitleState != "manual" || chat.ImportedFrom == nil || chat.ImportedFrom.Source != manifest.BackupID || chat.ImportedFrom.SourceID != "chat-1" {
 		t.Fatalf("cloud chat: %+v", chats)
+	}
+	// The stored chat records where it came from; its client is not told.
+	if view := postRoute(restored, "/v1/threads/get", api.Object{"key": keyBase64(key), "id": chat.ID}, "alice"); view.Code != 200 || strings.Contains(view.Body.String(), "_restore") {
+		t.Fatalf("the restored chat's view: HTTP %d %s", view.Code, view.Body.String())
 	}
 	if !reflect.DeepEqual(api.Parsed(api.Raw(chat.Messages[1].Timeline)), api.Parsed(api.Raw(mustRead(domain.ReadThread("chat-1", api.Raw(cloudChat))).Messages[1].Timeline))) || len(chat.Messages[1].Annotations) != 1 {
 		t.Fatalf("the reply changed: %s", api.Raw(chat.Messages[1]))
@@ -365,7 +420,6 @@ func TestBackupsHoldWhatRestoresTake(t *testing.T) {
 // goes to the cloud.
 func TestARestoreReadsDeviceChatsBeforeStoringTheCloud(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	newFakeSync(t, h)
 	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat-1")] = domain.StoredRow{ID: "chat-1", ETag: "1", Data: api.Raw(api.Object{"title": "Stored", "messages": []any{api.Object{"id": "m", "role": "user", "content": "hi"}}})}
 	device := api.Object{"id": "local-chat", "title": "On my device", "messages": []any{api.Object{"id": "d", "role": "user", "content": "hello"}}}
 	w := archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "native", "key": keyBase64(key)}), threadPart(device))
@@ -374,14 +428,33 @@ func TestARestoreReadsDeviceChatsBeforeStoringTheCloud(t *testing.T) {
 	}
 	archive := withBackupEntries(t, w.Body.Bytes(), map[string][]byte{archives.BackupEntityPath("local_chats", "local-chat"): api.Raw(api.Object{"id": "another-chat", "title": "On my device"})})
 
-	restored, restoredRows, _ := testChatHarness(t, nil)
-	newFakeSync(t, restored)
+	restored, restoredRows, _ := cloudImportHarness(t)
 	r := archiveRoute(restored, "/v1/import", "alice", optionsPart(api.Object{"target": "cloud", "key": keyBase64(key)}), formPart{name: "file", filename: "backup.zip", data: archive})
 	if r.Code != 400 || !strings.Contains(r.Body.String(), "a chat is filed under another id") {
 		t.Fatalf("restore: HTTP %d %s", r.Code, r.Body.String())
 	}
-	if stored := storedChats(restoredRows, "alice"); len(stored) != 0 {
+	if stored := storedChats(restoredRows, "alice"); len(stored) != 0 || restored.archives.Imports.Get("alice") != nil {
 		t.Fatalf("a failed restore stored the cloud's chats: %v", stored)
+	}
+}
+
+// A cloud import stores rows under the registered content key alone, so
+// one under another key is refused before the archive is read.
+func TestACloudImportUnderAnUnregisteredKeyIsRefused(t *testing.T) {
+	h, rows, key := cloudImportHarness(t)
+	for name, offered := range map[string]auth.ContentKey{"another key": randomKey(), "the key once replaced": key} {
+		if name == "the key once replaced" {
+			rows.cp.Mu.Lock()
+			rows.cp.CurrentKeyID = keyIDOf(randomKey())
+			rows.cp.Mu.Unlock()
+		}
+		w := archiveRoute(h, "/v1/import", "alice", optionsPart(api.Object{"target": "cloud", "key": keyBase64(offered)}), formPart{name: "file", filename: "projects.json", data: fixture(t, "claude-projects.json")})
+		if e := api.Obj(api.Obj(api.Parsed(w.Body.Bytes()))["error"]); w.Code != http.StatusConflict || e["code"] != "KEY_MISMATCH" || e["keyId"] == "" {
+			t.Fatalf("an import under %s: HTTP %d %s", name, w.Code, w.Body.String())
+		}
+	}
+	if stored, _ := rows.List(context.Background(), &auth.Principal{ID: "alice"}, key, "project", "", "", 0); len(stored.Rows) != 0 || h.archives.Imports.Get("alice") != nil {
+		t.Fatalf("a refused import stored %d projects", len(stored.Rows))
 	}
 }
 
@@ -444,11 +517,13 @@ func TestWebAppBackupsRestore(t *testing.T) {
 		{"web-backup-v2.zip", []string{"The backup left out 1 items when it was made."}},
 	} {
 		t.Run(tc.fixture, func(t *testing.T) {
-			h, rows, key := testChatHarness(t, nil)
-			newFakeSync(t, h)
+			h, rows, key := cloudImportHarness(t)
 			result := importOf(t, h, "alice", fixture(t, tc.fixture), tc.fixture, api.Object{"target": "cloud", "key": keyBase64(key)})
 			if result.done.JobID == nil || !reflect.DeepEqual(result.done.Warnings, tc.warnings) || len(result.threads) != 2 {
 				t.Fatalf("restore: %+v, %d device chats", result.done, len(result.threads))
+			}
+			if status := importEnded(t, h, "alice", result.done); status.Imported != 3 || status.Total != 3 {
+				t.Fatalf("job status: %+v", status)
 			}
 			legacy, scanned := result.threads[0], result.threads[1]
 			if legacy.Title != "Old device chat" || scanned.Title != "Scanned notes" {
@@ -498,8 +573,9 @@ func TestWebAppBackupsRestore(t *testing.T) {
 }
 
 // sameForm is a thread as both destinations keep it: the cloud stores an
-// image under a blob and names it anew, a device keeps its original apart
-// from the copy and thumbnail an upload makes.
+// image under a blob and names it anew, and records where the chat came
+// from; a device keeps its original apart from the copy and thumbnail an
+// upload makes.
 func sameForm(t *testing.T, rows *memoryRows, originals map[string][]byte, thread domain.Thread) string {
 	t.Helper()
 	thread = thread.Clone()
@@ -517,7 +593,7 @@ func sameForm(t *testing.T, rows *memoryRows, originals map[string][]byte, threa
 			a.EncryptionKey = ""
 		}
 	}
-	thread.ID, thread.ProjectID, thread.UpdatedAt, thread.RecordVersion = "", nil, "", 0
+	thread.ID, thread.ProjectID, thread.UpdatedAt, thread.RecordVersion, thread.ImportedFrom = "", nil, "", 0, nil
 	return string(api.Raw(thread))
 }
 
@@ -565,13 +641,15 @@ func TestExportsImportAlikeToCloudAndDevice(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.fixture, func(t *testing.T) {
-			h, rows, key := testChatHarness(t, nil)
-			newFakeSync(t, h)
+			h, rows, key := cloudImportHarness(t)
 			archive := withEntries(t, fixture(t, tc.fixture), tc.images)
 			onDevice := importOf(t, h, "alice", archive, tc.fixture, api.Object{"target": "device"})
 			inCloud := importOf(t, h, "alice", archive, tc.fixture, api.Object{"target": "cloud", "key": keyBase64(key)})
 			if len(onDevice.threads) != tc.chats || inCloud.threads != nil || onDevice.done.JobID != nil || inCloud.done.JobID == nil || !reflect.DeepEqual(onDevice.done.Warnings, tc.onDevice) || !reflect.DeepEqual(inCloud.done.Warnings, tc.inCloud) {
 				t.Fatalf("device %d chats %+v, cloud %+v", len(onDevice.threads), onDevice.done, inCloud.done)
+			}
+			if status := importEnded(t, h, "alice", inCloud.done); status.Counts["chat"].Imported != tc.chats || len(status.Warnings) != 0 {
+				t.Fatalf("job status: %+v", status)
 			}
 			cloud := storedChats(rows, "alice")
 			byTitle := map[string]domain.Thread{}
@@ -653,28 +731,37 @@ func TestNullFormatKeysAreNotExports(t *testing.T) {
 // Claude's projects go to the cloud with their documents' text; on the
 // device alone they cannot be imported.
 func TestClaudeProjectsRequireTheCloud(t *testing.T) {
-	h, rows, key := testChatHarness(t, nil)
-	newFakeSync(t, h)
+	h, rows, key := cloudImportHarness(t)
 	projects := fixture(t, "claude-projects.json")
 	w := archiveRoute(h, "/v1/import", "alice", optionsPart(api.Object{"target": "device"}), formPart{name: "file", filename: "projects.json", data: projects})
 	if w.Code != 400 || !strings.Contains(w.Body.String(), "PROJECTS_REQUIRE_CLOUD") {
 		t.Fatalf("projects imported to the device: HTTP %d %s", w.Code, w.Body.String())
 	}
 	result := importOf(t, h, "alice", projects, "projects.json", api.Object{"target": "cloud", "key": keyBase64(key)})
+	status := importEnded(t, h, "alice", result.done)
 	stored, _ := rows.List(context.Background(), &auth.Principal{ID: "alice"}, key, "project", "", "", 0)
-	if result.done.JobID == nil || len(stored.Rows) != 1 {
-		t.Fatalf("projects: %d stored, done %+v", len(stored.Rows), result.done)
+	if len(stored.Rows) != 1 || status.Counts["project"].Imported != 1 || status.Counts["document"].Imported != 1 {
+		t.Fatalf("projects: %d stored, status %+v", len(stored.Rows), status)
 	}
 	project := mustRead(domain.ReadProject(&stored.Rows[0]))
 	docs, _ := h.store.ProjectDocuments(context.Background(), &auth.Principal{ID: "alice"}, key, project.ID, store.RefuseUnreadable)
 	if project.Name != "Release Notes" || project.SystemInstructions != "Write concise release notes." || len(docs) != 1 || docs[0].Filename != "style-guide.md" || docs[0].Content != "# Style guide" {
 		t.Fatalf("project: %+v %+v", project, docs)
 	}
+	// The same export imported again finds what it stored.
+	again := importOf(t, h, "alice", projects, "projects.json", api.Object{"target": "cloud", "key": keyBase64(key)})
+	if status := importEnded(t, h, "alice", again.done); *again.done.JobID == *result.done.JobID || status.Imported != 0 || status.Counts["project"].Skipped != 1 || status.Counts["document"].Skipped != 1 {
+		t.Fatalf("the import run again: %+v", status)
+	}
+	if stored, _ := rows.List(context.Background(), &auth.Principal{ID: "alice"}, key, "project", "", "", 0); len(stored.Rows) != 1 {
+		t.Fatalf("the import run again stored %d projects", len(stored.Rows))
+	}
 	// Claude's newer exports hold each project in a file of its own.
 	var split []json.RawMessage
 	json.Unmarshal(projects, &split)
 	one := importOf(t, h, "bob", split[0], "release-notes.json", api.Object{"target": "cloud", "key": keyBase64(key)})
-	if stored, _ := rows.List(context.Background(), &auth.Principal{ID: "bob"}, key, "project", "", "", 0); one.done.JobID == nil || len(stored.Rows) != 1 {
+	importEnded(t, h, "bob", one.done)
+	if stored, _ := rows.List(context.Background(), &auth.Principal{ID: "bob"}, key, "project", "", "", 0); len(stored.Rows) != 1 {
 		t.Fatalf("a project file of its own was not imported: %+v", one.done)
 	}
 	full := importOf(t, h, "alice", fixture(t, "claude-export.zip"), "claude.zip", api.Object{"target": "device"})
@@ -747,7 +834,7 @@ func decodedOr(encoded string, fallback []byte) []byte {
 }
 
 // An export without the content key holds the chats its client sends, and
-// nothing is read from sync for it.
+// nothing is read from the cloud for it.
 func TestAnExportWithoutTheKeyHoldsOnlyItsDeviceChats(t *testing.T) {
 	h, rows, _ := testChatHarness(t, nil)
 	thread := api.Object{"id": "local-chat", "title": "Tab chat", "messages": []any{api.Object{"id": "m", "role": "user", "content": "hi"}}}
@@ -780,11 +867,11 @@ func TestArchivesNeedNoChatAccess(t *testing.T) {
 		if export.Code != 200 {
 			t.Fatalf("%s exported: HTTP %d %s", name, export.Code, export.Body.String())
 		}
-		restored, restoredRows, _ := testChatHarness(t, nil)
-		newFakeSync(t, restored)
+		restored, restoredRows, _ := cloudImportHarness(t)
 		result := importLines(t, archiveRequest(restored, "/v1/import", signedIn, optionsPart(api.Object{"target": "cloud", "key": keyBase64(key)}), formPart{name: "file", filename: "tinfoil-backup.zip", data: export.Body.Bytes()}))
+		importEnded(t, restored, "alice", result.done)
 		chats := storedChats(restoredRows, "alice")
-		if chat := chats["Stored"]; result.done.JobID == nil || len(chats) != 1 || len(chat.Messages) != 1 || chat.Messages[0].Role != "user" || chat.Messages[0].Content != "hi" {
+		if chat := chats["Stored"]; len(chats) != 1 || len(chat.Messages) != 1 || chat.Messages[0].Role != "user" || chat.Messages[0].Content != "hi" {
 			t.Fatalf("%s restored %+v: %+v", name, result.done, chats)
 		}
 	}

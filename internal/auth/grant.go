@@ -11,7 +11,4 @@ type StorageGrant struct {
 	ProjectID string
 	KeyID     string // hex id of the content key, as seal.KeyIDHex gives it
 	ExpiresAt time.Time
-	// Token is the sync enclave's credential for the grant, carried while
-	// the harness still calls the enclave for what rows are not.
-	Token Secret
 }

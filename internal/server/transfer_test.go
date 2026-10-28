@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -200,20 +202,39 @@ func TestImportStoresTheDeviceChatUnderItsID(t *testing.T) {
 	}
 }
 
-// An archive import's status names its job and its failure as the client
-// reads them.
+// An import's status names its job and, once the cloud refuses the
+// caller's credential, its failure, as the client reads them; the job of
+// another import, or of another caller, is not found.
 func TestImportStatusReadsAsTheClientNamesIt(t *testing.T) {
-	h, _, _ := testChatHarness(t, nil)
-	f := newFakeSync(t, h)
-	f.imports["job-1"] = &fakeImport{status: api.Object{"status": "failed", "imported": 0, "failed": 1, "total": 1, "job_id": "job-1", "failure_reason": "invalid_archive", "failure_detail": "Not a zip archive"}}
-	w := postRoute(h, "/v1/import/status", api.Object{"jobId": "job-1"}, "alice")
+	h, rows, key := cloudImportHarness(t)
+	rows.refuse = func(*domain.StoredRow) error { return api.Err(401, "UNAUTHENTICATED", "the session expired") }
+	result := importOf(t, h, "alice", fixture(t, "claude-projects.json"), "projects.json", api.Object{"target": "cloud", "key": keyBase64(key)})
+	if result.done.JobID == nil {
+		t.Fatalf("no cloud job: %+v", result.done)
+	}
+	<-h.archives.Imports.Get("alice").Done()
+	w := postRoute(h, "/v1/import/status", api.Object{"jobId": *result.done.JobID}, "alice")
 	if w.Code != 200 {
 		t.Fatalf("HTTP %d: %s", w.Code, w.Body.String())
 	}
-	var status api.Object
-	json.Unmarshal(w.Body.Bytes(), &status)
-	want := api.Object{"status": "failed", "imported": float64(0), "failed": float64(1), "total": float64(1), "jobId": "job-1", "failureReason": "invalid_archive", "failureDetail": "Not a zip archive"}
-	if !reflect.DeepEqual(status, want) {
-		t.Fatalf("the status reads as %v, want %v", status, want)
+	want := api.Object{"jobId": *result.done.JobID, "status": "failed", "phase": "projects", "imported": float64(0), "failed": float64(1), "total": float64(2), "failureReason": "authorization_failed",
+		"counts": api.Object{"project": api.Object{"imported": float64(0), "skipped": float64(0), "failed": float64(1), "blocked": float64(0)}, "document": api.Object{"imported": float64(0), "skipped": float64(0), "failed": float64(0), "blocked": float64(0)}, "chat": api.Object{"imported": float64(0), "skipped": float64(0), "failed": float64(0), "blocked": float64(0)}},
+		"errors": []any{"project failed", "Tinfoil could not authorize access to cloud storage for the import; please retry from a signed-in device"}}
+	if !reflect.DeepEqual(api.Parsed(w.Body.Bytes()), api.Parsed(api.Raw(want))) {
+		t.Fatalf("the status reads as %s, want %s", w.Body.String(), api.Raw(want))
+	}
+	rows.cp.Mu.Lock()
+	told := slices.Clone(rows.cp.ImportOutcomes)
+	rows.cp.Mu.Unlock()
+	if len(told) != 1 || told[0].ClerkUserID != "alice" || told[0].JobID != *result.done.JobID || told[0].Status != "failed" || told[0].FailureReason != "authorization_failed" || told[0].Failed != 1 {
+		t.Fatalf("the control plane was told %+v", told)
+	}
+	for name, poll := range map[string]*httptest.ResponseRecorder{
+		"another job":    postRoute(h, "/v1/import/status", api.Object{"jobId": "job-2"}, "alice"),
+		"another caller": postRoute(h, "/v1/import/status", api.Object{"jobId": *result.done.JobID}, "bob"),
+	} {
+		if poll.Code != 404 || !strings.Contains(poll.Body.String(), "THREAD_NOT_FOUND") {
+			t.Fatalf("the status of %s: HTTP %d %s", name, poll.Code, poll.Body.String())
+		}
 	}
 }

@@ -10,7 +10,7 @@ import (
 // writes. A change to what they hold changes it.
 const RecordVersion = 1
 
-// Thread is a chat in the thread format: what the harness stores in sync,
+// Thread is a chat in the thread format: what the harness stores in the cloud,
 // what a device keeps, and what a device chat's run returns.
 type Thread struct {
 	ID               string        `json:"id"`
@@ -33,6 +33,9 @@ type Thread struct {
 	// context without showing them.
 	HiddenCount   int `json:"harnessHiddenCount,omitempty"`
 	RecordVersion int `json:"recordVersion,omitempty"`
+	// ImportedFrom is set on a stored chat an import made, so the same
+	// import run again finds it. No client is sent it.
+	ImportedFrom *ImportOrigin `json:"_restore,omitempty"`
 }
 
 // Message is one turn of a chat. Its pointer fields are absent unless set.
@@ -154,10 +157,9 @@ type Attachment struct {
 	Pages       []DocumentPage `json:"pages,omitempty"`
 	// Base64 is an image's copy that models read.
 	Base64 string `json:"base64,omitempty"`
-	// EncryptionKey opens the attachment's blob. Sync reads it by this name
-	// to copy a forked chat's blobs.
+	// EncryptionKey opens the attachment's blob, as every client names it.
 	EncryptionKey string `json:"encryptionKey,omitempty"`
-	// Key is the control plane key of an image stored before sync existed.
+	// Key is the control plane key of an image stored before buckets existed.
 	Key             string `json:"key,omitempty"`
 	StorageThreadID string `json:"storageThreadId,omitempty"`
 
@@ -295,8 +297,8 @@ func (b *Block) CallID() string {
 
 func (a *Attachment) IsImage() bool { return a.Kind == "image" }
 
-// StorageKey opens the attachment's blob: a sync key, or a control plane
-// key from before sync.
+// StorageKey opens the attachment's blob: a buckets key, or a control plane
+// key from before buckets.
 func (a *Attachment) StorageKey() string {
 	if a.EncryptionKey != "" {
 		return a.EncryptionKey

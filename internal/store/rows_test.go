@@ -36,6 +36,7 @@ const (
 type rowsHarness struct {
 	cp    *cpstub.Store
 	bk    *bucketstub.Store
+	bkURL string
 	rows  *Rows
 	store *Store
 	p     *auth.Principal
@@ -59,6 +60,7 @@ func newRowsHarness(t *testing.T) *rowsHarness {
 	return &rowsHarness{
 		cp:    cp,
 		bk:    bk,
+		bkURL: bkServer.URL,
 		rows:  rows,
 		store: &Store{Rows: rows, Controlplane: rows.Controlplane, Buckets: rows.Buckets, Reseals: jobs.New[ResealReport](ResealBudget, ResealRetention)},
 		p:     &auth.Principal{ID: "user_abc", JWT: "clerk-abc"},

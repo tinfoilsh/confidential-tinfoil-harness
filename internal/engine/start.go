@@ -123,8 +123,8 @@ func (eng *Engine) prepareTurn(ctx context.Context, r *Run, p *auth.Principal, c
 	options := r.input.Options
 	t.Model = cmp.Or(options.Model, t.Model, domain.AutoModelName)
 	t.WebSearchEnabled = domain.ValueOr(options.WebSearch, t.WebSearchEnabled)
-	// Sync stores a chat only if every attachment it names is stored under the
-	// chat. An ask's stored source has attachments in sync; a keyless thread
+	// A chat is stored only if every attachment it names is stored under the
+	// chat. An ask's stored source has attachments in buckets; a keyless thread
 	// carries its own. Image descriptions are stored, image bytes are not.
 	if !s.local {
 		if err := eng.Attachments.PlaceAttachments(ctx, p, s.ID, t); err != nil {

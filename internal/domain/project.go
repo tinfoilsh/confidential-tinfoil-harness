@@ -25,13 +25,16 @@ type ProjectDocument struct {
 	UpdatedAt       string `json:"updatedAt,omitempty"`
 }
 
-// StoredProject and storedDocument are the rows this harness writes.
+// StoredProject and StoredDocument are the rows this harness writes. A row
+// an import made says where it came from, which no client is sent.
 type StoredProject struct {
 	Project
-	RecordVersion int `json:"recordVersion"`
+	RecordVersion int           `json:"recordVersion"`
+	ImportedFrom  *ImportOrigin `json:"_restore,omitempty"`
 }
 
 type StoredDocument struct {
 	ProjectDocument
-	RecordVersion int `json:"recordVersion"`
+	RecordVersion int           `json:"recordVersion"`
+	ImportedFrom  *ImportOrigin `json:"_restore,omitempty"`
 }
