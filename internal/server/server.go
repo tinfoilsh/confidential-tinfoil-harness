@@ -18,6 +18,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/jobs"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/search"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
 
@@ -25,6 +26,7 @@ type harness struct {
 	controlplane string
 	auth         *auth.Authenticator
 	store        *store.Store
+	search       *search.Service
 	models       *inference.Models
 	attachments  *attach.Service
 	archives     *archives.Service
@@ -64,6 +66,7 @@ func Run() {
 		slog.Error("initialize chat service", "error", err)
 		os.Exit(1)
 	}
+	go h.search.RunDeletionWorker(ctx)
 	h.attachments = &attach.Service{Auth: h.auth, Models: h.models, Store: h.store}
 	h.store.Repair = h.attachments
 	h.engine = &engine.Engine{Safeguards: engine.NewSubmitter(os.Getenv("SAFEGUARDS_URL")), Store: h.store, Models: h.models, Attachments: h.attachments, Auth: h.auth}

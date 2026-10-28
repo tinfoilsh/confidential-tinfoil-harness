@@ -140,7 +140,7 @@ func (r *Rows) Push(ctx context.Context, p *auth.Principal, key auth.ContentKey,
 	}
 	envelope, err := seal.Encrypt(key[:], row.Data, aad)
 	if err != nil {
-		return "", fromControlplane(err)
+		return "", FromControlplane(err)
 	}
 	ifMatch := controlplane.IfMatchCreateOnly
 	if row.ETag != "" {
@@ -183,7 +183,7 @@ func (r *Rows) Push(ctx context.Context, p *auth.Principal, key auth.ContentKey,
 	}
 	resp, err := r.Controlplane.PutBlob(ctx, req)
 	if err != nil {
-		return "", fromControlplane(err)
+		return "", FromControlplane(err)
 	}
 	if scope == "chat" && r.Index != nil {
 		// The plaintext and key exist only for this request, so the index
@@ -282,7 +282,7 @@ func (r *Rows) pullBatch(ctx context.Context, p *auth.Principal, target seal.Key
 		case item.transient && retry:
 			again = append(again, id)
 		case item.transient:
-			failed[id] = errRowNotFetched
+			failed[id] = ErrRowNotFetched
 		case item.err != nil:
 			failed[id] = item.err
 		case item.row != nil:
@@ -302,9 +302,9 @@ func (r *Rows) pullOne(ctx context.Context, p *auth.Principal, target seal.Key, 
 		case errors.As(err, &cpe) && cpe.StatusCode == http.StatusNotFound:
 			return pulled{}
 		case errors.As(err, &cpe) && cpe.StatusCode/100 == 4:
-			return pulled{err: fromControlplane(err)}
+			return pulled{err: FromControlplane(err)}
 		}
-		return pulled{err: fromControlplane(err), transient: true}
+		return pulled{err: FromControlplane(err), transient: true}
 	}
 	keys := []seal.Key{target}
 	row := &domain.StoredRow{ID: id, ETag: blob.ETag, Project: blob.ProjectID, ProjectSet: blob.ProjectIDSet}
@@ -393,7 +393,7 @@ func (r *Rows) listStatus(ctx context.Context, p *auth.Principal, scope, cursor,
 	}
 	list, err := r.Controlplane.ListStatus(ctx, scope, cursor, limit, string(p.JWT), p.ID, chatsOf, "desc")
 	if err != nil {
-		return nil, "", fromControlplane(err)
+		return nil, "", FromControlplane(err)
 	}
 	ids := []string{}
 	for _, item := range list.Updates {
@@ -475,7 +475,7 @@ func (r *Rows) Remove(ctx context.Context, p *auth.Principal, key auth.ContentKe
 				}
 				return nil
 			}
-			return fromControlplane(err)
+			return FromControlplane(err)
 		}
 		attemptNonce := nonce
 		if attempt > 0 {
@@ -489,7 +489,7 @@ func (r *Rows) Remove(ctx context.Context, p *auth.Principal, key auth.ContentKe
 		if controlplane.IsCode(err, controlplane.StatusStaleBlob) {
 			continue
 		}
-		return fromControlplane(err)
+		return FromControlplane(err)
 	}
 	return api.Err(409, "REVISION_CONFLICT", "The row changed during every delete attempt")
 }
@@ -510,7 +510,7 @@ func (r *Rows) RemoveRevision(ctx context.Context, p *auth.Principal, key auth.C
 	}
 	resp, err := r.removeAt(ctx, p, key, "chat", path, id, revision, uuid.NewString())
 	if err != nil {
-		return fromControlplane(err)
+		return FromControlplane(err)
 	}
 	r.finishRemove(ctx, p, key, "chat", id, resp)
 	return nil

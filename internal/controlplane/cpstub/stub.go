@@ -1,9 +1,10 @@
 // Package cpstub is an in-memory stand-in for the control plane's storage
 // API as the harness uses it: sealed blobs with their revisions and
 // metadata, the key registry with its passkey bundles, the legacy
-// attachments and the attachment index, chat activity, and the rows left
-// to reseal with their cooldowns. Tests seed its state, read it back after
-// a call, and inject the failures the control plane can answer with.
+// attachments and the attachment index, chat activity, the rows left to
+// reseal with their cooldowns, and the search index's publication with
+// the objects retired from it. Tests seed its state, read it back after a
+// call, and inject the failures the control plane can answer with.
 package cpstub
 
 import (
@@ -14,6 +15,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -21,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane"
 )
 
@@ -68,7 +71,19 @@ type Store struct {
 	// the id as the needs-migration list names it; a row with one is in
 	// its cooldown and is not listed.
 	MigrationFailures map[string]int
-	SourceRevision    int64
+	// SourceRevision counts the chat writes and deletes, which the search
+	// index's publication is measured against.
+	SourceRevision int64
+	// SearchState is the search index's publication: the object that
+	// holds it, under which key and model, at which generation and fence,
+	// and through which source revision it covers. SourceRevision and the
+	// derived Incomplete are filled in as it is served.
+	SearchState controlplane.SearchIndexState
+	// SearchIndexDeletions are the index objects retired from publication
+	// and not yet acknowledged as deleted, by id; a claim leases a batch
+	// of them under a token, and an ack under that token drops them.
+	SearchIndexDeletions []controlplane.SearchIndexDeletion
+	searchClaims         map[string]string // deletion id to the token that claimed it
 	// MinimumProfileSyncProtocol refuses profile overwrites by older
 	// writers when set.
 	MinimumProfileSyncProtocol int
@@ -80,7 +95,9 @@ type Store struct {
 	// Failure injection. A count is how many calls fail before the next
 	// succeeds; a list of statuses is answered in turn. A reservation
 	// purge refuses the reservation of an id while its earlier copy is
-	// still being purged.
+	// still being purged. A search conflict is another replica's
+	// publication landing just before the next one, which is then
+	// refused with the state that replica left.
 	BeforePutBlob    func(scope, id string)
 	BeforeDeleteBlob func(scope, id string)
 	PutBlobFailures  map[string]int
@@ -92,6 +109,7 @@ type Store struct {
 	DeleteAttachmentIndexFailures   map[string]int
 	RegisterAttachmentIndexFailures map[string][]int
 	ReserveAttachmentPurges         map[string]int
+	SearchConflict                  func(controlplane.SearchIndexState) controlplane.SearchIndexState
 	// CaptureHeaders sees every request before it is served, outside Mu.
 	CaptureHeaders func(r *http.Request)
 
@@ -111,6 +129,7 @@ func New() *Store {
 		DeleteAttachmentIndexFailures:   map[string]int{},
 		RegisterAttachmentIndexFailures: map[string][]int{},
 		ReserveAttachmentPurges:         map[string]int{},
+		searchClaims:                    map[string]string{},
 		mux:                             http.NewServeMux(),
 	}
 	s.mux.HandleFunc("PUT /api/sync/blob/chat/{id}", s.handlePutBlob("chat"))
@@ -121,6 +140,10 @@ func New() *Store {
 	s.mux.HandleFunc("GET /api/sync/blob/profile", s.handleGetBlob("profile"))
 	s.mux.HandleFunc("GET /api/sync/blob/project/{id}", s.handleGetBlob("project"))
 	s.mux.HandleFunc("GET /api/sync/blob/project_document/{pid}/{did}", s.handleGetBlob("project_document"))
+	s.mux.HandleFunc("HEAD /api/sync/blob/chat/{id}", s.handleHeadBlob("chat"))
+	s.mux.HandleFunc("HEAD /api/sync/blob/profile", s.handleHeadBlob("profile"))
+	s.mux.HandleFunc("HEAD /api/sync/blob/project/{id}", s.handleHeadBlob("project"))
+	s.mux.HandleFunc("HEAD /api/sync/blob/project_document/{pid}/{did}", s.handleHeadBlob("project_document"))
 	s.mux.HandleFunc("DELETE /api/sync/blob/chat/{id}", s.handleDeleteBlob("chat"))
 	s.mux.HandleFunc("DELETE /api/sync/blob/profile", s.handleDeleteBlob("profile"))
 	s.mux.HandleFunc("DELETE /api/sync/blob/project/{id}", s.handleDeleteBlob("project"))
@@ -132,6 +155,10 @@ func New() *Store {
 	s.mux.HandleFunc("GET "+controlplane.RevisionSummaryPath, s.handleRevisionSummary)
 	s.mux.HandleFunc("GET /api/sync/needs-migration", s.handleNeedsMigration)
 	s.mux.HandleFunc("POST /api/sync/migration-failure", s.handleMigrationFailure)
+	s.mux.HandleFunc("GET "+controlplane.SearchIndexStatePath, s.handleGetSearchIndexState)
+	s.mux.HandleFunc("PUT "+controlplane.SearchIndexStatePath, s.handlePublishSearchIndex)
+	s.mux.HandleFunc("POST "+controlplane.ClaimSearchIndexDeletionsPath, s.handleClaimSearchIndexDeletions)
+	s.mux.HandleFunc("POST "+controlplane.AckSearchIndexDeletionsPath, s.handleAckSearchIndexDeletions)
 	s.mux.HandleFunc("GET /api/sync/keys/current", s.handleCurrentKey)
 	s.mux.HandleFunc("POST "+controlplane.RegisterKeyPath, s.handleRegisterKey)
 	s.mux.HandleFunc("POST /api/sync/keys/{kid}/bundles", s.handleAddBundle)
@@ -292,6 +319,20 @@ func (s *Store) handleGetBlob(scope string) http.HandlerFunc {
 			w.Header().Set(controlplane.HeaderActivityAt, blob.ActivityAt.Format(time.RFC3339Nano))
 		}
 		_, _ = w.Write(blob.Body)
+	}
+}
+
+// handleHeadBlob answers a row's revision and key id without its bytes.
+func (s *Store) handleHeadBlob(scope string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		blob, ok := s.Blobs[Key(scope, extractID(scope, r))]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set(controlplane.HeaderETag, FormatETag(blob.ETag))
+		w.Header().Set(controlplane.HeaderKeyID, blob.KeyID)
+		w.WriteHeader(http.StatusOK)
 	}
 }
 
@@ -524,6 +565,166 @@ func (s *Store) handleMigrationFailure(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// The search index's publication, as the control plane keeps it: one
+// object key per publication, named for the fence it was published under.
+
+// searchIndexObjectKey is the shape of an index object's key: the prefix,
+// the fence it was published under, and a random suffix.
+var searchIndexObjectKey = regexp.MustCompile(`^search-index-v1-([0-9]+)-[a-f0-9]{32}$`)
+
+const (
+	maxSearchIndexObjectKeyLength = 256
+	maxSearchIndexModelLength     = 128
+	// A claim of retired index objects is defaultSearchDeletionBatch
+	// without a batch size, and at most maxSearchDeletionBatch.
+	defaultSearchDeletionBatch = 25
+	maxSearchDeletionBatch     = 100
+)
+
+// searchState is the publication as the control plane serves it: with the
+// source revision, and incomplete when the publication says so or covers
+// less than the source.
+func (s *Store) searchState() controlplane.SearchIndexState {
+	state := s.SearchState
+	state.SourceRevision = s.SourceRevision
+	state.Incomplete = state.PublicationIncomplete || state.PublishedSourceRevision < state.SourceRevision
+	return state
+}
+
+// fenceSearchIndex retires the published index object when the caller's
+// key changes or starts fresh: the publication and fence generations
+// advance, and nothing is published until a new object is.
+func (s *Store) fenceSearchIndex() {
+	state := s.searchState()
+	s.SearchState = controlplane.SearchIndexState{
+		PublicationGeneration: state.PublicationGeneration + 1,
+		FenceGeneration:       state.FenceGeneration + 1,
+		PublicationIncomplete: true,
+	}
+}
+
+func (s *Store) handleGetSearchIndexState(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.searchState())
+}
+
+func searchIndexConflict(w http.ResponseWriter, state controlplane.SearchIndexState) {
+	writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": controlplane.StatusSearchIndexConflict, "state": state})
+}
+
+// handlePublishSearchIndex publishes an index object at the generation and
+// fence the publisher expects, covering a source revision no earlier than
+// the published one and no later than the source; a publication under
+// another key than the registered one, or at another generation, is a
+// conflict that answers with the current state.
+func (s *Store) handlePublishSearchIndex(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ExpectedGeneration    int64  `json:"expected_generation"`
+		ExpectedFence         int64  `json:"expected_fence"`
+		CoveredSourceRevision int64  `json:"covered_source_revision"`
+		ObjectKey             string `json:"object_key"`
+		KeyID                 string `json:"key_id"`
+		Model                 string `json:"model"`
+		Incomplete            bool   `json:"incomplete"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "BAD_REQUEST", "error": "invalid request body"})
+		return
+	}
+	if req.ExpectedGeneration < 0 || req.ExpectedFence < 0 || req.CoveredSourceRevision < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "BAD_REQUEST", "error": "search index revisions must be non-negative"})
+		return
+	}
+	match := searchIndexObjectKey.FindStringSubmatch(req.ObjectKey)
+	if len(req.ObjectKey) > maxSearchIndexObjectKeyLength || len(match) != 2 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "BAD_REQUEST", "error": "invalid search index object_key"})
+		return
+	}
+	if fence, err := strconv.ParseInt(match[1], 10, 64); err != nil || fence != req.ExpectedFence {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "BAD_REQUEST", "error": "search index object_key fence mismatch"})
+		return
+	}
+	if !isLowerHex32(req.KeyID) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "BAD_REQUEST", "error": "invalid key_id"})
+		return
+	}
+	if strings.TrimSpace(req.Model) == "" || len(req.Model) > maxSearchIndexModelLength {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "BAD_REQUEST", "error": "invalid model"})
+		return
+	}
+	if s.SearchConflict != nil {
+		conflict := s.SearchConflict
+		s.SearchConflict = nil
+		s.SearchState = conflict(s.searchState())
+		searchIndexConflict(w, s.searchState())
+		return
+	}
+	state := s.searchState()
+	if req.ExpectedGeneration != state.PublicationGeneration || req.ExpectedFence != state.FenceGeneration ||
+		req.CoveredSourceRevision < state.PublishedSourceRevision || req.CoveredSourceRevision > state.SourceRevision ||
+		req.KeyID != s.CurrentKeyID {
+		searchIndexConflict(w, state)
+		return
+	}
+	s.SearchState = controlplane.SearchIndexState{
+		PublicationGeneration:   state.PublicationGeneration + 1,
+		FenceGeneration:         state.FenceGeneration,
+		PublishedSourceRevision: req.CoveredSourceRevision,
+		ObjectKey:               req.ObjectKey,
+		KeyID:                   req.KeyID,
+		Model:                   req.Model,
+		PublicationIncomplete:   req.Incomplete,
+	}
+	writeJSON(w, http.StatusOK, s.searchState())
+}
+
+// handleClaimSearchIndexDeletions leases a batch of the retired index
+// objects not yet claimed under a fresh token.
+func (s *Store) handleClaimSearchIndexDeletions(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		BatchSize int `json:"batch_size"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.BatchSize < 0 || req.BatchSize > maxSearchDeletionBatch {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "BAD_REQUEST", "error": "invalid batch_size"})
+		return
+	}
+	if req.BatchSize == 0 {
+		req.BatchSize = defaultSearchDeletionBatch
+	}
+	claim := controlplane.SearchIndexDeletionClaim{ClaimToken: uuid.NewString(), Deletions: []controlplane.SearchIndexDeletion{}}
+	for _, deletion := range s.SearchIndexDeletions {
+		if len(claim.Deletions) == req.BatchSize {
+			break
+		}
+		if _, claimed := s.searchClaims[deletion.ID]; claimed {
+			continue
+		}
+		s.searchClaims[deletion.ID] = claim.ClaimToken
+		claim.Deletions = append(claim.Deletions, deletion)
+	}
+	writeJSON(w, http.StatusOK, claim)
+}
+
+// handleAckSearchIndexDeletions drops the retired objects acknowledged
+// under the token that claimed them.
+func (s *Store) handleAckSearchIndexDeletions(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ClaimToken string   `json:"claim_token"`
+		IDs        []string `json:"ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ClaimToken == "" || len(req.IDs) == 0 || len(req.IDs) > maxSearchDeletionBatch {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "BAD_REQUEST", "error": "invalid claim_token or ids"})
+		return
+	}
+	for _, id := range req.IDs {
+		if s.searchClaims[id] != req.ClaimToken {
+			continue
+		}
+		delete(s.searchClaims, id)
+		s.SearchIndexDeletions = slices.DeleteFunc(s.SearchIndexDeletions, func(d controlplane.SearchIndexDeletion) bool { return d.ID == id })
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // keyTimestamp is a time as the control plane reports when a key or a
 // bundle was registered.
 func keyTimestamp(at time.Time) string { return at.UTC().Format("2006-01-02T15:04:05.000Z") }
@@ -653,6 +854,11 @@ func (s *Store) handleRegisterKey(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	changed := s.CurrentKeyID != body.KeyID
+	// A search index sealed under the key that was registered, or built
+	// over rows a fresh start wipes, is fenced off: a key registered over
+	// none fences only when it starts fresh, since no index could have
+	// been published without a key.
+	fenced := body.CreatedVia == "start_fresh" || s.CurrentKeyID != "" && changed
 	if changed {
 		s.KeyRegisteredAt = time.Now()
 	}
@@ -665,6 +871,10 @@ func (s *Store) handleRegisterKey(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		clear(s.MigrationFailures)
+	}
+	if fenced {
+		s.fenceSearchIndex()
+		w.Header().Set(controlplane.HeaderSearchIndexFenced, "true")
 	}
 	s.addBundle(body.KeyID, body.InitialBundle)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "key_id": s.CurrentKeyID, "etag": FormatETag(s.KeyETag), "wiped_v2_attachments": wiped})

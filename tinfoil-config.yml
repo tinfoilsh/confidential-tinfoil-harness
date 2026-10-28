@@ -36,11 +36,18 @@ containers:
       - SAFEGUARDS_URL: "http://safeguards:8090"
       - BUCKETS_URL: "http://buckets:9000"
       - CHAT_ATTACHMENTS_BUCKET: "sync-chat-attachments"
+      # The search index objects live in their own bucket; the sidecar
+      # routes on the bucket named in the path, so one sidecar serves both.
+      - SEARCH_BUCKETS_URL: "http://buckets:9000"
+      - SEARCH_INDEXES_BUCKET: "sync-search-indexes"
+      - EMBEDDING_MODEL: "nomic-embed-text"
     secrets:
       - USAGE_CONTEXT_SECRET
       # The control plane's service secret for its storage API, which the
       # harness seals rows and stores attachments through.
       - SYNC_ENCLAVE_SECRET
+      # Embeds chat text and search queries through the inference service.
+      - TINFOIL_API_KEY
     read_only: true
     # Archives spool here for the request that sends or builds them. The
     # harness budgets requests to this size, and an import holds its upload

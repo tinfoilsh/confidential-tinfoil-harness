@@ -36,7 +36,7 @@ type ledgerDelete struct {
 func (s *Store) StorageChanges(ctx context.Context, p *auth.Principal) (any, error) {
 	summary, err := s.Controlplane.RevisionSummary(ctx, string(p.JWT), p.ID)
 	if err != nil {
-		return nil, fromControlplane(err)
+		return nil, FromControlplane(err)
 	}
 	tokens := map[string]string{"chats": summary.CurrentRevision}
 	for _, scope := range []string{"profile", "project", "project_document"} {
@@ -46,7 +46,7 @@ func (s *Store) StorageChanges(ctx context.Context, p *auth.Principal) (any, err
 		}
 		list, err := s.Controlplane.ListStatus(ctx, scope, "", 1, string(p.JWT), p.ID, "", direction)
 		if err != nil {
-			return nil, fromControlplane(err)
+			return nil, FromControlplane(err)
 		}
 		var ledger changeLedger
 		for _, update := range list.Updates {

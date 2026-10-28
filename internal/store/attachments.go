@@ -82,7 +82,7 @@ func (s *Store) PutAttachment(ctx context.Context, p *auth.Principal, chatID, cl
 			_ = s.Buckets.Delete(cleanupCtx, p.ID, id)
 			cancel()
 		}
-		return "", "", fromControlplane(err)
+		return "", "", FromControlplane(err)
 	}
 	return id, base64.StdEncoding.EncodeToString(key), nil
 }
@@ -97,7 +97,7 @@ func (s *Store) reserveAttachment(ctx context.Context, p *auth.Principal, id, ch
 			return nil
 		}
 		if !controlplane.IsCode(err, controlplane.StatusAttachmentPurgeInProgress) || attempt == reserveAttempts {
-			return fromControlplane(err)
+			return FromControlplane(err)
 		}
 		select {
 		case <-time.After(time.Duration(attempt) * reserveWaitStep):
@@ -162,7 +162,7 @@ func (s *Store) GetAttachment(ctx context.Context, p *auth.Principal, id, key st
 		return s.legacyAttachment(ctx, p, id, attKey)
 	}
 	if err != nil {
-		return nil, fromControlplane(err)
+		return nil, FromControlplane(err)
 	}
 	data, err := s.Buckets.Get(ctx, owner, id, attKey)
 	switch {
@@ -184,7 +184,7 @@ func (s *Store) legacyAttachment(ctx context.Context, p *auth.Principal, id stri
 		return nil, errAttachmentMissing
 	}
 	if err != nil {
-		return nil, fromControlplane(err)
+		return nil, FromControlplane(err)
 	}
 	data, err := openLegacyAttachment(ciphertext, key)
 	if err != nil {

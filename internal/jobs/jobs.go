@@ -58,20 +58,36 @@ func (r *Runner[R]) Start(ctx context.Context, owner string, work func(ctx conte
 	}
 	now := time.Now()
 	job := &Job[R]{status: Status[R]{State: Running, StartedAt: now, UpdatedAt: now}, done: make(chan struct{})}
+	// The job's context is made here, so a cancel can end it before its
+	// goroutine has run.
+	ctx, job.cancel = context.WithTimeout(context.WithoutCancel(ctx), r.budget)
 	r.jobs[owner] = job
-	go r.run(context.WithoutCancel(ctx), owner, job, work)
+	go r.run(ctx, owner, job, work)
 	return job, true
 }
 
+// Cancel ends owner's job, running or ended, and forgets it, so the next
+// Start begins at once. A running job's work sees its context end; the
+// job returned, if any, is done once that work has returned.
+func (r *Runner[R]) Cancel(owner string) *Job[R] {
+	r.mu.Lock()
+	job := r.jobs[owner]
+	delete(r.jobs, owner)
+	r.mu.Unlock()
+	if job != nil {
+		job.cancel()
+	}
+	return job
+}
+
 func (r *Runner[R]) run(ctx context.Context, owner string, job *Job[R], work func(context.Context, func(R)) (R, error)) {
-	ctx, cancel := context.WithTimeout(ctx, r.budget)
-	defer cancel()
+	defer job.cancel()
 	final, err := guarded(ctx, job.report, work)
 	// The job ends and, without a retention, leaves the runner in one
 	// step, so whoever sees it done finds the owner free.
 	r.mu.Lock()
 	job.finish(final, err)
-	if r.retention <= 0 {
+	if r.retention <= 0 && r.jobs[owner] == job {
 		delete(r.jobs, owner)
 	}
 	r.mu.Unlock()
@@ -109,6 +125,7 @@ type Job[R any] struct {
 	mu     sync.Mutex
 	status Status[R]
 	done   chan struct{}
+	cancel context.CancelFunc
 }
 
 // Status is where the job stands now.
