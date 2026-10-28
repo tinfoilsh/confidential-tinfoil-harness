@@ -5,6 +5,8 @@ package jobs
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"runtime/debug"
@@ -57,13 +59,31 @@ func (r *Runner[R]) Start(ctx context.Context, owner string, work func(ctx conte
 		return job, false
 	}
 	now := time.Now()
-	job := &Job[R]{status: Status[R]{State: Running, StartedAt: now, UpdatedAt: now}, done: make(chan struct{})}
+	job := &Job[R]{id: newID(), status: Status[R]{State: Running, StartedAt: now, UpdatedAt: now}, done: make(chan struct{})}
 	// The job's context is made here, so a cancel can end it before its
 	// goroutine has run.
 	ctx, job.cancel = context.WithTimeout(context.WithoutCancel(ctx), r.budget)
 	r.jobs[owner] = job
 	go r.run(ctx, owner, job, work)
 	return job, true
+}
+
+// Get is the job owner has, running or ended within the retention, or nil.
+func (r *Runner[R]) Get(owner string) *Job[R] {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.jobs[owner]
+}
+
+// idBytes is the length of a job's id before hex.
+const idBytes = 16
+
+// newID names a job so a client can tell the one it started from the
+// owner's next.
+func newID() string {
+	var b [idBytes]byte
+	rand.Read(b[:])
+	return hex.EncodeToString(b[:])
 }
 
 // Cancel ends owner's job, running or ended, and forgets it, so the next
@@ -122,11 +142,15 @@ func guarded[R any](ctx context.Context, report func(R), work func(context.Conte
 
 // Job is one owner's background work.
 type Job[R any] struct {
+	id     string
 	mu     sync.Mutex
 	status Status[R]
 	done   chan struct{}
 	cancel context.CancelFunc
 }
+
+// ID names the job, unlike any other's.
+func (j *Job[R]) ID() string { return j.id }
 
 // Status is where the job stands now.
 func (j *Job[R]) Status() Status[R] {
