@@ -13,11 +13,17 @@ shim:
 networks:
   upstream:
     egress: open
+  # The buckets sidecar trusts its caller's tenant, so only the harness
+  # shares a network with it; the sidecar reaches its buckets over its own.
+  storage:
+    egress: closed
+  buckets-egress:
+    egress: open
 
 containers:
   - name: harness
     image: "ghcr.io/tinfoilsh/confidential-tinfoil-harness@sha256:0000000000000000000000000000000000000000000000000000000000000000"
-    networks: [upstream]
+    networks: [upstream, storage]
     env:
       - TINFOIL_GATEWAY_URL: https://inference-gateway.tinfoil.sh
       - TINFOIL_CONTROLPLANE_URL: https://api.tinfoil.sh
@@ -28,8 +34,13 @@ containers:
       - TINFOIL_SUMMARIZER_ENCLAVE: summarizer.tinfoil.sh
       - TINFOIL_METADATA_ENCLAVE: opengraph-metadata.tinfoil.sh
       - SAFEGUARDS_URL: "http://safeguards:8090"
+      - BUCKETS_URL: "http://buckets:9000"
+      - CHAT_ATTACHMENTS_BUCKET: "sync-chat-attachments"
     secrets:
       - USAGE_CONTEXT_SECRET
+      # The control plane's service secret for its storage API, which the
+      # harness seals rows and stores attachments through.
+      - SYNC_ENCLAVE_SECRET
     read_only: true
     # Archives spool here for the request that sends or builds them. The
     # harness budgets requests to this size, and an import holds its upload
@@ -38,6 +49,23 @@ containers:
     tmpfs:
       /tmp: rw,noexec,nosuid,nodev,size=1100m
     restart: always
+
+  # Attachment bytes, sealed by the sidecar under a key per attachment that
+  # the harness mints and the chat embeds, in a bucket per kind of object.
+  # Reachable only from the harness, over the storage network. The release
+  # workflow does not rewrite this digest; pin it by hand to a published
+  # tinfoil-buckets-sidecar release.
+  - name: "buckets"
+    image: "ghcr.io/tinfoilsh/tinfoil-buckets-sidecar@sha256:03d43dd687a5ed352f3d4956db6af706ec9dee8ca2c0fbce651ee59317b2ede5"
+    restart: always
+    networks: [storage, buckets-egress]
+    env:
+      - PORT: "9000"
+      - AWS_REGION: "us-east-2"
+      - MULTITENANT: "true"
+    secrets:
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
 
   # Acceptable-use classifier for every first-party chat, Auto included. The
   # router is not given the chat id, so its own report is ignored. Reachable
