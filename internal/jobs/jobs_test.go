@@ -185,6 +185,28 @@ func TestGetFindsAnOwnersJobWhileItRunsAndWhileItIsKept(t *testing.T) {
 	}
 }
 
+func TestRestartReplacesAnEndedJobAndJoinsARunningOne(t *testing.T) {
+	r := New[int](ample, time.Hour)
+	first, _ := r.Start(context.Background(), "alice", func(context.Context, func(int)) (int, error) { return 1, nil })
+	<-first.Done()
+	release := make(chan struct{})
+	second, started := r.Restart(context.Background(), "alice", func(context.Context, func(int)) (int, error) {
+		<-release
+		return 2, nil
+	})
+	if !started || second == first || r.Get("alice") != second {
+		t.Fatalf("a restart after an ended job: started=%v same job=%v found=%v", started, second == first, r.Get("alice") == second)
+	}
+	if again, started := r.Restart(context.Background(), "alice", func(context.Context, func(int)) (int, error) { return 3, nil }); started || again != second {
+		t.Fatalf("a restart while running: started=%v same job=%v", started, again == second)
+	}
+	close(release)
+	<-second.Done()
+	if status := second.Status(); status.State != Complete || status.Report != 2 {
+		t.Fatalf("the restarted job's status = %+v", status)
+	}
+}
+
 func TestTheBudgetCancelsTheWork(t *testing.T) {
 	r := New[int](time.Millisecond, 0)
 	job, _ := r.Start(context.Background(), "alice", func(ctx context.Context, _ func(int)) (int, error) {
