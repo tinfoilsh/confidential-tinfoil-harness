@@ -1,0 +1,306 @@
+package auth
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"math/big"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/MicahParks/keyfunc/v3"
+	"github.com/golang-jwt/jwt/v5"
+)
+
+type testIssuer struct {
+	server   *httptest.Server
+	issuer   string
+	signKey  *rsa.PrivateKey
+	signKID  string
+	jwksURL  string
+	jwksJSON []byte
+}
+
+func newTestIssuer(t *testing.T) *testIssuer {
+	t.Helper()
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kid := "test-key-1"
+
+	jwk := buildJWK(t, priv, kid)
+	jwksJSON, err := json.Marshal(map[string]any{"keys": []any{jwk}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	ti := &testIssuer{
+		server:   srv,
+		issuer:   srv.URL,
+		signKey:  priv,
+		signKID:  kid,
+		jwksURL:  srv.URL + "/.well-known/jwks.json",
+		jwksJSON: jwksJSON,
+	}
+	mux.HandleFunc("/.well-known/jwks.json", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(ti.jwksJSON)
+	})
+	t.Cleanup(srv.Close)
+	return ti
+}
+
+func buildJWK(t *testing.T, priv *rsa.PrivateKey, kid string) map[string]any {
+	t.Helper()
+	pub := priv.Public().(*rsa.PublicKey)
+	return map[string]any{
+		"kty": "RSA",
+		"use": "sig",
+		"alg": "RS256",
+		"kid": kid,
+		"n":   base64URLUInt(pub.N),
+		"e":   base64URLUInt(big.NewInt(int64(pub.E))),
+	}
+}
+
+func base64URLUInt(i *big.Int) string {
+	return base64.RawURLEncoding.EncodeToString(i.Bytes())
+}
+
+func (ti *testIssuer) sign(t *testing.T, claims jwt.MapClaims) string {
+	t.Helper()
+	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	tok.Header["kid"] = ti.signKID
+	s, err := tok.SignedString(ti.signKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func (ti *testIssuer) verifier(t *testing.T) Verifier {
+	t.Helper()
+	ctx := context.Background()
+	kf, err := keyfunc.NewDefaultCtx(ctx, []string{ti.jwksURL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := NewVerifierWithKeyfunc(Config{Issuer: ti.issuer}, kf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v
+}
+
+func validClaims(iss string) jwt.MapClaims {
+	now := time.Now()
+	return jwt.MapClaims{
+		"sub": "user_abc",
+		"iss": iss,
+		"iat": now.Unix(),
+		"nbf": now.Unix(),
+		"exp": now.Add(5 * time.Minute).Unix(),
+	}
+}
+
+func TestVerifierAcceptsValidToken(t *testing.T) {
+	ti := newTestIssuer(t)
+	v := ti.verifier(t)
+	tok := ti.sign(t, validClaims(ti.issuer))
+	claims, err := v.Verify(context.Background(), tok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.Subject != "user_abc" {
+		t.Fatalf("sub mismatch: %q", claims.Subject)
+	}
+	if claims.Issuer != ti.issuer {
+		t.Fatalf("iss mismatch: %q", claims.Issuer)
+	}
+}
+
+func TestVerifierRejectsExpiredToken(t *testing.T) {
+	ti := newTestIssuer(t)
+	v := ti.verifier(t)
+	c := validClaims(ti.issuer)
+	c["exp"] = time.Now().Add(-time.Minute).Unix()
+	tok := ti.sign(t, c)
+	if _, err := v.Verify(context.Background(), tok); !errors.Is(err, ErrTokenInvalid) {
+		t.Fatalf("expected ErrTokenInvalid, got %v", err)
+	}
+}
+
+func TestVerifierToleratesClockSkew(t *testing.T) {
+	ti := newTestIssuer(t)
+	v := ti.verifier(t)
+
+	// A token minted by an issuer whose clock is slightly ahead of ours:
+	// nbf/iat are in our future, within the leeway window.
+	now := time.Now()
+	ahead := now.Add(ClockSkewLeeway / 2)
+	c := jwt.MapClaims{
+		"sub": "user_abc",
+		"iss": ti.issuer,
+		"iat": ahead.Unix(),
+		"nbf": ahead.Unix(),
+		"exp": ahead.Add(time.Minute).Unix(),
+	}
+	if _, err := v.Verify(context.Background(), ti.sign(t, c)); err != nil {
+		t.Fatalf("expected token within leeway to verify, got %v", err)
+	}
+
+	// A token that expired within the leeway window is still accepted.
+	c = validClaims(ti.issuer)
+	c["exp"] = now.Add(-ClockSkewLeeway / 2).Unix()
+	if _, err := v.Verify(context.Background(), ti.sign(t, c)); err != nil {
+		t.Fatalf("expected just-expired token within leeway to verify, got %v", err)
+	}
+
+	// Beyond the leeway window the token is rejected.
+	c = validClaims(ti.issuer)
+	c["exp"] = now.Add(-2 * ClockSkewLeeway).Unix()
+	if _, err := v.Verify(context.Background(), ti.sign(t, c)); !errors.Is(err, ErrTokenInvalid) {
+		t.Fatalf("expected ErrTokenInvalid beyond leeway, got %v", err)
+	}
+}
+
+func TestVerifierRejectsWrongIssuer(t *testing.T) {
+	ti := newTestIssuer(t)
+	v := ti.verifier(t)
+	c := validClaims("https://attacker.example.com")
+	tok := ti.sign(t, c)
+	if _, err := v.Verify(context.Background(), tok); !errors.Is(err, ErrTokenInvalid) {
+		t.Fatalf("expected verification failure, got %v", err)
+	}
+}
+
+func TestVerifierRejectsTamperedSignature(t *testing.T) {
+	ti := newTestIssuer(t)
+	v := ti.verifier(t)
+	tok := ti.sign(t, validClaims(ti.issuer))
+	parts := strings.Split(tok, ".")
+	if len(parts) != 3 {
+		t.Fatalf("bad token")
+	}
+	tampered := parts[0] + "." + parts[1] + ".AAAAAAAA"
+	if _, err := v.Verify(context.Background(), tampered); err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
+func TestVerifierRejectsUnknownKID(t *testing.T) {
+	ti := newTestIssuer(t)
+	v := ti.verifier(t)
+	c := validClaims(ti.issuer)
+	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, c)
+	tok.Header["kid"] = "does-not-exist"
+	s, err := tok.SignedString(ti.signKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.Verify(context.Background(), s); err == nil {
+		t.Fatalf("expected error for unknown kid")
+	}
+}
+
+func TestVerifierEnforcesAudienceWhenConfigured(t *testing.T) {
+	ti := newTestIssuer(t)
+	ctx := context.Background()
+	kf, err := keyfunc.NewDefaultCtx(ctx, []string{ti.jwksURL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := NewVerifierWithKeyfunc(Config{
+		Issuer:   ti.issuer,
+		Audience: "tinfoil-sync",
+	}, kf)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c := validClaims(ti.issuer)
+	c["aud"] = "tinfoil-sync"
+	if _, err := v.Verify(ctx, ti.sign(t, c)); err != nil {
+		t.Fatalf("expected audience match, got %v", err)
+	}
+
+	c["aud"] = "wrong"
+	if _, err := v.Verify(ctx, ti.sign(t, c)); !errors.Is(err, ErrAudienceMismatch) {
+		t.Fatalf("expected ErrAudienceMismatch, got %v", err)
+	}
+}
+
+func TestVerifierRequiresSubject(t *testing.T) {
+	ti := newTestIssuer(t)
+	v := ti.verifier(t)
+	c := validClaims(ti.issuer)
+	delete(c, "sub")
+	if _, err := v.Verify(context.Background(), ti.sign(t, c)); !errors.Is(err, ErrSubjectMissing) {
+		t.Fatalf("expected ErrSubjectMissing, got %v", err)
+	}
+}
+
+// The key lookup returns RSA keys as *rsa.PublicKey, which golang-jwt
+// refuses as an HMAC secret, so signing with the RSA public key bytes
+// fails whatever algorithms the verifier allows. A symmetric (oct) key
+// in the JWKS is different: the lookup returns its raw bytes, and since
+// the JWKS is public, anyone can sign with them. The allowed signing
+// methods are the only thing that rejects such a token.
+func TestVerifierRejectsHMAC(t *testing.T) {
+	ti := newTestIssuer(t)
+	const hmacKID = "published-hmac-key"
+	secret := []byte("symmetric key anyone can read from the JWKS")
+	jwksJSON, err := json.Marshal(map[string]any{"keys": []any{
+		buildJWK(t, ti.signKey, ti.signKID),
+		map[string]any{
+			"kty": "oct",
+			"kid": hmacKID,
+			"k":   base64.RawURLEncoding.EncodeToString(secret),
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ti.jwksJSON = jwksJSON
+	v := ti.verifier(t)
+
+	for _, method := range []jwt.SigningMethod{jwt.SigningMethodHS256, jwt.SigningMethodHS384, jwt.SigningMethodHS512} {
+		tok := jwt.NewWithClaims(method, validClaims(ti.issuer))
+		tok.Header["kid"] = hmacKID
+		s, err := tok.SignedString(secret)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := v.Verify(context.Background(), s); !errors.Is(err, ErrTokenInvalid) {
+			t.Fatalf("%s: expected ErrTokenInvalid, got %v", method.Alg(), err)
+		}
+	}
+}
+
+func TestBearerTokenParsing(t *testing.T) {
+	cases := map[string]bool{
+		"Bearer abc":     true,
+		"Bearer  abc":    true,
+		"Bearer ":        false,
+		"":               false,
+		"Token abc":      false,
+		"bearer abc":     false,
+		"Bearer abc def": true,
+	}
+	for h, want := range cases {
+		tok, err := BearerToken(h)
+		gotOK := err == nil && tok != ""
+		if gotOK != want {
+			t.Fatalf("BearerToken(%q): ok=%v, want %v (err=%v, tok=%q)", h, gotOK, want, err, tok)
+		}
+	}
+}

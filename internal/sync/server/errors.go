@@ -1,0 +1,195 @@
+package server
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/controlplane"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/envelope"
+)
+
+// Application error codes returned in JSON envelopes. These match the
+// controlplane's own codes so the client sees a consistent vocabulary
+// regardless of which service rejected the request.
+const (
+	CodeStaleKey                   = controlplane.StatusStaleKey
+	CodeStaleBlob                  = controlplane.StatusStaleBlob
+	CodeSyncConflict               = "SYNC_CONFLICT"
+	CodeIdempotencyConflict        = controlplane.StatusIdempotencyConflict
+	CodeExistingDataUnderOtherKey  = controlplane.StatusExistingDataUnderOtherKey
+	CodeProfileSyncUpgradeRequired = controlplane.StatusProfileSyncUpgradeRequired
+	CodeUnknownKey                 = "UNKNOWN_KEY"
+	CodeLegacyBlobNotMigrated      = controlplane.StatusLegacyBlobNotMigrated
+	CodeAttestationFailed          = "ATTESTATION_FAILED"
+	CodeAuth                       = "AUTH"
+	CodeForbidden                  = "FORBIDDEN"
+	CodeBadRequest                 = "BAD_REQUEST"
+	CodeNotFound                   = "NOT_FOUND"
+	CodeNetwork                    = "NETWORK"
+	CodeUpstream                   = "UPSTREAM"
+	CodeRateLimited                = "RATE_LIMITED"
+	CodePayloadTooLarge            = "PAYLOAD_TOO_LARGE"
+	CodeMissingAttachment          = controlplane.StatusMissingAttachment
+	CodeAttachmentPurgeInProgress  = controlplane.StatusAttachmentPurgeInProgress
+	CodeInternal                   = "INTERNAL"
+)
+
+const CodeSyncProtocolUpgradeRequired = "SYNC_PROTOCOL_UPGRADE_REQUIRED"
+
+// AppError is the wire representation of a non-2xx response. Extra context
+// fields (current_etag, current_key_id, reason) are folded in when relevant.
+type AppError struct {
+	Status       int    `json:"-"`
+	Code         string `json:"code"`
+	Message      string `json:"message,omitempty"`
+	CurrentKeyID string `json:"current_key_id,omitempty"`
+	CurrentETag  string `json:"current_etag,omitempty"`
+	Reason       string `json:"reason,omitempty"`
+	// CurrentRevision and OldestReplayableRevision are forwarded from
+	// the controlplane's SYNC_SNAPSHOT_REQUIRED response so the client
+	// can bootstrap a snapshot without a follow-up summary call.
+	CurrentRevision          string `json:"current_revision,omitempty"`
+	OldestReplayableRevision string `json:"oldest_replayable_revision,omitempty"`
+	// MinimumProtocol is forwarded from controlplane upgrade-required
+	// responses that name the lowest accepted protocol version.
+	MinimumProtocol int `json:"minimum_protocol,omitempty"`
+	// MissingAttachments accompanies MISSING_ATTACHMENT: ids the pushed
+	// chat referenced that the controlplane no longer holds. The client
+	// re-uploads those bytes and pushes again.
+	MissingAttachments []string `json:"missing_attachments,omitempty"`
+	RetryAfterSeconds  int64    `json:"retry_after_seconds,omitempty"`
+}
+
+func (a *AppError) Error() string {
+	if a == nil {
+		return "<nil>"
+	}
+	if a.Code != "" {
+		return a.Code
+	}
+	if a.Message != "" {
+		return a.Message
+	}
+	return http.StatusText(a.Status)
+}
+
+func writeError(w http.ResponseWriter, err error) {
+	a := translate(err)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(a.Status)
+	payload := map[string]any{
+		"ok":   false,
+		"code": a.Code,
+	}
+	if a.Message != "" {
+		payload["message"] = a.Message
+	}
+	if a.CurrentKeyID != "" {
+		payload["current_key_id"] = a.CurrentKeyID
+	}
+	if a.CurrentETag != "" {
+		payload["current_etag"] = a.CurrentETag
+	}
+	if a.Reason != "" {
+		payload["reason"] = a.Reason
+	}
+	if a.CurrentRevision != "" {
+		payload["current_revision"] = a.CurrentRevision
+	}
+	if a.OldestReplayableRevision != "" {
+		payload["oldest_replayable_revision"] = a.OldestReplayableRevision
+	}
+	if a.MinimumProtocol > 0 {
+		payload["minimum_protocol"] = a.MinimumProtocol
+	}
+	if len(a.MissingAttachments) > 0 {
+		payload["missing_attachments"] = a.MissingAttachments
+	}
+	if a.RetryAfterSeconds > 0 {
+		payload["retry_after_seconds"] = a.RetryAfterSeconds
+	}
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func translate(err error) *AppError {
+	var a *AppError
+	if errors.As(err, &a) {
+		if a.Status == 0 {
+			a.Status = http.StatusInternalServerError
+		}
+		if a.Code == "" {
+			a.Code = CodeInternal
+		}
+		return a
+	}
+	// Oversize inputs are a deterministic client error, not an
+	// enclave fault. A 5xx here makes clients retry forever (and
+	// re-upload any attachments that preceded the push each time);
+	// a 413 with a stable code lets them stop and tell the user.
+	if errors.Is(err, envelope.ErrPlaintextTooLarge) {
+		return payloadTooLarge(fmt.Sprintf("plaintext exceeds %d bytes", envelope.MaxPlaintextBytes))
+	}
+	var maxBytes *http.MaxBytesError
+	if errors.As(err, &maxBytes) {
+		return payloadTooLarge(fmt.Sprintf("request body exceeds %d bytes", maxBytes.Limit))
+	}
+	var outcomeUnknown *controlplane.PutBlobOutcomeUnknownError
+	if errors.As(err, &outcomeUnknown) {
+		return &AppError{
+			Status: http.StatusServiceUnavailable,
+			Code:   CodeUpstream,
+			Reason: "outcome_unknown",
+		}
+	}
+	var cpe *controlplane.Error
+	if errors.As(err, &cpe) {
+		return &AppError{
+			Status:                   cpe.StatusCode,
+			Code:                     normalizeCode(cpe.Code, cpe.StatusCode),
+			Message:                  cpe.Message,
+			CurrentKeyID:             cpe.CurrentKeyID,
+			CurrentETag:              cpe.CurrentETag,
+			CurrentRevision:          cpe.CurrentRevision,
+			OldestReplayableRevision: cpe.OldestReplayableRevision,
+			MinimumProtocol:          cpe.MinimumProtocol,
+			MissingAttachments:       cpe.MissingAttachments,
+			RetryAfterSeconds:        cpe.RetryAfterSeconds,
+		}
+	}
+	return &AppError{
+		Status:  http.StatusInternalServerError,
+		Code:    CodeInternal,
+		Message: err.Error(),
+	}
+}
+
+func normalizeCode(code string, status int) string {
+	if code != "" {
+		return code
+	}
+	switch status {
+	case http.StatusUnauthorized:
+		return CodeAuth
+	case http.StatusForbidden:
+		return CodeForbidden
+	case http.StatusBadRequest:
+		return CodeBadRequest
+	case http.StatusGone:
+		return CodeLegacyBlobNotMigrated
+	}
+	return CodeInternal
+}
+
+func badRequest(message string) *AppError {
+	return &AppError{Status: http.StatusBadRequest, Code: CodeBadRequest, Message: message}
+}
+
+func payloadTooLarge(message string) *AppError {
+	return &AppError{Status: http.StatusRequestEntityTooLarge, Code: CodePayloadTooLarge, Message: message}
+}
+
+func unauthorized(message string) *AppError {
+	return &AppError{Status: http.StatusUnauthorized, Code: CodeAuth, Message: message}
+}

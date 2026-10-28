@@ -1,6 +1,6 @@
 # Layout
 
-Package `main` starts `internal/server`, which holds the routes, wiring, and integration tests; each layer under `internal/` depends only on the ones above it. `api` is what every route shares; `auth` is who a request is from; `domain` is what a chat is made of; `inference` is the models the harness serves and how it reaches them; `store` reads and writes what sync keeps for a caller; `attach` is what a chat carries besides text; `importer` reads other assistants' exports; `archives` moves chats in and out whole; `engine` carries out turns and holds the live runs. A change goes in the lowest layer that has what it needs, and nothing reaches back up.
+Package `main` starts `internal/server`, which holds the routes, wiring, and integration tests; each layer under `internal/` depends only on the ones above it. `api` is what every route shares; `auth` is who a request is from; `domain` is what a chat is made of; `inference` is the models the harness serves and how it reaches them; `sync` seals and stores what a caller keeps, in the control plane's database and the buckets sidecar, and knows nothing of the harness; `store` reads and writes it for a caller; `attach` is what a chat carries besides text; `importer` reads other assistants' exports; `archives` moves chats in and out whole; `engine` carries out turns and holds the live runs. A change goes in the lowest layer that has what it needs, and nothing reaches back up.
 
 # Protocol
 
