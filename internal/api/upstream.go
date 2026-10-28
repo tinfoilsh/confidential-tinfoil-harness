@@ -40,9 +40,9 @@ func WithRetryAfter(e *Error, header http.Header) *Error {
 }
 
 // OpenAIRefusal maps the OpenAI error shape that the gateway, the router, and
-// model and document enclaves answer with, nested or flat. Other bodies, such
-// as sync's, keep their status mapping, as does a 401, which callers answer
-// by refreshing the credential.
+// model and document enclaves answer with, nested or flat. Other bodies keep
+// their status mapping, as does a 401, which callers answer by refreshing
+// the credential.
 func OpenAIRefusal(status int, body []byte) *Error {
 	var in Object
 	if status == http.StatusUnauthorized || json.Unmarshal(body, &in) != nil {

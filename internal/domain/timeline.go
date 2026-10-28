@@ -207,4 +207,4 @@ const ChatURL = "https://chat.tinfoil.sh"
 // A signed-in client can also share a chat it keeps itself by sending the
 // transcript, with no content key. As from the web client, that share holds
 // image thumbnails and document text, so the transcript may omit image bytes.
-// No attachment is uploaded for it: sync holds no chat to keep one under.
+// No attachment is uploaded for it: the cloud holds no chat to keep one under.

@@ -10,7 +10,6 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/buckets"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/search"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
@@ -62,7 +61,5 @@ func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
 	h.search = search.New(cp, sbk, embedder, rows)
 	rows.Index = h.search
 	h.store.Controlplane, h.store.Buckets, h.store.Rows, h.store.Search = cp, bk, rows, h.search
-	s := h.models.Services["sync"]
-	h.store.API = &store.Client{URL: s.URL, Client: s.Client, MinimumGrant: engine.RunTimeout + engine.CommitTimeout}
 	return nil
 }

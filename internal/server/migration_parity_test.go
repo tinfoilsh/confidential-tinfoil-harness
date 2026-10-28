@@ -3,7 +3,6 @@ package server
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"image"
 	"image/png"
@@ -14,14 +13,12 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane/cpstub"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
 
 func TestResponseLanguageUsesTheDeviceUnlessTheProfileChoosesOne(t *testing.T) {
@@ -105,7 +102,7 @@ func TestASelectionCanBeSentAloneAndAskedAbout(t *testing.T) {
 		}
 	}
 	if rows.calls != 0 {
-		t.Fatal("device questions used sync")
+		t.Fatal("device questions used the cloud")
 	}
 }
 
@@ -146,61 +143,6 @@ func TestAProjectImageBecomesContextForItsChats(t *testing.T) {
 	}
 	if system := <-requests; descriptions.Load() != 1 || !strings.Contains(system, document.Content) {
 		t.Fatalf("project image was not reusable context: %q", system)
-	}
-}
-
-func TestACloudRunUsesItsStorageCredentialForTheFinalSave(t *testing.T) {
-	h, rows, key := testChatHarness(t, nil)
-	var grantCalls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var in api.Object
-		json.NewDecoder(r.Body).Decode(&in)
-		if r.URL.Path == "/v1/runs/authorize" {
-			if r.Header.Get("Authorization") != "Bearer clerk-alice" || in["key"] != keyBase64(key) || api.Str(in["thread_id"]) == "" {
-				t.Errorf("invalid delegation request")
-			}
-			grantCalls.Add(1)
-			json.NewEncoder(w).Encode(api.Object{"token": "scoped-storage", "expires_at": api.Now().Add(time.Hour)})
-			return
-		}
-		if r.Header.Get("Authorization") != "Bearer scoped-storage" {
-			w.WriteHeader(401)
-			return
-		}
-		p := &auth.Principal{ID: "alice"}
-		switch r.URL.Path {
-		case "/v1/sync/pull":
-			items := []api.Object{}
-			for _, value := range api.Arr(in["ids"]) {
-				id := api.Str(value)
-				row, err := rows.Load(r.Context(), p, key, api.Str(in["scope"]), id)
-				if err != nil {
-					items = append(items, api.Object{"id": id, "ok": false, "code": "NOT_FOUND"})
-					continue
-				}
-				items = append(items, api.Object{"id": id, "ok": true, "etag": row.ETag, "plaintext": base64.StdEncoding.EncodeToString(row.Data)})
-			}
-			json.NewEncoder(w).Encode(api.Object{"items": items})
-		case "/v1/sync/push":
-			plain, _ := base64.StdEncoding.DecodeString(api.Str(in["plaintext"]))
-			etag, err := rows.Push(r.Context(), p, key, api.Str(in["scope"]), &domain.StoredRow{ID: api.Str(in["id"]), ETag: api.Str(in["if_match"]), Data: plain}, "write")
-			if err != nil {
-				w.WriteHeader(409)
-				return
-			}
-			json.NewEncoder(w).Encode(api.Object{"etag": etag})
-		default:
-			t.Errorf("unexpected storage route %s", r.URL.Path)
-			w.WriteHeader(404)
-		}
-	}))
-	defer server.Close()
-	h.store.Rows = &store.Client{URL: server.URL, Client: server.Client()}
-	in := sendInput(key)
-	events := finishedRun(t, h, "/v1/threads/turn", in)
-	row, err := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", api.Str(in["threadId"]))
-	if err != nil || grantCalls.Load() != 1 || eventOfType(events, "RUN_FINISHED") == nil || len(mustRead(domain.ReadThreadRow(row)).Messages) != 2 || mustRead(domain.ReadThreadRow(row)).Messages[1].Content != "hello" {
-		t.Fatalf("reply was not stored with the run credential: %v", err)
 	}
 }
 

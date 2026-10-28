@@ -156,7 +156,7 @@ type DeviceTranscript struct {
 }
 
 // SharePayload is what a share link opens, sealed under its key: each
-// attachment's thumbnail or text, and the key of its blob, which sync keeps
+// attachment's thumbnail or text, and the key of its blob, which buckets keeps
 // for the share.
 type SharePayload struct {
 	V         int            `json:"v"`

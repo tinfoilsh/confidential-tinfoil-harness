@@ -168,7 +168,7 @@ type Entry struct {
 	// Slot is the chat's position in the Slots table; posting lists
 	// reference chats by slot. Assigned by Upsert.
 	Slot int `json:"slot"`
-	// ETag is the sync blob etag the entry was built from, so callers
+	// ETag is the stored row's etag the entry was built from, so callers
 	// can skip re-embedding chats that have not changed.
 	ETag           string `json:"etag,omitempty"`
 	SourceRevision int64  `json:"source_revision,omitempty"`

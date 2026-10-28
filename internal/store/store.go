@@ -28,8 +28,6 @@ type Store struct {
 	Reseals *jobs.Runner[ResealReport]
 	// Search forgets a caller's search index when a new key fences it off.
 	Search SearchResetter
-	// API is the sync enclave's HTTP API, for what has not moved here yet.
-	API *Client
 }
 
 // SearchResetter drops what is held for a caller's search index once the
@@ -40,14 +38,14 @@ type SearchResetter interface {
 
 // The store is the harness's typed view of what a caller keeps: chats, the
 // profile, projects and their documents, attachments and keys. Nothing
-// else calls sync. Rows are read through the legacy reader, so a row any
+// else reaches the rows. Rows are read through the legacy reader, so a row any
 // client wrote reads in the current format.
 
 var errEveryCommitConflicted = api.Err(409, "REVISION_CONFLICT", "The row changed during every commit attempt")
 
 // Push writes a row at the revision it was read at; an empty one creates
 // it. A push whose outcome is unknown is sent again under the same
-// idempotency key, which sync answers with the first push's outcome.
+// idempotency key, which the control plane answers with the first push's outcome.
 func (s *Store) Push(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope string, row *domain.StoredRow) error {
 	nonce := uuid.NewString()
 	for attempt := 1; ; attempt++ {
@@ -87,7 +85,7 @@ func (s *Store) CommitRow(ctx context.Context, p *auth.Principal, key auth.Conte
 }
 
 // EachRowOrUnreadable visits every row of a scope, or of a project's chats,
-// and names each row sync holds but cannot open.
+// and names each row the control plane holds that the key cannot open.
 func (s *Store) EachRowOrUnreadable(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, project string, visit func(*domain.StoredRow) error, unreadable func(string)) error {
 	cursor := ""
 	for {
@@ -144,7 +142,7 @@ func (s *Store) ThreadBatch(ctx context.Context, p *auth.Principal, key auth.Con
 	}
 	threads := make([]*domain.ThreadRow, 0, len(rows))
 	for i := range rows {
-		// A chat this harness cannot read is left out, as one sync cannot
+		// A chat this harness cannot read is left out, as one the key cannot
 		// open is.
 		if t, err := domain.ReadThreadRow(&rows[i]); err == nil {
 			threads = append(threads, t)
@@ -165,7 +163,7 @@ func (s *Store) ThreadPage(ctx context.Context, p *auth.Principal, key auth.Cont
 	}
 	threads := make([]*domain.ThreadRow, 0, len(page.Rows))
 	for i := range page.Rows {
-		// A chat this harness cannot read is left out, as one sync cannot
+		// A chat this harness cannot read is left out, as one the key cannot
 		// open is.
 		if t, err := domain.ReadThreadRow(&page.Rows[i]); err == nil {
 			threads = append(threads, t)
@@ -174,14 +172,14 @@ func (s *Store) ThreadPage(ctx context.Context, p *auth.Principal, key auth.Cont
 	return threads, page.Next, nil
 }
 
-// Repairer places the attachments a pushed chat names that sync
-// does not hold under it.
+// Repairer places the attachments a pushed chat names that the control
+// plane does not hold under it.
 type Repairer interface {
 	RepairAttachments(context.Context, *auth.Principal, *domain.Thread, []string) error
 }
 
 // SaveThread pushes a chat at the revision it was read at. A chat naming
-// attachments sync does not hold under it is repaired once and pushed again.
+// attachments the control plane does not hold under it is repaired once and pushed again.
 func (s *Store) SaveThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, row *domain.ThreadRow) error {
 	row.RecordVersion = domain.RecordVersion
 	row.UpdatedAt = api.Timestamp()
@@ -222,7 +220,7 @@ func (s *Store) MutateThread(ctx context.Context, p *auth.Principal, key auth.Co
 	return nil, errEveryCommitConflicted
 }
 
-// A deletion needs no revision: sync reads the row's, retries a race, and
+// A deletion needs no revision: the store reads the row's, retries a race, and
 // treats a missing row as deleted.
 func (s *Store) RemoveRow(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, id string) error {
 	return s.Rows.Remove(ctx, p, key, scope, id)
@@ -330,7 +328,7 @@ func (s *Store) ProjectPage(ctx context.Context, p *auth.Principal, key auth.Con
 	}
 	projects := make([]domain.Project, 0, len(page.Rows))
 	for i := range page.Rows {
-		// A project this harness cannot read is left out, as one sync cannot
+		// A project this harness cannot read is left out, as one the key cannot
 		// open is.
 		if project, err := domain.ReadProject(&page.Rows[i]); err == nil {
 			projects = append(projects, project)
@@ -384,7 +382,7 @@ func (s *Store) RemoveAllProjects(ctx context.Context, p *auth.Principal, key au
 	return resp.Deleted, nil
 }
 
-// ProjectDocuments are every document of a project. A document sync cannot
+// ProjectDocuments are every document of a project. A document the key cannot
 // open, or this harness cannot read, is passed to unreadable with why, which
 // fails the read by returning an error or leaves the document out by
 // returning nil.
@@ -436,8 +434,8 @@ func (s *Store) ProjectDocuments(ctx context.Context, p *auth.Principal, key aut
 	return list, nil
 }
 
-// documentCopy is a document row as a page listed it, or why sync could not
-// open it.
+// documentCopy is a document row as a page listed it, or why it could not
+// be opened.
 type documentCopy struct {
 	row *domain.StoredRow
 	err error

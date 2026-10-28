@@ -49,7 +49,7 @@ type memoryRows struct {
 	conflict func(*domain.StoredRow)
 	refuse   func(*domain.StoredRow) error
 	// sealed is the key each row was stored with; a row a test seeds is
-	// sealed with key. Like sync, only that key opens or overwrites a row,
+	// sealed with key. Like the store, only that key opens or overwrites a row,
 	// and any key deletes it.
 	sealed map[string]auth.ContentKey
 	key    auth.ContentKey
@@ -92,11 +92,11 @@ func (stubEmbedder) Embed(_ context.Context, inputs []string) ([][]float32, erro
 }
 
 func (s *memoryRows) AuthorizeRun(_ context.Context, _ *auth.Principal, _ auth.ContentKey, id string, project *string) (*auth.StorageGrant, error) {
-	return &auth.StorageGrant{ChatID: id, ProjectID: domain.ValueOr(project, ""), Token: auth.Secret("run-for-" + id), ExpiresAt: api.Now().Add(time.Hour)}, nil
+	return &auth.StorageGrant{ChatID: id, ProjectID: domain.ValueOr(project, ""), ExpiresAt: api.Now().Add(time.Hour)}, nil
 }
 
 func (s *memoryRows) AuthorizeStorage(_ context.Context, p *auth.Principal, _ auth.ContentKey, operation, project string) (*auth.StorageGrant, error) {
-	return &auth.StorageGrant{Operation: operation, ProjectID: project, Token: auth.Secret("sync-archive:" + p.ID), ExpiresAt: api.Now().Add(time.Hour)}, nil
+	return &auth.StorageGrant{Operation: operation, ProjectID: project, ExpiresAt: api.Now().Add(time.Hour)}, nil
 }
 
 func randomKey() auth.ContentKey { var k auth.ContentKey; rand.Read(k[:]); return k }
@@ -168,7 +168,7 @@ func editRow(row *domain.StoredRow, edit func(api.Object)) {
 	row.Data = api.Raw(data)
 }
 
-// rowProject is the project sync files a row under: the one its last push
+// rowProject is the project the control plane files a row under: the one its last push
 // named, or a seeded row's own.
 func rowProject(row domain.StoredRow) string {
 	if row.ProjectSet {
@@ -1297,34 +1297,6 @@ func TestCASReappliesPatchToTheChangedRow(t *testing.T) {
 		t.Fatalf("the patch overwrote the concurrent change: %v", row.Data)
 	}
 }
-func TestSyncWireCarriesJWTProtocolAndBase64(t *testing.T) {
-	key := randomKey()
-	p := &auth.Principal{ID: "alice", JWT: "session-jwt"}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Sync-Protocol") != "3" || r.Header.Get("Authorization") != "Bearer session-jwt" {
-			t.Errorf("wrong sync auth: %v", r.Header)
-		}
-		var in api.Object
-		json.NewDecoder(r.Body).Decode(&in)
-		if in["key"] != keyBase64(key) {
-			t.Error("wrong key")
-		}
-		plaintext, err := base64.StdEncoding.DecodeString(api.Str(in["plaintext"]))
-		if err != nil || !strings.Contains(string(plaintext), "hello") {
-			t.Error("plaintext was not base64")
-		}
-		if in["if_match"] != "4" || api.Obj(in["metadata"])["profile_sync_protocol"] != float64(2) {
-			t.Error("wrong CAS metadata")
-		}
-		io.WriteString(w, `{"ok":true,"etag":"5"}`)
-	}))
-	defer server.Close()
-	client := &store.Client{URL: server.URL, Client: &http.Client{Transport: &auth.CallerTransport{Inner: server.Client().Transport}}}
-	etag, err := client.Push(caller("inference-key"), p, key, "profile", &domain.StoredRow{ID: "profile", ETag: "4", Data: api.Raw(api.Object{"nickname": "hello"})}, uuid.NewString())
-	if err != nil || etag != "5" {
-		t.Fatal(etag, err)
-	}
-}
 func TestPromptEscapingReasoningAndBudget(t *testing.T) {
 	h, _, key := testChatHarness(t, nil)
 	thread := &domain.Thread{ID: "t", Messages: []domain.Message{{Role: "user", Content: "hello"}}, Model: "kimi-k3"}
@@ -1345,17 +1317,6 @@ func TestPromptEscapingReasoningAndBudget(t *testing.T) {
 	group := engine.RenderMessage(message, false, "tool-call-only")
 	if len(group) != 2 || !strings.Contains(string(group[0]), "reasoning_content") {
 		t.Fatal("tool reasoning policy lost")
-	}
-}
-func TestTypedErrors(t *testing.T) {
-	for _, code := range []string{"STALE_KEY", "EXISTING_DATA_UNDER_OTHER_KEY"} {
-		e := api.DownstreamError(409, api.Raw(api.Object{"code": code, "current_key_id": "kid"}))
-		if e.Code != "KEY_MISMATCH" || e.KeyID != "kid" {
-			t.Fatal(e)
-		}
-	}
-	if e := api.DownstreamError(409, []byte(`{"code":"SYNC_CONFLICT"}`)); e.Code != "REVISION_CONFLICT" {
-		t.Fatal(e)
 	}
 }
 

@@ -22,7 +22,7 @@ type Error struct {
 	// RateLimit is the caller's quota as an exhausted one's refusal leaves it.
 	RateLimit *RateLimit `json:"rateLimit,omitempty"`
 
-	Missing []string `json:"-"` // attachment ids sync did not find under the pushed chat
+	Missing []string `json:"-"` // attachment ids the control plane did not find under the pushed chat
 }
 
 // The actions protocol/openapi.yaml describes as ErrorAction.
@@ -110,52 +110,26 @@ func DownstreamError(status int, body []byte) *Error {
 	if nested := Obj(in["error"]); len(nested) > 0 {
 		in = nested
 	}
-	code := Str(in["code"])
 	e := Err(502, "UPSTREAM_REFUSED", "A downstream service refused the request")
 	e.Status = status
-	switch code {
-	case "STALE_KEY", "EXISTING_DATA_UNDER_OTHER_KEY", "UNKNOWN_KEY", "KEY_MISMATCH":
-		e = Err(409, "KEY_MISMATCH", "The stored data uses another content key")
-		e.KeyID = FirstString(in["current_key_id"], in["key_id"])
-	case "STALE_BLOB", "SYNC_CONFLICT":
-		e = Err(409, "REVISION_CONFLICT", "The stored row changed")
-	case "MISSING_ATTACHMENT":
-		e = Err(409, "MISSING_ATTACHMENT", "The chat references attachments that are not stored with it")
-		for _, id := range Arr(in["missing_attachments"]) {
-			e.Missing = append(e.Missing, Str(id))
+	if refused := OpenAIRefusal(status, body); refused != nil {
+		if refused.RetryAfter == 0 {
+			refused.RetryAfter = Int(in["retryAfter"])
 		}
-	case "PAYLOAD_TOO_LARGE":
-		e = Err(413, "THREAD_TOO_LARGE", "The chat is too large to store")
-	case "SYNC_PROTOCOL_UPGRADE_REQUIRED":
-		e.Message, e.Action = "The sync service requires a newer protocol", ActionStop
-	case "UPSTREAM":
-		if Str(in["reason"]) == "outcome_unknown" {
-			// The write may have been stored. Retrying reapplies the change
-			// to a freshly pulled row, so retrying is safe.
-			e = Err(503, "SYNC_OUTCOME_UNKNOWN", "The sync service may not have stored the change")
-		}
-	default:
-		if refused := OpenAIRefusal(status, body); refused != nil {
-			if refused.RetryAfter == 0 {
-				refused.RetryAfter = Int(in["retryAfter"])
-			}
-			return refused
-		}
-		switch status {
-		case 401:
-			e = Err(401, "UNAUTHENTICATED", "Authentication is required")
-		case 404:
-			e = Err(404, "THREAD_NOT_FOUND", "The requested data was not found")
-		case 412:
-			e = Err(409, "REVISION_CONFLICT", "The stored row changed")
-		case 429:
-			e = Err(429, "QUOTA_EXHAUSTED", "The request quota is exhausted")
-			e.Kind = FirstString(in["kind"], in["type"])
-			e.ResetsAt = FirstString(in["resetsAt"], in["resets_at"])
-			e.RetryAfter = Int(in["retryAfter"])
-		}
-		RefusedAsSent(e, status)
+		return refused
 	}
+	switch status {
+	case 401:
+		e = Err(401, "UNAUTHENTICATED", "Authentication is required")
+	case 404:
+		e = Err(404, "THREAD_NOT_FOUND", "The requested data was not found")
+	case 429:
+		e = Err(429, "QUOTA_EXHAUSTED", "The request quota is exhausted")
+		e.Kind = FirstString(in["kind"], in["type"])
+		e.ResetsAt = FirstString(in["resetsAt"], in["resets_at"])
+		e.RetryAfter = Int(in["retryAfter"])
+	}
+	RefusedAsSent(e, status)
 	return e
 }
 

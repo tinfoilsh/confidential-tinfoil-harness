@@ -31,8 +31,8 @@ func Respond(w http.ResponseWriter, result any, err error) {
 
 const MaxRequestBody = 8 << 20
 
-// MaxResponseBody bounds a downstream answer: a pull of sync's largest batch,
-// or an attachment, base64 encoded.
+// MaxResponseBody bounds a downstream answer: a converted document, or an
+// attachment, base64 encoded.
 const MaxResponseBody = 96 << 20
 
 // ReadBody reads a request body of at most limit bytes that holds one JSON
@@ -222,7 +222,7 @@ func IsIdentifier(s string) bool {
 }
 
 // RequireID refuses an id that cannot name a row. Ids become path segments
-// of other services' URLs, so the dot segments are refused, as sync does.
+// of the control plane's URLs, so the dot segments are refused.
 func RequireID(field, id string) error {
 	if id == "" || id == "." || id == ".." || !IsIdentifier(id) || strings.ContainsAny(id, "/\\?#") {
 		return Err(400, "BAD_REQUEST", field+" must be a valid identifier")

@@ -286,7 +286,9 @@ func TestMissingAttachmentsAreRepairedBeforeRetrying(t *testing.T) {
 		for _, a := range mustRead(domain.ReadThreadRow(row)).Messages[0].Attachments {
 			if a.ID == docID || a.ID == imageID && a.EncryptionKey != "" {
 				refused++
-				return api.DownstreamError(409, []byte(`{"ok":false,"code":"MISSING_ATTACHMENT","missing_attachments":["`+docID+`","`+imageID+`"]}`))
+				missing := api.Err(409, "MISSING_ATTACHMENT", "The chat references attachments that are not stored with it")
+				missing.Missing = []string{docID, imageID}
+				return missing
 			}
 		}
 		return nil
@@ -583,7 +585,7 @@ func TestAPromotedLegacyImageIsReadFromBuckets(t *testing.T) {
 	}
 }
 
-// A document whose blob sync never held loses its reference, and each turn
+// A document whose blob was never stored loses its reference, and each turn
 // tells the model it is gone without storing that in the chat.
 func TestARetiredDocumentIsDescribedOnlyToTheModel(t *testing.T) {
 	var prompt string

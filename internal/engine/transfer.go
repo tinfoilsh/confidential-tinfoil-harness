@@ -96,7 +96,7 @@ func (eng *Engine) FinishTransfer(ctx context.Context, p *auth.Principal, key au
 }
 
 // HandleThreadImport stores a chat from the device as a cloud chat under the
-// same id. Its attachments are stored under the new chat first, as sync
+// same id. Its attachments are stored under the new chat first, as the control plane
 // requires; the chat itself is a create, so an existing cloud chat is never
 // overwritten.
 func (eng *Engine) HandleThreadImport(w http.ResponseWriter, r *http.Request) {

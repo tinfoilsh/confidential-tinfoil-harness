@@ -24,7 +24,6 @@ func TestWireContractMirrorsControlplane(t *testing.T) {
 	t.Run("headers", func(t *testing.T) {
 		t.Parallel()
 		cases := map[string]struct{ have, want string }{
-			"HeaderSyncProtocol":        {HeaderSyncProtocol, "X-Sync-Protocol"},
 			"HeaderKeyID":               {HeaderKeyID, "X-Key-Id"},
 			"HeaderIfMatch":             {HeaderIfMatch, "If-Match"},
 			"HeaderIdempotency":         {HeaderIdempotency, "X-Idempotency-Key"},

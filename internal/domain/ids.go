@@ -19,5 +19,5 @@ func RowID() string {
 }
 
 // EnclaveAttachmentID is the id of an attachment stored through this harness, as
-// sync names its blobs.
+// the store names its blobs.
 var EnclaveAttachmentID = regexp.MustCompile(`^[0-9a-f]{36}$`)

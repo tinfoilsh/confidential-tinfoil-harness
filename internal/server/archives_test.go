@@ -834,7 +834,7 @@ func decodedOr(encoded string, fallback []byte) []byte {
 }
 
 // An export without the content key holds the chats its client sends, and
-// nothing is read from sync for it.
+// nothing is read from the cloud for it.
 func TestAnExportWithoutTheKeyHoldsOnlyItsDeviceChats(t *testing.T) {
 	h, rows, _ := testChatHarness(t, nil)
 	thread := api.Object{"id": "local-chat", "title": "Tab chat", "messages": []any{api.Object{"id": "m", "role": "user", "content": "hi"}}}

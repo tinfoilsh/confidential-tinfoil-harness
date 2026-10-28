@@ -77,7 +77,7 @@ func (ar *Service) ShareThread(ctx context.Context, p *auth.Principal, _ auth.Co
 	if err != nil {
 		return nil, err
 	}
-	// A share is keyed by its chat, like the web client's: sync keeps a shared
+	// A share is keyed by its chat, like the web client's: the control plane keeps a shared
 	// chat's blobs, and the owner can revoke the link by chat.
 	if _, err := ar.shareRequest(ctx, p, http.MethodPut, id, ciphertext); err != nil {
 		return nil, err
@@ -423,7 +423,7 @@ func (f *exportForm) deviceImage(a *domain.Attachment) ([]byte, error) {
 // noDocument is a device chat's document, which holds whatever content it has.
 func noDocument(*domain.Attachment) error { return errAttachmentMissing }
 
-// cloudImage is a stored image's bytes; one sync no longer holds is missing.
+// cloudImage is a stored image's bytes; one buckets no longer holds is missing.
 func (ar *Service) cloudImage(ctx context.Context, p *auth.Principal) func(*domain.Attachment) ([]byte, error) {
 	return func(a *domain.Attachment) ([]byte, error) {
 		if a.Base64 == "" && a.StorageKey() == "" {
@@ -728,7 +728,7 @@ func (ar *Service) writeConversations(ctx context.Context, p *auth.Principal, ke
 	}
 	if key != nil {
 		err := ar.Store.EachRow(ctx, p, *key, "chat", "", func(row *domain.StoredRow) error {
-			// A chat this harness cannot read is left out, as one sync cannot
+			// A chat this harness cannot read is left out, as one the key cannot
 			// open is.
 			read, err := domain.ReadThreadRow(row)
 			if err != nil {

@@ -206,7 +206,6 @@ func (inf *Models) Boot(ctx context.Context, usageSecret string) error {
 		role, repo, variable string
 		required             bool
 	}{
-		{"sync", "tinfoilsh/confidential-sync", "TINFOIL_SYNC_ENCLAVE", true},
 		{"summarizer", "tinfoilsh/confidential-summarizer", "TINFOIL_SUMMARIZER_ENCLAVE", false},
 		{"metadata", "tinfoilsh/confidential-website-metadata-fetcher", "TINFOIL_METADATA_ENCLAVE", false},
 		{"router", "tinfoilsh/confidential-model-router", "TINFOIL_ROUTER_ENCLAVE", true},

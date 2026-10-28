@@ -182,7 +182,7 @@ func TestAChatDeletedAsItsTurnStartsStaysDeleted(t *testing.T) {
 		id := domain.RowID()
 		name := rowMapKey(&auth.Principal{ID: "alice"}, "chat", id)
 		rows.rows[name] = domain.StoredRow{ID: id, ETag: "1", Data: api.Raw(api.Object{"title": "Old", "messages": []any{}})}
-		// Sync removes the chat for another instance just before the
+		// The control plane removes the chat for another instance just before the
 		// turn's write, which then conflicts.
 		rows.refuse = func(*domain.StoredRow) error {
 			delete(rows.rows, name)
@@ -214,7 +214,7 @@ func within(t *testing.T, what string, call func() error) {
 	}
 }
 
-// A finishing run's writes hold no lock: while its commit waits on sync, its
+// A finishing run's writes hold no lock: while its commit waits on the control plane, its
 // chat can still be followed and cancelled, and other chats still run.
 func TestAFinishingRunsWritesBlockNothing(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)

@@ -40,7 +40,40 @@ type ChatIndexer interface {
 	ChatRemoved(ctx context.Context, p *auth.Principal, key auth.ContentKey, id string, revision int64)
 }
 
+// RowStore is what the store reads and writes rows through: Rows, or a
+// test's stand-in for it.
+type RowStore interface {
+	AuthorizeRun(context.Context, *auth.Principal, auth.ContentKey, string, *string) (*auth.StorageGrant, error)
+	AuthorizeStorage(context.Context, *auth.Principal, auth.ContentKey, string, string) (*auth.StorageGrant, error)
+	Load(context.Context, *auth.Principal, auth.ContentKey, string, string) (*domain.StoredRow, error)
+	Pull(context.Context, *auth.Principal, auth.ContentKey, string, []string) ([]domain.StoredRow, map[string]error, error)
+	List(context.Context, *auth.Principal, auth.ContentKey, string, string, string, int) (Page, error)
+	Push(context.Context, *auth.Principal, auth.ContentKey, string, *domain.StoredRow, string) (string, error)
+	// Remove deletes a row whatever its revision; a missing row is gone.
+	Remove(context.Context, *auth.Principal, auth.ContentKey, string, string) error
+	RemoveRevision(context.Context, *auth.Principal, auth.ContentKey, string, string) error
+	// IDs lists every row of a scope, or a project's chats, unopened.
+	IDs(context.Context, *auth.Principal, string, string) ([]string, error)
+}
+
+// Page is one page of rows, and the cursor of the next.
+type Page struct {
+	Rows []domain.StoredRow
+	Next string
+	// Rows the control plane holds but this harness cannot open, such as
+	// one sealed to a retired key, and why. A page lists them rather than
+	// failing, so one row cannot hide the rest.
+	Unreadable map[string]error
+}
+
 const (
+	// PullBatch is the most rows one fetch from the control plane opens.
+	PullBatch = 100
+	// ListStatusPage is the largest page of row ids the control plane
+	// lists.
+	ListStatusPage = 500
+	// MaxCommitAttempts bounds the pushes of one change to a row.
+	MaxCommitAttempts = 3
 	// grantLifetime is how long a run or an operation may use the rows.
 	grantLifetime = time.Hour
 	// pullConcurrency bounds the rows fetched from the control plane at

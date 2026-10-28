@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -13,7 +12,6 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
 
 func TestInvalidKeyEncodingNamesTheKey(t *testing.T) {
@@ -82,51 +80,5 @@ func TestRunDropsKeyBeforeScreening(t *testing.T) {
 	thread := mustRead(domain.ReadThreadRow(row))
 	if len(thread.Messages) != 2 || thread.Messages[1].Content != "hello" || thread.ActiveRun != nil {
 		t.Fatal("the reply was not committed before the key was dropped")
-	}
-}
-
-// The wire key must survive retries during a call, then disappear from all
-// readers, including one a transport retains after returning a refusal.
-func TestSyncRequestKeyReadersAreCleared(t *testing.T) {
-	for _, status := range []int{http.StatusOK, http.StatusForbidden} {
-		t.Run(http.StatusText(status), func(t *testing.T) {
-			key := randomKey()
-			var sent *http.Request
-			var late io.ReadCloser
-			s := &store.Client{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
-				sent = r
-				first, err := io.ReadAll(r.Body)
-				if err != nil {
-					t.Fatal(err)
-				}
-				var in api.Object
-				if json.Unmarshal(first, &in) != nil || in["key"] != keyBase64(key) || in["id"] != "chat-1" || in["scope"] != "chat" {
-					t.Fatal("sync did not receive the requested key and row")
-				}
-				replay, err := r.GetBody()
-				if err != nil {
-					t.Fatal(err)
-				}
-				again, err := io.ReadAll(replay)
-				replay.Close()
-				if err != nil || !bytes.Equal(first, again) {
-					t.Fatal("the request could not be replayed during the call")
-				}
-				late, err = r.GetBody()
-				if err != nil {
-					t.Fatal(err)
-				}
-				return syncTestResponse(status, api.Object{})
-			})}}
-			err := s.Remove(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, key, "chat", "chat-1")
-			if (err == nil) != (status == http.StatusOK) || sent == nil || late == nil {
-				t.Fatalf("sync call: %v", err)
-			}
-			defer late.Close()
-			remaining, err := io.ReadAll(late)
-			if err != nil || !bytes.Equal(remaining, make([]byte, len(remaining))) {
-				t.Fatal("the completed sync call left key bytes in a transport reader")
-			}
-		})
 	}
 }
