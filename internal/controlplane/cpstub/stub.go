@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -114,9 +115,11 @@ func New() *Store {
 	s.mux.HandleFunc("DELETE /api/sync/blob/profile", s.handleDeleteBlob("profile"))
 	s.mux.HandleFunc("DELETE /api/sync/blob/project/{id}", s.handleDeleteBlob("project"))
 	s.mux.HandleFunc("DELETE /api/sync/blob/project_document/{pid}/{did}", s.handleDeleteBlob("project_document"))
+	s.mux.HandleFunc("DELETE "+controlplane.DeleteAllProjectsPath, s.handleDeleteAllProjects)
 	s.mux.HandleFunc("POST "+controlplane.RewrapPath, s.handleRewrap)
 	s.mux.HandleFunc("POST "+controlplane.ChatActivityPath, s.handleBackfillChatActivity)
 	s.mux.HandleFunc("GET /api/sync/list-status", s.handleListStatus)
+	s.mux.HandleFunc("GET "+controlplane.RevisionSummaryPath, s.handleRevisionSummary)
 	s.mux.HandleFunc("GET /api/sync/needs-migration", s.handleNeedsMigration)
 	s.mux.HandleFunc("POST /api/sync/migration-failure", s.handleMigrationFailure)
 	s.mux.HandleFunc("GET /api/sync/keys/current", s.handleCurrentKey)
@@ -318,6 +321,22 @@ func (s *Store) handleDeleteBlob(scope string) http.HandlerFunc {
 	}
 }
 
+// handleDeleteAllProjects removes every project and project document, and
+// answers how many projects went.
+func (s *Store) handleDeleteAllProjects(w http.ResponseWriter, r *http.Request) {
+	deleted := 0
+	for key := range s.Blobs {
+		switch scope, _, _ := strings.Cut(key, "/"); scope {
+		case "project":
+			deleted++
+			delete(s.Blobs, key)
+		case "project_document":
+			delete(s.Blobs, key)
+		}
+	}
+	writeJSON(w, http.StatusOK, controlplane.DeleteAllProjectsResponse{OK: true, Deleted: deleted})
+}
+
 // handleRewrap replaces a row's sealed bytes and key id at a revision
 // without the write counting as a change to the row.
 func (s *Store) handleRewrap(w http.ResponseWriter, r *http.Request) {
@@ -373,8 +392,9 @@ func (s *Store) handleBackfillChatActivity(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, map[string]bool{"updated": updated})
 }
 
-// handleListStatus lists a scope's rows, the last written first, in pages
-// of limit from an offset cursor; chats can be narrowed to a project.
+// handleListStatus lists a scope's rows, the last written first unless
+// asked for the oldest, in pages of limit from an offset cursor; chats can
+// be narrowed to a project.
 func (s *Store) handleListStatus(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	scope, project := query.Get("scope"), query.Get("project_id")
@@ -406,6 +426,9 @@ func (s *Store) handleListStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		return all[i].id > all[j].id
 	})
+	if query.Get("direction") == "asc" {
+		slices.Reverse(all)
+	}
 	if offset > len(all) {
 		offset = len(all)
 	}
@@ -420,6 +443,11 @@ func (s *Store) handleListStatus(w http.ResponseWriter, r *http.Request) {
 		updates = append(updates, controlplane.BlobMeta{ID: item.id, ETag: FormatETag(item.blob.ETag), KeyID: item.blob.KeyID, ProjectID: item.blob.ProjectID, UpdatedAt: item.blob.UpdatedAt, ActivityAt: item.blob.ActivityAt})
 	}
 	writeJSON(w, http.StatusOK, controlplane.ListStatusResponse{Updates: updates, NextCursor: next})
+}
+
+// handleRevisionSummary is where the chats' ledger stands.
+func (s *Store) handleRevisionSummary(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, controlplane.RevisionSummaryResponse{CurrentRevision: strconv.FormatInt(s.SourceRevision, 10)})
 }
 
 func (s *Store) handleNeedsMigration(w http.ResponseWriter, r *http.Request) {

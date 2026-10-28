@@ -392,13 +392,28 @@ func (s *Store) MutateProject(ctx context.Context, p *auth.Principal, key auth.C
 	return project, err
 }
 
-// Sync deletes every project and project document in one step.
+// RemoveAllProjects deletes every project and project document in one
+// step, and is how many projects went.
 func (s *Store) RemoveAllProjects(ctx context.Context, p *auth.Principal, key auth.ContentKey) (int, error) {
-	var result struct {
-		Deleted int `json:"deleted"`
+	defer clear(key[:])
+	if p.Grant != nil && !(*grantScope)(p.Grant).allows(opRemove) {
+		return 0, errRunScope
 	}
-	err := s.API.CallKey(ctx, p, "/v1/sync/delete-all-projects", key, api.Object{"idempotency_key": uuid.NewString()}, &result)
-	return result.Deleted, err
+	kidHex, nonce := keyID(key), uuid.NewString()
+	resp, err := s.Controlplane.DeleteAllProjects(ctx, controlplane.DeleteAllProjectsRequest{
+		JWT:            string(p.JWT),
+		ClerkUserID:    p.ID,
+		KeyIDHex:       kidHex,
+		IdempotencyKey: nonce,
+		OperationHash:  operationHash(key, http.MethodDelete, controlplane.DeleteAllProjectsPath, kidHex, "", nonce, 0, nil, nil),
+	})
+	if err != nil {
+		return 0, fromControlplane(err)
+	}
+	if !resp.OK {
+		return 0, api.Err(502, "UPSTREAM_REFUSED", "The projects were not deleted")
+	}
+	return resp.Deleted, nil
 }
 
 // ProjectDocuments are every document of a project. A document sync cannot
