@@ -113,6 +113,44 @@ func TestAPanicEndsTheJobFailedAndTheRunnerStartsTheNext(t *testing.T) {
 	}
 }
 
+func TestACancelEndsTheRunningJobAndLetsTheNextStart(t *testing.T) {
+	r := New[int](ample, time.Hour)
+	winding := make(chan struct{})
+	first, _ := r.Start(context.Background(), "alice", func(ctx context.Context, _ func(int)) (int, error) {
+		<-ctx.Done()
+		// A canceled job may take a while to wind down; the owner's
+		// next job starts meanwhile.
+		<-winding
+		return 0, ctx.Err()
+	})
+	if canceled := r.Cancel("alice"); canceled != first {
+		t.Fatal("cancel did not return the running job")
+	}
+	next, started := r.Start(context.Background(), "alice", func(context.Context, func(int)) (int, error) { return 1, nil })
+	if !started || next == first {
+		t.Fatalf("the start after a cancel: started=%v same job=%v", started, next == first)
+	}
+	if first.Status().State != Running {
+		t.Fatal("the canceled job ended before it was released")
+	}
+	close(winding)
+	<-first.Done()
+	if status := first.Status(); status.State != Failed || !errors.Is(status.Err, context.Canceled) {
+		t.Fatalf("status after a cancel = %+v, want failed as canceled", status)
+	}
+	<-next.Done()
+	// A cancel also forgets a job the retention would otherwise keep.
+	if again := r.Cancel("alice"); again != next {
+		t.Fatal("cancel did not return the ended job within the retention")
+	}
+	if _, started := r.Start(context.Background(), "alice", func(context.Context, func(int)) (int, error) { return 2, nil }); !started {
+		t.Fatal("a start after an ended job was canceled did not start")
+	}
+	if r.Cancel("bob") != nil {
+		t.Fatal("cancel of an owner without a job returned one")
+	}
+}
+
 func TestTheBudgetCancelsTheWork(t *testing.T) {
 	r := New[int](time.Millisecond, 0)
 	job, _ := r.Start(context.Background(), "alice", func(ctx context.Context, _ func(int)) (int, error) {
