@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"time"
@@ -29,16 +30,22 @@ func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
 	if err := h.models.Boot(ctx, usageSecret); err != nil {
 		return err
 	}
-	s := h.models.Services["sync"]
-	h.store.API = &store.Client{URL: s.URL, Client: s.Client, MinimumGrant: engine.RunTimeout + engine.CommitTimeout}
-	h.store.Rows = h.store.API
-	// With the control plane's service secret, this harness seals and
-	// stores rows itself; without it, the sync enclave does.
-	if secret := os.Getenv("SYNC_ENCLAVE_SECRET"); secret != "" {
-		h.store.Rows = &store.Rows{
-			Controlplane: controlplane.NewClient(h.controlplane, &http.Client{Timeout: controlplaneTimeout}, controlplane.WithServiceSecret(secret)),
-			Buckets:      buckets.NewClient(os.Getenv("BUCKETS_URL"), os.Getenv("CHAT_ATTACHMENTS_BUCKET"), &http.Client{Timeout: bucketsTimeout}),
+	// This harness seals rows and stores attachments itself, with the
+	// control plane's service secret and the buckets sidecar beside it.
+	secret, bucketsURL, bucket := os.Getenv("SYNC_ENCLAVE_SECRET"), os.Getenv("BUCKETS_URL"), os.Getenv("CHAT_ATTACHMENTS_BUCKET")
+	for _, required := range []struct{ name, value string }{{"SYNC_ENCLAVE_SECRET", secret}, {"BUCKETS_URL", bucketsURL}, {"CHAT_ATTACHMENTS_BUCKET", bucket}} {
+		if required.value == "" {
+			return fmt.Errorf("%s is required", required.name)
 		}
 	}
+	cp := controlplane.NewClient(h.controlplane, &http.Client{Timeout: controlplaneTimeout}, controlplane.WithServiceSecret(secret))
+	bk := buckets.NewClient(bucketsURL, bucket, &http.Client{Timeout: bucketsTimeout})
+	if !bk.Configured() {
+		return fmt.Errorf("CHAT_ATTACHMENTS_BUCKET %q is not a valid bucket name", bucket)
+	}
+	h.store.Controlplane, h.store.Buckets = cp, bk
+	h.store.Rows = &store.Rows{Controlplane: cp, Buckets: bk}
+	s := h.models.Services["sync"]
+	h.store.API = &store.Client{URL: s.URL, Client: s.Client, MinimumGrant: engine.RunTimeout + engine.CommitTimeout}
 	return nil
 }

@@ -221,7 +221,6 @@ func TestTheComposerOffersWhatUploadsAccept(t *testing.T) {
 // as the web client read both. A turn takes such a file back.
 func TestFilesThatReadAsTextAreTakenAsText(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	newFakeSync(t, h)
 	mostlyText := append(bytes.Repeat([]byte("a"), 99), 0xff)
 	for _, tc := range []struct {
 		name string
@@ -271,7 +270,6 @@ func TestFilesThatReadAsTextAreTakenAsText(t *testing.T) {
 // copy already within it is kept as it is.
 func TestATurnsUploadIsHeldToWhatUploadsMake(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	fake := newFakeSync(t, h)
 	picture := func(width int) []byte {
 		var b bytes.Buffer
 		png.Encode(&b, image.NewRGBA(image.Rect(0, 0, width, 10)))
@@ -297,10 +295,10 @@ func TestATurnsUploadIsHeldToWhatUploadsMake(t *testing.T) {
 	}
 	stored := chat.Messages[0].Attachments
 	thumbnail, _ := base64.StdEncoding.DecodeString(stored[0].Thumbnail)
-	if copied := fake.blobs[stored[0].ID].data; dimensions(copied) != "jpeg 1536x7 <nil>" || dimensions(thumbnail) != "jpeg 256x1 <nil>" {
+	if copied := attachmentBytes(t, rows, stored[0]); dimensions(copied) != "jpeg 1536x7 <nil>" || dimensions(thumbnail) != "jpeg 256x1 <nil>" {
 		t.Fatalf("a large image was kept as %s with a thumbnail of %s", dimensions(copied), dimensions(thumbnail))
 	}
-	if !bytes.Equal(fake.blobs[stored[1].ID].data, small) || stored[1].Thumbnail != "dGh1bWI=" {
+	if !bytes.Equal(attachmentBytes(t, rows, stored[1]), small) || stored[1].Thumbnail != "dGh1bWI=" {
 		t.Fatalf("an image within the bounds was changed: %+v", stored[1])
 	}
 	// Small limits stand in for the real ones, which take tens of MiB to reach.
@@ -339,7 +337,7 @@ func TestATurnsUploadIsHeldToWhatUploadsMake(t *testing.T) {
 	if len(held) != 1 || held[0].FileName != "notes.txt" {
 		t.Fatalf("the chat holds %+v", held)
 	}
-	if content, err := attach.DecodeDocument(fake.blobs[held[0].ID].data); err != nil || content.TextContent != strings.Repeat("x", 64) {
+	if content, err := attach.DecodeDocument(attachmentBytes(t, rows, held[0])); err != nil || content.TextContent != strings.Repeat("x", 64) {
 		t.Fatalf("the stored document holds %+v: %v", content, err)
 	}
 }
@@ -391,7 +389,6 @@ func TestATurnResizesNoMorePixelsThanOneImageHolds(t *testing.T) {
 // same fields without the bytes or the blob's key.
 func TestAnImageKeepsOneFormFromUploadToView(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	fake := newFakeSync(t, h)
 	var source bytes.Buffer
 	png.Encode(&source, image.NewRGBA(image.Rect(0, 0, 2000, 10)))
 	upload := uploadRoute(h, "/v1/attachments/upload", "photo.png", source.Bytes(), nil, "alice")
@@ -416,7 +413,7 @@ func TestAnImageKeepsOneFormFromUploadToView(t *testing.T) {
 	thread := events[0].ThreadID
 	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", thread)
 	stored := api.Obj(api.Arr(api.Obj(api.Arr(rowJSON(row)["messages"])[0])["attachments"])[0])
-	if got := fieldsOf(stored); !slices.Equal(got, []string{"encryptionKey", "fileName", "id", "kind", "mimeType", "size", "storageThreadId", "thumbnail"}) || stored["thumbnail"] != sent["thumbnail"] || !bytes.Equal(fake.blobs[api.Str(stored["id"])].data, modelCopy) {
+	if got := fieldsOf(stored); !slices.Equal(got, []string{"encryptionKey", "fileName", "id", "kind", "mimeType", "size", "storageThreadId", "thumbnail"}) || stored["thumbnail"] != sent["thumbnail"] || !bytes.Equal(attachmentBytes(t, rows, mustRead(domain.ReadThreadRow(row)).Messages[0].Attachments[0]), modelCopy) {
 		t.Fatalf("the chat stored %v", stored)
 	}
 	var window struct {

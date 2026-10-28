@@ -73,9 +73,12 @@ func DocumentText(content DocumentBlob) string {
 	return strings.Join(parts, "\n\n")
 }
 
+// Unreachable is whether an attachment's content is gone or unusable: its
+// blob is not held, its key does not open it, or what it holds cannot be
+// read as its kind.
 func Unreachable(err error) bool {
 	e := api.AsError(err)
-	return e.HTTP == 404 || e.Status == 400 || e.Status == 404 || e.Code == "ATTACHMENT_UNSUPPORTED"
+	return e.HTTP == 404 || e.Code == "ATTACHMENT_UNSUPPORTED"
 }
 
 // PlaceAttachments stores every attachment of a thread under the thread, in
@@ -105,7 +108,7 @@ func (at *Service) placeAttachment(ctx context.Context, p *auth.Principal, threa
 		}
 		data = decoded
 	case keyed && elsewhere:
-		stored, err := at.Bytes(ctx, p, a, false)
+		stored, err := at.Bytes(ctx, p, a)
 		if err == nil && !a.IsImage() {
 			var content DocumentBlob
 			content, err = DecodeDocument(stored)
@@ -167,7 +170,7 @@ func (at *Service) HydrateDocuments(ctx context.Context, p *auth.Principal, t *d
 
 // InflateDocument reads a document's content from its blob into it.
 func (at *Service) InflateDocument(ctx context.Context, p *auth.Principal, a *domain.Attachment) error {
-	data, err := at.Bytes(ctx, p, a, false)
+	data, err := at.Bytes(ctx, p, a)
 	if err != nil {
 		return err
 	}

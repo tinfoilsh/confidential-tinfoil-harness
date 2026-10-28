@@ -12,13 +12,13 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane/cpstub"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
@@ -206,32 +206,9 @@ func TestACloudRunUsesItsStorageCredentialForTheFinalSave(t *testing.T) {
 
 func TestRemoteChangesReadOnlyStorageMetadata(t *testing.T) {
 	h, rows, _ := testChatHarness(t, nil)
-	var mu sync.Mutex
-	revisions := map[string]string{"chat": "1", "profile": "1", "project": "1", "project_document": "1"}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		defer mu.Unlock()
-		if r.Header.Get("Authorization") != "Bearer clerk-alice" {
-			t.Errorf("missing caller identity")
-		}
-		if r.URL.Path == "/v1/sync/revision-summary" {
-			json.NewEncoder(w).Encode(api.Object{"current_revision": revisions["chat"]})
-			return
-		}
-		var in api.Object
-		json.NewDecoder(r.Body).Decode(&in)
-		scope := api.Str(in["scope"])
-		direction := "desc"
-		if scope == "profile" {
-			direction = "asc"
-		}
-		if r.URL.Path != "/v1/sync/list-status" || in["limit"] != float64(1) || in["direction"] != direction {
-			t.Errorf("unexpected metadata request: %s %v", r.URL.Path, in)
-		}
-		json.NewEncoder(w).Encode(api.Object{"updates": []api.Object{{"id": scope, "etag": revisions[scope]}}})
-	}))
-	defer server.Close()
-	h.store.API = &store.Client{URL: server.URL, Client: server.Client()}
+	for _, seeded := range []struct{ scope, id string }{{"chat", "c1"}, {"profile", "profile"}, {"project", "p1"}, {"project_document", "p1/d1"}} {
+		rows.cp.SetBlob(seeded.scope, seeded.id, cpstub.Blob{ETag: 1, Body: []byte("sealed")})
+	}
 	read := func() api.Object {
 		t.Helper()
 		w := postRoute(h, "/v1/changes", api.Object{}, "alice")
@@ -241,23 +218,31 @@ func TestRemoteChangesReadOnlyStorageMetadata(t *testing.T) {
 		}
 		return result
 	}
+	revise := func(scope, id string) {
+		rows.cp.Mu.Lock()
+		defer rows.cp.Mu.Unlock()
+		rows.cp.Blobs[cpstub.Key(scope, id)].ETag++
+	}
 	first := read()
 	if !reflect.DeepEqual(first, read()) {
 		t.Fatal("unchanged metadata changed its tokens")
 	}
-	mu.Lock()
-	revisions["profile"] = "2"
-	mu.Unlock()
+	revise("profile", "profile")
 	second := read()
 	if first["profile"] == second["profile"] || first["chats"] != second["chats"] || first["projects"] != second["projects"] {
 		t.Fatalf("profile changes: %v -> %v", first, second)
 	}
-	mu.Lock()
-	revisions["project_document"] = "2"
-	mu.Unlock()
+	revise("project_document", "p1/d1")
 	third := read()
-	if third["projects"] == second["projects"] || rows.calls != 0 {
-		t.Fatal("document changes were missed or full rows were read")
+	if third["projects"] == second["projects"] || third["profile"] != second["profile"] || third["chats"] != second["chats"] {
+		t.Fatalf("document changes: %v -> %v", second, third)
+	}
+	rows.cp.Mu.Lock()
+	rows.cp.SourceRevision++
+	rows.cp.Mu.Unlock()
+	fourth := read()
+	if fourth["chats"] == third["chats"] || fourth["projects"] != third["projects"] || rows.calls != 0 {
+		t.Fatalf("chat changes were missed or full rows were read: %v -> %v after %d row reads", third, fourth, rows.calls)
 	}
 }
 

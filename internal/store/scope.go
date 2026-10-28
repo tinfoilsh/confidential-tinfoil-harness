@@ -126,6 +126,12 @@ func (g *grantScope) permitsPush(key auth.ContentKey, scope string, row *domain.
 	return g.Operation == "" && scope == "chat" && row.ID == g.ChatID
 }
 
+// permitsPutAttachment is whether the grant may store an attachment under
+// chatID: a run's, under its own chat.
+func (g *grantScope) permitsPutAttachment(chatID string) bool {
+	return g.allows(opPutAttachment) && chatID == g.ChatID
+}
+
 // permitsList is whether the grant may list a scope's rows, or those of a
 // project: an export lists anything, a run only its project's documents.
 func (g *grantScope) permitsList(scope, project string) bool {

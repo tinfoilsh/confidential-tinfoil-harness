@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -155,11 +154,7 @@ func statsThread() api.Object {
 // current declaration refuses them, wherever it reads the chat from.
 func TestEveryViewMarksWidgetArgumentsTheDeclarationRefuses(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	fake := newFakeSync(t, h)
-	cp := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	defer cp.Close()
-	h.atControlplane(cp.URL)
-	h.archives.CPClient = &http.Client{Transport: &auth.CallerTransport{Inner: cp.Client().Transport}}
+	shares := fakeShares(t, h)
 	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat-1")] = domain.StoredRow{ID: "chat-1", ETag: "1", Data: api.Raw(statsThread())}
 	marks := func(view string, messages any) {
 		t.Helper()
@@ -188,13 +183,12 @@ func TestEveryViewMarksWidgetArgumentsTheDeclarationRefuses(t *testing.T) {
 	events := eventsIn(t, postRoute(h, "/v1/threads/turn", continueInput(key, "chat-1"), "alice"))
 	marks("the run's snapshot", eventOfType(events, "MESSAGES_SNAPSHOT").Messages)
 	marks("the transcript", api.Obj(body(postRoute(h, "/v1/threads/transcript", api.Object{"key": keyBase64(key), "threadId": "chat-1"}, "alice"))["thread"])["messages"])
-	body(postRoute(h, "/v1/threads/share", api.Object{"key": keyBase64(key), "threadId": "chat-1"}, "alice"))
-	if seals := fake.requests("/v1/share/seal"); len(seals) == 1 {
-		plaintext, _ := base64.StdEncoding.DecodeString(api.Str(seals[0]["plaintext"]))
-		marks("the share", api.Obj(api.Parsed(plaintext))["messages"])
-	} else {
-		t.Fatalf("%d shares were sealed", len(seals))
+	link := api.Str(body(postRoute(h, "/v1/threads/share", api.Object{"key": keyBase64(key), "threadId": "chat-1"}, "alice"))["url"])
+	uploaded, count := shares.uploaded("chat-1")
+	if count != 1 {
+		t.Fatalf("%d shares were uploaded", count)
 	}
+	marks("the share", api.Obj(api.Parsed(sharedPayload(t, link, uploaded)))["messages"])
 	marks("the device run", endedThread(t, h, localInput("", statsThread()), "RUN_FINISHED")["messages"])
 	marks("the device operation", deviceOperation(t, h, "/v1/threads/update", statsThread(), api.Object{"id": "chat-2", "title": "Renamed"}, "")["messages"])
 	device := statsThread()

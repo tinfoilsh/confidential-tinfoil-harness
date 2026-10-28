@@ -25,22 +25,115 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/archives"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/buckets"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/buckets/bucketstub"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/seal"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
 
-type fakeBlob struct {
-	chat, key string
-	data      []byte
+// storeAttachment holds an attachment as the harness stores one: its bytes
+// in buckets under the owner's tenant and the given key, and its index
+// entry under the chat.
+func (s *memoryRows) storeAttachment(user, chat, id string, key, data []byte) {
+	tenant, err := buckets.TenantForUser(user)
+	if err != nil {
+		panic(err)
+	}
+	s.bk.Put(id, bucketstub.Item{Tenant: tenant, Value: data, EncryptionKeys: [][]byte{key}})
+	s.cp.Mu.Lock()
+	defer s.cp.Mu.Unlock()
+	s.cp.AttachmentIndex[id], s.cp.AttachmentOwners[id] = chat, user
 }
 
-// fakeSync serves the attachment routes the way the sync enclave does: ids and
-// keys derive from the idempotency key and chat, and protocol 3 is required.
-// A fork copies a chat the test harness stores.
+// seedAttachment stores data as an attachment of user's chat under an id
+// and key of its own, and is that id and the key as a chat embeds it.
+func seedAttachment(rows *memoryRows, user, chat string, data []byte) (id, key string) {
+	sum := sha256.Sum256(append([]byte(chat+"\x00seed\x00"), data...))
+	id = hex.EncodeToString(sum[:18])
+	rows.storeAttachment(user, chat, id, sum[:], data)
+	return id, base64.StdEncoding.EncodeToString(sum[:])
+}
+
+// attachmentBytes is the bytes stored under an attachment, which its key
+// opens; a test fails when the harness stored none.
+func attachmentBytes(t *testing.T, rows *memoryRows, a domain.Attachment) []byte {
+	t.Helper()
+	item, ok := rows.bk.Item(a.ID)
+	key, err := base64.StdEncoding.DecodeString(a.EncryptionKey)
+	if !ok || err != nil || len(item.EncryptionKeys) != 1 || !bytes.Equal(item.EncryptionKeys[0], key) {
+		t.Fatalf("no attachment stored under %+v", a)
+	}
+	return item.Value
+}
+
+// attachmentsStored is how many attachments buckets holds.
+func attachmentsStored(rows *memoryRows) int { return len(rows.bk.Tokens()) }
+
+// indexedUnder is the chat the control plane indexes an attachment under.
+func (s *memoryRows) indexedUnder(id string) string {
+	s.cp.Mu.Lock()
+	defer s.cp.Mu.Unlock()
+	return s.cp.AttachmentIndex[id]
+}
+
+// sharedPayload opens a share as its reader does: the ciphertext the
+// harness uploaded, with the key its link carries.
+func sharedPayload(t *testing.T, link string, ciphertext []byte) []byte {
+	t.Helper()
+	_, key, ok := strings.Cut(link, "#v2:")
+	plaintext, err := seal.OpenShare(key, ciphertext)
+	if !ok || err != nil {
+		t.Fatalf("the share at %s cannot be opened: %v", link, err)
+	}
+	return plaintext
+}
+
+// shareStore is a control plane that keeps the shares uploaded to it, by
+// chat, and serves them back to readers.
+type shareStore struct {
+	mu     sync.Mutex
+	shares map[string][]byte
+}
+
+func fakeShares(t *testing.T, h *harness) *shareStore {
+	t.Helper()
+	s := &shareStore{shares: map[string][]byte{}}
+	cp := httptest.NewServer(s)
+	t.Cleanup(cp.Close)
+	h.atControlplane(cp.URL)
+	h.archives.CPClient = &http.Client{Transport: &auth.CallerTransport{Inner: cp.Client().Transport}}
+	return s
+}
+
+func (s *shareStore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id := strings.TrimPrefix(r.URL.Path, "/api/shares/")
+	switch r.Method {
+	case http.MethodPut:
+		s.shares[id], _ = io.ReadAll(r.Body)
+	case http.MethodGet:
+		if body, ok := s.shares[id]; ok {
+			w.Write(body)
+		} else {
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}
+}
+
+// uploaded is the share of a chat as it was uploaded, and how many
+// shares were.
+func (s *shareStore) uploaded(id string) ([]byte, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.shares[id], len(s.shares)
+}
+
+// fakeSync serves the sync enclave's import routes, which require protocol
+// 3, and runs the import jobs they start.
 type fakeSync struct {
 	mu       sync.Mutex
-	blobs    map[string]fakeBlob
-	puts     []api.Object
 	received map[string][]api.Object
 	server   *httptest.Server
 	imports  map[string]*fakeImport
@@ -48,7 +141,7 @@ type fakeSync struct {
 
 func newFakeSync(t *testing.T, h *harness) *fakeSync {
 	t.Helper()
-	f := &fakeSync{blobs: map[string]fakeBlob{}, received: map[string][]api.Object{}, imports: map[string]*fakeImport{}}
+	f := &fakeSync{received: map[string][]api.Object{}, imports: map[string]*fakeImport{}}
 	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Sync-Protocol") != "3" {
 			w.WriteHeader(426)
@@ -61,51 +154,10 @@ func newFakeSync(t *testing.T, h *harness) *fakeSync {
 		defer f.mu.Unlock()
 		f.received[r.URL.Path] = append(f.received[r.URL.Path], in)
 		switch r.URL.Path {
-		case "/v1/sync/fork":
-			rows := h.store.Rows.(*memoryRows)
-			rows.mu.Lock()
-			defer rows.mu.Unlock()
-			p := &auth.Principal{ID: strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer clerk-")}
-			source, ok := rows.rows[rowMapKey(p, "chat", api.Str(in["source_id"]))]
-			if !ok {
-				w.WriteHeader(404)
-				io.WriteString(w, `{"ok":false,"code":"NOT_FOUND"}`)
-				return
-			}
-			data := rowJSON(&source)
-			for _, field := range []string{"clock", "clockVersion", "codeExecutionAccessToken", "messageCount", "syncVersion", "version", "writer"} {
-				delete(data, field)
-			}
-			data["messages"] = api.Arr(data["messages"])[:api.Int(in["message_count"])]
-			data["id"], data["title"], data["titleState"], data["createdAt"], data["updatedAt"], data["isLocalOnly"] = in["target_id"], in["title"], "manual", in["created_at"], in["created_at"], false
-			rows.rows[rowMapKey(p, "chat", api.Str(in["target_id"]))] = domain.StoredRow{ID: api.Str(in["target_id"]), ETag: "1", Data: api.Raw(data), Project: source.Project, ProjectSet: source.ProjectSet}
-			json.NewEncoder(w).Encode(api.Object{"ok": true, "id": in["target_id"], "etag": "1", "key_id": "key-id"})
-		case "/v1/attachment/put":
-			data, _ := base64.StdEncoding.DecodeString(api.Str(in["plaintext"]))
-			sum := sha256.Sum256([]byte(api.Str(in["idempotency_key"]) + "\x00" + api.Str(in["chat_id"])))
-			id, key := hex.EncodeToString(sum[:18]), base64.StdEncoding.EncodeToString(sum[:])
-			f.blobs[id] = fakeBlob{chat: api.Str(in["chat_id"]), key: key, data: data}
-			f.puts = append(f.puts, in)
-			json.NewEncoder(w).Encode(api.Object{"ok": true, "id": id, "att_key": key})
-		case "/v1/attachment/get":
-			blob, ok := f.blobs[api.Str(in["id"])]
-			if !ok {
-				w.WriteHeader(404)
-				io.WriteString(w, `{"ok":false,"code":"NOT_FOUND"}`)
-				return
-			}
-			if blob.key != api.Str(in["att_key"]) {
-				w.WriteHeader(400)
-				io.WriteString(w, `{"ok":false,"code":"BAD_REQUEST"}`)
-				return
-			}
-			json.NewEncoder(w).Encode(api.Object{"ok": true, "plaintext": base64.StdEncoding.EncodeToString(blob.data)})
 		case "/v1/import/create", "/v1/import/upload", "/v1/import/start", "/v1/import/status":
 			status, out := f.importStep(t, h, r, in)
 			w.WriteHeader(status)
 			json.NewEncoder(w).Encode(out)
-		case "/v1/share/seal":
-			json.NewEncoder(w).Encode(api.Object{"ok": true, "share_key": strings.Repeat("ab", 32), "ciphertext": base64.StdEncoding.EncodeToString([]byte("sealed"))})
 		default:
 			w.WriteHeader(404)
 		}
@@ -117,30 +169,14 @@ func newFakeSync(t *testing.T, h *harness) *fakeSync {
 
 func TestPublicAttachmentPropagatesMissingBlob(t *testing.T) {
 	h, _, key := testChatHarness(t, nil)
-	fake := newFakeSync(t, h)
 	w := postRoute(h, "/v1/attachments/get-public", api.Object{"id": "missing", "attKey": keyBase64(key)}, "")
 	var response struct {
 		Error api.Error `json:"error"`
 	}
 	json.Unmarshal(w.Body.Bytes(), &response)
-	if w.Code != http.StatusNotFound || response.Error.Code != "THREAD_NOT_FOUND" || len(fake.requests("/v1/attachment/get-public")) != 1 {
+	if w.Code != http.StatusNotFound || response.Error.Code != "THREAD_NOT_FOUND" {
 		t.Fatalf("missing public blob: HTTP %d %s", w.Code, w.Body.String())
 	}
-}
-
-func (f *fakeSync) seed(chat string, data []byte) (string, string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	sum := sha256.Sum256(append([]byte(chat+"\x00seed\x00"), data...))
-	id, key := hex.EncodeToString(sum[:18]), base64.StdEncoding.EncodeToString(sum[:])
-	f.blobs[id] = fakeBlob{chat: chat, key: key, data: data}
-	return id, key
-}
-
-func (f *fakeSync) putCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return len(f.puts)
 }
 
 func (f *fakeSync) requests(path string) []api.Object {
@@ -162,7 +198,6 @@ func capturePrompt(prompt *string) http.HandlerFunc {
 func TestStoredUploadIsOffloadedUnderItsThread(t *testing.T) {
 	var prompt string
 	h, rows, key := testChatHarness(t, capturePrompt(&prompt))
-	fake := newFakeSync(t, h)
 	uploader, _, _ := testChatHarness(t, nil)
 	upload := uploadRoute(uploader, "/v1/attachments/upload", "notes.txt", []byte("remember the blue door"), nil, "alice")
 	if upload.Code != 200 {
@@ -183,18 +218,14 @@ func TestStoredUploadIsOffloadedUnderItsThread(t *testing.T) {
 	if !strings.Contains(prompt, "remember the blue door") {
 		t.Fatal("the document did not reach the model")
 	}
-	if fake.putCount() != 1 {
-		t.Fatalf("expected one blob, got %d", fake.putCount())
-	}
-	put := fake.puts[0]
-	payload, _ := base64.StdEncoding.DecodeString(api.Str(put["plaintext"]))
-	if put["chat_id"] != thread || string(payload) != `{"textContent":"remember the blue door"}` || put["idempotency_key"] != sent["id"] {
-		t.Fatalf("blob is not the document payload under its thread: %v %s", put, payload)
-	}
 	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", thread)
 	stored := api.Obj(api.Arr(api.Obj(api.Arr(rowJSON(row)["messages"])[0])["attachments"])[0])
 	if !domain.EnclaveAttachmentID.MatchString(api.Str(stored["id"])) || api.Str(stored["encryptionKey"]) == "" || stored["storageThreadId"] != thread {
 		t.Fatalf("row does not reference the stored blob: %v", stored)
+	}
+	held := mustRead(domain.ReadThreadRow(row)).Messages[0].Attachments[0]
+	if payload := attachmentBytes(t, rows, held); attachmentsStored(rows) != 1 || string(payload) != `{"textContent":"remember the blue door"}` || rows.indexedUnder(held.ID) != thread {
+		t.Fatalf("blob is not the document payload under its thread: %s, %d stored, indexed under %q", payload, attachmentsStored(rows), rows.indexedUnder(held.ID))
 	}
 	for _, field := range []string{"textContent", "pages", "base64", "legacyId"} {
 		if _, ok := stored[field]; ok {
@@ -212,8 +243,8 @@ func TestStoredUploadIsOffloadedUnderItsThread(t *testing.T) {
 	finishedRun(t, h, "/v1/threads/turn", edit)
 	row, _ = rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", thread)
 	kept := mustRead(domain.ReadThreadRow(row)).Messages[0].Attachments[0]
-	if kept.ID != stored["id"] || kept.EncryptionKey != stored["encryptionKey"] || fake.putCount() != 1 {
-		t.Fatalf("the edit did not keep the stored attachment: %+v after %d blobs", kept, fake.putCount())
+	if kept.ID != stored["id"] || kept.EncryptionKey != stored["encryptionKey"] || attachmentsStored(rows) != 1 {
+		t.Fatalf("the edit did not keep the stored attachment: %+v after %d blobs", kept, attachmentsStored(rows))
 	}
 }
 
@@ -237,14 +268,13 @@ func continueInput(key auth.ContentKey, thread string) api.Object {
 func TestOffloadedDocumentIsReadBackForEachTurn(t *testing.T) {
 	var prompt string
 	h, rows, key := testChatHarness(t, capturePrompt(&prompt))
-	fake := newFakeSync(t, h)
-	id, blobKey := fake.seed("chat-1", []byte(`{"textContent":"the quarterly numbers"}`))
+	id, blobKey := seedAttachment(rows, "alice", "chat-1", []byte(`{"textContent":"the quarterly numbers"}`))
 	storedThread(rows, "alice", "chat-1", api.Object{"id": id, "type": "document", "fileName": "report.pdf", "encryptionKey": blobKey})
 	eventsIn(t, postRoute(h, "/v1/threads/turn", continueInput(key, "chat-1"), "alice"))
 	if !strings.Contains(prompt, "the quarterly numbers") {
 		t.Fatal("the offloaded document was not read back")
 	}
-	if fake.putCount() != 0 {
+	if attachmentsStored(rows) != 1 {
 		t.Fatal("a document already stored under its thread was stored again")
 	}
 	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
@@ -257,8 +287,7 @@ func TestOffloadedDocumentIsReadBackForEachTurn(t *testing.T) {
 func TestMissingDocumentIsDescribedInsteadOfFailingTheTurn(t *testing.T) {
 	var prompt string
 	h, rows, key := testChatHarness(t, capturePrompt(&prompt))
-	newFakeSync(t, h)
-	storedThread(rows, "alice", "chat-1", api.Object{"id": strings.Repeat("a", 36), "type": "document", "fileName": "gone.pdf", "encryptionKey": "key"})
+	storedThread(rows, "alice", "chat-1", api.Object{"id": strings.Repeat("a", 36), "type": "document", "fileName": "gone.pdf", "encryptionKey": keyBase64(randomKey())})
 	events := eventsIn(t, postRoute(h, "/v1/threads/turn", continueInput(key, "chat-1"), "alice"))
 	if events[len(events)-1].Type != "RUN_FINISHED" || !strings.Contains(prompt, "gone.pdf is no longer available") {
 		t.Fatalf("a deleted document blocked the chat: %s", prompt)
@@ -268,22 +297,18 @@ func TestMissingDocumentIsDescribedInsteadOfFailingTheTurn(t *testing.T) {
 func TestInlineDocumentIsOffloadedUnderItsThread(t *testing.T) {
 	var prompt string
 	h, rows, key := testChatHarness(t, capturePrompt(&prompt))
-	fake := newFakeSync(t, h)
 	// The web and iOS apps kept a document's content in the row before storing it as a blob.
 	clientID := "3f2b8c1e-5d4a-4e6b-9c7d-1a2b3c4d5e6f"
 	storedThread(rows, "alice", "chat-1", api.Object{"id": clientID, "type": "document", "fileName": "deck.pdf", "textContent": "slide text", "pages": nil})
 	eventsIn(t, postRoute(h, "/v1/threads/turn", continueInput(key, "chat-1"), "alice"))
-	if fake.putCount() != 1 {
-		t.Fatalf("expected the document to be stored once, got %d", fake.putCount())
-	}
-	payload, _ := base64.StdEncoding.DecodeString(api.Str(fake.puts[0]["plaintext"]))
-	if fake.puts[0]["chat_id"] != "chat-1" || string(payload) != `{"textContent":"slide text"}` {
-		t.Fatalf("not stored as a payload under the thread: %s", payload)
-	}
 	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
 	stored := api.Obj(api.Arr(api.Obj(api.Arr(rowJSON(row)["messages"])[0])["attachments"])[0])
 	if !domain.EnclaveAttachmentID.MatchString(api.Str(stored["id"])) || api.Str(stored["encryptionKey"]) == "" || stored["storageThreadId"] != "chat-1" || stored["textContent"] != nil {
 		t.Fatalf("row does not reference the stored blob: %v", stored)
+	}
+	held := mustRead(domain.ReadThreadRow(row)).Messages[0].Attachments[0]
+	if payload := attachmentBytes(t, rows, held); attachmentsStored(rows) != 1 || string(payload) != `{"textContent":"slide text"}` || rows.indexedUnder(held.ID) != "chat-1" {
+		t.Fatalf("not stored once as a payload under the thread: %s, %d stored", payload, attachmentsStored(rows))
 	}
 	if _, ok := stored["pages"]; ok {
 		t.Fatal("a null field was stored")
@@ -295,12 +320,11 @@ func TestInlineDocumentIsOffloadedUnderItsThread(t *testing.T) {
 
 func TestMissingAttachmentsAreRepairedBeforeRetrying(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	fake := newFakeSync(t, h)
-	docID, docKey := fake.seed("another-chat", []byte(`{"textContent":"filed elsewhere"}`))
+	docID, docKey := seedAttachment(rows, "alice", "another-chat", []byte(`{"textContent":"filed elsewhere"}`))
 	imageID := strings.Repeat("b", 36)
 	storedThread(rows, "alice", "chat-1",
 		api.Object{"id": docID, "type": "document", "fileName": "notes.md", "encryptionKey": docKey},
-		api.Object{"id": imageID, "type": "image", "fileName": "photo.png", "encryptionKey": "gone", "thumbnailBase64": "thumb"})
+		api.Object{"id": imageID, "type": "image", "fileName": "photo.png", "encryptionKey": keyBase64(randomKey()), "thumbnailBase64": "thumb"})
 	refused := 0
 	rows.refuse = func(row *domain.StoredRow) error {
 		for _, a := range mustRead(domain.ReadThreadRow(row)).Messages[0].Attachments {
@@ -320,7 +344,7 @@ func TestMissingAttachmentsAreRepairedBeforeRetrying(t *testing.T) {
 	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
 	chat := mustRead(domain.ReadThreadRow(row))
 	doc, image := chat.Messages[0].Attachments[0], chat.Messages[0].Attachments[1]
-	if doc.ID == docID || doc.StorageThreadID != "chat-1" || fake.blobs[doc.ID].chat != "chat-1" {
+	if doc.ID == docID || doc.StorageThreadID != "chat-1" || rows.indexedUnder(doc.ID) != "chat-1" || string(attachmentBytes(t, rows, doc)) != `{"textContent":"filed elsewhere"}` {
 		t.Fatalf("the document was not stored under its chat: %+v", doc)
 	}
 	if image.EncryptionKey != "" || image.Thumbnail != "thumb" || chat.Title != "Renamed" {
@@ -330,41 +354,31 @@ func TestMissingAttachmentsAreRepairedBeforeRetrying(t *testing.T) {
 
 func TestLegacyKeyedAttachmentIsReadFromTheControlPlane(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	fake := newFakeSync(t, h)
 	legacyKey := bytes.Repeat([]byte{7}, 32)
 	block, _ := aes.NewCipher(legacyKey)
 	gcm, _ := cipher.NewGCM(block)
 	nonce := bytes.Repeat([]byte{1}, gcm.NonceSize())
 	sealed := append(nonce, gcm.Seal(nil, nonce, []byte("old photo"), nil)...)
-	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/storage/attachment/legacy-1" {
-			w.WriteHeader(404)
-			return
-		}
-		w.Write(sealed)
-	}))
-	defer cp.Close()
-	h.atControlplane(cp.URL)
-	// The web and iOS apps stored images at the control plane before the sync enclave.
+	// The web and iOS apps stored images at the control plane itself before
+	// the harness stored them.
+	rows.cp.Mu.Lock()
+	rows.cp.LegacyAttachments = map[string][]byte{"legacy-1": sealed}
+	rows.cp.Mu.Unlock()
 	storedThread(rows, "alice", "chat-1", api.Object{"id": "legacy-1", "type": "image", "fileName": "photo.png", "description": "a photo", "key": base64.StdEncoding.EncodeToString(legacyKey)})
 	eventsIn(t, postRoute(h, "/v1/threads/turn", continueInput(key, "chat-1"), "alice"))
-	if fake.putCount() != 1 {
-		t.Fatalf("legacy attachment was not moved under its thread: puts=%d", fake.putCount())
-	}
-	if payload, _ := base64.StdEncoding.DecodeString(api.Str(fake.puts[0]["plaintext"])); fake.puts[0]["chat_id"] != "chat-1" || string(payload) != "old photo" {
-		t.Fatalf("stored %q under %v", payload, fake.puts[0]["chat_id"])
-	}
 	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
 	stored := mustRead(domain.ReadThreadRow(row)).Messages[0].Attachments[0]
 	if stored.Key != "" || !domain.EnclaveAttachmentID.MatchString(stored.ID) {
 		t.Fatalf("legacy reference kept: %+v", stored)
 	}
+	if payload := attachmentBytes(t, rows, stored); attachmentsStored(rows) != 1 || string(payload) != "old photo" || rows.indexedUnder(stored.ID) != "chat-1" {
+		t.Fatalf("legacy attachment was not moved under its thread: stored %q, %d objects", payload, attachmentsStored(rows))
+	}
 }
 
 func TestDocumentDownloadReturnsExtractedText(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	fake := newFakeSync(t, h)
-	id, blobKey := fake.seed("chat-1", []byte(`{"pages":[{"page":1,"text":"page one","image":"","is_scanned":false}]}`))
+	id, blobKey := seedAttachment(rows, "alice", "chat-1", []byte(`{"pages":[{"page":1,"text":"page one","image":"","is_scanned":false}]}`))
 	storedThread(rows, "alice", "chat-1", api.Object{"id": id, "type": "document", "fileName": "scan.pdf", "encryptionKey": blobKey})
 	w := postRoute(h, "/v1/attachments/get", api.Object{"key": keyBase64(key), "id": id, "threadId": "chat-1"}, "alice")
 	if w.Code != 200 || w.Body.String() != "page one" {
@@ -383,45 +397,57 @@ func TestDocumentDownloadReturnsExtractedText(t *testing.T) {
 
 func TestForkCopiesAChatThroughItsMessage(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	fake := newFakeSync(t, h)
 	p := &auth.Principal{ID: "alice"}
-	messages := []any{api.Object{"id": "m1", "role": "user", "content": "plan a trip"}, api.Object{"id": "m2", "role": "assistant", "content": "first, pack"}, api.Object{"id": "m3", "role": "user", "content": "go on"}}
-	rows.rows[rowMapKey(p, "chat", "chat-1")] = domain.StoredRow{ID: "chat-1", ETag: "4", Data: api.Raw(api.Object{"title": "Trip", "titleState": "generated", "createdAt": "2026-01-01T00:00:00Z", "presetId": "builtin:tutor", "model": "kimi-k3", "webSearchEnabled": false,
+	project := "project-1"
+	imageID, imageKey := seedAttachment(rows, "alice", "chat-1", []byte("png bytes"))
+	messages := []any{
+		api.Object{"id": "m1", "role": "user", "content": "plan a trip", "attachments": []any{api.Object{"id": imageID, "type": "image", "fileName": "map.png", "mimeType": "image/png", "encryptionKey": imageKey, "thumbnailBase64": "thumb"}}},
+		api.Object{"id": "m2", "role": "assistant", "content": "first, pack"}, api.Object{"id": "m3", "role": "user", "content": "go on"}}
+	source := domain.StoredRow{ID: "chat-1", ETag: "4", Project: &project, ProjectSet: true, Data: api.Raw(api.Object{"title": "Trip", "titleState": "generated", "createdAt": "2026-01-01T00:00:00Z", "presetId": "builtin:tutor", "model": "kimi-k3", "webSearchEnabled": false,
 		"pinned": true, "contextUsage": api.Object{"usedTokens": 900}, "harnessRequests": api.Object{"nonce": api.Object{"runId": "run", "digest": "digest"}}, "messages": messages})}
+	rows.rows[rowMapKey(p, "chat", "chat-1")] = source
 	for _, tc := range []struct {
 		in   api.Object
 		code int
 	}{{api.Object{"threadId": "chat-1", "messageId": "m4"}, 404}, {api.Object{"threadId": "chat-1"}, 400}} {
 		tc.in["key"] = keyBase64(key)
-		if w := postRoute(h, "/v1/threads/fork", tc.in, "alice"); w.Code != tc.code || len(fake.requests("/v1/sync/fork")) != 0 {
+		if w := postRoute(h, "/v1/threads/fork", tc.in, "alice"); w.Code != tc.code || len(rows.rows) != 1 || attachmentsStored(rows) != 1 {
 			t.Fatalf("%v: HTTP %d, want %d without a fork", tc.in, w.Code, tc.code)
 		}
 	}
 	w := postRoute(h, "/v1/threads/fork", api.Object{"key": keyBase64(key), "threadId": "chat-1", "messageId": "m2"}, "alice")
-	forks := fake.requests("/v1/sync/fork")
-	if w.Code != 200 || len(forks) != 1 {
-		t.Fatalf("fork: HTTP %d %s after %d sync forks", w.Code, w.Body.String(), len(forks))
-	}
-	request, target := forks[0], api.Str(forks[0]["target_id"])
-	created, err := time.Parse(time.RFC3339Nano, api.Str(request["created_at"]))
-	if !regexp.MustCompile(`^\d{13}_[0-9a-f-]{36}$`).MatchString(target) || err != nil || time.Since(created) > time.Minute || api.Str(request["idempotency_key"]) == "" {
-		t.Fatalf("fork request: %v", request)
-	}
-	want := api.Object{"source_id": "chat-1", "target_id": target, "key": keyBase64(key), "message_count": float64(2), "title": "Trip (fork)", "created_at": request["created_at"], "idempotency_key": request["idempotency_key"]}
-	if !reflect.DeepEqual(request, want) {
-		t.Fatalf("fork request %v, want %v", request, want)
-	}
 	var summary api.Object
 	json.Unmarshal(w.Body.Bytes(), &summary)
-	if summary["id"] != target || summary["title"] != "Trip (fork)" || summary["createdAt"] != domain.ISOTime(request["created_at"]) || summary["pinned"] != false || summary["activeRun"] != nil || summary["contextUsage"] != nil {
+	target := api.Str(summary["id"])
+	created, err := time.Parse(time.RFC3339Nano, api.Str(summary["createdAt"]))
+	if w.Code != 200 || !regexp.MustCompile(`^\d{13}_[0-9a-f-]{36}$`).MatchString(target) || err != nil || time.Since(created) > time.Minute {
+		t.Fatalf("fork: HTTP %d %s", w.Code, w.Body.String())
+	}
+	if summary["title"] != "Trip (fork)" || summary["pinned"] != false || summary["activeRun"] != nil || summary["contextUsage"] != nil {
 		t.Fatalf("fork summary: %v", summary)
 	}
-	row, _ := rows.Load(context.Background(), p, key, "chat", target)
-	if fork := mustRead(domain.ReadThreadRow(row)); fork.Pinned || fork.ContextUsage != nil || fork.ActiveRun != nil || rowJSON(row)["harnessRequests"] != nil {
+	row, err := rows.Load(context.Background(), p, key, "chat", target)
+	if err != nil || row.ETag != "1" || !row.ProjectSet || domain.ValueOr(row.Project, "") != project {
+		t.Fatalf("the fork's row = %+v (%v), want a new row under the source's project", row, err)
+	}
+	fork := mustRead(domain.ReadThreadRow(row))
+	if fork.Pinned || fork.ContextUsage != nil || fork.ActiveRun != nil || fork.TitleState != "manual" || rowJSON(row)["harnessRequests"] != nil {
 		t.Fatalf("the fork kept the source's bookkeeping: %s", row.Data)
 	}
-	if fork := mustRead(domain.ReadThreadRow(row)); domain.ValueOr(fork.PresetID, "") != "builtin:tutor" || len(fork.Messages) != 2 || fork.Messages[0].ID != "m1" || fork.Messages[1].ID != "m2" {
+	if domain.ValueOr(fork.PresetID, "") != "builtin:tutor" || len(fork.Messages) != 2 || fork.Messages[0].ID != "m1" || fork.Messages[1].ID != "m2" || fork.CreatedAt != api.Str(summary["createdAt"]) {
 		t.Fatalf("the fork lost the conversation: %v", row.Data)
+	}
+	// The fork's attachment is its own copy, under the fork with a key of
+	// its own, and the source keeps what it had.
+	copied := fork.Messages[0].Attachments[0]
+	if copied.ID == imageID || copied.EncryptionKey == imageKey || copied.StorageThreadID != target || copied.Thumbnail != "thumb" || copied.Base64 != "" {
+		t.Fatalf("the fork's attachment = %+v", copied)
+	}
+	if attachmentsStored(rows) != 2 || string(attachmentBytes(t, rows, copied)) != "png bytes" || rows.indexedUnder(copied.ID) != target || rows.indexedUnder(imageID) != "chat-1" {
+		t.Fatalf("attachments after the fork: %d stored, the copy indexed under %q", attachmentsStored(rows), rows.indexedUnder(copied.ID))
+	}
+	if kept := rows.rows[rowMapKey(p, "chat", "chat-1")]; !reflect.DeepEqual(kept, source) {
+		t.Fatalf("the source changed: %+v", kept)
 	}
 }
 
@@ -435,12 +461,14 @@ func TestForkTitlesNameTheirSource(t *testing.T) {
 
 func TestALocalChatIsSharedFromItsTranscript(t *testing.T) {
 	h, rows, _ := testChatHarness(t, nil)
-	fake := newFakeSync(t, h)
-	type upload struct{ method, path, auth, format, body string }
+	type upload struct {
+		method, path, auth, format string
+		body                       []byte
+	}
 	uploads := make(chan upload, 4)
 	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		uploads <- upload{r.Method, r.URL.Path, r.Header.Get("Authorization"), r.Header.Get("X-Format-Version"), string(body)}
+		uploads <- upload{r.Method, r.URL.Path, r.Header.Get("Authorization"), r.Header.Get("X-Format-Version"), body}
 	}))
 	defer cp.Close()
 	h.atControlplane(cp.URL)
@@ -474,11 +502,18 @@ func TestALocalChatIsSharedFromItsTranscript(t *testing.T) {
 	w := share(api.Object{"local": true, "threadId": "0000000000005_local", "thread": thread}, "alice")
 	var result api.Object
 	json.Unmarshal(w.Body.Bytes(), &result)
-	if w.Code != 200 || !strings.HasSuffix(api.Str(result["url"]), "/share/0000000000005_local#v2:"+strings.Repeat("ab", 32)) {
+	link := api.Str(result["url"])
+	if _, fragment, ok := strings.Cut(link, "/share/0000000000005_local#v2:"); w.Code != 200 || !ok || len(fragment) != 64 {
 		t.Fatalf("local share: HTTP %d %s", w.Code, w.Body.String())
 	}
-	seals := fake.requests("/v1/share/seal")
-	plaintext, _ := base64.StdEncoding.DecodeString(api.Str(seals[0]["plaintext"]))
+	if len(uploads) != 1 {
+		t.Fatalf("%d share uploads", len(uploads))
+	}
+	got := <-uploads
+	if got.method != http.MethodPut || got.path != "/api/shares/0000000000005_local" || got.auth != "Bearer clerk-alice" || got.format != "1" {
+		t.Fatalf("share upload: %+v", got)
+	}
+	plaintext := sharedPayload(t, link, got.body)
 	want := api.Object{"v": 1, "title": "Local chat", "createdAt": 1767225600000, "messages": []any{
 		api.Object{"role": "user", "content": "what is this?", "timestamp": 1767225601000, "timeline": nil, "quote": "earlier", "attachments": []any{
 			api.Object{"id": "img", "kind": "image", "fileName": "photo.png", "mimeType": "image/png", "thumbnail": "dGh1bWI="},
@@ -486,42 +521,42 @@ func TestALocalChatIsSharedFromItsTranscript(t *testing.T) {
 		}},
 		api.Object{"role": "assistant", "content": "a photo", "timestamp": 1767225602000, "timeline": []any{api.Object{"id": "b1", "type": "content", "content": "a photo"}}, "modelDisplayName": "Kimi K3", "annotations": citations},
 	}}
-	if len(seals) != 1 || !reflect.DeepEqual(api.Parsed(plaintext), api.Parsed(api.Raw(want))) {
-		t.Fatalf("sealed %d payloads, the last %s", len(seals), plaintext)
+	if !reflect.DeepEqual(api.Parsed(plaintext), api.Parsed(api.Raw(want))) {
+		t.Fatalf("the share holds %s", plaintext)
 	}
 	// The opened share lists the reply's citations as its sources.
 	if opened := mustRead(archives.SharedThreadView("0000000000005_local", plaintext)).Messages[1].Annotations; !reflect.DeepEqual(api.Parsed(api.Raw(opened)), api.Parsed(api.Raw(citations))) {
 		t.Fatalf("the opened share cites %s", api.Raw(opened))
 	}
-	if len(uploads) != 1 {
-		t.Fatalf("%d share uploads", len(uploads))
-	}
-	if got := <-uploads; got != (upload{http.MethodPut, "/api/shares/0000000000005_local", "Bearer clerk-alice", "1", "sealed"}) {
-		t.Fatalf("share upload: %+v", got)
-	}
-	if fake.putCount() != 0 || rows.calls != 0 {
-		t.Fatalf("a local share stored %d attachments and made %d storage calls", fake.putCount(), rows.calls)
+	if attachmentsStored(rows) != 0 || rows.calls != 0 {
+		t.Fatalf("a local share stored %d attachments and made %d storage calls", attachmentsStored(rows), rows.calls)
 	}
 }
 
 func TestAStoredChatIsSharedFromItsRow(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	fake := newFakeSync(t, h)
 	storedThread(rows, "alice", "chat-1")
-	cp := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	defer cp.Close()
-	h.atControlplane(cp.URL)
-	h.archives.CPClient = &http.Client{Transport: &auth.CallerTransport{Inner: cp.Client().Transport}}
-	if _, err := h.archives.ShareThread(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, auth.ContentKey{}, requestOf[archives.ShareRequest](api.Object{"key": keyBase64(key), "threadId": "chat-1"})); err != nil {
-		t.Fatal(err)
+	shares := fakeShares(t, h)
+	w := postRoute(h, "/v1/threads/share", api.Object{"key": keyBase64(key), "threadId": "chat-1"}, "alice")
+	var result api.Object
+	json.Unmarshal(w.Body.Bytes(), &result)
+	link := api.Str(result["url"])
+	uploaded, count := shares.uploaded("chat-1")
+	if w.Code != 200 || count != 1 {
+		t.Fatalf("share: HTTP %d %s after %d uploads", w.Code, w.Body.String(), count)
 	}
-	var shared api.Object
-	if seals := fake.requests("/v1/share/seal"); len(seals) == 1 {
-		plaintext, _ := base64.StdEncoding.DecodeString(api.Str(seals[0]["plaintext"]))
-		json.Unmarshal(plaintext, &shared)
-	}
+	shared := api.Obj(api.Parsed(sharedPayload(t, link, uploaded)))
 	if messages := api.Arr(shared["messages"]); shared["title"] != "Old" || len(messages) != 2 || api.Obj(messages[0])["content"] != "look at this" || api.Obj(messages[1])["content"] != "ok" {
 		t.Fatalf("shared %v", shared)
+	}
+	// A reader opens the share with the link alone, and nothing else does.
+	_, fragment, _ := strings.Cut(link, "#")
+	var opened domain.SharedThread
+	if w := postRoute(h, "/v1/shares/open", api.Object{"shareId": "chat-1", "fragment": fragment}, ""); w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &opened) != nil || opened.Title != "Old" || len(opened.Messages) != 2 || domain.ValueOr(opened.Messages[0].Content, "") != "look at this" {
+		t.Fatalf("open: HTTP %d %s", w.Code, w.Body.String())
+	}
+	if w := postRoute(h, "/v1/shares/open", api.Object{"shareId": "chat-1", "fragment": "v2:" + strings.Repeat("0", 64)}, ""); w.Code != 400 || !strings.Contains(w.Body.String(), "BAD_REQUEST") {
+		t.Fatalf("open with another key: HTTP %d %s", w.Code, w.Body.String())
 	}
 }
 
@@ -575,17 +610,17 @@ func TestAChatTheProfileListsReadsAsPinned(t *testing.T) {
 	}
 }
 
-// Sync moves a legacy image into its own storage under the same id and key,
-// and the control plane then answers 410 for it.
-func TestAPromotedLegacyImageIsReadThroughSync(t *testing.T) {
+// A legacy image moved into buckets under the same id and key, as a read
+// of its chat moves it, is read from there by the key the chat still
+// embeds under its old name.
+func TestAPromotedLegacyImageIsReadFromBuckets(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	fake := newFakeSync(t, h)
-	legacyKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
-	fake.blobs["legacy-2"] = fakeBlob{chat: "chat-1", key: legacyKey, data: []byte("promoted photo")}
-	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusGone) }))
-	defer cp.Close()
-	h.atControlplane(cp.URL)
-	storedThread(rows, "alice", "chat-1", api.Object{"id": "legacy-2", "type": "image", "fileName": "photo.png", "mimeType": "image/png", "key": legacyKey})
+	legacyKey := bytes.Repeat([]byte{7}, 32)
+	rows.storeAttachment("alice", "chat-1", "legacy-2", legacyKey, []byte("promoted photo"))
+	rows.cp.Mu.Lock()
+	rows.cp.GoneAttachments = map[string]bool{"legacy-2": true}
+	rows.cp.Mu.Unlock()
+	storedThread(rows, "alice", "chat-1", api.Object{"id": "legacy-2", "type": "image", "fileName": "photo.png", "mimeType": "image/png", "key": base64.StdEncoding.EncodeToString(legacyKey)})
 	w := postRoute(h, "/v1/attachments/get", api.Object{"key": keyBase64(key), "id": "legacy-2", "threadId": "chat-1"}, "alice")
 	if w.Code != 200 || w.Body.String() != "promoted photo" {
 		t.Fatalf("a promoted legacy image: HTTP %d %s", w.Code, w.Body.String())
@@ -597,8 +632,7 @@ func TestAPromotedLegacyImageIsReadThroughSync(t *testing.T) {
 func TestARetiredDocumentIsDescribedOnlyToTheModel(t *testing.T) {
 	var prompt string
 	h, rows, key := testChatHarness(t, capturePrompt(&prompt))
-	newFakeSync(t, h)
-	storedThread(rows, "alice", "chat-1", api.Object{"id": "legacy-doc", "type": "document", "fileName": "old.pdf", "encryptionKey": "gone"})
+	storedThread(rows, "alice", "chat-1", api.Object{"id": "legacy-doc", "type": "document", "fileName": "old.pdf", "encryptionKey": keyBase64(randomKey())})
 	finishedRun(t, h, "/v1/threads/turn", continueInput(key, "chat-1"))
 	if !strings.Contains(prompt, "old.pdf is no longer available") {
 		t.Fatalf("the model was not told the document is gone: %s", prompt)

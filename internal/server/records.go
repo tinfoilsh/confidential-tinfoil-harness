@@ -266,44 +266,50 @@ func startFork(t *domain.Thread) {
 }
 
 // forkThread starts a new chat from a chat's messages through the given one,
-// under an id the harness makes. Sync copies a stored chat, with its own
-// copies of the attachments; a device chat's fork keeps their ids.
+// under an id the harness makes. A stored chat's fork is stored with its
+// own copies of the attachments; a device chat's fork keeps their ids.
 func (h *harness) forkThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *messageRequest) (any, error) {
+	var source domain.Thread
 	if in.Local {
-		source, err := domain.ReadDeviceThread(in.ThreadID, in.Thread)
+		var err error
+		if source, err = domain.ReadDeviceThread(in.ThreadID, in.Thread); err != nil {
+			return nil, err
+		}
+	} else {
+		row, err := h.store.LoadThread(ctx, p, key, in.ThreadID)
 		if err != nil {
 			return nil, err
 		}
-		count, err := forkedCount(&source, in.MessageID)
-		if err != nil {
-			return nil, err
-		}
-		fork := source.Clone()
-		fork.ID, fork.Title, fork.Messages, fork.CreatedAt, fork.UpdatedAt = domain.RowID(), forkTitle(source.Title), fork.Messages[:count], api.Timestamp(), api.Timestamp()
-		startFork(&fork)
+		source = row.Thread
+	}
+	count, err := forkedCount(&source, in.MessageID)
+	if err != nil {
+		return nil, err
+	}
+	fork := source.Clone()
+	fork.ID, fork.Title, fork.Messages, fork.CreatedAt, fork.UpdatedAt = domain.RowID(), forkTitle(source.Title), fork.Messages[:count], api.Timestamp(), api.Timestamp()
+	startFork(&fork)
+	if in.Local {
 		return deviceReply(&domain.ThreadRow{Thread: fork}), nil
 	}
-	row, err := h.store.LoadThread(ctx, p, key, in.ThreadID)
-	if err != nil {
-		return nil, err
-	}
-	count, err := forkedCount(&row.Thread, in.MessageID)
-	if err != nil {
-		return nil, err
-	}
-	target := domain.RowID()
-	if err := h.store.ForkStored(ctx, p, key, in.ThreadID, target, forkTitle(row.Title), count); err != nil {
-		return nil, err
-	}
-	// Sync leaves out the web client's bookkeeping, not the harness's.
-	forked, err := h.store.MutateThread(ctx, p, key, target, func(t *domain.Thread) error {
-		startFork(t)
+	// The fork's attachments are copied under it, so deleting either chat
+	// takes only its own. Older rows did not record where their blobs
+	// live, which is under the chat itself.
+	fork.EachAttachment(func(a *domain.Attachment) error {
+		if a.StorageKey() != "" && a.StorageThreadID == "" {
+			a.StorageThreadID = source.ID
+		}
 		return nil
 	})
-	if err != nil {
+	if err := h.attachments.PlaceAttachments(ctx, p, fork.ID, &fork); err != nil {
 		return nil, err
 	}
-	return domain.Summarize(&forked.Thread), nil
+	attach.StripInlineAttachments(&fork)
+	row := &domain.ThreadRow{Thread: fork}
+	if err := h.store.SaveThread(ctx, p, key, row); err != nil {
+		return nil, err
+	}
+	return domain.Summarize(&row.Thread), nil
 }
 
 // Message actions change a chat's transcript.

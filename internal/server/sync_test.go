@@ -19,6 +19,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/archives"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane/cpstub"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
@@ -231,7 +232,7 @@ func TestListPullsInBatchesAndListsUnreadableRows(t *testing.T) {
 // Sync finds a row's revision, retries a race and deletes rows no key can
 // open. Favorites cleanup may read the profile; deletion never opens the chat.
 func TestDeletionsLeaveTheWorkToSync(t *testing.T) {
-	h, _, key := testChatHarness(t, nil)
+	h, rows, key := testChatHarness(t, nil)
 	var requests []api.Object
 	pages := map[string]api.Object{"": {"updates": []api.Object{{"id": "one"}, {"id": "sealed-to-a-retired-key"}}, "next_cursor": "more"}, "more": {"updates": []api.Object{{"id": "two"}}}}
 	h.store.API = &store.Client{URL: "https://sync.example", Client: &http.Client{Transport: syncTestTransport(func(r *http.Request) (*http.Response, error) {
@@ -248,8 +249,6 @@ func TestDeletionsLeaveTheWorkToSync(t *testing.T) {
 			return syncTestResponse(200, api.Object{"items": []api.Object{{"id": "profile", "ok": false, "code": "NOT_FOUND"}}})
 		case "/v1/sync/list-status":
 			return syncTestResponse(200, pages[api.Str(in["cursor"])])
-		case "/v1/sync/delete-all-projects":
-			return syncTestResponse(200, api.Object{"ok": true, "deleted": 4})
 		case "/v1/sync/delete":
 			return syncTestResponse(200, api.Object{"ok": true})
 		}
@@ -271,7 +270,6 @@ func TestDeletionsLeaveTheWorkToSync(t *testing.T) {
 			{"path": "/v1/sync/list-status", "scope": "chat", "project_id": "project-1", "cursor": "", "limit": float64(store.ListStatusPage), "direction": "desc"},
 			{"path": "/v1/sync/list-status", "scope": "chat", "project_id": "project-1", "cursor": "more", "limit": float64(store.ListStatusPage), "direction": "desc"},
 			deleted("chat", "one"), deleted("chat", "sealed-to-a-retired-key"), deleted("chat", "two")}},
-		{"/v1/projects/delete-all", api.Object{}, []api.Object{{"path": "/v1/sync/delete-all-projects", "key": keyBase64(key)}}},
 	} {
 		requests = nil
 		tc.in["key"] = keyBase64(key)
@@ -288,6 +286,18 @@ func TestDeletionsLeaveTheWorkToSync(t *testing.T) {
 	}
 	if w := postRoute(h, "/v1/threads/delete-all", api.Object{"key": keyBase64(key)}, ""); w.Code != 401 {
 		t.Fatalf("anonymous bulk deletion accepted: %d", w.Code)
+	}
+	// The control plane deletes every project and document in one step,
+	// without any being opened, and the chats stay.
+	for _, seeded := range []struct{ scope, id string }{{"project", "p1"}, {"project", "p2"}, {"project_document", "p1/d1"}, {"chat", "c1"}} {
+		rows.cp.SetBlob(seeded.scope, seeded.id, cpstub.Blob{ETag: 1, Body: []byte("sealed")})
+	}
+	w := postRoute(h, "/v1/projects/delete-all", api.Object{"key": keyBase64(key)}, "alice")
+	rows.cp.Mu.Lock()
+	left := slices.Sorted(maps.Keys(rows.cp.Blobs))
+	rows.cp.Mu.Unlock()
+	if w.Code != 200 || api.Obj(api.Parsed(w.Body.Bytes()))["deleted"] != float64(2) || !reflect.DeepEqual(left, []string{"chat/c1"}) {
+		t.Fatalf("delete all projects: HTTP %d %s, leaving %v", w.Code, w.Body.String(), left)
 	}
 }
 

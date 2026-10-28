@@ -168,17 +168,6 @@ func storedChats(rows *memoryRows, user string) map[string]domain.Thread {
 	return chats
 }
 
-func blobOf(t *testing.T, fake *fakeSync, a domain.Attachment) []byte {
-	t.Helper()
-	fake.mu.Lock()
-	defer fake.mu.Unlock()
-	blob, ok := fake.blobs[a.ID]
-	if !ok || blob.key != a.EncryptionKey {
-		t.Fatalf("no blob under %+v", a)
-	}
-	return blob.data
-}
-
 func base64Bytes(t *testing.T, encoded string) []byte {
 	t.Helper()
 	b, err := base64.StdEncoding.DecodeString(encoded)
@@ -253,20 +242,19 @@ func withBackupEntries(t *testing.T, archive []byte, replaced map[string][]byte)
 // originals beside them.
 func TestNativeBackupRoundTrips(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	fake := newFakeSync(t, h)
 	alice := &auth.Principal{ID: "alice"}
 	project := "project-1"
 	rows.rows[rowMapKey(alice, "project", project)] = domain.StoredRow{ID: project, ETag: "1", Data: api.Raw(api.Object{"name": "Research", "description": "Notes", "systemInstructions": "Cite sources", "color": "teal", "createdAt": "2026-01-01T00:00:00Z"})}
 	rows.rows[rowMapKey(alice, "project_document", project+"/doc-1")] = domain.StoredRow{ID: project + "/doc-1", ETag: "1", Data: api.Raw(api.Object{"filename": "paper.md", "contentType": "text/markdown", "sizeBytes": 12, "content": "Paper text"}), Project: &project, ProjectSet: true}
 	stored := pngFixture(t, 8, 6, 40)
-	imageID, imageKey := fake.seed("chat-1", stored)
-	docID, docKey := fake.seed("chat-1", []byte(`{"textContent":"Stored document"}`))
+	imageID, imageKey := seedAttachment(rows, "alice", "chat-1", stored)
+	docID, docKey := seedAttachment(rows, "alice", "chat-1", []byte(`{"textContent":"Stored document"}`))
 	timeline := []domain.Block{{ID: "think", Type: "thinking", Content: "Check sources"}, {ID: "call", Type: "tool_call", ToolCallID: "call", Name: "web_search", Arguments: `{"query":"growth"}`, Complete: true, Result: api.Raw(api.Object{"query": "growth", "results": []api.Object{{"url": "https://example.com", "title": "Example"}}})}, {ID: "text", Type: "content", Content: "It grew."}}
 	cloudChat := api.Object{"title": "Evidence", "titleState": "manual", "createdAt": "2026-01-02T00:00:00Z", "updatedAt": "2026-01-02T01:00:00Z", "model": "kimi-k3", "pinned": true, "messages": []any{
 		api.Object{"id": "m1", "role": "user", "createdAt": "2026-01-02T00:00:00Z", "content": "Explain", "attachments": []any{
 			api.Object{"id": imageID, "kind": "image", "fileName": "chart.png", "mimeType": "image/png", "encryptionKey": imageKey, "thumbnail": "dGh1bWI=", "description": "A chart"},
 			api.Object{"id": docID, "kind": "document", "fileName": "report.txt", "mimeType": "text/plain", "encryptionKey": docKey},
-			api.Object{"id": strings.Repeat("e", 36), "kind": "image", "fileName": "gone.png", "encryptionKey": "gone"},
+			api.Object{"id": strings.Repeat("e", 36), "kind": "image", "fileName": "gone.png", "encryptionKey": keyBase64(randomKey())},
 		}},
 		api.Object{"id": "m2", "role": "assistant", "createdAt": "2026-01-02T00:01:00Z", "content": "It grew.", "timeline": timeline, "annotations": []any{api.Object{"type": "url_citation", "url_citation": api.Object{"url": "https://example.com", "title": "Example", "start_index": 0, "end_index": 2}}}},
 	}}
@@ -299,7 +287,7 @@ func TestNativeBackupRoundTrips(t *testing.T) {
 	}
 
 	restored, restoredRows, _ := testChatHarness(t, nil)
-	restoredSync := newFakeSync(t, restored)
+	newFakeSync(t, restored)
 	result := importOf(t, restored, "alice", w.Body.Bytes(), "tinfoil-backup.zip", api.Object{"target": "cloud", "key": keyBase64(key)})
 	if result.done.JobID == nil || len(result.threads) != 1 || !reflect.DeepEqual(result.done.Warnings, []string{"The backup left out 1 items when it was made."}) {
 		t.Fatalf("restore: %+v %v", result.done, result.threads)
@@ -329,7 +317,7 @@ func TestNativeBackupRoundTrips(t *testing.T) {
 		t.Fatalf("the reply changed: %s", api.Raw(chat.Messages[1]))
 	}
 	attachments := chat.Messages[0].Attachments
-	if len(attachments) != 2 || attachments[0].Description != "A chart" || attachments[0].Thumbnail != "dGh1bWI=" || !bytes.Equal(blobOf(t, restoredSync, attachments[0]), stored) || attachments[1].TextContent != "Stored document" {
+	if len(attachments) != 2 || attachments[0].Description != "A chart" || attachments[0].Thumbnail != "dGh1bWI=" || !bytes.Equal(attachmentBytes(t, restoredRows, attachments[0]), stored) || attachments[1].TextContent != "Stored document" {
 		t.Fatalf("cloud attachments: %+v", attachments)
 	}
 	projects, _ := restoredRows.List(context.Background(), alice, key, "project", "", "", 0)
@@ -457,7 +445,7 @@ func TestWebAppBackupsRestore(t *testing.T) {
 	} {
 		t.Run(tc.fixture, func(t *testing.T) {
 			h, rows, key := testChatHarness(t, nil)
-			fake := newFakeSync(t, h)
+			newFakeSync(t, h)
 			result := importOf(t, h, "alice", fixture(t, tc.fixture), tc.fixture, api.Object{"target": "cloud", "key": keyBase64(key)})
 			if result.done.JobID == nil || !reflect.DeepEqual(result.done.Warnings, tc.warnings) || len(result.threads) != 2 {
 				t.Fatalf("restore: %+v, %d device chats", result.done, len(result.threads))
@@ -484,7 +472,7 @@ func TestWebAppBackupsRestore(t *testing.T) {
 				t.Fatalf("cloud chat: %+v", chat)
 			}
 			image := chat.Messages[0].Attachments[0]
-			if image.Description != "A red chart" || image.FileName != "chart.png" || !strings.HasPrefix(string(blobOf(t, fake, image)), "\x89PNG") {
+			if image.Description != "A red chart" || image.FileName != "chart.png" || !strings.HasPrefix(string(attachmentBytes(t, rows, image)), "\x89PNG") {
 				t.Fatalf("cloud image: %+v", image)
 			}
 			names := []string{}
@@ -512,14 +500,14 @@ func TestWebAppBackupsRestore(t *testing.T) {
 // sameForm is a thread as both destinations keep it: the cloud stores an
 // image under a blob and names it anew, a device keeps its original apart
 // from the copy and thumbnail an upload makes.
-func sameForm(t *testing.T, fake *fakeSync, originals map[string][]byte, thread domain.Thread) string {
+func sameForm(t *testing.T, rows *memoryRows, originals map[string][]byte, thread domain.Thread) string {
 	t.Helper()
 	thread = thread.Clone()
 	for i := range thread.Messages {
 		for j := range thread.Messages[i].Attachments {
 			a := &thread.Messages[i].Attachments[j]
 			if a.EncryptionKey != "" {
-				a.Base64 = base64.StdEncoding.EncodeToString(blobOf(t, fake, *a))
+				a.Base64 = base64.StdEncoding.EncodeToString(attachmentBytes(t, rows, *a))
 			} else if original, ok := originals[a.ID]; ok {
 				a.Base64 = base64.StdEncoding.EncodeToString(original)
 			}
@@ -578,7 +566,7 @@ func TestExportsImportAlikeToCloudAndDevice(t *testing.T) {
 	} {
 		t.Run(tc.fixture, func(t *testing.T) {
 			h, rows, key := testChatHarness(t, nil)
-			fake := newFakeSync(t, h)
+			newFakeSync(t, h)
 			archive := withEntries(t, fixture(t, tc.fixture), tc.images)
 			onDevice := importOf(t, h, "alice", archive, tc.fixture, api.Object{"target": "device"})
 			inCloud := importOf(t, h, "alice", archive, tc.fixture, api.Object{"target": "cloud", "key": keyBase64(key)})
@@ -590,8 +578,8 @@ func TestExportsImportAlikeToCloudAndDevice(t *testing.T) {
 			for _, thread := range onDevice.threads {
 				byTitle[thread.Title] = thread
 				stored, ok := cloud[thread.Title]
-				if !ok || !domain.RowIDPattern.MatchString(thread.ID) || sameForm(t, fake, nil, stored) != sameForm(t, fake, onDevice.originals, thread) {
-					t.Fatalf("the cloud and the device differ:\n%s\n%s", sameForm(t, fake, nil, stored), sameForm(t, fake, onDevice.originals, thread))
+				if !ok || !domain.RowIDPattern.MatchString(thread.ID) || sameForm(t, rows, nil, stored) != sameForm(t, rows, onDevice.originals, thread) {
+					t.Fatalf("the cloud and the device differ:\n%s\n%s", sameForm(t, rows, nil, stored), sameForm(t, rows, onDevice.originals, thread))
 				}
 			}
 			if len(cloud) != tc.chats {
@@ -698,7 +686,6 @@ func TestClaudeProjectsRequireTheCloud(t *testing.T) {
 // The conversations export is the one the web app wrote for the same chats.
 func TestConversationsExportMatchesTheWebApp(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	fake := newFakeSync(t, h)
 	var threads struct {
 		Device []json.RawMessage `json:"device"`
 		Stored domain.Thread     `json:"stored"`
@@ -711,8 +698,9 @@ func TestConversationsExportMatchesTheWebApp(t *testing.T) {
 	for i := range stored.Messages {
 		for j := range stored.Messages[i].Attachments {
 			a := &stored.Messages[i].Attachments[j]
-			a.EncryptionKey = "key-" + a.ID
-			fake.blobs[a.ID] = fakeBlob{chat: stored.ID, key: a.EncryptionKey, data: decodedOr(a.Base64, api.Raw(attach.DocumentBlob{TextContent: a.TextContent}))}
+			blobKey := randomKey()
+			a.EncryptionKey = keyBase64(blobKey)
+			rows.storeAttachment("alice", stored.ID, a.ID, blobKey[:], decodedOr(a.Base64, api.Raw(attach.DocumentBlob{TextContent: a.TextContent})))
 			a.Base64, a.TextContent = "", ""
 		}
 	}

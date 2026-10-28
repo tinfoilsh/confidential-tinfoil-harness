@@ -3,28 +3,33 @@ package store
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"maps"
 	"net/http"
 	"slices"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/buckets"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
 type Store struct {
 	Repair Repairer
 	Rows   RowStore
-	API    *Client
+	// Controlplane keeps the attachment index, the key registry and the
+	// change ledger; Buckets holds attachment bytes.
+	Controlplane *controlplane.Client
+	Buckets      *buckets.Client
+	// API is the sync enclave's HTTP API, for what has not moved here yet.
+	API *Client
 }
 
-// The store is the harness's typed view of sync: chats, the profile,
-// projects and their documents, attachment blobs, shares, search and keys.
+// The store is the harness's typed view of what a caller keeps: chats, the
+// profile, projects and their documents, attachments, search and keys.
 // Nothing else calls sync. Rows are read through the legacy reader, so a
 // row any client wrote reads in the current format.
 
@@ -218,12 +223,6 @@ func (s *Store) ChatIDs(ctx context.Context, p *auth.Principal, project string) 
 	return s.Rows.IDs(ctx, p, "chat", project)
 }
 
-// ForkStored has sync copy a chat's first count messages, with their
-// attachments, into a new chat.
-func (s *Store) ForkStored(ctx context.Context, p *auth.Principal, key auth.ContentKey, source, target, title string, count int) error {
-	return s.API.CallKey(ctx, p, "/v1/sync/fork", key, api.Object{"source_id": source, "target_id": target, "message_count": count, "title": title, "created_at": api.Timestamp(), "idempotency_key": uuid.NewString()}, nil)
-}
-
 // SearchResults are the chats a search found, in its order, and how many of
 // them sync or this harness cannot open, which are left out. A chat deleted
 // since it was indexed is not a result. One sync could not fetch in time
@@ -393,13 +392,28 @@ func (s *Store) MutateProject(ctx context.Context, p *auth.Principal, key auth.C
 	return project, err
 }
 
-// Sync deletes every project and project document in one step.
+// RemoveAllProjects deletes every project and project document in one
+// step, and is how many projects went.
 func (s *Store) RemoveAllProjects(ctx context.Context, p *auth.Principal, key auth.ContentKey) (int, error) {
-	var result struct {
-		Deleted int `json:"deleted"`
+	defer clear(key[:])
+	if p.Grant != nil && !(*grantScope)(p.Grant).allows(opRemove) {
+		return 0, errRunScope
 	}
-	err := s.API.CallKey(ctx, p, "/v1/sync/delete-all-projects", key, api.Object{"idempotency_key": uuid.NewString()}, &result)
-	return result.Deleted, err
+	kidHex, nonce := keyID(key), uuid.NewString()
+	resp, err := s.Controlplane.DeleteAllProjects(ctx, controlplane.DeleteAllProjectsRequest{
+		JWT:            string(p.JWT),
+		ClerkUserID:    p.ID,
+		KeyIDHex:       kidHex,
+		IdempotencyKey: nonce,
+		OperationHash:  operationHash(key, http.MethodDelete, controlplane.DeleteAllProjectsPath, kidHex, "", nonce, 0, nil, nil),
+	})
+	if err != nil {
+		return 0, fromControlplane(err)
+	}
+	if !resp.OK {
+		return 0, api.Err(502, "UPSTREAM_REFUSED", "The projects were not deleted")
+	}
+	return resp.Deleted, nil
 }
 
 // ProjectDocuments are every document of a project. A document sync cannot
@@ -479,82 +493,6 @@ func (s *Store) CreateProjectDocument(ctx context.Context, p *auth.Principal, ke
 		return nil
 	})
 	return doc, err
-}
-
-// Attachments
-
-// PutAttachment stores a blob under a chat. Sync derives its id from the
-// idempotency key, chat and bytes, so storing the same attachment again
-// reuses its blob.
-func (s *Store) PutAttachment(ctx context.Context, p *auth.Principal, chatID, clientID string, data []byte) (string, string, error) {
-	in := api.Object{"chat_id": chatID, "plaintext": base64.StdEncoding.EncodeToString(data), "idempotency_key": clientID}
-	var stored struct {
-		ID  string `json:"id"`
-		Key string `json:"att_key"`
-	}
-	var err error
-	for attempt := 0; attempt < 3; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-time.After(time.Duration(attempt) * time.Second):
-			case <-ctx.Done():
-				return "", "", ctx.Err()
-			}
-		}
-		stored.ID, stored.Key = "", ""
-		// A purge of the same chat or a lost index write fails with a 502.
-		// The idempotency key makes the retry store the same blob.
-		if err = s.API.call(ctx, p, "/v1/attachment/put", in, &stored); err == nil || api.AsError(err).Status != 502 {
-			break
-		}
-	}
-	if err != nil {
-		return "", "", err
-	}
-	if !domain.EnclaveAttachmentID.MatchString(stored.ID) || stored.Key == "" {
-		return "", "", api.Err(502, "UPSTREAM_REFUSED", "The sync service returned an invalid attachment")
-	}
-	return stored.ID, stored.Key, nil
-}
-
-// GetAttachment reads a blob, or with public a blob a share holds.
-func (s *Store) GetAttachment(ctx context.Context, p *auth.Principal, id, attKey string, public bool) ([]byte, error) {
-	path := "/v1/attachment/get"
-	if public {
-		path += "-public"
-	}
-	var result struct {
-		Plaintext string `json:"plaintext"`
-	}
-	if err := s.API.call(ctx, p, path, api.Object{"id": id, "att_key": attKey}, &result); err != nil {
-		return nil, err
-	}
-	return base64.StdEncoding.DecodeString(result.Plaintext)
-}
-
-// Shares
-
-// SealShare seals a share's payload under a key the link carries.
-func (s *Store) SealShare(ctx context.Context, p *auth.Principal, plaintext []byte) ([]byte, string, error) {
-	var sealed struct {
-		Ciphertext string `json:"ciphertext"`
-		ShareKey   string `json:"share_key"`
-	}
-	if err := s.API.call(ctx, p, "/v1/share/seal", api.Object{"plaintext": base64.StdEncoding.EncodeToString(plaintext)}, &sealed); err != nil {
-		return nil, "", err
-	}
-	ciphertext, err := base64.StdEncoding.DecodeString(sealed.Ciphertext)
-	return ciphertext, sealed.ShareKey, err
-}
-
-func (s *Store) OpenSealedShare(ctx context.Context, shareKey string, ciphertext []byte) ([]byte, error) {
-	var opened struct {
-		Plaintext string `json:"plaintext"`
-	}
-	if err := s.API.call(ctx, &auth.Principal{Anonymous: true}, "/v1/share/open", api.Object{"share_key": shareKey, "ciphertext": base64.StdEncoding.EncodeToString(ciphertext)}, &opened); err != nil {
-		return nil, err
-	}
-	return base64.StdEncoding.DecodeString(opened.Plaintext)
 }
 
 // Keys and imports

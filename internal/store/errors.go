@@ -23,6 +23,13 @@ var (
 	errRowUnreadable = api.Err(502, "UPSTREAM_REFUSED", "The stored row cannot be opened")
 )
 
+// refusedByControlplane is whether the control plane answered the request
+// with a refusal of its own, which proves it wrote nothing for it.
+func refusedByControlplane(err error) bool {
+	var cpe *controlplane.Error
+	return errors.As(err, &cpe) && cpe.StatusCode/100 == 4
+}
+
 // fromControlplane is the harness's error for what the control plane, or
 // the sealing of a row, refused.
 func fromControlplane(err error) *api.Error {

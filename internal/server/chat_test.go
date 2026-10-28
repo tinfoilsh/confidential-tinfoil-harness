@@ -29,6 +29,10 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/archives"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/buckets"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/buckets/bucketstub"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane/cpstub"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
@@ -47,7 +51,16 @@ type memoryRows struct {
 	sealed map[string]auth.ContentKey
 	key    auth.ContentKey
 	calls  int
+	// What the harness stores beside the rows: attachment bytes in bk,
+	// and in cp their index, the legacy attachments and the change ledger.
+	cp *cpstub.Store
+	bk *bucketstub.Store
 }
+
+const (
+	testBucket        = "test-attachments-bucket"
+	testStorageSecret = "test-enclave-secret"
+)
 
 func (s *memoryRows) AuthorizeRun(_ context.Context, _ *auth.Principal, _ auth.ContentKey, id string, project *string) (*auth.StorageGrant, error) {
 	return &auth.StorageGrant{ChatID: id, ProjectID: domain.ValueOr(project, ""), Token: auth.Secret("run-for-" + id), ExpiresAt: api.Now().Add(time.Hour)}, nil
@@ -212,7 +225,13 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 	}
 	server := httptest.NewServer(upstream)
 	t.Cleanup(server.Close)
+	storage := cpstub.New()
+	storage.Secret = testStorageSecret
 	cp := httptest.NewServer(unflagged(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/sync/") || strings.HasPrefix(r.URL.Path, "/api/storage/") {
+			storage.ServeHTTP(w, r)
+			return
+		}
 		if r.URL.Path != "/api/shim/validate-key" {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -225,9 +244,15 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 		io.WriteString(w, "OK")
 	}))
 	t.Cleanup(cp.Close)
-	rows := &memoryRows{rows: map[string]domain.StoredRow{}, sealed: map[string]auth.ContentKey{}}
-	h := &harness{models: &inference.Models{Gateway: server.URL, Controlplane: cp.URL, Services: map[string]*inference.Service{}}, controlplane: cp.URL, store: &store.Store{Rows: rows}}
-	h.attachments = &attach.Service{Auth: testAuth(cp), Controlplane: cp.URL, Models: h.models, Store: h.store}
+	bk := bucketstub.NewStore()
+	objects := http.NewServeMux()
+	objects.HandleFunc("/"+testBucket+"/{key}", bk.Handle)
+	bkServer := httptest.NewServer(objects)
+	t.Cleanup(bkServer.Close)
+	rows := &memoryRows{rows: map[string]domain.StoredRow{}, sealed: map[string]auth.ContentKey{}, cp: storage, bk: bk}
+	h := &harness{models: &inference.Models{Gateway: server.URL, Controlplane: cp.URL, Services: map[string]*inference.Service{}}, controlplane: cp.URL,
+		store: &store.Store{Rows: rows, Controlplane: controlplane.NewClient(cp.URL, nil, controlplane.WithServiceSecret(testStorageSecret)), Buckets: buckets.NewClient(bkServer.URL, testBucket, nil)}}
+	h.attachments = &attach.Service{Auth: testAuth(cp), Models: h.models, Store: h.store}
 	h.auth = h.attachments.Auth
 	h.store.Repair = h.attachments
 	h.engine = &engine.Engine{Store: h.store, Models: h.models, Attachments: h.attachments, Auth: h.auth}
@@ -688,7 +713,6 @@ func TestDeletingAMessageRemovesOnlyThatMessage(t *testing.T) {
 // by a process that died, expired or not, never locks its chat.
 func TestADeadRunNeverLocksItsChat(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
-	fake := newFakeSync(t, h)
 	p := &auth.Principal{ID: "alice"}
 	recent := api.Now().Add(time.Hour).Format(time.RFC3339Nano)
 	runs := map[string]api.Object{
@@ -720,8 +744,12 @@ func TestADeadRunNeverLocksItsChat(t *testing.T) {
 		if w := postRoute(h, "/v1/threads/messages/update", api.Object{"key": keyBase64(key), "threadId": id, "messageId": "m2", "content": "edited"}, "alice"); w.Code != 200 {
 			t.Fatalf("%s: editing a reply: HTTP %d %s", id, w.Code, w.Body.String())
 		}
-		if w := postRoute(h, "/v1/threads/fork", in, "alice"); w.Code != 200 {
+		var fork domain.ThreadSummary
+		if w := postRoute(h, "/v1/threads/fork", in, "alice"); w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &fork) != nil || fork.ActiveRun != nil {
 			t.Fatalf("%s: forking: HTTP %d %s", id, w.Code, w.Body.String())
+		}
+		if _, err := rows.Load(context.Background(), p, key, "chat", fork.ID); err != nil {
+			t.Fatalf("%s: the fork was not stored: %v", id, err)
 		}
 		if w := postRoute(h, "/v1/threads/transcript", api.Object{"key": keyBase64(key), "threadId": id}, "alice"); w.Code != 200 {
 			t.Fatalf("%s: moving to the device: HTTP %d %s", id, w.Code, w.Body.String())
@@ -740,9 +768,6 @@ func TestADeadRunNeverLocksItsChat(t *testing.T) {
 		if _, err := rows.Load(context.Background(), p, key, "chat", id); api.AsError(err).HTTP != 404 {
 			t.Fatalf("%s: the deleted chat remains: %v", id, err)
 		}
-	}
-	if forks := fake.requests("/v1/sync/fork"); len(forks) != 2 {
-		t.Fatalf("%d forks reached sync", len(forks))
 	}
 }
 
@@ -2030,9 +2055,9 @@ func (h *harness) useAuth(a *auth.Authenticator) {
 }
 
 // atControlplane points the harness and every layer that reads the control
-// plane at url.
+// plane over plain HTTP at url; the store keeps its stub.
 func (h *harness) atControlplane(url string) {
-	h.controlplane, h.models.Controlplane, h.attachments.Controlplane, h.archives.Controlplane = url, url, url, url
+	h.controlplane, h.models.Controlplane, h.archives.Controlplane = url, url, url
 }
 
 // caller is a request context carrying one API key.
