@@ -1644,6 +1644,11 @@ type SearchIndexDeletionClaim struct {
 	Deletions  []SearchIndexDeletion `json:"deletions"`
 }
 
+const (
+	ClaimSearchIndexDeletionsPath = "/api/sync/search-index-deletions/claim"
+	AckSearchIndexDeletionsPath   = "/api/sync/search-index-deletions/ack"
+)
+
 func (c *Client) ClaimSearchIndexDeletions(ctx context.Context, batchSize int) (*SearchIndexDeletionClaim, error) {
 	body, err := json.Marshal(struct {
 		BatchSize int `json:"batch_size"`
@@ -1651,7 +1656,7 @@ func (c *Client) ClaimSearchIndexDeletions(ctx context.Context, batchSize int) (
 	if err != nil {
 		return nil, err
 	}
-	endpoint := c.baseURL + "/api/sync/search-index-deletions/claim"
+	endpoint := c.baseURL + ClaimSearchIndexDeletionsPath
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -1687,7 +1692,7 @@ func (c *Client) AckSearchIndexDeletions(ctx context.Context, claimToken string,
 	if err != nil {
 		return err
 	}
-	endpoint := c.baseURL + "/api/sync/search-index-deletions/ack"
+	endpoint := c.baseURL + AckSearchIndexDeletionsPath
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return err
