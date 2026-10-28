@@ -3,8 +3,10 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -767,6 +769,16 @@ func (s *cpStub) handleLegacyAttachment(w http.ResponseWriter, r *http.Request) 
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
+	digest := sha256.Sum256(body)
+	payload, _ := json.Marshal(struct {
+		ClerkUserID string `json:"clerk_user_id"`
+		ID          string `json:"id"`
+		Scope       string `json:"scope"`
+		SHA256      string `json:"sha256"`
+	}{r.Header.Get(controlplane.HeaderClerkUserID), aid, "attachment", hex.EncodeToString(digest[:])})
+	mac := hmac.New(sha256.New, []byte(testServiceSecret))
+	mac.Write(payload)
+	w.Header().Set(controlplane.HeaderLegacyClaim, hex.EncodeToString(mac.Sum(nil)))
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Write(body)
 }
@@ -976,7 +988,7 @@ func newFixture(t *testing.T) *fixture {
 	}
 
 	cp := newCPStub(t)
-	cpClient := controlplane.NewClient(cp.server.URL, nil)
+	cpClient := controlplane.NewClient(cp.server.URL, nil, controlplane.WithServiceSecret(testServiceSecret))
 
 	bk := newBucketsStub(t)
 	bkClient := buckets.NewClient(bk.server.URL, testBucketName, nil)

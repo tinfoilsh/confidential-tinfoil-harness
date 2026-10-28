@@ -180,14 +180,14 @@ func (eng *Engine) launch(ctx context.Context, r *Run) error {
 	eng.Live.mu.Lock()
 	p := r.Principal
 	eng.Live.mu.Unlock()
-	if !s.keyless && !p.SyncExpires.After(api.Now().Add(RunTimeout+CommitTimeout)) {
+	if !s.keyless && (p.Grant == nil || !p.Grant.ExpiresAt.After(api.Now().Add(RunTimeout+CommitTimeout))) {
 		fresh := *p
-		fresh.SyncToken = ""
+		fresh.Grant = nil
 		grant, err := eng.Store.Rows.AuthorizeRun(ctx, &fresh, r.key, r.input.ThreadID, r.input.ProjectID)
 		if err != nil {
 			return err
 		}
-		fresh.SyncToken, fresh.SyncExpires = grant.Token, grant.ExpiresAt
+		fresh.Grant = grant
 		p = &fresh
 		eng.Live.mu.Lock()
 		r.Principal = p

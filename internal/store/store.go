@@ -171,7 +171,7 @@ func (s *Store) SaveThread(ctx context.Context, p *auth.Principal, key auth.Cont
 	row.RecordVersion = domain.RecordVersion
 	row.UpdatedAt = api.Timestamp()
 	for repaired := false; ; repaired = true {
-		stored := domain.StoredRow{ID: row.ID, ETag: row.ETag, Data: api.Raw(row.Thread), Project: row.ProjectID, ProjectSet: true, Restore: row.Restore}
+		stored := domain.StoredRow{ID: row.ID, ETag: row.ETag, Data: api.Raw(row.Thread), Project: row.ProjectID, ProjectSet: true}
 		err := s.Push(ctx, p, key, "chat", &stored)
 		if err == nil {
 			row.ETag = stored.ETag
@@ -568,11 +568,11 @@ func (s *Store) AuthorizeArchive(ctx context.Context, p *auth.Principal, keyByte
 		return err
 	}
 	defer clear(key[:])
-	token, err := s.Rows.AuthorizeStorage(ctx, p, key, operation, "")
+	grant, err := s.Rows.AuthorizeStorage(ctx, p, key, operation, "")
 	if err != nil {
 		return err
 	}
-	p.SyncToken = token
+	p.Grant = grant
 	return nil
 }
 

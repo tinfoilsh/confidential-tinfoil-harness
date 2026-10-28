@@ -32,10 +32,11 @@ func bearer(header string) string {
 }
 
 type Principal struct {
-	ID           string
-	JWT          Secret
-	SyncToken    Secret
-	SyncExpires  time.Time
+	ID  string
+	JWT Secret
+	// Grant is the caller's right to the stored rows for a while: a run's
+	// to its chat, or an operation's. Nil before one is granted.
+	Grant        *StorageGrant
 	Anonymous    bool
 	AnonymousID  string
 	InferenceKey Secret

@@ -276,7 +276,7 @@ type countedRunGrants struct {
 	grants atomic.Int32
 }
 
-func (s *countedRunGrants) AuthorizeRun(ctx context.Context, p *auth.Principal, key auth.ContentKey, id string, project *string) (store.Grant, error) {
+func (s *countedRunGrants) AuthorizeRun(ctx context.Context, p *auth.Principal, key auth.ContentKey, id string, project *string) (*auth.StorageGrant, error) {
 	s.grants.Add(1)
 	return s.memoryRows.AuthorizeRun(ctx, p, key, id, project)
 }
@@ -300,7 +300,7 @@ func TestAQueuedTurnRefreshesStorageAccessBeforeStarting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.engine.Live.Locked(func() { queued.Principal.SyncExpires = api.Now() })
+	h.engine.Live.Locked(func() { queued.Principal.Grant.ExpiresAt = api.Now() })
 	release()
 	<-queued.Finished
 	row, err := rows.Load(context.Background(), p, key, "chat", api.Str(in["threadId"]))

@@ -7,7 +7,10 @@ package controlplane
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1316,78 +1319,88 @@ func IsCode(err error, code string) bool {
 	return e.Code == code
 }
 
-// GetLegacyAttachment fetches the raw ciphertext for a v0/v1
-// attachment from controlplane's BYTEA-backed storage. Used by the
-// rewrap path to migrate attachments into buckets.tinfoil.sh: the
-// enclave reads the ciphertext, decrypts it with the per-attachment
-// key embedded in the chat JSON, re-uploads through buckets, and
-// then registers a v2 index row (which nulls the BYTEA column).
-// A 404 surfaces as ErrLegacyAttachmentNotFound so the caller can
-// treat already-migrated rows as a no-op.
-//
-// Returns the ciphertext alongside the controlplane's X-Legacy-Claim
-// header so the caller can verify CP signed off on this specific
-// (user, attachment) pair before promoting it to v2.
+// ErrLegacyAttachmentNotFound is a legacy attachment the control plane
+// does not hold.
 var ErrLegacyAttachmentNotFound = errors.New("controlplane: legacy attachment not found")
 
-// ErrLegacyAttachmentGone is returned when the controlplane answers
-// 410: the attachment has already been promoted to v2 buckets storage,
-// so there is no legacy ciphertext left to re-seal. The rewrap caller
-// treats this exactly like not-found — a no-op skip — because the
-// chat's embedded per-attachment key already addresses the v2 slot.
-var ErrLegacyAttachmentGone = errors.New("controlplane: legacy attachment already migrated to v2")
+// ErrLegacyAttachmentGone is a legacy attachment already moved to buckets,
+// which the chat's embedded key addresses there as it is.
+var ErrLegacyAttachmentGone = errors.New("controlplane: legacy attachment already moved to buckets")
 
-// HeaderLegacyClaim names the response header carrying the CP-signed
-// claim that authorizes a legacy attachment re-seal for a specific
-// user. Lives in controlplane/client.go so both enclave and CP can
-// import the canonical constant.
+// ErrLegacyClaimInvalid is a legacy attachment served without the control
+// plane's claim that it is the caller's, or with one the service secret
+// does not verify.
+var ErrLegacyClaimInvalid = errors.New("controlplane: legacy attachment claim invalid")
+
+// HeaderLegacyClaim carries the control plane's claim on a legacy
+// attachment it serves to the enclave.
 const HeaderLegacyClaim = "X-Legacy-Claim"
 
-// LegacyAttachmentResponse is the result of GetLegacyAttachment. Claim
-// is empty when CP did not stamp the header (only possible in dev
-// mode with no shared secret configured); the caller MUST treat the
-// missing header as a hard failure in production.
-type LegacyAttachmentResponse struct {
-	Ciphertext []byte
-	Claim      string
+// legacyAttachmentClaim is what the control plane signs when it serves a
+// legacy attachment: the user, the attachment, and a digest of the bytes.
+// Fields are in alphabetical order, as the control plane marshals them.
+type legacyAttachmentClaim struct {
+	ClerkUserID string `json:"clerk_user_id"`
+	ID          string `json:"id"`
+	Scope       string `json:"scope"`
+	SHA256      string `json:"sha256"`
 }
 
-func (c *Client) GetLegacyAttachment(ctx context.Context, jwt, clerkUserID, attachmentID string) (LegacyAttachmentResponse, error) {
+// GetLegacyAttachment reads an attachment as older clients stored it, in
+// the control plane's own database rather than buckets, and checks the
+// control plane's claim that it is clerkUserID's: an HMAC under the
+// service secret over the user, the id and the bytes' digest.
+func (c *Client) GetLegacyAttachment(ctx context.Context, jwt, clerkUserID, attachmentID string) ([]byte, error) {
 	if attachmentID == "" {
-		return LegacyAttachmentResponse{}, fmt.Errorf("controlplane: attachment id is required")
+		return nil, fmt.Errorf("controlplane: attachment id is required")
 	}
 	endpoint := c.baseURL + "/api/storage/attachment/" + url.PathEscape(attachmentID)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return LegacyAttachmentResponse{}, err
+		return nil, err
 	}
 	c.addAuth(httpReq, jwt, clerkUserID)
 	resp, err := c.doRequest(httpReq)
 	if err != nil {
-		return LegacyAttachmentResponse{}, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		return LegacyAttachmentResponse{}, ErrLegacyAttachmentNotFound
+		return nil, ErrLegacyAttachmentNotFound
 	}
 	if resp.StatusCode == http.StatusGone {
-		return LegacyAttachmentResponse{}, ErrLegacyAttachmentGone
+		return nil, ErrLegacyAttachmentGone
 	}
 	if resp.StatusCode/100 != 2 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return LegacyAttachmentResponse{}, parseError(resp.StatusCode, raw)
+		return nil, parseError(resp.StatusCode, raw)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxLegacyAttachmentBytes)+1))
 	if err != nil {
-		return LegacyAttachmentResponse{}, err
+		return nil, err
 	}
 	if len(body) > maxLegacyAttachmentBytes {
-		return LegacyAttachmentResponse{}, fmt.Errorf("controlplane: legacy attachment exceeds %d bytes", maxLegacyAttachmentBytes)
+		return nil, fmt.Errorf("controlplane: legacy attachment exceeds %d bytes", maxLegacyAttachmentBytes)
 	}
-	return LegacyAttachmentResponse{
-		Ciphertext: body,
-		Claim:      resp.Header.Get(HeaderLegacyClaim),
-	}, nil
+	if !c.legacyClaimValid(resp.Header.Get(HeaderLegacyClaim), clerkUserID, attachmentID, body) {
+		return nil, ErrLegacyClaimInvalid
+	}
+	return body, nil
+}
+
+func (c *Client) legacyClaimValid(claim, clerkUserID, attachmentID string, ciphertext []byte) bool {
+	provided, err := hex.DecodeString(claim)
+	if err != nil || len(provided) == 0 {
+		return false
+	}
+	digest := sha256.Sum256(ciphertext)
+	payload, err := json.Marshal(legacyAttachmentClaim{ClerkUserID: clerkUserID, ID: attachmentID, Scope: "attachment", SHA256: hex.EncodeToString(digest[:])})
+	if err != nil {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(c.serviceSecret))
+	mac.Write(payload)
+	return hmac.Equal(provided, mac.Sum(nil))
 }
 
 // RegisterAttachmentIndex records ownership of a v2 attachment with

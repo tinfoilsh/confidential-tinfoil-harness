@@ -139,7 +139,7 @@ func (eng *Engine) admit(ctx context.Context, p *auth.Principal, credential auth
 			return err
 		}
 		copy := *p
-		copy.SyncToken, copy.SyncExpires = granted.Token, granted.ExpiresAt
+		copy.Grant = granted
 		p = &copy
 	}
 	var source *domain.Thread
