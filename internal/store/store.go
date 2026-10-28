@@ -3,7 +3,6 @@ package store
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"maps"
 	"net/http"
@@ -515,13 +514,6 @@ func (s *Store) AuthorizeArchive(ctx context.Context, p *auth.Principal, keyByte
 	}
 	p.Grant = grant
 	return nil
-}
-
-// KeyCall passes a key management request to sync as the client sent it.
-func (s *Store) KeyCall(ctx context.Context, p *auth.Principal, path string, in json.RawMessage) (json.RawMessage, error) {
-	var out json.RawMessage
-	err := s.API.call(ctx, p, path, in, &out)
-	return out, err
 }
 
 // SyncImport makes one call of an archive import, whose job sync runs.

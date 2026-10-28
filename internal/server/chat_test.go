@@ -36,6 +36,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/jobs"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
@@ -251,7 +252,7 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 	t.Cleanup(bkServer.Close)
 	rows := &memoryRows{rows: map[string]domain.StoredRow{}, sealed: map[string]auth.ContentKey{}, cp: storage, bk: bk}
 	h := &harness{models: &inference.Models{Gateway: server.URL, Controlplane: cp.URL, Services: map[string]*inference.Service{}}, controlplane: cp.URL,
-		store: &store.Store{Rows: rows, Controlplane: controlplane.NewClient(cp.URL, nil, controlplane.WithServiceSecret(testStorageSecret)), Buckets: buckets.NewClient(bkServer.URL, testBucket, nil)}}
+		store: &store.Store{Rows: rows, Controlplane: controlplane.NewClient(cp.URL, nil, controlplane.WithServiceSecret(testStorageSecret)), Buckets: buckets.NewClient(bkServer.URL, testBucket, nil), Reseals: jobs.New[store.ResealReport](store.ResealBudget, store.ResealRetention)}}
 	h.attachments = &attach.Service{Auth: testAuth(cp), Models: h.models, Store: h.store}
 	h.auth = h.attachments.Auth
 	h.store.Repair = h.attachments
