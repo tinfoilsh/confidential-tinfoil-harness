@@ -435,7 +435,7 @@ func TestACloudImportOutOfTimeFailsAsTimedOut(t *testing.T) {
 	h.ar.Imports = jobs.New[ImportReport](budget, ImportRetention)
 	h.cp.BeforePutBlob = func(string, string) { time.Sleep(2 * budget) }
 	status, id := h.imported(t, h.archive(t, research(t)))
-	if status.State != jobs.Failed || status.Report.FailureReason != importFailureTimeout || status.Report.Phase != "projects" || !slices.Contains(status.Report.Errors, "import failed: timeout") {
+	if status.State != jobs.Failed || status.Report.FailureReason != importFailureTimeout || status.Report.Phase != "projects" || !slices.Contains(status.Report.Errors, "import timed out") {
 		t.Fatalf("the import ended %s with %+v, want failed as timed out", status.State, status.Report)
 	}
 	if told := h.outcomes(); len(told) != 1 || told[0].JobID != id || told[0].Status != controlplane.ImportOutcomeFailed || told[0].FailureReason != importFailureTimeout {

@@ -71,6 +71,15 @@ var (
 // importStates are a job's states as a client reads them.
 var importStates = map[jobs.State]string{jobs.Running: "running", jobs.Complete: "completed", jobs.Failed: "failed"}
 
+// importFailureMessages say in the report why an import ended early; the
+// control plane's email carries the longer explanation.
+var importFailureMessages = map[string]string{
+	importFailureTimeout:       "import timed out",
+	importFailureAuthorization: "Tinfoil could not authorize access to cloud storage for the import; please retry from a signed-in device",
+	importFailureWorker:        "the import worker stopped unexpectedly; please retry the import",
+	importFailureInternal:      "import failed",
+}
+
 // ImportKindCounts is what an import did with one kind of entity: stored,
 // found stored by an earlier run, failed, or blocked by its project's
 // failure.
@@ -156,7 +165,7 @@ func (j *cloudImport) run(ctx context.Context, report func(ImportReport)) (out I
 			j.report.FailureReason = importFailureWorker
 		}
 		if err != nil {
-			j.note(&j.report.Errors, "import failed: "+j.report.FailureReason)
+			j.note(&j.report.Errors, importFailureMessages[j.report.FailureReason])
 		}
 		out = j.snapshot()
 		j.tell(ctx, err)

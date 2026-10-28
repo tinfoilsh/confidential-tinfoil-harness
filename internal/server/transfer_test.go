@@ -219,7 +219,7 @@ func TestImportStatusReadsAsTheClientNamesIt(t *testing.T) {
 	}
 	want := api.Object{"jobId": *result.done.JobID, "status": "failed", "phase": "projects", "imported": float64(0), "failed": float64(1), "total": float64(2), "failureReason": "authorization_failed",
 		"counts": api.Object{"project": api.Object{"imported": float64(0), "skipped": float64(0), "failed": float64(1), "blocked": float64(0)}, "document": api.Object{"imported": float64(0), "skipped": float64(0), "failed": float64(0), "blocked": float64(0)}, "chat": api.Object{"imported": float64(0), "skipped": float64(0), "failed": float64(0), "blocked": float64(0)}},
-		"errors": []any{"project failed", "import failed: authorization_failed"}}
+		"errors": []any{"project failed", "Tinfoil could not authorize access to cloud storage for the import; please retry from a signed-in device"}}
 	if !reflect.DeepEqual(api.Parsed(w.Body.Bytes()), api.Parsed(api.Raw(want))) {
 		t.Fatalf("the status reads as %s, want %s", w.Body.String(), api.Raw(want))
 	}
