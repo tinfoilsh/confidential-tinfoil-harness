@@ -29,7 +29,6 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/buckets/bucketstub"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/seal"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
 
 // storeAttachment holds an attachment as the harness stores one: its bytes
@@ -130,43 +129,6 @@ func (s *shareStore) uploaded(id string) ([]byte, int) {
 	return s.shares[id], len(s.shares)
 }
 
-// fakeSync serves the sync enclave's import routes, which require protocol
-// 3, and runs the import jobs they start.
-type fakeSync struct {
-	mu       sync.Mutex
-	received map[string][]api.Object
-	server   *httptest.Server
-	imports  map[string]*fakeImport
-}
-
-func newFakeSync(t *testing.T, h *harness) *fakeSync {
-	t.Helper()
-	f := &fakeSync{received: map[string][]api.Object{}, imports: map[string]*fakeImport{}}
-	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Sync-Protocol") != "3" {
-			w.WriteHeader(426)
-			io.WriteString(w, `{"ok":false,"code":"SYNC_PROTOCOL_UPGRADE_REQUIRED"}`)
-			return
-		}
-		var in api.Object
-		json.NewDecoder(r.Body).Decode(&in)
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		f.received[r.URL.Path] = append(f.received[r.URL.Path], in)
-		switch r.URL.Path {
-		case "/v1/import/create", "/v1/import/upload", "/v1/import/start", "/v1/import/status":
-			status, out := f.importStep(t, h, r, in)
-			w.WriteHeader(status)
-			json.NewEncoder(w).Encode(out)
-		default:
-			w.WriteHeader(404)
-		}
-	}))
-	t.Cleanup(f.server.Close)
-	h.store.API = &store.Client{URL: f.server.URL, Client: f.server.Client()}
-	return f
-}
-
 func TestPublicAttachmentPropagatesMissingBlob(t *testing.T) {
 	h, _, key := testChatHarness(t, nil)
 	w := postRoute(h, "/v1/attachments/get-public", api.Object{"id": "missing", "attKey": keyBase64(key)}, "")
@@ -177,12 +139,6 @@ func TestPublicAttachmentPropagatesMissingBlob(t *testing.T) {
 	if w.Code != http.StatusNotFound || response.Error.Code != "THREAD_NOT_FOUND" {
 		t.Fatalf("missing public blob: HTTP %d %s", w.Code, w.Body.String())
 	}
-}
-
-func (f *fakeSync) requests(path string) []api.Object {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]api.Object(nil), f.received[path]...)
 }
 
 func capturePrompt(prompt *string) http.HandlerFunc {

@@ -78,6 +78,26 @@ func (s *Store) CurrentKey(ctx context.Context, p *auth.Principal) (*KeyState, e
 	return state, nil
 }
 
+// CheckRegisteredKey refuses a key that is not the caller's registered
+// current key, naming the registered one when there is one: the control
+// plane takes new rows only under it, so a job sealing many would be
+// refused row by row.
+func (s *Store) CheckRegisteredKey(ctx context.Context, p *auth.Principal, key auth.ContentKey) error {
+	defer clear(key[:])
+	current, err := s.Controlplane.GetCurrentKey(ctx, string(p.JWT), p.ID)
+	if err != nil {
+		return FromControlplane(err)
+	}
+	if current == nil || current.KeyID != keyID(key) {
+		e := api.Err(409, "KEY_MISMATCH", "The key is not the registered content key")
+		if current != nil {
+			e.KeyID = current.KeyID
+		}
+		return e
+	}
+	return nil
+}
+
 // RegisterKey registers key as the caller's current key, with a bundle
 // when given, and returns its id. ifMatch is the current key's etag, or
 // "*" for an account that must have none. The control plane refuses a

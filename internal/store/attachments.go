@@ -87,6 +87,24 @@ func (s *Store) PutAttachment(ctx context.Context, p *auth.Principal, chatID, cl
 	return id, base64.StdEncoding.EncodeToString(key), nil
 }
 
+// RetireAttachments removes attachments stored for a chat that never came
+// to name them: each leaves the index, then buckets. One whose index entry
+// the control plane could not drop keeps its bytes, since a row may still
+// name it; the control plane's sweeps decide. The removal outlives ctx.
+func (s *Store) RetireAttachments(ctx context.Context, p *auth.Principal, ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bucketsCleanupTimeout)
+	defer cancel()
+	for _, id := range ids {
+		if err := s.Controlplane.DeleteAttachmentIndex(cleanupCtx, string(p.JWT), p.ID, id); err != nil {
+			continue
+		}
+		_ = s.Buckets.Delete(cleanupCtx, p.ID, id)
+	}
+}
+
 // reserveAttachment has the control plane expect the bytes. A reservation
 // refused while the id's earlier copy is still being purged is tried
 // again shortly.

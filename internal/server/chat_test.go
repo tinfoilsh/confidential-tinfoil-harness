@@ -296,7 +296,8 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 	h.auth = h.attachments.Auth
 	h.store.Repair = h.attachments
 	h.engine = &engine.Engine{Store: h.store, Models: h.models, Attachments: h.attachments, Auth: h.auth}
-	h.archives = &archives.Service{Scratch: archives.NewScratch(t.TempDir(), 1<<30), CPClient: cp.Client(), Store: h.store, Attachments: h.attachments, Auth: h.auth, Controlplane: cp.URL}
+	h.archives = &archives.Service{Scratch: archives.NewScratch(t.TempDir(), 1<<30), CPClient: cp.Client(), Store: h.store, Attachments: h.attachments, Auth: h.auth, Controlplane: cp.URL,
+		Imports: jobs.New[archives.ImportReport](archives.ImportBudget, archives.ImportRetention)}
 	m := &inference.Model{Name: "kimi-k3", Context: 8192, Client: &http.Client{Transport: &auth.CallerTransport{Inner: server.Client().Transport, UsageSecret: "test-usage-secret"}}}
 	h.models.Offer.Set([]*inference.Model{m}, nil)
 	h.models.Auto = m

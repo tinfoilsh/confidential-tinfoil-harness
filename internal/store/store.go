@@ -465,7 +465,7 @@ func (s *Store) CreateProjectDocument(ctx context.Context, p *auth.Principal, ke
 	return doc, err
 }
 
-// Keys and imports
+// Archives
 
 func (s *Store) AuthorizeArchive(ctx context.Context, p *auth.Principal, keyBytes []byte, operation string) error {
 	if len(keyBytes) == 0 {
@@ -482,9 +482,4 @@ func (s *Store) AuthorizeArchive(ctx context.Context, p *auth.Principal, keyByte
 	}
 	p.Grant = grant
 	return nil
-}
-
-// SyncImport makes one call of an archive import, whose job sync runs.
-func (s *Store) SyncImport(ctx context.Context, p *auth.Principal, step string, in, out any) error {
-	return s.API.call(ctx, p, "/v1/import/"+step, in, out)
 }

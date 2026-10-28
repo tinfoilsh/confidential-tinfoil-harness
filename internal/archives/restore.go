@@ -249,7 +249,7 @@ func (j *importRun) nativeCloud(b *nativeBackup) error {
 			return err
 		}
 		projects[project.ID] = true
-		if err := cloud.entity("project", project.ID, "", cloudProject{Name: cmp.Or(strings.TrimSpace(project.Name), "Imported Project"), Description: project.Description, SystemInstructions: project.SystemInstructions, Color: domain.ValueOr(project.Color, ""), Memory: []json.RawMessage{}}); err != nil {
+		if err := cloud.entity("project", project.ID, "", cloudProject{Name: cmp.Or(strings.TrimSpace(project.Name), "Imported Project"), Description: project.Description, SystemInstructions: project.SystemInstructions, Color: domain.ValueOr(project.Color, "")}); err != nil {
 			return err
 		}
 	}
@@ -261,8 +261,7 @@ func (j *importRun) nativeCloud(b *nativeBackup) error {
 		if !projects[doc.ProjectID] || BackupDocumentPath(doc.ProjectID, doc.ID) != f.Name {
 			return errInvalidBackup("a document is filed apart from its project")
 		}
-		size := int64(len(doc.ExtractedText))
-		if err := j.cloud.entity("document", doc.ProjectID+"/"+doc.ID, doc.ProjectID, cloudDocument{Filename: cmp.Or(doc.Filename, "document"), ContentType: cmp.Or(doc.ContentType, "text/plain"), SourceSizeBytes: int64(max(doc.SizeBytes, 0)), SizeBytes: size, Content: doc.ExtractedText}); err != nil {
+		if err := j.cloud.entity("document", doc.ProjectID+"/"+doc.ID, doc.ProjectID, cloudDocument{Filename: cmp.Or(doc.Filename, "document"), ContentType: cmp.Or(doc.ContentType, "text/plain"), SizeBytes: max(doc.SizeBytes, 0), Content: doc.ExtractedText}); err != nil {
 			return err
 		}
 	}

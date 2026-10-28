@@ -84,6 +84,8 @@ type Store struct {
 	// of them under a token, and an ack under that token drops them.
 	SearchIndexDeletions []controlplane.SearchIndexDeletion
 	searchClaims         map[string]string // deletion id to the token that claimed it
+	// ImportOutcomes are the imports the enclave reported ended, in order.
+	ImportOutcomes []controlplane.ImportOutcome
 	// MinimumProfileSyncProtocol refuses profile overwrites by older
 	// writers when set.
 	MinimumProfileSyncProtocol int
@@ -169,6 +171,7 @@ func New() *Store {
 	s.mux.HandleFunc("GET /api/sync/attachment-owner/{aid}", s.handleAttachmentOwner)
 	s.mux.HandleFunc("POST /api/sync/pending-attachments/{aid}", s.handleReservePendingAttachment)
 	s.mux.HandleFunc("POST /api/sync/pending-attachments/sweep", s.handleSweepPendingAttachments)
+	s.mux.HandleFunc("POST /api/sync/notify-import-complete", s.handleNotifyImportOutcome)
 	return s
 }
 
@@ -1042,12 +1045,15 @@ func (s *Store) handleAttachmentOwner(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"clerk_user_id": owner})
 }
 
-// The pending-write ledger accepts every reservation, except while an
-// earlier copy of the id is being purged, and never has anything to sweep.
+// The pending-write ledger accepts every reservation, except of an id
+// whose earlier copy is queued for purging or being purged.
 func (s *Store) handleReservePendingAttachment(w http.ResponseWriter, r *http.Request) {
 	aid := r.PathValue("aid")
-	if s.ReserveAttachmentPurges[aid] > 0 {
-		s.ReserveAttachmentPurges[aid]--
+	queued := slices.ContainsFunc(s.AttachmentPurges, func(purge controlplane.AttachmentPurge) bool { return purge.AttachmentID == aid })
+	if queued || s.ReserveAttachmentPurges[aid] > 0 {
+		if s.ReserveAttachmentPurges[aid] > 0 {
+			s.ReserveAttachmentPurges[aid]--
+		}
 		writeJSON(w, http.StatusConflict, map[string]string{"code": controlplane.StatusAttachmentPurgeInProgress})
 		return
 	}
@@ -1056,4 +1062,26 @@ func (s *Store) handleReservePendingAttachment(w http.ResponseWriter, r *http.Re
 
 func (s *Store) handleSweepPendingAttachments(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"rows": []any{}})
+}
+
+// handleNotifyImportOutcome records how an import ended, for the user the
+// request names, as the control plane does before emailing them.
+func (s *Store) handleNotifyImportOutcome(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		JobID         string `json:"jobId"`
+		Source        string `json:"source"`
+		Status        string `json:"status"`
+		Imported      int    `json:"importedCount"`
+		Failed        int    `json:"failedCount"`
+		FailureReason string `json:"failureReason"`
+		FailureDetail string `json:"failureDetail"`
+	}
+	user := r.Header.Get(controlplane.HeaderClerkUserID)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || user == "" || body.JobID == "" || body.Status == "failed" && body.FailureReason == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "BAD_REQUEST", "error": "invalid import outcome"})
+		return
+	}
+	s.ImportOutcomes = append(s.ImportOutcomes, controlplane.ImportOutcome{ClerkUserID: user, JobID: body.JobID, Source: body.Source, Status: controlplane.ImportOutcomeStatus(body.Status),
+		Imported: body.Imported, Failed: body.Failed, FailureReason: body.FailureReason, FailureDetail: body.FailureDetail})
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }

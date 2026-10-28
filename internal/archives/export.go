@@ -21,6 +21,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/jobs"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/seal"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
@@ -32,6 +33,8 @@ type Service struct {
 	Auth         *auth.Authenticator
 	Controlplane string
 	Store        *store.Store
+	// Imports runs each caller's cloud import.
+	Imports *jobs.Runner[ImportReport]
 }
 
 func (ar *Service) ShareThread(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *ShareRequest) (any, error) {
@@ -567,7 +570,7 @@ func (ar *Service) writeBackup(ctx context.Context, p *auth.Principal, key *auth
 // document whose content cannot be read is left out and listed as omitted.
 func backupChat(b *BackupWriter, rel *backupRelationships, kind string, t *domain.Thread, image func(*domain.Attachment) ([]byte, error), document func(*domain.Attachment) error) error {
 	entry := backupThread{Thread: *t, Messages: make([]backupMessage, 0, len(t.Messages))}
-	entry.ActiveRun, entry.LastRequestID, entry.LastRequestKind, entry.Flagged, entry.HiddenCount, entry.RecordVersion = nil, "", "", false, 0, 0
+	entry.ActiveRun, entry.LastRequestID, entry.LastRequestKind, entry.Flagged, entry.HiddenCount, entry.RecordVersion, entry.ImportedFrom = nil, "", "", false, 0, 0, nil
 	omit := func(id string) {
 		b.omit(BackupOmission{Kind: "attachment", SourceID: id, ParentSourceID: t.ID, Category: "unavailable", Reason: "attachment_not_found"})
 	}

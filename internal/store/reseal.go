@@ -65,19 +65,10 @@ func (s *Store) Reseal(ctx context.Context, p *auth.Principal, keys []auth.Conte
 	}
 	// The control plane accepts a reseal only under the registered key,
 	// so any other target would be refused row by row.
-	current, err := s.Controlplane.GetCurrentKey(ctx, string(p.JWT), p.ID)
-	if err != nil {
-		return ResealReport{}, FromControlplane(err)
+	if err := s.CheckRegisteredKey(ctx, p, target); err != nil {
+		return ResealReport{}, err
 	}
 	targetKey := seal.Key{Bytes: bytes.Clone(target[:]), KeyIDHex: keyID(target)}
-	if current == nil || current.KeyID != targetKey.KeyIDHex {
-		seal.Zero(targetKey.Bytes)
-		e := api.Err(409, "KEY_MISMATCH", "The target is not the registered content key")
-		if current != nil {
-			e.KeyID = current.KeyID
-		}
-		return ResealReport{}, e
-	}
 	// The job outlives the request, so it takes copies of the keys and
 	// of who the caller is.
 	candidates := make([]seal.Key, 0, len(keys))
