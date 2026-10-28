@@ -1,3 +1,7 @@
+// Package controlplane is the harness's client for the control plane's
+// storage API: the sealed rows, the key registry, the attachment index,
+// the search index state and the cleanup queues it keeps for the enclave.
+
 package controlplane
 
 import (

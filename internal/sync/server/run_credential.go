@@ -6,13 +6,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/seal"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/auth"
-	cryptopkg "github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/crypto"
 )
 
 const (
@@ -78,9 +78,9 @@ func runKeyID(encoded string) (string, error) {
 	if err != nil {
 		return "", badRequest("invalid key")
 	}
-	defer cryptopkg.Zero(key)
-	id, err := cryptopkg.DeriveKeyID(key)
-	return cryptopkg.KeyIDHex(id), err
+	defer seal.Zero(key)
+	id, err := seal.DeriveKeyID(key)
+	return seal.KeyIDHex(id), err
 }
 
 func runIDValid(id string) bool {
@@ -140,7 +140,7 @@ func (h *Handler) authorizeRun(w http.ResponseWriter, r *http.Request, sess Sess
 				ProjectID string `json:"projectId"`
 			}
 			decodeErr = json.Unmarshal(plain, &chat)
-			cryptopkg.Zero(plain)
+			seal.Zero(plain)
 			if decodeErr != nil {
 				writeError(w, badRequest("invalid chat"))
 				return
@@ -161,7 +161,7 @@ func (h *Handler) writeStorageCredential(w http.ResponseWriter, claims runCreden
 		writeError(w, &AppError{Status: http.StatusServiceUnavailable, Code: CodeInternal, Message: "run credentials are unavailable"})
 		return
 	}
-	defer cryptopkg.Zero(key)
+	defer seal.Zero(key)
 	now := time.Now()
 	claims.Issuer, claims.Audience = runCredentialIssuer, jwt.ClaimStrings{runCredentialAudience}
 	claims.IssuedAt, claims.ExpiresAt = jwt.NewNumericDate(now), jwt.NewNumericDate(now.Add(runCredentialLifetime))
@@ -182,7 +182,7 @@ func (h *Handler) verifyRunCredential(token string) (Session, error) {
 	if err != nil {
 		return Session{}, err
 	}
-	defer cryptopkg.Zero(key)
+	defer seal.Zero(key)
 	var claims runCredential
 	parsed, err := jwt.ParseWithClaims(strings.TrimPrefix(token, runCredentialPrefix), &claims, func(*jwt.Token) (any, error) { return key, nil }, jwt.WithValidMethods([]string{"HS256"}), jwt.WithIssuer(runCredentialIssuer), jwt.WithAudience(runCredentialAudience), jwt.WithExpirationRequired(), jwt.WithIssuedAt(), jwt.WithLeeway(auth.ClockSkewLeeway))
 	validScope := claims.Operation == "" && runIDValid(claims.ChatID) || claims.Operation == "import" || claims.Operation == "export" || claims.Operation == "project-upload" && runIDValid(claims.ProjectID)

@@ -139,7 +139,7 @@ func TestShareOpenRejectsOversizedDecompressedPlaintext(t *testing.T) {
 	if err := gz.Close(); err != nil {
 		t.Fatalf("gzip close: %v", err)
 	}
-	ciphertext, err := seal(key, buf.Bytes())
+	ciphertext, err := sealShare(key, buf.Bytes())
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}

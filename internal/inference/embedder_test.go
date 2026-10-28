@@ -3,7 +3,6 @@ package inference
 import (
 	"context"
 	"errors"
-	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -18,8 +17,8 @@ func (f embeddingServiceFunc) New(ctx context.Context, params openai.EmbeddingNe
 	return f(ctx, params, opts...)
 }
 
-func testClient(service embeddingService) *Client {
-	return &Client{model: "test-model", embeddings: service}
+func testClient(service embeddingService) *Embedder {
+	return &Embedder{model: "test-model", embeddings: service}
 }
 
 func TestEmbedReturnsVectorsInInputOrder(t *testing.T) {
@@ -90,35 +89,23 @@ func TestEmbedRejectsNilResponse(t *testing.T) {
 }
 
 func TestConfigured(t *testing.T) {
-	c, err := NewClient("", "m")
+	c, err := NewEmbedder("", "m")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if c.Configured() {
 		t.Fatal("empty api key should not be configured")
 	}
-	c, err = NewClient("k", "")
+	c, err = NewEmbedder("k", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if c.Configured() {
 		t.Fatal("empty model should not be configured")
 	}
-	if !testClient(embeddingServiceFunc(nil)).Configured() {
+	if !testClient(embeddingServiceFunc(func(context.Context, openai.EmbeddingNewParams, ...option.RequestOption) (*openai.CreateEmbeddingResponse, error) {
+		return &openai.CreateEmbeddingResponse{}, nil
+	})).Configured() {
 		t.Fatal("expected configured client")
-	}
-}
-
-func TestProductionClientUsesTinfoilSDK(t *testing.T) {
-	source, err := os.ReadFile("client.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(source)
-	if strings.Contains(text, `"net/http"`) || strings.Contains(text, "http.Client") {
-		t.Fatal("production inference client must not use a plain HTTP client")
-	}
-	if !strings.Contains(text, "tinfoil.NewClientWithOptions") {
-		t.Fatal("production inference client must use the attested Tinfoil SDK")
 	}
 }

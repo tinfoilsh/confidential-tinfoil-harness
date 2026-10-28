@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/controlplane"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/envelope"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/seal"
 )
 
 // Application error codes returned in JSON envelopes. These match the
@@ -128,8 +128,8 @@ func translate(err error) *AppError {
 	// enclave fault. A 5xx here makes clients retry forever (and
 	// re-upload any attachments that preceded the push each time);
 	// a 413 with a stable code lets them stop and tell the user.
-	if errors.Is(err, envelope.ErrPlaintextTooLarge) {
-		return payloadTooLarge(fmt.Sprintf("plaintext exceeds %d bytes", envelope.MaxPlaintextBytes))
+	if errors.Is(err, seal.ErrPlaintextTooLarge) {
+		return payloadTooLarge(fmt.Sprintf("plaintext exceeds %d bytes", seal.MaxPlaintextBytes))
 	}
 	var maxBytes *http.MaxBytesError
 	if errors.As(err, &maxBytes) {

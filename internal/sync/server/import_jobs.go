@@ -7,11 +7,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/seal"
 	"strings"
 	"sync"
 	"time"
-
-	cryptopkg "github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/crypto"
 )
 
 // ImportStallTimeout is how long a running import may go without
@@ -261,8 +260,8 @@ func (j *ImportJobState) finishWithReason(status ImportJobStatus, reason ImportF
 	j.failureReason = reason
 	j.failureDetail = detail
 	j.updatedAt = time.Now().UTC()
-	cryptopkg.Zero(j.cek)
-	cryptopkg.Zero(j.stagingKey)
+	seal.Zero(j.cek)
+	seal.Zero(j.stagingKey)
 	close(j.done)
 }
 
@@ -277,8 +276,8 @@ func (j *ImportJobState) failIfStaleStaging(retention time.Duration, now time.Ti
 	}
 	j.status = ImportJobFailed
 	j.updatedAt = now.UTC()
-	cryptopkg.Zero(j.cek)
-	cryptopkg.Zero(j.stagingKey)
+	seal.Zero(j.cek)
+	seal.Zero(j.stagingKey)
 	close(j.done)
 	return 0, true
 }
@@ -322,7 +321,7 @@ func (c *ImportCoordinator) Create(userID string, req ImportCreateRequest) (*Imp
 		}
 	}
 
-	stagingKey, err := cryptopkg.RandomKey()
+	stagingKey, err := seal.RandomKey()
 	if err != nil {
 		return nil, err
 	}
@@ -357,12 +356,12 @@ func (c *ImportCoordinator) Start(parentCtx context.Context, deps Deps, sess Ses
 	job.mu.Lock()
 	if job.startedRun {
 		job.mu.Unlock()
-		cryptopkg.Zero(cek)
+		seal.Zero(cek)
 		return false
 	}
 	if job.status != ImportJobStaging {
 		job.mu.Unlock()
-		cryptopkg.Zero(cek)
+		seal.Zero(cek)
 		return false
 	}
 	job.startedRun = true

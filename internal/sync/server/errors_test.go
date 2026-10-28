@@ -9,11 +9,11 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/envelope"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/seal"
 )
 
 func TestTranslateOversizePlaintextIs413(t *testing.T) {
-	err := fmt.Errorf("seal: %w", envelope.ErrPlaintextTooLarge)
+	err := fmt.Errorf("seal: %w", seal.ErrPlaintextTooLarge)
 	a := translate(err)
 	if a.Status != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want 413", a.Status)
@@ -24,7 +24,7 @@ func TestTranslateOversizePlaintextIs413(t *testing.T) {
 }
 
 func TestTranslateOtherEnvelopeErrorsStayInternal(t *testing.T) {
-	a := translate(envelope.ErrInvalidEnvelope)
+	a := translate(seal.ErrInvalidEnvelope)
 	if a.Status != http.StatusInternalServerError || a.Code != CodeInternal {
 		t.Fatalf("got %d %q, want 500 INTERNAL", a.Status, a.Code)
 	}

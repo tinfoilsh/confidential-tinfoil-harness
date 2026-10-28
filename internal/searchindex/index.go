@@ -1,5 +1,5 @@
 // Package searchindex implements the per-user chat search index the
-// sync enclave maintains, modeled on what E2EE messengers build
+// harness maintains, modeled on what E2EE messengers build
 // client-side (SQLite FTS5 style): an inverted index from token to
 // posting list for exact keyword search, plus a handful of quantized
 // chunk-embedding vectors per chat for semantic ranking as a bonus

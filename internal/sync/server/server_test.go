@@ -25,11 +25,10 @@ import (
 	"github.com/MicahParks/keyfunc/v3"
 	"github.com/golang-jwt/jwt/v5"
 
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/buckets"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/seal"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/auth"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/buckets"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/controlplane"
-	cryptopkg "github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/crypto"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/envelope"
 )
 
 // ---- test fixture ------------------------------------------------------
@@ -990,12 +989,12 @@ func newFixture(t *testing.T) *fixture {
 	srv := httptest.NewServer(handler.Routes())
 	t.Cleanup(srv.Close)
 
-	rawKey := make([]byte, cryptopkg.KeySize)
+	rawKey := make([]byte, seal.KeySize)
 	if _, err := rand.Read(rawKey); err != nil {
 		t.Fatal(err)
 	}
-	kidBytes, _ := cryptopkg.DeriveKeyID(rawKey)
-	kidHex := cryptopkg.KeyIDHex(kidBytes)
+	kidBytes, _ := seal.DeriveKeyID(rawKey)
+	kidHex := seal.KeyIDHex(kidBytes)
 
 	return &fixture{
 		t:          t,
@@ -1019,9 +1018,9 @@ func newFixture(t *testing.T) *fixture {
 func TestBlobOperationHashIgnoresRandomizedEnvelopeBytes(t *testing.T) {
 	f := newFixture(t)
 	plaintext := []byte(`{"id":"chat_1","messages":[]}`)
-	aadBytes, err := envelope.CanonicalPayloadAAD(envelope.AAD{
+	aadBytes, err := seal.CanonicalPayloadAAD(seal.AAD{
 		KeyIDHex:    f.userKeyID,
-		Scope:       envelope.ScopeChat,
+		Scope:       seal.ScopeChat,
 		ID:          "chat_1",
 		ClerkUserID: f.userSub,
 	})
@@ -1306,7 +1305,7 @@ func TestPullUnknownKey(t *testing.T) {
 		t.Fatalf("push: %d", resp.StatusCode)
 	}
 	// Try pull with a different key
-	otherKey := make([]byte, cryptopkg.KeySize)
+	otherKey := make([]byte, seal.KeySize)
 	rand.Read(otherKey)
 	pullResp, pullBody := f.post("/v1/sync/pull", PullRequest{
 		Scope: "chat", IDs: []string{"c1"},
@@ -1338,7 +1337,7 @@ func TestPullBatchPreservesRequestOrderAcrossMixedOutcomes(t *testing.T) {
 	f := newFixture(t)
 	tok := f.jwt()
 
-	otherKey := make([]byte, cryptopkg.KeySize)
+	otherKey := make([]byte, seal.KeySize)
 	rand.Read(otherKey)
 	otherKeyB64 := base64.StdEncoding.EncodeToString(otherKey)
 
@@ -1821,7 +1820,7 @@ func TestRegisterKeyExistingDataConflict(t *testing.T) {
 		t.Fatalf("seed push: %d", r.StatusCode)
 	}
 	// Now try to register a different fresh key without start_fresh.
-	freshKey := make([]byte, cryptopkg.KeySize)
+	freshKey := make([]byte, seal.KeySize)
 	rand.Read(freshKey)
 	resp, body := f.post("/v1/key/register", KeyRegisterRequest{
 		Key:            base64.StdEncoding.EncodeToString(freshKey),
@@ -1863,7 +1862,7 @@ func TestAddBundleForwards(t *testing.T) {
 func TestAddBundleRejectsMismatchedKeyID(t *testing.T) {
 	f := newFixture(t)
 	tok := f.jwt()
-	otherKey := make([]byte, cryptopkg.KeySize)
+	otherKey := make([]byte, seal.KeySize)
 	rand.Read(otherKey)
 	resp, body := f.post("/v1/key/add-bundle", AddBundleRequest{
 		KeyID:          f.userKeyID,
@@ -1960,7 +1959,7 @@ func TestAddBundleRejectsNonCanonicalBundle(t *testing.T) {
 func TestRemoveBundleRejectsMismatchedKeyID(t *testing.T) {
 	f := newFixture(t)
 	tok := f.jwt()
-	otherKey := make([]byte, cryptopkg.KeySize)
+	otherKey := make([]byte, seal.KeySize)
 	rand.Read(otherKey)
 	resp, body := f.post("/v1/key/remove-bundle", RemoveBundleRequest{
 		KeyID:          f.userKeyID,
@@ -2037,12 +2036,12 @@ func TestDeleteAllProjectsRouteAndWireContract(t *testing.T) {
 	if captured.Header.Get(controlplane.HeaderIfMatch) != "" {
 		t.Fatalf("unexpected If-Match = %q", captured.Header.Get(controlplane.HeaderIfMatch))
 	}
-	opKey, err := cryptopkg.DeriveOpHashKey(f.userKey)
+	opKey, err := seal.DeriveOpHashKey(f.userKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cryptopkg.Zero(opKey)
-	wantHash := cryptopkg.ComputeOperationHash(opKey, cryptopkg.CanonicalInput{
+	defer seal.Zero(opKey)
+	wantHash := seal.ComputeOperationHash(opKey, seal.CanonicalInput{
 		Method:         http.MethodDelete,
 		Path:           controlplane.DeleteAllProjectsPath,
 		KeyIDHex:       f.userKeyID,
@@ -2142,7 +2141,7 @@ func TestMigrateLegacyBlob(t *testing.T) {
 	tok := f.jwt()
 	// Plant a legacy v0 blob directly in the cp stub.
 	pt := []byte(`{"id":"chat_old","title":"legacy","messages":[]}`)
-	nonce, ct, err := cryptopkg.Seal(f.userKey, pt, nil)
+	nonce, ct, err := seal.GCMSeal(f.userKey, pt, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2174,7 +2173,7 @@ func TestMigrateLegacyBlob(t *testing.T) {
 	f.cp.mu.Lock()
 	after := f.cp.blobs["chat/chat_old"].Body
 	f.cp.mu.Unlock()
-	if envelope.Detect(after) != envelope.VersionV2 {
+	if seal.Detect(after) != seal.VersionV2 {
 		t.Fatalf("blob not migrated to v2: %s", after)
 	}
 }
@@ -2195,10 +2194,10 @@ func TestMigrateV2ProfileAddressedByClerkUserID(t *testing.T) {
 	// pinned to the profile singleton, not the clerk_user_id the
 	// controlplane stores the row under.
 	profilePT := []byte(`{"language":"English","theme":"dark"}`)
-	v2blob, err := envelope.Encrypt(f.userKey, profilePT, envelope.AAD{
+	v2blob, err := seal.Encrypt(f.userKey, profilePT, seal.AAD{
 		KeyIDHex:    f.userKeyID,
-		Scope:       envelope.ScopeProfile,
-		ID:          envelope.ProfileSingletonID,
+		Scope:       seal.ScopeProfile,
+		ID:          seal.ProfileSingletonID,
 		ClerkUserID: f.userSub,
 	})
 	if err != nil {
@@ -2206,13 +2205,13 @@ func TestMigrateV2ProfileAddressedByClerkUserID(t *testing.T) {
 	}
 
 	// Mint the target key the migrate re-seals under.
-	targetRaw := make([]byte, cryptopkg.KeySize)
+	targetRaw := make([]byte, seal.KeySize)
 	if _, err := rand.Read(targetRaw); err != nil {
 		t.Fatal(err)
 	}
 	targetB64 := base64.StdEncoding.EncodeToString(targetRaw)
-	targetKIDBytes, _ := cryptopkg.DeriveKeyID(targetRaw)
-	targetKID := cryptopkg.KeyIDHex(targetKIDBytes)
+	targetKIDBytes, _ := seal.DeriveKeyID(targetRaw)
+	targetKID := seal.KeyIDHex(targetKIDBytes)
 
 	// The profile row lives under "profile/profile" in the stub, but
 	// the needs-migration list reports it by clerk_user_id, mirroring
@@ -2244,16 +2243,16 @@ func TestMigrateV2ProfileAddressedByClerkUserID(t *testing.T) {
 	f.cp.mu.Lock()
 	after := f.cp.blobs["profile/profile"]
 	f.cp.mu.Unlock()
-	if envelope.Detect(after.Body) != envelope.VersionV2 {
+	if seal.Detect(after.Body) != seal.VersionV2 {
 		t.Fatalf("profile row not v2 after migrate")
 	}
 	if after.KeyID != targetKID {
 		t.Fatalf("profile row key id = %q, want target %q", after.KeyID, targetKID)
 	}
-	targetKey := envelope.Key{Bytes: targetRaw, KeyIDHex: targetKID}
-	dec, err := envelope.DecryptV2(after.Body, []envelope.Key{targetKey}, envelope.AAD{
-		Scope:       envelope.ScopeProfile,
-		ID:          envelope.ProfileSingletonID,
+	targetKey := seal.Key{Bytes: targetRaw, KeyIDHex: targetKID}
+	dec, err := seal.DecryptV2(after.Body, []seal.Key{targetKey}, seal.AAD{
+		Scope:       seal.ScopeProfile,
+		ID:          seal.ProfileSingletonID,
 		ClerkUserID: f.userSub,
 	})
 	if err != nil {
@@ -2268,10 +2267,10 @@ func TestMigrateBlobBumpsAttemptsOnFailure(t *testing.T) {
 	f := newFixture(t)
 	tok := f.jwt()
 	// A blob the user does not have the key for.
-	otherKey := make([]byte, cryptopkg.KeySize)
+	otherKey := make([]byte, seal.KeySize)
 	rand.Read(otherKey)
 	pt := []byte(`{"x":1}`)
-	nonce, ct, _ := cryptopkg.Seal(otherKey, pt, nil)
+	nonce, ct, _ := seal.GCMSeal(otherKey, pt, nil)
 	v0, _ := json.Marshal(map[string]string{
 		"iv":   base64.StdEncoding.EncodeToString(nonce),
 		"data": base64.StdEncoding.EncodeToString(ct),
@@ -2450,10 +2449,10 @@ func TestProfileSyncProtocolForwardedAndHashBound(t *testing.T) {
 		t.Fatal("profile operation hash was not forwarded")
 	}
 
-	aadBytes, err := envelope.CanonicalPayloadAAD(envelope.AAD{
+	aadBytes, err := seal.CanonicalPayloadAAD(seal.AAD{
 		KeyIDHex:    f.userKeyID,
-		Scope:       envelope.ScopeProfile,
-		ID:          envelope.ProfileSingletonID,
+		Scope:       seal.ScopeProfile,
+		ID:          seal.ProfileSingletonID,
 		ClerkUserID: f.userSub,
 	})
 	if err != nil {
@@ -2561,12 +2560,12 @@ func TestProfileSyncProtocolMetadataIgnoredOutsideProfileScope(t *testing.T) {
 func TestKeyIDDerivationConsistencyAcrossClients(t *testing.T) {
 	// The enclave derives KeyID identically regardless of who is calling.
 	// This test pins the hex output for a deterministic key.
-	key := bytes.Repeat([]byte{0x11}, cryptopkg.KeySize)
-	id, err := cryptopkg.DeriveKeyID(key)
+	key := bytes.Repeat([]byte{0x11}, seal.KeySize)
+	id, err := seal.DeriveKeyID(key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := cryptopkg.KeyIDHex(id)
+	got := seal.KeyIDHex(id)
 	if len(got) != 32 {
 		t.Fatalf("bad length")
 	}
@@ -2614,7 +2613,7 @@ func TestDeterministicAttachmentIDMatchesBucketsTokenContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cryptopkg.Zero(key)
+	defer seal.Zero(key)
 	if len(id) != 36 {
 		t.Fatalf("attachment id length = %d, want 36", len(id))
 	}
@@ -2631,7 +2630,7 @@ func TestDeterministicAttachmentIDMatchesBucketsTokenContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cryptopkg.Zero(key2)
+	defer seal.Zero(key2)
 	if id2 != id {
 		t.Fatalf("retry id mismatch: got %s, want %s", id2, id)
 	}
@@ -2646,7 +2645,7 @@ func TestDeterministicAttachmentIDMatchesBucketsTokenContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cryptopkg.Zero(otherKey)
+	defer seal.Zero(otherKey)
 	if otherID == id {
 		t.Fatalf("different plaintext must derive different id")
 	}
@@ -2656,7 +2655,7 @@ func TestDeterministicAttachmentIDMatchesBucketsTokenContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cryptopkg.Zero(otherChatKey)
+	defer seal.Zero(otherChatKey)
 	if otherChatID == id {
 		t.Fatalf("different chat id must derive different attachment id")
 	}
@@ -2670,12 +2669,12 @@ func TestDeterministicAttachmentIDMatchesBucketsTokenContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cryptopkg.Zero(shiftedA_Key)
+	defer seal.Zero(shiftedA_Key)
 	shiftedB_ID, shiftedB_Key, err := deriveAttachmentMaterials("idem", "attachment|chat-1", "user_123", plaintext)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cryptopkg.Zero(shiftedB_Key)
+	defer seal.Zero(shiftedB_Key)
 	if shiftedA_ID == shiftedB_ID {
 		t.Fatalf("delimiter ambiguity: shifting bytes across field boundary derived the same id (%s)", shiftedA_ID)
 	}

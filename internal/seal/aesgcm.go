@@ -1,4 +1,4 @@
-package crypto
+package seal
 
 import (
 	"crypto/aes"
@@ -25,7 +25,7 @@ func RandomKey() ([]byte, error) {
 	return k, nil
 }
 
-func Seal(key, plaintext, aad []byte) (nonce, ciphertext []byte, err error) {
+func GCMSeal(key, plaintext, aad []byte) (nonce, ciphertext []byte, err error) {
 	if len(key) != KeySize {
 		return nil, nil, ErrKeySize
 	}
@@ -45,7 +45,7 @@ func Seal(key, plaintext, aad []byte) (nonce, ciphertext []byte, err error) {
 	return nonce, ciphertext, nil
 }
 
-func Open(key, nonce, ciphertext, aad []byte) ([]byte, error) {
+func GCMOpen(key, nonce, ciphertext, aad []byte) ([]byte, error) {
 	if len(key) != KeySize {
 		return nil, ErrKeySize
 	}

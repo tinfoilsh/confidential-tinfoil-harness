@@ -12,9 +12,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/buckets"
-	cryptopkg "github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/crypto"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/envelope"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/buckets"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/seal"
 )
 
 // sealLegacyChatBlob emits the v0 envelope shape (`{iv, data}` JSON)
@@ -22,7 +21,7 @@ import (
 // webapp serializer.
 func sealLegacyChatBlob(t *testing.T, key, pt []byte) []byte {
 	t.Helper()
-	nonce, ct, err := cryptopkg.Seal(key, pt, nil)
+	nonce, ct, err := seal.GCMSeal(key, pt, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +46,7 @@ func sealLegacyChatBlobV1(t *testing.T, key, pt []byte) []byte {
 	if err := zw.Close(); err != nil {
 		t.Fatal(err)
 	}
-	nonce, ct, err := cryptopkg.Seal(key, gzbuf.Bytes(), nil)
+	nonce, ct, err := seal.GCMSeal(key, gzbuf.Bytes(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +123,7 @@ func TestPullRewrapsLegacyBareChat(t *testing.T) {
 	f.cp.mu.Lock()
 	after := f.cp.blobs["chat/c1"].Body
 	f.cp.mu.Unlock()
-	if envelope.Detect(after) != envelope.VersionV2 {
+	if seal.Detect(after) != seal.VersionV2 {
 		t.Fatalf("blob still legacy after auto-rewrap: %s", after)
 	}
 	// The activity backfill targets the row as rewrapped, not as read.
@@ -240,7 +239,7 @@ func TestPullSkipsRewrapWhenNoCurrentKey(t *testing.T) {
 	f.cp.mu.Lock()
 	after := f.cp.blobs["chat/c1"].Body
 	f.cp.mu.Unlock()
-	if envelope.Detect(after) == envelope.VersionV2 {
+	if seal.Detect(after) == seal.VersionV2 {
 		t.Fatalf("blob was rewrapped despite no current key; rewrap must be skipped")
 	}
 	// A row that stays legacy still gets its activity time.
@@ -354,11 +353,11 @@ func TestPullRewrapsAttachmentCascade(t *testing.T) {
 	f.cp.mu.Lock()
 	afterBlob := append([]byte(nil), f.cp.blobs["chat/c1"].Body...)
 	f.cp.mu.Unlock()
-	if envelope.Detect(afterBlob) != envelope.VersionV2 {
+	if seal.Detect(afterBlob) != seal.VersionV2 {
 		t.Fatalf("stored row not v2: %s", afterBlob)
 	}
-	dec, err := envelope.DecryptV2(afterBlob, []envelope.Key{{Bytes: f.userKey, KeyIDHex: f.userKeyID}}, envelope.AAD{
-		Scope:       envelope.ScopeChat,
+	dec, err := seal.DecryptV2(afterBlob, []seal.Key{{Bytes: f.userKey, KeyIDHex: f.userKeyID}}, seal.AAD{
+		Scope:       seal.ScopeChat,
 		ID:          "c1",
 		ClerkUserID: f.userSub,
 	})
@@ -462,7 +461,7 @@ func TestPullRewrapSkipsAlreadyV2Attachment(t *testing.T) {
 	f.cp.mu.Lock()
 	afterBlob := append([]byte(nil), f.cp.blobs["chat/c1"].Body...)
 	f.cp.mu.Unlock()
-	if envelope.Detect(afterBlob) != envelope.VersionV2 {
+	if seal.Detect(afterBlob) != seal.VersionV2 {
 		t.Fatalf("chat did not migrate to v2 with an already-v2 attachment")
 	}
 	if f.bk.has(attID) {
@@ -497,13 +496,13 @@ func TestDeleteChatCascadesAttachmentsToBuckets(t *testing.T) {
 		},
 	}
 	chatBytes, _ := json.Marshal(chat)
-	aad := envelope.AAD{
+	aad := seal.AAD{
 		KeyIDHex:    f.userKeyID,
-		Scope:       envelope.ScopeChat,
+		Scope:       seal.ScopeChat,
 		ID:          "c2",
 		ClerkUserID: f.userSub,
 	}
-	v2blob, err := envelope.Encrypt(f.userKey, chatBytes, aad)
+	v2blob, err := seal.Encrypt(f.userKey, chatBytes, aad)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -584,7 +584,7 @@ func TestListStatusEncodesQuery(t *testing.T) {
 		if r.URL.Query().Get("project_id") != "proj_1" {
 			t.Errorf("project_id: %q", r.URL.Query().Get("project_id"))
 		}
-		if r.URL.Query().Get("direction") != "" {
+		if _, ok := r.URL.Query()["direction"]; ok {
 			t.Errorf("direction should be omitted when empty: %q", r.URL.Query().Get("direction"))
 		}
 		json.NewEncoder(w).Encode(ListStatusResponse{

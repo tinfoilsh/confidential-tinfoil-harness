@@ -1,4 +1,4 @@
-package envelope
+package seal
 
 import (
 	"bytes"

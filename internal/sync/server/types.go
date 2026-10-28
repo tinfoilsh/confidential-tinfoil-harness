@@ -1,6 +1,6 @@
 package server
 
-import "github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/controlplane"
+import "github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane"
 
 // Wire shapes for /v1/* endpoints. Each request type is decoded from the
 // JSON body; each response type is encoded into the JSON body. Error

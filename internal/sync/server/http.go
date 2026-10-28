@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/auth"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/controlplane"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/importer"
 )
 

@@ -8,13 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/seal"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/controlplane"
-	cryptopkg "github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/crypto"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/importer"
 	"golang.org/x/sync/errgroup"
 )
@@ -524,7 +524,7 @@ func stageImportChunk(ctx context.Context, deps Deps, owner string, job *ImportJ
 	job.mu.Lock()
 	stagingKey := append([]byte(nil), job.stagingKey...)
 	job.mu.Unlock()
-	defer cryptopkg.Zero(stagingKey)
+	defer seal.Zero(stagingKey)
 
 	if deps.Buckets == nil || !deps.Buckets.Configured() {
 		job.clearPendingChunk(req.ChunkIndex, chunkSHA)

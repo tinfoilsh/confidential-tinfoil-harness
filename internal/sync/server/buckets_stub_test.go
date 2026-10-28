@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/bucketstub"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/buckets/bucketstub"
 )
 
 // bucketsStub mirrors the subset of the colocated buckets sidecar

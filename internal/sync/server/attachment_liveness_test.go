@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/buckets"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/controlplane"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/buckets"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane"
 )
 
 // TestPushReportsServerKeyedAttachmentRefs: every chat push carries the

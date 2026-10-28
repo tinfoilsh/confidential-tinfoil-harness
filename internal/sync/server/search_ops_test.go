@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/seal"
 	"hash/fnv"
 	"math"
 	"net/http"
@@ -14,9 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/buckets"
-	cryptopkg "github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/crypto"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/sync/searchindex"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/buckets"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/searchindex"
 )
 
 // stubEmbedder produces deterministic bag-of-words hash vectors with
@@ -256,7 +256,7 @@ func TestPushIndexesChatAndSemanticSearchFinds(t *testing.T) {
 
 func (f *searchFixture) loadIndex(t *testing.T) *searchindex.Index {
 	t.Helper()
-	indexKey, err := cryptopkg.DeriveSearchIndexKey(f.userKey)
+	indexKey, err := seal.DeriveSearchIndexKey(f.userKey)
 	if err != nil {
 		t.Fatal(err)
 	}
