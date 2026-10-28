@@ -242,7 +242,7 @@ func (s *Store) SearchResults(ctx context.Context, p *auth.Principal, key auth.C
 	for _, id := range ids {
 		row, pulledRow := pulled[id]
 		switch err := failed[id]; {
-		case errors.Is(err, errRowNotFetched):
+		case errors.Is(err, ErrRowNotFetched):
 			return nil, 0, err
 		case err != nil:
 			unreadable++
@@ -410,7 +410,7 @@ func (s *Store) RemoveAllProjects(ctx context.Context, p *auth.Principal, key au
 		OperationHash:  operationHash(key, http.MethodDelete, controlplane.DeleteAllProjectsPath, kidHex, "", nonce, 0, nil, nil),
 	})
 	if err != nil {
-		return 0, fromControlplane(err)
+		return 0, FromControlplane(err)
 	}
 	if !resp.OK {
 		return 0, api.Err(502, "UPSTREAM_REFUSED", "The projects were not deleted")

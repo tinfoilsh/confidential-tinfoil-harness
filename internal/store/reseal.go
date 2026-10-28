@@ -67,7 +67,7 @@ func (s *Store) Reseal(ctx context.Context, p *auth.Principal, keys []auth.Conte
 	// so any other target would be refused row by row.
 	current, err := s.Controlplane.GetCurrentKey(ctx, string(p.JWT), p.ID)
 	if err != nil {
-		return ResealReport{}, fromControlplane(err)
+		return ResealReport{}, FromControlplane(err)
 	}
 	targetKey := seal.Key{Bytes: bytes.Clone(target[:]), KeyIDHex: keyID(target)}
 	if current == nil || current.KeyID != targetKey.KeyIDHex {
@@ -126,7 +126,7 @@ func (s *Store) reseal(ctx context.Context, p *auth.Principal, keys []seal.Key, 
 				if ctx.Err() != nil || credentialRefused(err) {
 					return cutShort()
 				}
-				return out, fromControlplane(err)
+				return out, FromControlplane(err)
 			}
 			page := s.resealPage(ctx, rows, p, scope, list.IDs, keys, target)
 			out.Migrated += page.migrated

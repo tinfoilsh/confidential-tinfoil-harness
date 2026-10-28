@@ -620,7 +620,7 @@ func TestPullFetchesAFailedRowOnceMoreThenReportsIt(t *testing.T) {
 	h.cp.GetBlobFailures["chat/c2"] = []int{http.StatusServiceUnavailable, http.StatusServiceUnavailable}
 	h.cp.Mu.Unlock()
 	rows, failed, err := h.rows.Pull(ctx, h.p, h.key, "chat", []string{"c1", "c2"})
-	if err != nil || len(rows) != 1 || rows[0].ID != "c1" || !errors.Is(failed["c2"], errRowNotFetched) {
+	if err != nil || len(rows) != 1 || rows[0].ID != "c1" || !errors.Is(failed["c2"], ErrRowNotFetched) {
 		t.Fatalf("rows=%+v failed=%v err=%v, want c1 fetched on the second try and c2 reported", rows, failed, err)
 	}
 }

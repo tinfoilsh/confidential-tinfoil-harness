@@ -61,7 +61,7 @@ var errKeyNotItsID = api.Err(400, "BAD_REQUEST", "The key does not match its id"
 func (s *Store) CurrentKey(ctx context.Context, p *auth.Principal) (*KeyState, error) {
 	current, err := s.Controlplane.GetCurrentKey(ctx, string(p.JWT), p.ID)
 	if err != nil {
-		return nil, fromControlplane(err)
+		return nil, FromControlplane(err)
 	}
 	state := &KeyState{Bundles: map[string]KeyBundle{}}
 	if current == nil || current.KeyID == "" {
@@ -118,12 +118,12 @@ func (s *Store) RegisterKey(ctx context.Context, p *auth.Principal, key auth.Con
 	}
 	body, err := controlplane.RegisterKeyBody(req)
 	if err != nil {
-		return "", fromControlplane(err)
+		return "", FromControlplane(err)
 	}
 	req.OperationHash = operationHash(key, http.MethodPost, controlplane.RegisterKeyPath, kidHex, ifMatch, nonce, 0, nil, body)
 	resp, err := s.Controlplane.RegisterKey(ctx, req)
 	if err != nil {
-		return "", fromControlplane(err)
+		return "", FromControlplane(err)
 	}
 	deleteBucketAttachments(ctx, s.Buckets, p.ID, resp.WipedV2Attachments)
 	return kidHex, nil
@@ -159,11 +159,11 @@ func (s *Store) AddKeyBundle(ctx context.Context, p *auth.Principal, key auth.Co
 	}
 	body, err := controlplane.AddBundleBody(req)
 	if err != nil {
-		return fromControlplane(err)
+		return FromControlplane(err)
 	}
 	req.OperationHash = operationHash(key, http.MethodPost, controlplane.AddBundlePath(kid), kid, "", nonce, 0, nil, body)
 	if err := s.Controlplane.AddBundle(ctx, req); err != nil {
-		return fromControlplane(err)
+		return FromControlplane(err)
 	}
 	return nil
 }
@@ -193,7 +193,7 @@ func (s *Store) RemoveKeyBundle(ctx context.Context, p *auth.Principal, key auth
 		OperationHash:  operationHash(key, http.MethodDelete, controlplane.RemoveBundlePath(kid, credentialID), kid, "", nonce, 0, nil, nil),
 	}
 	if err := s.Controlplane.RemoveBundle(ctx, req); err != nil {
-		return fromControlplane(err)
+		return FromControlplane(err)
 	}
 	return nil
 }

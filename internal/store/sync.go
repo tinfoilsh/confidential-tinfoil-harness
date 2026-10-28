@@ -179,7 +179,7 @@ func (s *Client) pullBatch(ctx context.Context, p *auth.Principal, key auth.Cont
 			case item.Code == "NETWORK" && retry: // sync could not fetch it within its deadline
 				again = append(again, item.ID)
 			case item.Code == "NETWORK":
-				failed[item.ID] = errRowNotFetched
+				failed[item.ID] = ErrRowNotFetched
 			default:
 				// The item has no status of its own; its code says what failed.
 				failed[item.ID] = api.DownstreamError(0, api.Raw(api.Object{"code": item.Code, "key_id": item.KeyID}))

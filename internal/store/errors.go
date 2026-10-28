@@ -14,9 +14,9 @@ var (
 	// harness only asks within its grants, so this names a bug, not a
 	// condition a client can act on.
 	errRunScope = errors.New("store: the operation is outside the grant's storage scope")
-	// errRowNotFetched is a row the control plane could not serve twice
+	// ErrRowNotFetched is a row the control plane could not serve twice
 	// running. A later request may fetch it.
-	errRowNotFetched = api.Err(502, "UPSTREAM_REFUSED", "The sync service could not fetch the data in time")
+	ErrRowNotFetched = api.Err(502, "UPSTREAM_REFUSED", "The sync service could not fetch the data in time")
 	// errRowUnreadable is a row the control plane holds in no format this
 	// harness opens: an envelope it does not know, or one that fails its
 	// authentication.
@@ -30,9 +30,9 @@ func refusedByControlplane(err error) bool {
 	return errors.As(err, &cpe) && cpe.StatusCode/100 == 4
 }
 
-// fromControlplane is the harness's error for what the control plane, or
+// FromControlplane is the harness's error for what the control plane, or
 // the sealing of a row, refused.
-func fromControlplane(err error) *api.Error {
+func FromControlplane(err error) *api.Error {
 	var known *api.Error
 	if errors.As(err, &known) {
 		return known
