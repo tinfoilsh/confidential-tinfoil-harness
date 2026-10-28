@@ -340,7 +340,7 @@ func (r *Rows) pullOne(ctx context.Context, p *auth.Principal, target seal.Key, 
 		return pulled{err: FromControlplane(err), transient: true}
 	}
 	keys := []seal.Key{target}
-	row := &domain.StoredRow{ID: id, ETag: blob.ETag, Project: blob.ProjectID, ProjectSet: blob.ProjectIDSet}
+	row := &domain.StoredRow{ID: id, ETag: blob.ETag, Project: blob.ProjectID, ProjectSet: blob.ProjectIDSet, UpdatedAt: blob.UpdatedAt}
 	legacy := false
 	switch seal.Detect(blob.Ciphertext) {
 	case seal.VersionV2:

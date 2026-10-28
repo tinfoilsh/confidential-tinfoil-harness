@@ -82,6 +82,7 @@ const (
 	HeaderProjectIDSet        = "X-Project-Id-Set"
 	HeaderAttachmentRefs      = "X-Attachment-Refs"
 	HeaderActivityAt          = "X-Activity-At"
+	HeaderUpdatedAt           = "X-Updated-At"
 	HeaderETag                = "ETag"
 	HeaderRequestID           = "X-Request-ID"
 	HeaderSearchIndexFenced   = "X-Search-Index-Fenced"
@@ -323,6 +324,9 @@ type GetBlobResponse struct {
 	// ActivityAt is the chat row's recorded activity time. Nil means the
 	// row predates activity tracking and sorts by its write time.
 	ActivityAt *time.Time
+	// UpdatedAt is when the row was last written; zero when the control
+	// plane did not say.
+	UpdatedAt time.Time
 }
 
 func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
@@ -617,6 +621,9 @@ func (c *Client) GetBlob(ctx context.Context, scope, id, jwt, clerkUserID string
 		if activityAt, err := time.Parse(time.RFC3339Nano, resp.Header.Get(HeaderActivityAt)); err == nil {
 			out.ActivityAt = &activityAt
 		}
+	}
+	if updatedAt, err := time.Parse(time.RFC3339Nano, resp.Header.Get(HeaderUpdatedAt)); err == nil {
+		out.UpdatedAt = updatedAt
 	}
 	return out, nil
 }

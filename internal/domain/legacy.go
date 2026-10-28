@@ -644,7 +644,7 @@ func ReadProject(row *StoredRow) (Project, error) {
 	}
 	readLenient(row.Data, &stored)
 	project := stored.Project
-	project.ID, project.CreatedAt, project.UpdatedAt = row.ID, string(stored.CreatedAt), string(stored.UpdatedAt)
+	project.ID, project.CreatedAt, project.UpdatedAt = row.ID, string(stored.CreatedAt), cmp.Or(string(stored.UpdatedAt), row.rowTime())
 	return project, nil
 }
 
@@ -669,7 +669,7 @@ func ReadProjectDocument(row *StoredRow, projectID string) (ProjectDocument, err
 		}
 		readLenient(row.Data, &stored)
 		doc = stored.ProjectDocument
-		doc.CreatedAt, doc.UpdatedAt = string(stored.CreatedAt), string(stored.UpdatedAt)
+		doc.CreatedAt, doc.UpdatedAt = string(stored.CreatedAt), cmp.Or(string(stored.UpdatedAt), row.rowTime())
 	}
 	doc.ID, doc.ProjectID = strings.TrimPrefix(row.ID, projectID+"/"), projectID
 	return doc, nil
