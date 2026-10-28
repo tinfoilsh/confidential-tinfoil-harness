@@ -29,10 +29,10 @@ import (
 // another row holds the one it maps to.
 
 const (
-	// ImportBudget bounds one import. An archive at the import's limits
-	// takes about an hour of control plane round trips; one that takes
-	// longer fails as timed out and keeps what it stored, which the import
-	// run again skips.
+	// ImportBudget bounds one import. Each entity costs a few round trips
+	// to the control plane, so an archive at the import's limits takes
+	// well over an hour; one that takes longer fails as timed out and keeps
+	// what it stored, which the import run again skips.
 	ImportBudget = 2 * time.Hour
 	// ImportRetention is how long an ended import still answers for the
 	// caller, so a client polling for its end sees it.
