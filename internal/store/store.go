@@ -15,6 +15,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/buckets"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/jobs"
 )
 
 type Store struct {
@@ -24,6 +25,8 @@ type Store struct {
 	// change ledger; Buckets holds attachment bytes.
 	Controlplane *controlplane.Client
 	Buckets      *buckets.Client
+	// Reseals runs each caller's reseal of the rows an older key sealed.
+	Reseals *jobs.Runner[ResealReport]
 	// API is the sync enclave's HTTP API, for what has not moved here yet.
 	API *Client
 }

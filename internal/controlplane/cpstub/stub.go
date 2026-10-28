@@ -81,10 +81,14 @@ type Store struct {
 	// succeeds; a list of statuses is answered in turn. A reservation
 	// purge refuses the reservation of an id while its earlier copy is
 	// still being purged.
-	BeforePutBlob                   func(scope, id string)
-	BeforeDeleteBlob                func(scope, id string)
-	PutBlobFailures                 map[string]int
-	GetBlobFailures                 map[string][]int
+	BeforePutBlob    func(scope, id string)
+	BeforeDeleteBlob func(scope, id string)
+	PutBlobFailures  map[string]int
+	GetBlobFailures  map[string][]int
+	// NeedsMigrationFailures is the status a listing of rows to reseal
+	// answers with, by the listing's number since the stub was made.
+	NeedsMigrationFailures          map[int]int
+	needsMigrationListings          int
 	DeleteAttachmentIndexFailures   map[string]int
 	RegisterAttachmentIndexFailures map[string][]int
 	ReserveAttachmentPurges         map[string]int
@@ -471,6 +475,12 @@ const (
 // and how many are in a cooldown. The control plane files a profile under
 // its user, so it is named by the user id.
 func (s *Store) handleNeedsMigration(w http.ResponseWriter, r *http.Request) {
+	listing := s.needsMigrationListings
+	s.needsMigrationListings++
+	if status, failed := s.NeedsMigrationFailures[listing]; failed {
+		w.WriteHeader(status)
+		return
+	}
 	scope := r.URL.Query().Get("scope")
 	switch scope {
 	case "chat", "profile", "project", "project_document":
@@ -643,7 +653,7 @@ func (s *Store) handleRegisterKey(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	changed := s.CurrentKeyID != body.KeyID
-	if s.CurrentKeyID == "" {
+	if changed {
 		s.KeyRegisteredAt = time.Now()
 	}
 	s.CurrentKeyID, s.KeyCreatedVia = body.KeyID, body.CreatedVia
