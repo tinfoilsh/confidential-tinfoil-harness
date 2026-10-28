@@ -498,8 +498,9 @@ func TestWebAppBackupsRestore(t *testing.T) {
 }
 
 // sameForm is a thread as both destinations keep it: the cloud stores an
-// image under a blob and names it anew, a device keeps its original apart
-// from the copy and thumbnail an upload makes.
+// image under a blob and names it anew, and records where the chat came
+// from; a device keeps its original apart from the copy and thumbnail an
+// upload makes.
 func sameForm(t *testing.T, rows *memoryRows, originals map[string][]byte, thread domain.Thread) string {
 	t.Helper()
 	thread = thread.Clone()
@@ -517,7 +518,7 @@ func sameForm(t *testing.T, rows *memoryRows, originals map[string][]byte, threa
 			a.EncryptionKey = ""
 		}
 	}
-	thread.ID, thread.ProjectID, thread.UpdatedAt, thread.RecordVersion = "", nil, "", 0
+	thread.ID, thread.ProjectID, thread.UpdatedAt, thread.RecordVersion, thread.ImportedFrom = "", nil, "", 0, nil
 	return string(api.Raw(thread))
 }
 

@@ -33,6 +33,9 @@ type Thread struct {
 	// context without showing them.
 	HiddenCount   int `json:"harnessHiddenCount,omitempty"`
 	RecordVersion int `json:"recordVersion,omitempty"`
+	// ImportedFrom is set on a stored chat an import made, so the same
+	// import run again finds it. No client is sent it.
+	ImportedFrom *ImportOrigin `json:"_restore,omitempty"`
 }
 
 // Message is one turn of a chat. Its pointer fields are absent unless set.

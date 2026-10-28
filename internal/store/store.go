@@ -344,15 +344,17 @@ func (s *Store) MutateProject(ctx context.Context, p *auth.Principal, key auth.C
 	var project domain.Project
 	err := s.CommitRow(ctx, p, key, "project", id, create, func(row *domain.StoredRow, exists bool) error {
 		project = domain.Project{ID: id, CreatedAt: api.Timestamp()}
+		var origin *domain.ImportOrigin
 		if exists {
 			var err error
 			if project, err = domain.ReadProject(row); err != nil {
 				return err
 			}
+			origin = domain.ReadImportOrigin(row)
 		}
 		change(&project)
 		project.UpdatedAt = api.Timestamp()
-		row.Data = api.Raw(domain.StoredProject{Project: project, RecordVersion: domain.RecordVersion})
+		row.Data = api.Raw(domain.StoredProject{Project: project, RecordVersion: domain.RecordVersion, ImportedFrom: origin})
 		return nil
 	})
 	return project, err
@@ -447,15 +449,17 @@ func (s *Store) CreateProjectDocument(ctx context.Context, p *auth.Principal, ke
 	err := s.CommitRow(ctx, p, key, "project_document", id, true, func(row *domain.StoredRow, exists bool) error {
 		row.Project, row.ProjectSet = &doc.ProjectID, true
 		doc.CreatedAt = api.Timestamp()
+		var origin *domain.ImportOrigin
 		if exists {
 			stored, err := domain.ReadProjectDocument(row, doc.ProjectID)
 			if err != nil {
 				return err
 			}
 			doc.CreatedAt = stored.CreatedAt
+			origin = domain.ReadImportOrigin(row)
 		}
 		doc.UpdatedAt = api.Timestamp()
-		row.Data, row.Project, row.ProjectSet = api.Raw(domain.StoredDocument{ProjectDocument: doc, RecordVersion: domain.RecordVersion}), &doc.ProjectID, true
+		row.Data, row.Project, row.ProjectSet = api.Raw(domain.StoredDocument{ProjectDocument: doc, RecordVersion: domain.RecordVersion, ImportedFrom: origin}), &doc.ProjectID, true
 		return nil
 	})
 	return doc, err

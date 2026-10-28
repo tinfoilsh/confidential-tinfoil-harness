@@ -509,7 +509,7 @@ func (j *importRun) project(project *importer.Project) error {
 // state, server keys, messages of other roles, and attachments without
 // their content. It counts what it leaves out.
 func (j *importRun) prepare(t *domain.Thread) error {
-	t.ActiveRun, t.ContextUsage, t.HiddenCount, t.Flagged = nil, nil, 0, false
+	t.ActiveRun, t.ContextUsage, t.HiddenCount, t.Flagged, t.ImportedFrom = nil, nil, 0, false, nil
 	t.LastRequestID, t.LastRequestKind = "", ""
 	if _, err := time.Parse(time.RFC3339Nano, t.CreatedAt); err != nil {
 		t.CreatedAt = cmp.Or(domain.ISOTime(t.UpdatedAt), api.Timestamp())

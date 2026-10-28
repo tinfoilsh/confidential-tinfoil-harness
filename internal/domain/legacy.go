@@ -363,7 +363,7 @@ func ReadDeviceThread(id string, data []byte) (Thread, error) {
 		}
 		t.ID = id
 	}
-	t.ActiveRun, t.HiddenCount, t.ProjectID, t.ContextUsage = nil, 0, nil, nil
+	t.ActiveRun, t.HiddenCount, t.ProjectID, t.ContextUsage, t.ImportedFrom = nil, 0, nil, nil, nil
 	return t, nil
 }
 

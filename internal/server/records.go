@@ -257,7 +257,7 @@ func forkedCount(t *domain.Thread, messageID string) (int, error) {
 // from. Its title is the one it was given.
 func startFork(t *domain.Thread) {
 	t.ActiveRun, t.ContextUsage, t.Pinned, t.Flagged, t.TitleState = nil, nil, false, false, "manual"
-	t.LastRequestID, t.LastRequestKind = "", ""
+	t.LastRequestID, t.LastRequestKind, t.ImportedFrom = "", "", nil
 }
 
 // forkThread starts a new chat from a chat's messages through the given one,
