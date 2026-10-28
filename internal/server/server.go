@@ -67,6 +67,7 @@ func Run() {
 		os.Exit(1)
 	}
 	go h.search.RunDeletionWorker(ctx)
+	go h.store.RunAttachmentMaintenance(ctx)
 	h.attachments = &attach.Service{Auth: h.auth, Models: h.models, Store: h.store}
 	h.store.Repair = h.attachments
 	h.engine = &engine.Engine{Safeguards: engine.NewSubmitter(os.Getenv("SAFEGUARDS_URL")), Store: h.store, Models: h.models, Attachments: h.attachments, Auth: h.auth}

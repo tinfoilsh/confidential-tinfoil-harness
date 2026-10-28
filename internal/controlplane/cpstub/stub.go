@@ -1,10 +1,12 @@
 // Package cpstub is an in-memory stand-in for the control plane's storage
 // API as the harness uses it: sealed blobs with their revisions and
 // metadata, the key registry with its passkey bundles, the legacy
-// attachments and the attachment index, chat activity, the rows left to
-// reseal with their cooldowns, and the search index's publication with
-// the objects retired from it. Tests seed its state, read it back after a
-// call, and inject the failures the control plane can answer with.
+// attachments and the attachment index with the purges, pending writes
+// and orphans its maintenance reclaims, chat activity, the rows left to
+// reseal with their cooldowns, the search index's publication with the
+// objects retired from it, and the imports reported ended. Tests seed its
+// state, read it back after a call, and inject the failures the control
+// plane can answer with.
 package cpstub
 
 import (
@@ -14,6 +16,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
 	"regexp"
 	"slices"
@@ -67,6 +70,16 @@ type Store struct {
 	GoneAttachments   map[string]bool   // attachment ids already moved to buckets
 	AttachmentIndex   map[string]string // attachment id to chat id
 	AttachmentOwners  map[string]string // attachment id to the user it was registered for
+	// AttachmentPurges are the attachments dropped from the index whose
+	// bytes are still to be deleted, in order; a claim leases a batch of
+	// them under a token, and an ack under that token drops them.
+	AttachmentPurges []controlplane.AttachmentPurge
+	purgeClaims      map[string]string // attachment id to the token that claimed it
+	// PendingAttachmentWrites are the writes the control plane releases to
+	// the next sweep, and OrphanAttachments the index entries without an
+	// owner it drops for the next, each handed over once.
+	PendingAttachmentWrites []controlplane.PendingAttachmentRow
+	OrphanAttachments       []controlplane.OrphanAttachmentRow
 	// MigrationFailures counts the recorded reseal failures by "scope/id",
 	// the id as the needs-migration list names it; a row with one is in
 	// its cooldown and is not listed.
@@ -131,6 +144,7 @@ func New() *Store {
 		DeleteAttachmentIndexFailures:   map[string]int{},
 		RegisterAttachmentIndexFailures: map[string][]int{},
 		ReserveAttachmentPurges:         map[string]int{},
+		purgeClaims:                     map[string]string{},
 		searchClaims:                    map[string]string{},
 		mux:                             http.NewServeMux(),
 	}
@@ -171,6 +185,10 @@ func New() *Store {
 	s.mux.HandleFunc("GET /api/sync/attachment-owner/{aid}", s.handleAttachmentOwner)
 	s.mux.HandleFunc("POST /api/sync/pending-attachments/{aid}", s.handleReservePendingAttachment)
 	s.mux.HandleFunc("POST /api/sync/pending-attachments/sweep", s.handleSweepPendingAttachments)
+	s.mux.HandleFunc("DELETE /api/sync/orphan-attachments", s.handleOrphanAttachments)
+	s.mux.HandleFunc("POST /api/sync/attachment-purges/purge", s.handlePurgeAttachments)
+	s.mux.HandleFunc("POST /api/sync/attachment-purges/claim", s.handleClaimAttachmentPurges)
+	s.mux.HandleFunc("POST /api/sync/attachment-purges/ack", s.handleAckAttachmentPurges)
 	s.mux.HandleFunc("POST /api/sync/notify-import-complete", s.handleNotifyImportOutcome)
 	return s
 }
@@ -1060,8 +1078,141 @@ func (s *Store) handleReservePendingAttachment(w http.ResponseWriter, r *http.Re
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleSweepPendingAttachments hands the sweep the pending writes the
+// control plane releases, up to the limit, which it then forgets.
 func (s *Store) handleSweepPendingAttachments(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"rows": []any{}})
+	limit := limitParam(r, defaultSweepLimit, maxSweepLimit)
+	rows := s.PendingAttachmentWrites[:min(limit, len(s.PendingAttachmentWrites))]
+	s.PendingAttachmentWrites = slices.Clone(s.PendingAttachmentWrites[len(rows):])
+	writeJSON(w, http.StatusOK, map[string]any{"rows": slices.Clone(rows)})
+}
+
+// handleOrphanAttachments drops the index entries without an owner, up
+// to the limit, and names them for the sweep.
+func (s *Store) handleOrphanAttachments(w http.ResponseWriter, r *http.Request) {
+	limit := limitParam(r, defaultSweepLimit, maxSweepLimit)
+	rows := s.OrphanAttachments[:min(limit, len(s.OrphanAttachments))]
+	s.OrphanAttachments = slices.Clone(s.OrphanAttachments[len(rows):])
+	for _, row := range rows {
+		delete(s.AttachmentIndex, row.AttachmentID)
+		delete(s.AttachmentOwners, row.AttachmentID)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"attachments": slices.Clone(rows)})
+}
+
+// limitParam is a request's limit, within the bounds the control plane
+// gives the route.
+func limitParam(r *http.Request, fallback, most int) int {
+	if limit, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && limit > 0 && limit <= most {
+		return limit
+	}
+	return fallback
+}
+
+const (
+	// A sweep of pending writes or orphans hands over defaultSweepLimit
+	// rows without a limit, and at most maxSweepLimit.
+	defaultSweepLimit = 500
+	maxSweepLimit     = 500
+	// A purge queues defaultPurgeBatch attachments without a batch size
+	// and at most maxPurgeBatch; a claim leases defaultPurgeClaimBatch
+	// and at most maxPurgeClaimBatch, which an ack names at most.
+	defaultPurgeBatch      = 100
+	maxPurgeBatch          = 500
+	defaultPurgeClaimBatch = 25
+	maxPurgeClaimBatch     = 100
+)
+
+// batchSize is a purge request's batch size, within its bounds.
+func batchSize(w http.ResponseWriter, r *http.Request, fallback, most int) (int, bool) {
+	var req struct {
+		BatchSize int `json:"batch_size"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF || req.BatchSize < 0 || req.BatchSize > most {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "BAD_REQUEST", "error": "invalid batch_size"})
+		return 0, false
+	}
+	if req.BatchSize == 0 {
+		req.BatchSize = fallback
+	}
+	return req.BatchSize, true
+}
+
+// handlePurgeAttachments moves the index entries no chat names any more
+// into the purge queue, up to the batch size: those whose chat is gone,
+// and those a chat's last write left out of the attachments it names.
+func (s *Store) handlePurgeAttachments(w http.ResponseWriter, r *http.Request) {
+	batch, ok := batchSize(w, r, defaultPurgeBatch, maxPurgeBatch)
+	if !ok {
+		return
+	}
+	queued := 0
+	for _, aid := range slices.Sorted(maps.Keys(s.AttachmentIndex)) {
+		if queued == batch {
+			break
+		}
+		chat := s.AttachmentIndex[aid]
+		blob := s.Blobs[Key("chat", chat)]
+		if blob != nil && (blob.AttachmentRefs == nil || slices.Contains(blob.AttachmentRefs, aid)) {
+			continue
+		}
+		s.AttachmentPurges = append(s.AttachmentPurges, controlplane.AttachmentPurge{AttachmentID: aid, ClerkUserID: s.AttachmentOwners[aid], ChatID: chat})
+		delete(s.AttachmentIndex, aid)
+		delete(s.AttachmentOwners, aid)
+		queued++
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"queued": queued})
+}
+
+// handleClaimAttachmentPurges leases a batch of the queued purges not yet
+// claimed under a fresh token.
+func (s *Store) handleClaimAttachmentPurges(w http.ResponseWriter, r *http.Request) {
+	batch, ok := batchSize(w, r, defaultPurgeClaimBatch, maxPurgeClaimBatch)
+	if !ok {
+		return
+	}
+	claim := controlplane.AttachmentPurgeClaim{ClaimToken: uuid.NewString(), Purges: []controlplane.AttachmentPurge{}}
+	for _, purge := range s.AttachmentPurges {
+		if len(claim.Purges) == batch {
+			break
+		}
+		if _, claimed := s.purgeClaims[purge.AttachmentID]; claimed {
+			continue
+		}
+		s.purgeClaims[purge.AttachmentID] = claim.ClaimToken
+		claim.Purges = append(claim.Purges, purge)
+	}
+	writeJSON(w, http.StatusOK, claim)
+}
+
+// LapsePurgeLeases ends the leases on the claimed purges, as the control
+// plane does once their lease time has passed, so the next claim leases
+// them again.
+func (s *Store) LapsePurgeLeases() {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	clear(s.purgeClaims)
+}
+
+// handleAckAttachmentPurges drops the purges acknowledged under the token
+// that claimed them.
+func (s *Store) handleAckAttachmentPurges(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ClaimToken    string   `json:"claim_token"`
+		AttachmentIDs []string `json:"attachment_ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || uuid.Validate(req.ClaimToken) != nil || len(req.AttachmentIDs) == 0 || len(req.AttachmentIDs) > maxPurgeClaimBatch {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "BAD_REQUEST", "error": "invalid claim_token or attachment_ids"})
+		return
+	}
+	for _, aid := range req.AttachmentIDs {
+		if s.purgeClaims[aid] != req.ClaimToken {
+			continue
+		}
+		delete(s.purgeClaims, aid)
+		s.AttachmentPurges = slices.DeleteFunc(s.AttachmentPurges, func(p controlplane.AttachmentPurge) bool { return p.AttachmentID == aid })
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleNotifyImportOutcome records how an import ended, for the user the
