@@ -11,6 +11,8 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/buckets"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/search"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
 
@@ -30,10 +32,15 @@ func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
 	if err := h.models.Boot(ctx, usageSecret); err != nil {
 		return err
 	}
-	// This harness seals rows and stores attachments itself, with the
-	// control plane's service secret and the buckets sidecar beside it.
+	// This harness seals rows, stores attachments and keeps the search
+	// index itself, with the control plane's service secret, the buckets
+	// sidecars beside it, and the embedding model of the inference service.
 	secret, bucketsURL, bucket := os.Getenv("SYNC_ENCLAVE_SECRET"), os.Getenv("BUCKETS_URL"), os.Getenv("CHAT_ATTACHMENTS_BUCKET")
-	for _, required := range []struct{ name, value string }{{"SYNC_ENCLAVE_SECRET", secret}, {"BUCKETS_URL", bucketsURL}, {"CHAT_ATTACHMENTS_BUCKET", bucket}} {
+	searchURL, searchBucket, apiKey, model := os.Getenv("SEARCH_BUCKETS_URL"), os.Getenv("SEARCH_INDEXES_BUCKET"), os.Getenv("TINFOIL_API_KEY"), os.Getenv("EMBEDDING_MODEL")
+	for _, required := range []struct{ name, value string }{
+		{"SYNC_ENCLAVE_SECRET", secret}, {"BUCKETS_URL", bucketsURL}, {"CHAT_ATTACHMENTS_BUCKET", bucket},
+		{"SEARCH_BUCKETS_URL", searchURL}, {"SEARCH_INDEXES_BUCKET", searchBucket}, {"TINFOIL_API_KEY", apiKey}, {"EMBEDDING_MODEL", model},
+	} {
 		if required.value == "" {
 			return fmt.Errorf("%s is required", required.name)
 		}
@@ -43,8 +50,18 @@ func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
 	if !bk.Configured() {
 		return fmt.Errorf("CHAT_ATTACHMENTS_BUCKET %q is not a valid bucket name", bucket)
 	}
-	h.store.Controlplane, h.store.Buckets = cp, bk
-	h.store.Rows = &store.Rows{Controlplane: cp, Buckets: bk}
+	sbk := buckets.NewClient(searchURL, searchBucket, &http.Client{Timeout: bucketsTimeout})
+	if !sbk.Configured() {
+		return fmt.Errorf("SEARCH_INDEXES_BUCKET %q is not a valid bucket name", searchBucket)
+	}
+	embedder, err := inference.NewEmbedder(apiKey, model)
+	if err != nil {
+		return err
+	}
+	rows := &store.Rows{Controlplane: cp, Buckets: bk}
+	h.search = search.New(cp, sbk, embedder, rows)
+	rows.Index = h.search
+	h.store.Controlplane, h.store.Buckets, h.store.Rows, h.store.Search = cp, bk, rows, h.search
 	s := h.models.Services["sync"]
 	h.store.API = &store.Client{URL: s.URL, Client: s.Client, MinimumGrant: engine.RunTimeout + engine.CommitTimeout}
 	return nil

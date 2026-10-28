@@ -121,11 +121,23 @@ func (s *Store) RegisterKey(ctx context.Context, p *auth.Principal, key auth.Con
 		return "", FromControlplane(err)
 	}
 	req.OperationHash = operationHash(key, http.MethodPost, controlplane.RegisterKeyPath, kidHex, ifMatch, nonce, 0, nil, body)
+	// A key that replaces another, or starts fresh, fences off the search
+	// index the control plane names now; which object that is must be
+	// known before the fence clears the name.
+	fencedObject := ""
+	if s.Search != nil {
+		if state, err := s.Controlplane.GetSearchIndexState(ctx, string(p.JWT), p.ID); err == nil {
+			fencedObject = state.ObjectKey
+		}
+	}
 	resp, err := s.Controlplane.RegisterKey(ctx, req)
 	if err != nil {
 		return "", FromControlplane(err)
 	}
 	deleteBucketAttachments(ctx, s.Buckets, p.ID, resp.WipedV2Attachments)
+	if resp.SearchIndexFenced && s.Search != nil {
+		s.Search.Forget(ctx, p.ID, fencedObject)
+	}
 	return kidHex, nil
 }
 

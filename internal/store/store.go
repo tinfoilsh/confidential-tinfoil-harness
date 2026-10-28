@@ -26,14 +26,22 @@ type Store struct {
 	Buckets      *buckets.Client
 	// Reseals runs each caller's reseal of the rows an older key sealed.
 	Reseals *jobs.Runner[ResealReport]
+	// Search forgets a caller's search index when a new key fences it off.
+	Search SearchResetter
 	// API is the sync enclave's HTTP API, for what has not moved here yet.
 	API *Client
 }
 
+// SearchResetter drops what is held for a caller's search index once the
+// control plane has fenced it off, and the object it named.
+type SearchResetter interface {
+	Forget(ctx context.Context, owner, objectKey string)
+}
+
 // The store is the harness's typed view of what a caller keeps: chats, the
-// profile, projects and their documents, attachments, search and keys.
-// Nothing else calls sync. Rows are read through the legacy reader, so a
-// row any client wrote reads in the current format.
+// profile, projects and their documents, attachments and keys. Nothing
+// else calls sync. Rows are read through the legacy reader, so a row any
+// client wrote reads in the current format.
 
 var errEveryCommitConflicted = api.Err(409, "REVISION_CONFLICT", "The row changed during every commit attempt")
 
@@ -226,9 +234,9 @@ func (s *Store) ChatIDs(ctx context.Context, p *auth.Principal, project string) 
 }
 
 // SearchResults are the chats a search found, in its order, and how many of
-// them sync or this harness cannot open, which are left out. A chat deleted
-// since it was indexed is not a result. One sync could not fetch in time
-// fails the search, which may find it when run again.
+// them this harness cannot open, which are left out. A chat deleted since
+// it was indexed is not a result. One the control plane could not serve in
+// time fails the search, which may find it when run again.
 func (s *Store) SearchResults(ctx context.Context, p *auth.Principal, key auth.ContentKey, ids []string) ([]*domain.ThreadRow, int, error) {
 	rows, failed, err := s.Rows.Pull(ctx, p, key, "chat", ids)
 	if err != nil {
@@ -255,50 +263,6 @@ func (s *Store) SearchResults(ctx context.Context, p *auth.Principal, key auth.C
 		}
 	}
 	return found, unreadable, nil
-}
-
-// SearchChats finds the ids of a user's chats that match a query, and
-// whether sync must index them first.
-func (s *Store) SearchChats(ctx context.Context, p *auth.Principal, key auth.ContentKey, query string, limit int) ([]string, bool, error) {
-	var found struct {
-		NeedsReindex bool `json:"needs_reindex"`
-		Results      []struct {
-			ID string `json:"id"`
-		} `json:"results"`
-	}
-	if err := s.API.CallKey(ctx, p, "/v1/search/query", key, api.Object{"query": query, "limit": limit}, &found); err != nil {
-		return nil, false, err
-	}
-	ids := make([]string, len(found.Results))
-	for i, result := range found.Results {
-		ids[i] = result.ID
-	}
-	return ids, found.NeedsReindex, nil
-}
-
-const (
-	reindexRunning   = "running"
-	reindexCompleted = "completed"
-)
-
-// ReindexChats has sync index a user's chats, reporting whether more indexing is needed.
-func (s *Store) ReindexChats(ctx context.Context, p *auth.Principal, key auth.ContentKey) (bool, error) {
-	var job struct {
-		Status  string `json:"status"`
-		Partial bool   `json:"partial"`
-	}
-	if err := s.API.call(ctx, p, "/v1/search/reindex", keyedBody(key, api.Object{}, true), &job); err != nil {
-		return false, err
-	}
-	switch job.Status {
-	case reindexRunning:
-		return true, nil
-	case reindexCompleted:
-		// A clean partial checkpoint resumes on the next request.
-		return job.Partial, nil
-	default:
-		return false, api.Err(http.StatusBadGateway, "SEARCH_INDEX_FAILED", "The search index could not be rebuilt")
-	}
 }
 
 // Profile

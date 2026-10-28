@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -37,6 +38,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/jobs"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/search"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
@@ -51,7 +53,9 @@ type memoryRows struct {
 	// and any key deletes it.
 	sealed map[string]auth.ContentKey
 	key    auth.ContentKey
-	calls  int
+	// unfetched is a row the store cannot serve in time.
+	unfetched string
+	calls     int
 	// What the harness stores beside the rows: attachment bytes in bk,
 	// and in cp their index, the legacy attachments and the change ledger.
 	cp *cpstub.Store
@@ -60,8 +64,32 @@ type memoryRows struct {
 
 const (
 	testBucket        = "test-attachments-bucket"
+	testSearchBucket  = "test-search-bucket"
 	testStorageSecret = "test-enclave-secret"
 )
+
+// stubEmbedder embeds text as a deterministic hash of each of its words
+// into a few dimensions, so chats about the same words land together.
+type stubEmbedder struct{}
+
+const stubEmbedDims = 16
+
+func (stubEmbedder) Configured() bool { return true }
+func (stubEmbedder) Model() string    { return "test-embed" }
+func (stubEmbedder) Embed(_ context.Context, inputs []string) ([][]float32, error) {
+	out := make([][]float32, len(inputs))
+	for i, input := range inputs {
+		vector := make([]float32, stubEmbedDims)
+		for _, word := range strings.Fields(strings.ToLower(input)) {
+			digest := sha256.Sum256([]byte(strings.Trim(word, ".,!?;:")))
+			for d := range vector {
+				vector[d] += float32(digest[d]) / 255
+			}
+		}
+		out[i] = vector
+	}
+	return out, nil
+}
 
 func (s *memoryRows) AuthorizeRun(_ context.Context, _ *auth.Principal, _ auth.ContentKey, id string, project *string) (*auth.StorageGrant, error) {
 	return &auth.StorageGrant{ChatID: id, ProjectID: domain.ValueOr(project, ""), Token: auth.Secret("run-for-" + id), ExpiresAt: api.Now().Add(time.Hour)}, nil
@@ -101,6 +129,10 @@ func (s *memoryRows) Load(_ context.Context, p *auth.Principal, key auth.Content
 func (s *memoryRows) Pull(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope string, ids []string) ([]domain.StoredRow, map[string]error, error) {
 	rows, failed := []domain.StoredRow{}, map[string]error{}
 	for _, id := range ids {
+		if id == s.unfetched {
+			failed[id] = store.ErrRowNotFetched
+			continue
+		}
 		row, err := s.Load(ctx, p, key, scope, id)
 		if err == nil {
 			rows = append(rows, *row)
@@ -250,9 +282,16 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 	objects.HandleFunc("/"+testBucket+"/{key}", bk.Handle)
 	bkServer := httptest.NewServer(objects)
 	t.Cleanup(bkServer.Close)
+	searchObjects := http.NewServeMux()
+	searchObjects.HandleFunc("/"+testSearchBucket+"/{key}", bucketstub.NewStore().Handle)
+	searchServer := httptest.NewServer(searchObjects)
+	t.Cleanup(searchServer.Close)
 	rows := &memoryRows{rows: map[string]domain.StoredRow{}, sealed: map[string]auth.ContentKey{}, cp: storage, bk: bk}
+	cpClient := controlplane.NewClient(cp.URL, nil, controlplane.WithServiceSecret(testStorageSecret))
 	h := &harness{models: &inference.Models{Gateway: server.URL, Controlplane: cp.URL, Services: map[string]*inference.Service{}}, controlplane: cp.URL,
-		store: &store.Store{Rows: rows, Controlplane: controlplane.NewClient(cp.URL, nil, controlplane.WithServiceSecret(testStorageSecret)), Buckets: buckets.NewClient(bkServer.URL, testBucket, nil), Reseals: jobs.New[store.ResealReport](store.ResealBudget, store.ResealRetention)}}
+		store: &store.Store{Rows: rows, Controlplane: cpClient, Buckets: buckets.NewClient(bkServer.URL, testBucket, nil), Reseals: jobs.New[store.ResealReport](store.ResealBudget, store.ResealRetention)}}
+	h.search = search.New(cpClient, buckets.NewClient(searchServer.URL, testSearchBucket, nil), stubEmbedder{}, rows)
+	h.store.Search = h.search
 	h.attachments = &attach.Service{Auth: testAuth(cp), Models: h.models, Store: h.store}
 	h.auth = h.attachments.Auth
 	h.store.Repair = h.attachments

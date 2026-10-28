@@ -479,16 +479,16 @@ func (h *harness) deleteDocument(ctx context.Context, p *auth.Principal, key aut
 	return struct{}{}, h.store.RemoveRow(ctx, p, key, "project_document", in.ProjectID+"/"+in.DocumentID)
 }
 func (h *harness) searchThreads(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *searchRequest) (any, error) {
-	ids, indexing, err := h.store.SearchChats(ctx, p, key, in.Query, in.Limit)
+	ids, indexing, err := h.search.Query(ctx, p, key, in.Query, in.Limit)
 	if err != nil {
 		return nil, err
 	}
 	if indexing {
-		if indexing, err = h.store.ReindexChats(ctx, p, key); err != nil {
+		if indexing, err = h.search.Rebuild(ctx, p, key); err != nil {
 			return nil, err
 		}
 		if !indexing {
-			if ids, indexing, err = h.store.SearchChats(ctx, p, key, in.Query, in.Limit); err != nil {
+			if ids, indexing, err = h.search.Query(ctx, p, key, in.Query, in.Limit); err != nil {
 				return nil, err
 			}
 		}
