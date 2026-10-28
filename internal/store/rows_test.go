@@ -599,6 +599,39 @@ func TestListPagesNewestFirstAndSelectsAProjectsRows(t *testing.T) {
 	}
 }
 
+// A project or document an older client stored carries no time of its
+// own; it reads as updated when the control plane last wrote its row. One
+// that carries a time keeps it.
+func TestALegacyProjectOrDocumentIsUpdatedWhenItsRowWasWritten(t *testing.T) {
+	h := newRowsHarness(t)
+	ctx := context.Background()
+	written := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	h.cp.SetBlob("project", "old", cpstub.Blob{ETag: 1, UpdatedAt: written, Body: sealLegacyV0(t, h.key, []byte(`{"name":"Work","description":"","systemInstructions":""}`))})
+	h.cp.SetBlob("project", "dated", cpstub.Blob{ETag: 1, UpdatedAt: written, Body: sealLegacyV0(t, h.key, []byte(`{"name":"Dated","updatedAt":"2025-01-02T03:04:05Z"}`))})
+	h.cp.SetBlob("project_document", "old/doc", cpstub.Blob{ETag: 1, UpdatedAt: written, Body: sealLegacyV0(t, h.key, []byte(`{"filename":"notes.txt","contentType":"text/plain","sizeBytes":5,"content":"notes"}`))})
+	h.cp.SetBlob("project_document", "old/dated", cpstub.Blob{ETag: 1, UpdatedAt: written, Body: sealLegacyV0(t, h.key, []byte(`{"filename":"notes.txt","contentType":"text/plain","sizeBytes":5,"content":"notes","updatedAt":"2025-01-02T03:04:05Z"}`))})
+	load := func(scope, id string) *domain.StoredRow {
+		t.Helper()
+		row, err := h.rows.Load(ctx, h.p, h.key, scope, id)
+		if err != nil {
+			t.Fatalf("load %s/%s: %v", scope, id, err)
+		}
+		return row
+	}
+	if project, err := domain.ReadProject(load("project", "old")); err != nil || project.UpdatedAt != "2026-03-04T05:06:07Z" {
+		t.Fatalf("legacy project = %+v (%v), want it updated when its row was written", project, err)
+	}
+	if project, err := domain.ReadProject(load("project", "dated")); err != nil || project.UpdatedAt != "2025-01-02T03:04:05Z" {
+		t.Fatalf("dated project = %+v (%v), want the time it carries", project, err)
+	}
+	if doc, err := domain.ReadProjectDocument(load("project_document", "old/doc"), "old"); err != nil || doc.UpdatedAt != "2026-03-04T05:06:07Z" {
+		t.Fatalf("legacy document = %+v (%v), want it updated when its row was written", doc, err)
+	}
+	if doc, err := domain.ReadProjectDocument(load("project_document", "old/dated"), "old"); err != nil || doc.UpdatedAt != "2025-01-02T03:04:05Z" {
+		t.Fatalf("dated document = %+v (%v), want the time it carries", doc, err)
+	}
+}
+
 func TestAnAbsentRowIsNotAnErrorForPullAndIs404ForLoad(t *testing.T) {
 	h := newRowsHarness(t)
 	ctx := context.Background()

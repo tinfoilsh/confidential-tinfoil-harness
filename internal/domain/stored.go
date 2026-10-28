@@ -3,6 +3,7 @@ package domain
 import (
 	"encoding/json"
 	"slices"
+	"time"
 )
 
 // StoredRow is a row as the control plane holds it: sealed JSON, opened
@@ -15,6 +16,19 @@ type StoredRow struct {
 	// even none.
 	Project    *string `json:"-"`
 	ProjectSet bool    `json:"-"`
+	// UpdatedAt is when the control plane last wrote the row. A row an
+	// older client sealed carries no time of its own, and is read as
+	// updated then.
+	UpdatedAt time.Time `json:"-"`
+}
+
+// rowTime is when a row was last written, as RFC 3339, or "" when the
+// control plane did not say.
+func (row *StoredRow) rowTime() string {
+	if row.UpdatedAt.IsZero() {
+		return ""
+	}
+	return row.UpdatedAt.UTC().Format(time.RFC3339Nano)
 }
 
 func (row StoredRow) Copy() *StoredRow {

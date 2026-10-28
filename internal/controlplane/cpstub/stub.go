@@ -339,6 +339,7 @@ func (s *Store) handleGetBlob(scope string) http.HandlerFunc {
 		if scope == "chat" && blob.ActivityAt != nil {
 			w.Header().Set(controlplane.HeaderActivityAt, blob.ActivityAt.Format(time.RFC3339Nano))
 		}
+		w.Header().Set(controlplane.HeaderUpdatedAt, blob.UpdatedAt.UTC().Format(time.RFC3339Nano))
 		_, _ = w.Write(blob.Body)
 	}
 }
