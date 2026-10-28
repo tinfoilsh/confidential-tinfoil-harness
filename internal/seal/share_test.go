@@ -3,6 +3,7 @@ package seal
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"testing"
@@ -56,6 +57,17 @@ func TestShareRefusesTheWrongKeyAndADamagedShare(t *testing.T) {
 func TestShareRefusesMoreThanAShareHolds(t *testing.T) {
 	if _, _, err := SealShare(make([]byte, MaxSharePlaintextBytes+1)); !errors.Is(err, ErrShareTooLarge) {
 		t.Fatalf("seal past the limit: %v", err)
+	}
+	// The largest plaintext a share holds still fits a sealed share when
+	// nothing in it compresses.
+	largest := make([]byte, MaxSharePlaintextBytes)
+	rand.Read(largest)
+	sealed, linkKey, err := SealShare(largest)
+	if err != nil || len(sealed) > MaxShareBytes {
+		t.Fatalf("seal of the largest plaintext: %d bytes, %v", len(sealed), err)
+	}
+	if opened, err := OpenShare(linkKey, sealed); err != nil || !bytes.Equal(opened, largest) {
+		t.Fatalf("open of the largest share: %v", err)
 	}
 	// A small share can decompress past the limit; the reader stops there.
 	key := mustRandKey(t)

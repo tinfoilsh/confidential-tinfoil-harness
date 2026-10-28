@@ -164,7 +164,7 @@ func (ar *Service) OpenShare(ctx context.Context, _ *auth.Principal, _ auth.Cont
 		return nil, err
 	}
 	defer resp.Body.Close()
-	ciphertext, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	ciphertext, err := io.ReadAll(io.LimitReader(resp.Body, seal.MaxShareBytes))
 	if err != nil {
 		return nil, err
 	}

@@ -13,8 +13,13 @@ import (
 // before the ciphertext.
 
 // MaxSharePlaintextBytes bounds what a share holds: before compression
-// when sealed, after decompression when opened.
-const MaxSharePlaintextBytes = 32 << 20
+// when sealed, after decompression when opened. MaxShareBytes bounds the
+// sealed share, which is what is stored and fetched; compression can
+// leave a share larger than its plaintext.
+const (
+	MaxSharePlaintextBytes = 32 << 20
+	MaxShareBytes          = MaxSharePlaintextBytes + 1<<20
+)
 
 var (
 	ErrShareTooLarge = errors.New("seal: the share exceeds the size limit")
@@ -47,13 +52,20 @@ func SealShare(plaintext []byte) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	return append(nonce, ciphertext...), hex.EncodeToString(key), nil
+	sealed := append(nonce, ciphertext...)
+	if len(sealed) > MaxShareBytes {
+		return nil, "", ErrShareTooLarge
+	}
+	return sealed, hex.EncodeToString(key), nil
 }
 
 // OpenShare is the plaintext of a share sealed under key.
 func OpenShare(key string, ciphertext []byte) ([]byte, error) {
+	if len(key) != KeySize*2 || len(ciphertext) < NonceSize+TagSize || len(ciphertext) > MaxShareBytes {
+		return nil, ErrShareInvalid
+	}
 	raw, err := hex.DecodeString(key)
-	if err != nil || len(raw) != KeySize || len(ciphertext) < NonceSize+TagSize {
+	if err != nil {
 		return nil, ErrShareInvalid
 	}
 	defer Zero(raw)
