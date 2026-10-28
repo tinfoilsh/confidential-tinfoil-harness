@@ -98,6 +98,7 @@ func New() *Store {
 		MigrationFailures:               map[string]int{},
 		PutBlobFailures:                 map[string]int{},
 		GetBlobFailures:                 map[string][]int{},
+		NeedsMigrationFailures:          map[int]int{},
 		DeleteAttachmentIndexFailures:   map[string]int{},
 		RegisterAttachmentIndexFailures: map[string][]int{},
 		ReserveAttachmentPurges:         map[string]int{},
