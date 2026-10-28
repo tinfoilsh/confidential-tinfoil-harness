@@ -17,6 +17,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/jobs"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
 
@@ -57,7 +58,7 @@ func Run() {
 	}
 	h := &harness{models: &inference.Models{Gateway: gw, Controlplane: controlplane},
 		controlplane: controlplane,
-		store:        &store.Store{}}
+		store:        &store.Store{Reseals: jobs.New[store.ResealReport](store.ResealBudget, store.ResealRetention)}}
 
 	if err := h.bootChat(ctx, usageSecret); err != nil {
 		slog.Error("initialize chat service", "error", err)

@@ -37,12 +37,7 @@ func (h *harness) apiRoutes() []routeSpec {
 		{"/v1/projects/delete-all", false, true, h.deleteAllProjects},
 		{"/v1/metadata/favicon", true, false, decoded(h.attachments.Favicon)}, {"/v1/metadata/link", true, false, decoded(h.attachments.LinkPreview)},
 	}
-	for _, pair := range [][2]string{{"current", "/v1/key/current"}, {"register", "/v1/key/register"}, {"add-bundle", "/v1/key/add-bundle"}, {"remove-bundle", "/v1/key/remove-bundle"}, {"migrate-all", "/v1/blobs/migrate-all"}} {
-		routes = append(routes, routeSpec{"/v1/keys/" + pair[0], false, false, func(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in json.RawMessage) (any, error) {
-			return h.store.KeyCall(ctx, p, pair[1], in)
-		}})
-	}
-	return routes
+	return append(routes, h.keyRoutes()...)
 }
 
 func (h *harness) changes(ctx context.Context, p *auth.Principal, _ auth.ContentKey, _ json.RawMessage) (any, error) {

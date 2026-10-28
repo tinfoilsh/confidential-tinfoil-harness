@@ -534,7 +534,7 @@ func (r *Rows) finishRemove(ctx context.Context, p *auth.Principal, key auth.Con
 	if scope != "chat" {
 		return
 	}
-	r.deleteBucketAttachments(ctx, p.ID, resp.WipedV2Attachments)
+	deleteBucketAttachments(ctx, r.Buckets, p.ID, resp.WipedV2Attachments)
 	if r.Index != nil {
 		r.Index.ChatRemoved(ctx, p, key, id, resp.SourceRevision)
 	}

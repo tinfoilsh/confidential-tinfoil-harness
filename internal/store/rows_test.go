@@ -22,6 +22,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane/cpstub"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/jobs"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/seal"
 )
 
@@ -59,7 +60,7 @@ func newRowsHarness(t *testing.T) *rowsHarness {
 		cp:    cp,
 		bk:    bk,
 		rows:  rows,
-		store: &Store{Rows: rows, Controlplane: rows.Controlplane, Buckets: rows.Buckets},
+		store: &Store{Rows: rows, Controlplane: rows.Controlplane, Buckets: rows.Buckets, Reseals: jobs.New[ResealReport](ResealBudget, ResealRetention)},
 		p:     &auth.Principal{ID: "user_abc", JWT: "clerk-abc"},
 		key:   key,
 		kid:   keyID(key),

@@ -3,7 +3,6 @@ package store
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"maps"
 	"net/http"
@@ -15,6 +14,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/buckets"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/jobs"
 )
 
 type Store struct {
@@ -24,6 +24,8 @@ type Store struct {
 	// change ledger; Buckets holds attachment bytes.
 	Controlplane *controlplane.Client
 	Buckets      *buckets.Client
+	// Reseals runs each caller's reseal of the rows an older key sealed.
+	Reseals *jobs.Runner[ResealReport]
 	// API is the sync enclave's HTTP API, for what has not moved here yet.
 	API *Client
 }
@@ -512,13 +514,6 @@ func (s *Store) AuthorizeArchive(ctx context.Context, p *auth.Principal, keyByte
 	}
 	p.Grant = grant
 	return nil
-}
-
-// KeyCall passes a key management request to sync as the client sent it.
-func (s *Store) KeyCall(ctx context.Context, p *auth.Principal, path string, in json.RawMessage) (json.RawMessage, error) {
-	var out json.RawMessage
-	err := s.API.call(ctx, p, path, in, &out)
-	return out, err
 }
 
 // SyncImport makes one call of an archive import, whose job sync runs.

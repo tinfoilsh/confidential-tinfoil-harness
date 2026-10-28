@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/buckets"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/seal"
 )
@@ -191,19 +192,19 @@ func (r *Rows) promoteAttachment(ctx context.Context, p *auth.Principal, chatID,
 	return nil
 }
 
-// deleteBucketAttachments removes a deleted chat's attachments from
+// deleteBucketAttachments removes the attachments of deleted chats from
 // buckets, best effort. The ids come from the control plane's answer to
-// the delete, never from the chat's plaintext, which could name another
+// the delete, never from a chat's plaintext, which could name another
 // user's attachment. An orphan left in buckets is unaddressable without
 // the per-attachment key, which went with the chat.
-func (r *Rows) deleteBucketAttachments(ctx context.Context, owner string, ids []string) {
-	if !r.Buckets.Configured() || len(ids) == 0 {
+func deleteBucketAttachments(ctx context.Context, bk *buckets.Client, owner string, ids []string) {
+	if !bk.Configured() || len(ids) == 0 {
 		return
 	}
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bucketsCleanupTimeout)
 	defer cancel()
 	for _, attID := range ids {
-		_ = r.Buckets.Delete(cleanupCtx, owner, attID)
+		_ = bk.Delete(cleanupCtx, owner, attID)
 	}
 }
 
