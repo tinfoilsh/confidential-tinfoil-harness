@@ -79,7 +79,8 @@ func rewriteRefs(v any, from, to string) any {
 // admitting no member its schema does not name. The parts of an allOf, and
 // definitions, are not checked on their own: the schema that names them
 // closes over all their members together. A schema that names no members,
-// or declares the rest open, stays open.
+// or declares the rest open, stays open. A list of values open to clients
+// admits only the values it names, which are all the harness sends.
 func (c *contract) closed(schema any, whole bool) any {
 	switch s := schema.(type) {
 	case []any:
@@ -89,6 +90,9 @@ func (c *contract) closed(schema any, whole bool) any {
 		}
 		return out
 	case map[string]any:
+		if named, ok := namedValues(s); ok {
+			return c.closed(named, whole)
+		}
 		out := maps.Clone(s)
 		for _, k := range []string{"properties", "patternProperties", "dependentSchemas"} {
 			if children, ok := s[k].(map[string]any); ok {
@@ -120,6 +124,31 @@ func (c *contract) closed(schema any, whole bool) any {
 		return out
 	}
 	return schema
+}
+
+// namedValues is the values an open list names: of an anyOf of a list of
+// values and any string, the list.
+func namedValues(s map[string]any) (map[string]any, bool) {
+	branches, ok := s["anyOf"].([]any)
+	if !ok || len(branches) != 2 {
+		return nil, false
+	}
+	named, _ := branches[0].(map[string]any)
+	rest, _ := branches[1].(map[string]any)
+	if _, ok := named["enum"]; !ok || len(rest) != 1 || rest["type"] != "string" {
+		return nil, false
+	}
+	return named, true
+}
+
+// values is the values a list of the protocol's schemas names, open or not.
+func (c *contract) values(name string) []any {
+	s, _ := c.at("components", "schemas", name).(map[string]any)
+	if named, ok := namedValues(s); ok {
+		s = named
+	}
+	values, _ := s["enum"].([]any)
+	return values
 }
 
 // namesMembers reports whether a schema, or the definition it refers to,
@@ -630,10 +659,10 @@ func TestEveryErrorCodeHasAnAction(t *testing.T) {
 		t.Fatal(err)
 	}
 	codes, actions := map[string]bool{}, map[string]bool{}
-	for _, code := range c.at("components", "schemas", "ErrorCode", "enum").([]any) {
+	for _, code := range c.values("ErrorCode") {
 		codes[code.(string)] = true
 	}
-	for _, action := range c.at("components", "schemas", "ErrorAction", "enum").([]any) {
+	for _, action := range c.values("ErrorAction") {
 		actions[action.(string)] = true
 	}
 	for code := range codes {
@@ -645,6 +674,21 @@ func TestEveryErrorCodeHasAnAction(t *testing.T) {
 		if !codes[code] || !actions[action] {
 			t.Errorf("%s: %s is not in the protocol", code, action)
 		}
+	}
+}
+
+// A list of values open to clients still holds the harness to the values it
+// names.
+func TestTheHarnessSendsOnlyTheValuesAnOpenListNames(t *testing.T) {
+	c, err := loadContract()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.validate([]byte(`{"id":"b","type":"content"}`), "components", "schemas", "Block"); err != nil {
+		t.Fatalf("a block of a named type: %v", err)
+	}
+	if err := c.validate([]byte(`{"id":"b","type":"image"}`), "components", "schemas", "Block"); err == nil {
+		t.Fatal("a block of a type the protocol does not name passed")
 	}
 }
 
