@@ -2,43 +2,40 @@ package attach
 
 import (
 	"context"
-	"encoding/json"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/pages"
 )
 
+// Pages reads what a link preview shows of a page, and a site's favicon.
+type Pages interface {
+	Details(ctx context.Context, url string) (*pages.Details, error)
+	Favicon(ctx context.Context, url string) (*pages.Favicon, error)
+}
+
+// Favicon reads a site's favicon for a caller with chat access.
 func (at *Service) Favicon(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *PageRequest) (any, error) {
-	credential, err := at.Auth.Inference(ctx, p)
-	if err != nil {
+	if _, err := at.Auth.Inference(ctx, p); err != nil {
 		return nil, err
 	}
-	ctx = auth.WithCallerKey(ctx, string(credential.Key))
-	var result json.RawMessage
-	err = at.Models.ServiceCall(ctx, "metadata", "/favicon", PageRequest{URL: in.URL}, &result)
-	return result, err
+	return at.Pages.Favicon(ctx, in.URL)
 }
 
 // LinkPreview reads a page's details for a link preview that holds none, as
-// the previous web client's did.
+// the previous web client's did, for a caller with chat access.
 func (at *Service) LinkPreview(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *PageRequest) (any, error) {
-	credential, err := at.Auth.Inference(ctx, p)
+	if _, err := at.Auth.Inference(ctx, p); err != nil {
+		return nil, err
+	}
+	return at.LinkDetails(ctx, in.URL)
+}
+
+// LinkDetails are a page's details, as a link preview shows them.
+func (at *Service) LinkDetails(ctx context.Context, url string) (any, error) {
+	details, err := at.Pages.Details(ctx, url)
 	if err != nil {
 		return nil, err
 	}
-	return at.LinkDetails(auth.WithCallerKey(ctx, string(credential.Key)), in.URL)
-}
-
-// LinkDetails are a page's details, read by the metadata service, as a link
-// preview shows them.
-func (at *Service) LinkDetails(ctx context.Context, url string) (any, error) {
-	var response api.Object
-	if err := at.Models.ServiceCall(ctx, "metadata", "/metadata", api.Object{"url": url}, &response); err != nil {
-		return nil, err
-	}
-	result := api.Obj(response["result"])
-	if len(result) == 0 {
-		result = response
-	}
-	return api.Object{"url": url, "title": result["title"], "description": result["description"], "siteName": api.FirstString(result["siteName"], result["site_name"]), "image": result["image"]}, nil
+	return api.Object{"url": url, "title": details.Title, "description": details.Description, "siteName": details.SiteName, "image": details.Image}, nil
 }

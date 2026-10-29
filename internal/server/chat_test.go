@@ -38,6 +38,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/jobs"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/pages"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/search"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
@@ -252,6 +253,31 @@ type summarizerFunc func(style inference.SummaryStyle, text string) (string, err
 
 func (f summarizerFunc) Summarize(_ context.Context, style inference.SummaryStyle, text string) (string, error) {
 	return f(style, text)
+}
+
+// testPages reads the pages and favicons a test gives, and tells read of
+// each URL it is asked for.
+type testPages struct {
+	details map[string]*pages.Details
+	favicon *pages.Favicon
+	read    chan string
+}
+
+func (p *testPages) Details(_ context.Context, url string) (*pages.Details, error) {
+	p.read <- url
+	if details, ok := p.details[url]; ok {
+		return details, nil
+	}
+	return nil, api.Err(502, "UPSTREAM_REFUSED", "The page's details could not be read")
+}
+
+func (p *testPages) Favicon(_ context.Context, url string) (*pages.Favicon, error) {
+	p.read <- url
+	return p.favicon, nil
+}
+
+func detailsOf(title, description, siteName, image string) *pages.Details {
+	return &pages.Details{Title: &title, Description: &description, SiteName: &siteName, Image: &image}
 }
 
 func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memoryRows, auth.ContentKey) {
