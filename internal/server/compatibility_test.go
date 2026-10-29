@@ -176,12 +176,10 @@ func TestTitleRunsBeforeAnswerFinishes(t *testing.T) {
 		io.WriteString(w, "data: [DONE]\n\n")
 	})
 	titled := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(api.Object{"summary": "A generated title"})
+	h.models.Summarizer = summarizerFunc(func(inference.SummaryStyle, string) (string, error) {
 		close(titled)
-	}))
-	defer server.Close()
-	h.models.Services["summarizer"] = &inference.Service{URL: server.URL, Client: server.Client()}
+		return "A generated title", nil
+	})
 	run, err := h.engine.AcceptTurn(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[engine.TurnRequest](sendInput(key)))
 	if err != nil {
 		t.Fatal(err)

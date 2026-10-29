@@ -7,6 +7,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 )
 
 // A reply's reasoning is summarized while it thinks, as the web client did:
@@ -16,8 +17,6 @@ const (
 	minSummaryWords  = 20
 	summaryTailWords = 200
 	summaryInterval  = 3 * time.Second
-	summaryTimeout   = 30 * time.Second
-	ThoughtsStyle    = "thoughts_summary"
 )
 
 // thoughtSummaries follows the thinking block a reply streams into. The
@@ -37,20 +36,15 @@ type thoughtSummaries struct {
 	timer    *time.Timer
 }
 
-// thoughtSummaries starts following a run's reasoning, unless no summarizer
-// verified.
+// thoughtSummaries starts following a run's reasoning, unless the harness
+// has no summarizer.
 func (eng *Engine) thoughtSummaries(ctx context.Context, out *Stream, assembler *domain.MessageAssembler) *thoughtSummaries {
-	if !eng.Models.ServiceReady("summarizer") {
+	summarizer := eng.Models.Summarizer
+	if summarizer == nil {
 		return nil
 	}
 	return &thoughtSummaries{ctx: ctx, out: out, assembler: assembler, summarize: func(ctx context.Context, text string) (string, error) {
-		ctx, cancel := context.WithTimeout(ctx, summaryTimeout)
-		defer cancel()
-		var result struct {
-			Summary string `json:"summary"`
-		}
-		err := eng.Models.ServiceCall(ctx, "summarizer", "/summarize", api.Object{"content": text, "style": ThoughtsStyle}, &result)
-		return result.Summary, err
+		return summarizer.Summarize(ctx, inference.ThoughtsSummary, text)
 	}}
 }
 

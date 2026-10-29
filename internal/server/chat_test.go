@@ -247,6 +247,13 @@ func (s *memoryRows) IDs(_ context.Context, p *auth.Principal, scope, project st
 	return ids, nil
 }
 
+// summarizerFunc summarizes as a test says.
+type summarizerFunc func(style inference.SummaryStyle, text string) (string, error)
+
+func (f summarizerFunc) Summarize(_ context.Context, style inference.SummaryStyle, text string) (string, error) {
+	return f(style, text)
+}
+
 func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memoryRows, auth.ContentKey) {
 	t.Helper()
 	watchContract(t)

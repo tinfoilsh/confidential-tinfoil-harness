@@ -3,9 +3,9 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -44,15 +44,12 @@ func TestAThinkingReplysReasoningIsSummarized(t *testing.T) {
 		var mu sync.Mutex
 		var asked []string
 		summarized := make(chan struct{}, 1)
-		summarizer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			var in struct{ Content, Style string }
-			json.NewDecoder(r.Body).Decode(&in)
-			if in.Style != engine.ThoughtsStyle {
-				json.NewEncoder(w).Encode(api.Object{"summary": "Title"})
-				return
+		h.models.Summarizer = summarizerFunc(func(style inference.SummaryStyle, text string) (string, error) {
+			if style != inference.ThoughtsSummary {
+				return "Title", nil
 			}
 			mu.Lock()
-			asked = append(asked, in.Content)
+			asked = append(asked, text)
 			mu.Unlock()
 			defer func() {
 				select {
@@ -61,13 +58,10 @@ func TestAThinkingReplysReasoningIsSummarized(t *testing.T) {
 				}
 			}()
 			if failing {
-				w.WriteHeader(http.StatusInternalServerError)
-				return
+				return "", errors.New("the summary model is unavailable")
 			}
-			json.NewEncoder(w).Encode(api.Object{"summary": " Weighing options "})
-		}))
-		t.Cleanup(summarizer.Close)
-		h.models.Services["summarizer"] = &inference.Service{URL: summarizer.URL, Client: summarizer.Client()}
+			return " Weighing options ", nil
+		})
 		run, err := h.engine.AcceptTurn(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[engine.TurnRequest](sendInput(key)))
 		if err != nil {
 			t.Fatal(err)
