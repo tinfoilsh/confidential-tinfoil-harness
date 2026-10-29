@@ -4,10 +4,10 @@ import (
 	"context"
 	"strings"
 
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 )
 
 // titleSource is the text a title summarizes: the first user message, or the
@@ -33,7 +33,7 @@ func titleSource(t *domain.Thread) string {
 }
 
 func (eng *Engine) generateTitle(ctx context.Context, r *Run, p *auth.Principal, titleState string, text string) {
-	if !eng.Models.ServiceReady("summarizer") || titleState != "placeholder" {
+	if eng.Models.Summarizer == nil || titleState != "placeholder" {
 		return
 	}
 	words := strings.Fields(text)
@@ -41,13 +41,11 @@ func (eng *Engine) generateTitle(ctx context.Context, r *Run, p *auth.Principal,
 		return
 	}
 	text = strings.Join(words[:min(len(words), 100)], " ")
-	var result struct {
-		Summary string `json:"summary"`
-	}
-	if err := eng.Models.ServiceCall(ctx, "summarizer", "/summarize", api.Object{"content": text, "style": "title_summary"}, &result); err != nil {
+	summary, err := eng.Models.Summarizer.Summarize(ctx, inference.TitleSummary, text)
+	if err != nil {
 		return
 	}
-	title := strings.Trim(strings.TrimSpace(result.Summary), "\"'")
+	title := strings.Trim(strings.TrimSpace(summary), "\"'")
 	if title == "" {
 		return
 	}

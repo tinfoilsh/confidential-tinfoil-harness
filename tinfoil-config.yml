@@ -32,7 +32,6 @@ containers:
       - CLERK_ISSUER: https://clerk.tinfoil.sh
       - TINFOIL_TOOLS_ENCLAVE: websearch.tinfoil.sh
       - TINFOIL_ROUTER_ENCLAVE: inference.tinfoil.sh
-      - TINFOIL_SUMMARIZER_ENCLAVE: summarizer.tinfoil.sh
       - TINFOIL_METADATA_ENCLAVE: opengraph-metadata.tinfoil.sh
       - SAFEGUARDS_URL: "http://safeguards:8090"
       - BUCKETS_URL: "http://buckets:9000"
@@ -42,12 +41,14 @@ containers:
       - SEARCH_BUCKETS_URL: "http://buckets:9000"
       - SEARCH_INDEXES_BUCKET: "sync-search-indexes"
       - EMBEDDING_MODEL: "nomic-embed-text"
+      - SUMMARY_MODEL: "llama3-3-70b"
     secrets:
       - USAGE_CONTEXT_SECRET
       # The control plane's service secret for its storage API, which the
       # harness seals rows and stores attachments through.
       - SYNC_ENCLAVE_SECRET
-      # Embeds chat text and search queries through the inference service.
+      # Embeds chat text and search queries, and names chats and labels
+      # reasoning, through the inference service.
       - TINFOIL_API_KEY
     read_only: true
     # Archives spool here for the request that sends or builds them. The

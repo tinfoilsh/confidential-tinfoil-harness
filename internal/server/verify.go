@@ -34,11 +34,14 @@ func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
 	// This harness seals rows, stores attachments and keeps the search
 	// index itself, with the control plane's service secret, the buckets
 	// sidecars beside it, and the embedding model of the inference service.
+	// It names chats and labels reasoning with a summary model there.
 	secret, bucketsURL, bucket := os.Getenv("SYNC_ENCLAVE_SECRET"), os.Getenv("BUCKETS_URL"), os.Getenv("CHAT_ATTACHMENTS_BUCKET")
 	searchURL, searchBucket, apiKey, model := os.Getenv("SEARCH_BUCKETS_URL"), os.Getenv("SEARCH_INDEXES_BUCKET"), os.Getenv("TINFOIL_API_KEY"), os.Getenv("EMBEDDING_MODEL")
+	summaryModel := os.Getenv("SUMMARY_MODEL")
 	for _, required := range []struct{ name, value string }{
 		{"SYNC_ENCLAVE_SECRET", secret}, {"BUCKETS_URL", bucketsURL}, {"CHAT_ATTACHMENTS_BUCKET", bucket},
 		{"SEARCH_BUCKETS_URL", searchURL}, {"SEARCH_INDEXES_BUCKET", searchBucket}, {"TINFOIL_API_KEY", apiKey}, {"EMBEDDING_MODEL", model},
+		{"SUMMARY_MODEL", summaryModel},
 	} {
 		if required.value == "" {
 			return fmt.Errorf("%s is required", required.name)
@@ -55,6 +58,9 @@ func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
 	}
 	embedder, err := inference.NewEmbedder(apiKey, model)
 	if err != nil {
+		return err
+	}
+	if h.models.Summarizer, err = inference.NewSummarizer(apiKey, summaryModel); err != nil {
 		return err
 	}
 	rows := &store.Rows{Controlplane: cp, Buckets: bk}

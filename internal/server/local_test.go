@@ -8,7 +8,6 @@ import (
 	"image/png"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"reflect"
 	"slices"
 	"strconv"
@@ -138,11 +137,7 @@ func TestLocalTurnFieldsAreRefusedOutsideLocalThreads(t *testing.T) {
 
 func TestLocalTitleIsGeneratedWithoutStorage(t *testing.T) {
 	h, rows, _ := testChatHarness(t, nil)
-	summarizer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(api.Object{"summary": "\"Local title\""})
-	}))
-	defer summarizer.Close()
-	h.models.Services["summarizer"] = &inference.Service{URL: summarizer.URL, Client: summarizer.Client()}
+	h.models.Summarizer = summarizerFunc(func(inference.SummaryStyle, string) (string, error) { return "\"Local title\"", nil })
 	events := eventsIn(t, postRoute(h, "/v1/threads/turn", localInput("", api.Object{"messages": []any{}}), "alice"))
 	if rows.calls != 0 {
 		t.Fatalf("local title used storage %d times", rows.calls)
@@ -260,11 +255,7 @@ func TestADeviceChatRunReturnsItsUpdatedThread(t *testing.T) {
 		}
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"an answer\"}}]}\n\ndata: [DONE]\n\n")
 	})
-	summarizer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(api.Object{"summary": "Device title"})
-	}))
-	defer summarizer.Close()
-	h.models.Services["summarizer"] = &inference.Service{URL: summarizer.URL, Client: summarizer.Client()}
+	h.models.Summarizer = summarizerFunc(func(inference.SummaryStyle, string) (string, error) { return "Device title", nil })
 	in := localInput("", api.Object{"messages": []any{}})
 	id := api.Str(in["threadId"])
 	in["content"] = "what is this?"

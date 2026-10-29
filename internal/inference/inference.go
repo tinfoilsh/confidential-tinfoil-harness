@@ -28,6 +28,9 @@ type Models struct {
 	Offer        Offer
 	Services     map[string]*Service
 	Controlplane string
+	// Summarizer names chats and labels a reply's reasoning; nil when the
+	// harness has none.
+	Summarizer Summarizer
 }
 
 // The pinned repo is the trust anchor; the gateway's catalog supplies the rest.
@@ -206,7 +209,6 @@ func (inf *Models) Boot(ctx context.Context, usageSecret string) error {
 		role, repo, variable string
 		required             bool
 	}{
-		{"summarizer", "tinfoilsh/confidential-summarizer", "TINFOIL_SUMMARIZER_ENCLAVE", false},
 		{"metadata", "tinfoilsh/confidential-website-metadata-fetcher", "TINFOIL_METADATA_ENCLAVE", false},
 		{"router", "tinfoilsh/confidential-model-router", "TINFOIL_ROUTER_ENCLAVE", true},
 	} {
