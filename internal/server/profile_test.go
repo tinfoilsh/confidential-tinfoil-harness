@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -87,6 +88,34 @@ func TestAStoredProfileReadsUpgradedAndKeepsTheUpgradeOnceChanged(t *testing.T) 
 	row, _ := rows.Load(context.Background(), p, key, "profile", "profile")
 	if data := rowJSON(row); data["isUsingCustomPrompt"] != false || data["themeMode"] != nil {
 		t.Fatalf("the stored profile is %v", data)
+	}
+}
+
+// The apps' own profile sync keeps members of its own in the profile row and
+// merges it field by field by edit clocks it trusts only while clockVersion
+// is the row's revision. A change through the harness keeps those members
+// and advances the clock of each field it changes, and only those.
+func TestAProfileChangeKeepsTheAppsMembersAndAdvancesTheirClocks(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	p := &auth.Principal{ID: "alice"}
+	stored := api.Object{"nickname": "Sam", "isDarkMode": true, "projectUploadPreference": "ask", "version": 4, "clockVersion": 4,
+		"fieldClocks": api.Object{"nickname": api.Object{"v": 7, "w": "web"}, "isDarkMode": api.Object{"v": 9, "w": "ios"}}}
+	rows.rows[rowMapKey(p, "profile", "profile")] = domain.StoredRow{ID: "profile", ETag: "4", Data: api.Raw(stored)}
+	if w := postRoute(h, "/v1/profile/update", api.Object{"key": keyBase64(key), "patch": api.Object{"profession": "Pilot"}}, "alice"); w.Code != 200 {
+		t.Fatalf("HTTP %d %s", w.Code, w.Body)
+	}
+	row, _ := rows.Load(context.Background(), p, key, "profile", "profile")
+	data := rowJSON(row)
+	if data["isDarkMode"] != true || data["projectUploadPreference"] != "ask" || data["nickname"] != "Sam" || data["profession"] != "Pilot" {
+		t.Fatalf("the stored profile is %v", data)
+	}
+	clocks := api.Obj(data["fieldClocks"])
+	want := api.Object{"nickname": map[string]any{"v": float64(7), "w": "web"}, "isDarkMode": map[string]any{"v": float64(9), "w": "ios"}, "profession": map[string]any{"v": float64(10), "w": "harness"}}
+	if !reflect.DeepEqual(clocks, want) {
+		t.Fatalf("the stored clocks are %v", clocks)
+	}
+	if revision := strconv.Itoa(api.Int(data["clockVersion"])); revision != row.ETag || data["version"] != data["clockVersion"] {
+		t.Fatalf("clocks marked current at %v, version %v, for a row at revision %s", data["clockVersion"], data["version"], row.ETag)
 	}
 }
 

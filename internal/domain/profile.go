@@ -2,9 +2,11 @@ package domain
 
 import (
 	"encoding/json"
+	"maps"
 	"reflect"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
@@ -62,6 +64,116 @@ type StoredProfile struct {
 	RecordVersion int    `json:"recordVersion,omitempty"`
 	// PinnedChatIDs makes favorites available outside the loaded history pages.
 	PinnedChatIDs []string `json:"pinnedChatIds,omitzero"`
+	// Others are the row's members this harness does not name, such as the
+	// edit clocks the apps' own profile sync keeps. A write keeps them.
+	Others map[string]json.RawMessage `json:"-"`
+}
+
+// storedProfileFields is every member of the row a StoredProfile names.
+var storedProfileFields = jsonFields(reflect.TypeFor[StoredProfile]())
+
+func jsonFields(t reflect.Type) map[string]bool {
+	fields := map[string]bool{}
+	for i := range t.NumField() {
+		field := t.Field(i)
+		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		switch {
+		case field.Anonymous && name == "":
+			maps.Copy(fields, jsonFields(field.Type))
+		case name != "" && name != "-":
+			fields[name] = true
+		}
+	}
+	return fields
+}
+
+// otherMembers are the members of a profile row a StoredProfile does not name.
+func otherMembers(data []byte) map[string]json.RawMessage {
+	var members map[string]json.RawMessage
+	json.Unmarshal(data, &members)
+	maps.DeleteFunc(members, func(name string, _ json.RawMessage) bool { return storedProfileFields[name] })
+	if len(members) == 0 {
+		return nil
+	}
+	return members
+}
+
+// MarshalJSON writes the row with the members it does not name kept.
+func (p StoredProfile) MarshalJSON() ([]byte, error) {
+	type row StoredProfile
+	data, err := json.Marshal(row(p))
+	if err != nil || len(p.Others) == 0 {
+		return data, err
+	}
+	members := map[string]json.RawMessage{}
+	json.Unmarshal(data, &members)
+	for name, value := range p.Others {
+		if !storedProfileFields[name] {
+			members[name] = value
+		}
+	}
+	return json.Marshal(members)
+}
+
+// The apps' own profile sync merges the row field by field. It keeps an edit
+// clock {v, w} for each field in fieldClocks, and trusts the clocks only while
+// clockVersion is the row's revision. A write that leaves them stale makes
+// those apps refuse to merge any field both they and the write changed.
+const (
+	fieldClocksMember  = "fieldClocks"
+	clockVersionMember = "clockVersion"
+	versionMember      = "version"
+	clockWriter        = "harness"
+	// maxClock is the largest counter those apps keep, the largest integer a
+	// JavaScript number holds exactly.
+	maxClock = 1<<53 - 1
+)
+
+// PrepareWrite readies a changed profile to be stored over data, the row it
+// was read from, as revision, the revision the write creates or 0 when it is
+// not known. Each field the write changes takes an edit clock past every one
+// the row holds, so the apps' own profile sync can merge it.
+func (p *StoredProfile) PrepareWrite(data json.RawMessage, revision int, now time.Time) {
+	p.UpdatedAt = now.Format(time.RFC3339Nano)
+	p.RecordVersion = RecordVersion
+	p.stampEdits(data, revision)
+}
+
+func (p *StoredProfile) stampEdits(data json.RawMessage, revision int) {
+	type row StoredProfile
+	var was, is map[string]any
+	json.Unmarshal(data, &was)
+	json.Unmarshal(api.Raw(row(*p)), &is)
+	var changed []string
+	for name := range storedProfileFields {
+		if name != "updatedAt" && name != "recordVersion" && !reflect.DeepEqual(was[name], is[name]) {
+			changed = append(changed, name)
+		}
+	}
+	if p.Others == nil {
+		p.Others = map[string]json.RawMessage{}
+	}
+	if len(changed) > 0 {
+		clocks := map[string]json.RawMessage{}
+		json.Unmarshal(p.Others[fieldClocksMember], &clocks)
+		latest := int64(0)
+		for _, raw := range clocks {
+			var clock struct {
+				V float64 `json:"v"`
+			}
+			if json.Unmarshal(raw, &clock) == nil {
+				latest = max(latest, int64(clock.V))
+			}
+		}
+		tick := api.Raw(api.Object{"v": min(latest+1, maxClock), "w": clockWriter})
+		for _, name := range changed {
+			clocks[name] = tick
+		}
+		p.Others[fieldClocksMember] = api.Raw(clocks)
+	}
+	if revision > 0 {
+		p.Others[clockVersionMember], p.Others[versionMember] = api.Raw(revision), api.Raw(revision)
+	}
 }
 
 // ProfileView is the profile a client reads.

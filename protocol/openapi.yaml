@@ -41,7 +41,10 @@ info:
       refuses any other with RECORD_UNSUPPORTED. A member of a stored row it
       does not name is read past, since other clients of the same rows write
       members of their own; the harness leaves such members out when it
-      writes the row back.
+      writes the row back, except in the profile row. There it keeps them,
+      and for each field it changes it advances the edit clock the apps'
+      own profile sync keeps in fieldClocks, marking the clocks current
+      with clockVersion, so those apps can still merge the row.
     - The harness ignores request members it does not know, except in a
       profile patch, which refuses them.
     - Optional behavior is announced in the session's `features`. A client
