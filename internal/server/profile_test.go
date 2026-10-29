@@ -119,6 +119,33 @@ func TestAProfileChangeKeepsTheAppsMembersAndAdvancesTheirClocks(t *testing.T) {
 	}
 }
 
+// The apps' own profile sync refuses a whole profile when a saved prompt
+// lacks its text or numeric dates, so every stored prompt has them.
+func TestASavedPromptIsStoredWithWhatTheAppsRequire(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	p := &auth.Principal{ID: "alice"}
+	patch := api.Object{"customPromptPresets": []any{api.Object{"id": "user:bare", "name": "Bare"},
+		api.Object{"id": "user:dated", "name": "Dated", "systemPrompt": "Be brief", "createdAt": 1000, "updatedAt": "yesterday"}}}
+	if w := postRoute(h, "/v1/profile/update", api.Object{"key": keyBase64(key), "patch": patch}, "alice"); w.Code != 200 {
+		t.Fatalf("HTTP %d %s", w.Code, w.Body)
+	}
+	row, _ := rows.Load(context.Background(), p, key, "profile", "profile")
+	presets := presetsByID(rowJSON(row))
+	bare, dated := presets["user:bare"], presets["user:dated"]
+	if created, _ := bare["createdAt"].(float64); bare["description"] != "" || bare["systemPrompt"] != "" || created <= 0 || bare["updatedAt"] != bare["createdAt"] {
+		t.Fatalf("a prompt saved with only a name is stored as %v", bare)
+	}
+	if dated["systemPrompt"] != "Be brief" || dated["createdAt"] != float64(1000) || dated["updatedAt"] != float64(1000) {
+		t.Fatalf("a prompt saved with a date that is not a number is stored as %v", dated)
+	}
+	// A device's copy that leaves the text unset is the same prompt, not a
+	// conflicting one.
+	device := api.Object{"customPromptPresets": []any{api.Object{"id": "user:bare", "name": "Bare"}}}
+	if merged := presetsByID(profileOf(t, postRoute(h, "/v1/profile/merge", api.Object{"key": keyBase64(key), "profile": device}, "alice"))); len(merged) != 2 {
+		t.Fatalf("the device's unchanged prompt merged as %v", merged)
+	}
+}
+
 // A device's settings upgrade as a stored profile reads, and its invalid
 // fields are dropped rather than refusing the request.
 func TestADeviceProfileUpgradesAsAStoredOneReads(t *testing.T) {

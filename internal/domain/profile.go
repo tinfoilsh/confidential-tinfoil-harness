@@ -45,7 +45,7 @@ type Profile struct {
 }
 
 // CustomPreset is a prompt the user saved. Its timestamps are kept as the
-// client wrote them.
+// client wrote them; one stored without a number for either is dated then.
 type CustomPreset struct {
 	ID               string          `json:"id"`
 	Name             string          `json:"name"`
@@ -131,9 +131,11 @@ const (
 
 // PrepareWrite readies a changed profile to be stored over data, the row it
 // was read from, as revision, the revision the write creates or 0 when it is
-// not known. Each field the write changes takes an edit clock past every one
-// the row holds, so the apps' own profile sync can merge it.
+// not known. Its saved prompts get every member the apps' own profile sync
+// requires, and each field the write changes takes an edit clock past every
+// one the row holds, so that sync can merge it.
 func (p *StoredProfile) PrepareWrite(data json.RawMessage, revision int, now time.Time) {
+	p.completePresets(now)
 	p.UpdatedAt = now.Format(time.RFC3339Nano)
 	p.RecordVersion = RecordVersion
 	p.stampEdits(data, revision)
@@ -174,6 +176,42 @@ func (p *StoredProfile) stampEdits(data json.RawMessage, revision int) {
 	if revision > 0 {
 		p.Others[clockVersionMember], p.Others[versionMember] = api.Raw(revision), api.Raw(revision)
 	}
+}
+
+// completePresets gives each saved prompt the members the apps' own profile
+// sync requires of one, without which it refuses the whole profile: its text,
+// empty when unset, and its dates as Unix milliseconds, now for one without.
+func (p *Profile) completePresets(now time.Time) {
+	for i := range p.CustomPromptPresets {
+		preset := &p.CustomPromptPresets[i]
+		preset.Description = new(ValueOr(preset.Description, ""))
+		preset.SystemPrompt = new(ValueOr(preset.SystemPrompt, ""))
+		if !isNumber(preset.CreatedAt) {
+			preset.CreatedAt = api.Raw(now.UnixMilli())
+		}
+		if !isNumber(preset.UpdatedAt) {
+			preset.UpdatedAt = preset.CreatedAt
+		}
+	}
+}
+
+func isNumber(raw json.RawMessage) bool {
+	var value any
+	if json.Unmarshal(raw, &value) != nil {
+		return false
+	}
+	_, number := value.(float64)
+	return number
+}
+
+// samePrompt reports whether two saved prompts read the same, text left unset
+// reading as empty, as a stored prompt's does.
+func samePrompt(a, b CustomPreset) bool {
+	for _, preset := range []*CustomPreset{&a, &b} {
+		preset.Description = new(ValueOr(preset.Description, ""))
+		preset.SystemPrompt = new(ValueOr(preset.SystemPrompt, ""))
+	}
+	return reflect.DeepEqual(a, b)
 }
 
 // ProfileView is the profile a client reads.
@@ -298,7 +336,7 @@ func MergeDeviceProfile(remote, local Profile, changed []string) Profile {
 		if index >= 0 {
 			kept, incoming := presets[index], preset
 			kept.CreatedAt, kept.UpdatedAt, incoming.CreatedAt, incoming.UpdatedAt = nil, nil, nil, nil
-			if reflect.DeepEqual(kept, incoming) {
+			if samePrompt(kept, incoming) {
 				continue
 			}
 			preset.ID = "user:" + uuid.NewSHA1(uuid.NameSpaceURL, api.Raw(incoming)).String()

@@ -2508,7 +2508,7 @@ components:
       additionalProperties: true
 
     CustomPreset:
-      description: A prompt the user saved. Its timestamps are kept as the client wrote them.
+      description: A prompt the user saved. Its timestamps are kept as the client wrote them. A stored prompt always has a description and systemPrompt, empty when unset, and numeric timestamps, set when it is stored without them, as the apps' own profile sync requires.
       type: object
       required: [id, name]
       properties:
