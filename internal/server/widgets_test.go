@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -14,7 +15,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/pages"
 )
 
 func TestCanonicalizeWidgetArgumentsRecursive(t *testing.T) {
@@ -219,14 +220,7 @@ func TestARetriedLinkPreviewReadsItsPage(t *testing.T) {
 		json.NewEncoder(w).Encode(api.Object{"choices": []api.Object{{"message": api.Object{"content": fixed}}}})
 	})
 	asked := make(chan string, 1)
-	metadata := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var in api.Object
-		json.NewDecoder(r.Body).Decode(&in)
-		asked <- r.URL.Path + " " + api.Str(in["url"])
-		json.NewEncoder(w).Encode(api.Object{"result": api.Object{"title": "The Post", "description": "About it", "site_name": "Example", "image": "https://example.com/i.png"}})
-	}))
-	defer metadata.Close()
-	h.models.Services["metadata"] = &inference.Service{URL: metadata.URL, Client: metadata.Client()}
+	h.attachments.Pages = &testPages{details: map[string]*pages.Details{"https://example.com/post": detailsOf("The Post", "About it", "Example", "https://example.com/i.png")}, read: asked}
 	h.models.Catalog.Get().EnabledWidgets = []string{"render_link_preview"}
 	refused := domain.WidgetFailure(catalogWidgets("render_link_preview")["render_link_preview"], original)
 	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat")] = domain.StoredRow{ID: "chat", ETag: "1", Data: api.Raw(api.Object{"createdAt": api.Timestamp(), "title": "Links", "titleState": "manual", "model": "kimi-k3", "messages": []any{
@@ -245,7 +239,7 @@ func TestARetriedLinkPreviewReadsItsPage(t *testing.T) {
 	}
 	select {
 	case got := <-asked:
-		if got != "/metadata https://example.com/post" {
+		if got != "https://example.com/post" {
 			t.Fatalf("the retry read %s", got)
 		}
 	default:
@@ -262,32 +256,47 @@ func TestARetriedLinkPreviewReadsItsPage(t *testing.T) {
 }
 
 // A link preview in an old chat holds no page details; its client reads
-// them with the caller's credential, signed in or not, as the widget's call
+// them for a caller with chat access, signed in or not, as the widget's call
 // reads them.
 func TestALinkPreviewReadsItsPageDetails(t *testing.T) {
 	h, _, _ := testChatHarness(t, nil)
 	asked := make(chan string, 2)
-	metadata := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var in api.Object
-		json.NewDecoder(r.Body).Decode(&in)
-		asked <- r.Header.Get("Authorization") + " " + r.URL.Path + " " + api.Str(in["url"])
-		json.NewEncoder(w).Encode(api.Object{"result": api.Object{"title": "The Post", "description": "About it", "site_name": "Example", "image": "https://example.com/i.png", "favicon": "https://example.com/f.ico"}})
-	}))
-	defer metadata.Close()
-	h.models.Services["metadata"] = &inference.Service{URL: metadata.URL, Client: metadata.Client()}
+	details := detailsOf("The Post", "About it", "Example", "https://example.com/i.png")
+	details.URL = "https://example.com/posts/the-post"
+	h.attachments.Pages = &testPages{details: map[string]*pages.Details{"https://example.com/post": details}, read: asked}
 	w := postRoute(h, "/v1/metadata/link", api.Object{"url": "https://example.com/post"}, "")
 	if want := `{"description":"About it","image":"https://example.com/i.png","siteName":"Example","title":"The Post","url":"https://example.com/post"}` + "\n"; w.Code != 200 || w.Body.String() != want {
 		t.Fatalf("the details: HTTP %d %s", w.Code, w.Body.String())
 	}
 	select {
 	case got := <-asked:
-		if got != "Bearer free_anonymous-key /metadata https://example.com/post" {
-			t.Fatalf("the metadata service was asked %s", got)
+		if got != "https://example.com/post" {
+			t.Fatalf("the page read was %s", got)
 		}
 	default:
-		t.Fatal("the metadata service was not asked")
+		t.Fatal("no page was read")
 	}
 	if w := postRoute(h, "/v1/metadata/link", api.Object{"url": " "}, ""); w.Code != 400 || !strings.Contains(w.Body.String(), "BAD_REQUEST") || len(asked) != 0 {
 		t.Fatalf("a link without a URL: HTTP %d %s", w.Code, w.Body.String())
+	}
+}
+
+// A site's favicon is sent as the protocol names it, and only to a caller
+// with chat access.
+func TestAFaviconIsReadForACallerWithChatAccess(t *testing.T) {
+	h, _, _ := testChatHarness(t, nil)
+	asked := make(chan string, 2)
+	h.attachments.Pages = &testPages{favicon: &pages.Favicon{Status: pages.FaviconFound, Bytes: []byte("icon"), ContentType: "image/png"}, read: asked}
+	w := postRoute(h, "/v1/metadata/favicon", api.Object{"url": "https://example.com/post"}, "alice")
+	if want := `{"status":"found","favicon_bytes":"aWNvbg==","favicon_content_type":"image/png"}` + "\n"; w.Code != 200 || w.Body.String() != want || <-asked != "https://example.com/post" {
+		t.Fatalf("the favicon: HTTP %d %s", w.Code, w.Body.String())
+	}
+	r := httptest.NewRequest("POST", "/v1/metadata/favicon", bytes.NewReader(api.Raw(api.Object{"url": "https://example.com/post"})))
+	r.Header.Set("Authorization", "Bearer clerk-alice")
+	r.Header.Set("Content-Type", "application/json")
+	refused := httptest.NewRecorder()
+	h.routes().ServeHTTP(refused, r)
+	if refused.Code == 200 || len(asked) != 0 {
+		t.Fatalf("a caller without chat access read a favicon: HTTP %d %s", refused.Code, refused.Body.String())
 	}
 }

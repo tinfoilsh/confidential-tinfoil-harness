@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -204,33 +205,16 @@ func (inf *Models) Boot(ctx context.Context, usageSecret string) error {
 	}
 	// Outermost: the SDK salts each caller's prompt cache with the key set here.
 	inf.Client = &http.Client{Transport: &auth.CallerTransport{Inner: gw.HTTPClient().Transport, UsageSecret: usageSecret}}
-	inf.Services = map[string]*Service{}
-	for _, config := range []struct {
-		role, repo, variable string
-		required             bool
-	}{
-		{"metadata", "tinfoilsh/confidential-website-metadata-fetcher", "TINFOIL_METADATA_ENCLAVE", false},
-		{"router", "tinfoilsh/confidential-model-router", "TINFOIL_ROUTER_ENCLAVE", true},
-	} {
-		host := os.Getenv(config.variable)
-		if host == "" && config.required {
-			return fmt.Errorf("%s is required", config.variable)
-		}
-		if host == "" {
-			slog.Warn("downstream enclave not configured", "role", config.role)
-			continue
-		}
-		client, err := Attest(ctx, host, config.repo, usageSecret)
-		if err != nil {
-			if config.required {
-				return fmt.Errorf("verify required %s enclave %s: %w", config.role, host, err)
-			}
-			slog.Warn("downstream enclave unavailable", "role", config.role, "enclave", host, "error", err)
-			continue
-		}
-		inf.Services[config.role] = &Service{URL: "https://" + host, Client: client}
+	host := os.Getenv("TINFOIL_ROUTER_ENCLAVE")
+	if host == "" {
+		return errors.New("TINFOIL_ROUTER_ENCLAVE is required")
 	}
-	router := inf.Services["router"]
+	client, err := Attest(ctx, host, "tinfoilsh/confidential-model-router", usageSecret)
+	if err != nil {
+		return fmt.Errorf("verify required router enclave %s: %w", host, err)
+	}
+	router := &Service{URL: "https://" + host, Client: client}
+	inf.Services = map[string]*Service{"router": router}
 	inf.Auto = &Model{Name: "auto", Client: router.Client, Endpoint: router.URL + "/v1/chat/completions"}
 	if err := inf.RefreshCatalog(ctx); err != nil {
 		return err
@@ -261,13 +245,6 @@ func (inf *Models) Boot(ctx context.Context, usageSecret string) error {
 func (inf *Models) ServiceReady(role string) bool {
 	service := inf.Services[role]
 	return service != nil && service.Client != nil
-}
-func (inf *Models) ServiceCall(ctx context.Context, role, path string, in, out any) error {
-	s := inf.Services[role]
-	if s == nil {
-		return api.Err(503, "TOOL_UNAVAILABLE", role+" is unavailable")
-	}
-	return api.PostJSON(ctx, s.Client, strings.TrimRight(s.URL, "/")+path, auth.CallerKey(ctx), in, out)
 }
 
 type usageSinkKey struct{}

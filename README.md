@@ -24,9 +24,10 @@ Anonymous chat works only from a deployed harness, because Tinfoil validates `fr
 - `TINFOIL_API_KEY`: secret for the safeguards sidecar, and for embedding chats and search queries and writing chat titles and reasoning labels through the inference service
 - `TINFOIL_GATEWAY_URL`, `TINFOIL_CONTROLPLANE_URL` and `CLERK_ISSUER`: required
 - `TINFOIL_ROUTER_ENCLAVE`: required, and must attest at boot
-- The other `TINFOIL_*_ENCLAVE` hosts: used once their attestation succeeds
+- `TINFOIL_TOOLS_ENCLAVE`: the web search enclave, used once its attestation succeeds
 - `SYNC_ENCLAVE_SECRET`, `BUCKETS_URL`, `CHAT_ATTACHMENTS_BUCKET`, `SEARCH_BUCKETS_URL`, `SEARCH_INDEXES_BUCKET` and `EMBEDDING_MODEL`: required; the control plane's service secret for its storage API, the buckets sidecar that holds attachments and search indexes, and the model that embeds chats for search
 - `SUMMARY_MODEL`: required; the model that writes chat titles and reasoning labels
+- `CONTEXT_DEV_API_KEY`: required secret for reading link previews through [context.dev](https://docs.context.dev), which needs zero data retention enabled for its organization; site favicons come from DuckDuckGo by host
 - `SAFEGUARDS_URL`: the [safeguards](https://github.com/tinfoilsh/confidential-safeguards) sidecar that classifies completed first-party chats
 
 A chat model is offered only when Tinfoil's model catalog lists it, its repository is pinned in [internal/inference/inference.go](internal/inference/inference.go), and a replica serving it is available.

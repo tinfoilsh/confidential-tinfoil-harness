@@ -18,6 +18,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/jobs"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/pages"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/search"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
@@ -28,6 +29,7 @@ type harness struct {
 	store        *store.Store
 	search       *search.Service
 	models       *inference.Models
+	pages        *pages.Reader
 	attachments  *attach.Service
 	archives     *archives.Service
 	engine       *engine.Engine
@@ -68,7 +70,7 @@ func Run() {
 	}
 	go h.search.RunDeletionWorker(ctx)
 	go h.store.RunAttachmentMaintenance(ctx)
-	h.attachments = &attach.Service{Auth: h.auth, Models: h.models, Store: h.store}
+	h.attachments = &attach.Service{Auth: h.auth, Models: h.models, Store: h.store, Pages: h.pages}
 	h.store.Repair = h.attachments
 	h.engine = &engine.Engine{Safeguards: engine.NewSubmitter(os.Getenv("SAFEGUARDS_URL")), Store: h.store, Models: h.models, Attachments: h.attachments, Auth: h.auth}
 	h.archives = &archives.Service{Scratch: scratch, CPClient: &http.Client{Transport: &auth.CallerTransport{Inner: http.DefaultTransport}}, Store: h.store, Attachments: h.attachments, Auth: h.auth, Controlplane: h.controlplane,

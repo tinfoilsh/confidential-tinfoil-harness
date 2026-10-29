@@ -11,6 +11,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/buckets"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/pages"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/search"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
@@ -34,14 +35,15 @@ func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
 	// This harness seals rows, stores attachments and keeps the search
 	// index itself, with the control plane's service secret, the buckets
 	// sidecars beside it, and the embedding model of the inference service.
-	// It names chats and labels reasoning with a summary model there.
+	// It names chats and labels reasoning with a summary model there, and
+	// reads link previews through context.dev.
 	secret, bucketsURL, bucket := os.Getenv("SYNC_ENCLAVE_SECRET"), os.Getenv("BUCKETS_URL"), os.Getenv("CHAT_ATTACHMENTS_BUCKET")
 	searchURL, searchBucket, apiKey, model := os.Getenv("SEARCH_BUCKETS_URL"), os.Getenv("SEARCH_INDEXES_BUCKET"), os.Getenv("TINFOIL_API_KEY"), os.Getenv("EMBEDDING_MODEL")
-	summaryModel := os.Getenv("SUMMARY_MODEL")
+	summaryModel, contextDevKey := os.Getenv("SUMMARY_MODEL"), os.Getenv("CONTEXT_DEV_API_KEY")
 	for _, required := range []struct{ name, value string }{
 		{"SYNC_ENCLAVE_SECRET", secret}, {"BUCKETS_URL", bucketsURL}, {"CHAT_ATTACHMENTS_BUCKET", bucket},
 		{"SEARCH_BUCKETS_URL", searchURL}, {"SEARCH_INDEXES_BUCKET", searchBucket}, {"TINFOIL_API_KEY", apiKey}, {"EMBEDDING_MODEL", model},
-		{"SUMMARY_MODEL", summaryModel},
+		{"SUMMARY_MODEL", summaryModel}, {"CONTEXT_DEV_API_KEY", contextDevKey},
 	} {
 		if required.value == "" {
 			return fmt.Errorf("%s is required", required.name)
@@ -63,6 +65,7 @@ func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
 	if h.models.Summarizer, err = inference.NewSummarizer(apiKey, summaryModel); err != nil {
 		return err
 	}
+	h.pages = pages.New(contextDevKey)
 	rows := &store.Rows{Controlplane: cp, Buckets: bk}
 	h.search = search.New(cp, sbk, embedder, rows)
 	rows.Index = h.search
