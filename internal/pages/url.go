@@ -25,7 +25,8 @@ func NormalizeURL(rawURL string) (string, error) {
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return "", errors.New("only http and https URLs are allowed")
 	}
-	host := strings.ToLower(parsed.Hostname())
+	// A trailing dot names the same host.
+	host := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
 	if host == "" {
 		return "", errors.New("the URL has no host")
 	}
@@ -38,10 +39,21 @@ func NormalizeURL(rawURL string) (string, error) {
 		strings.HasSuffix(host, ".internal") {
 		return "", errors.New("the host is not allowed")
 	}
-	if _, err := netip.ParseAddr(host); err == nil {
+	if _, err := netip.ParseAddr(host); err == nil || endsInANumber(host) {
 		return "", errors.New("IP addresses are not allowed")
 	}
 	parsed.Host = strings.ToLower(parsed.Host)
 	parsed.Fragment = ""
 	return parsed.String(), nil
+}
+
+// endsInANumber reports whether host's last label is a number, decimal or
+// hexadecimal, as the URL standard reads one: such a host is an IPv4
+// address in a shorthand form, as 127.1 or 0x7f.0.0.1 is.
+func endsInANumber(host string) bool {
+	label := host[strings.LastIndex(host, ".")+1:]
+	if hex, ok := strings.CutPrefix(strings.ToLower(label), "0x"); ok {
+		return strings.Trim(hex, "0123456789abcdef") == ""
+	}
+	return label != "" && strings.Trim(label, "0123456789") == ""
 }

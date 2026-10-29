@@ -61,6 +61,8 @@ func TestNormalizeURLRejectsUnsafeTargets(t *testing.T) {
 		"", "not a url", "ftp://example.com", "http://user:pass@example.com", "http://localhost", "http://foo.local",
 		"http://foo.internal", "http://127.0.0.1", "http://[::1]", "http://10.0.0.1", "http://169.254.169.254/latest/meta-data/",
 		"http://192.168.1.1", "http://[fe80::1]", "http://example.com:9200",
+		"http://127.1/", "http://0x7f.0.0.1/", "http://2130706433/", "http://0/", "http://0x/", "http://10.0.0.1./",
+		"http://localhost./", "http://foo.internal./",
 	} {
 		if _, err := NormalizeURL(rawURL); err == nil {
 			t.Errorf("%q was accepted", rawURL)
@@ -75,6 +77,12 @@ func TestNormalizeURLCanonicalizesAPublicURL(t *testing.T) {
 	normalized, err := NormalizeURL("  https://EXAMPLE.com/article?ref=one#section  ")
 	if err != nil || normalized != "https://example.com/article?ref=one" {
 		t.Fatalf("normalized %q, error %v", normalized, err)
+	}
+	// Numbers name a host only in its last label.
+	for _, public := range []string{"https://1password.com", "https://123.example.com", "https://example.com./", "https://example.0xyz"} {
+		if _, err := NormalizeURL(public); err != nil {
+			t.Errorf("%q was refused: %v", public, err)
+		}
 	}
 }
 
