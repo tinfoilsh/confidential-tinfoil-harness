@@ -88,11 +88,17 @@ type deleteAllRequest struct {
 
 type profileUpdateRequest struct {
 	Patch json.RawMessage `json:"patch"`
+	domain.PromptEdits
 }
+
+func (in *profileUpdateRequest) Validate() error { return in.PromptEdits.Validate() }
 
 // patch is the profile fields a request sets, and whether it clears the
 // default prompt by setting it to null.
 func (in *profileUpdateRequest) patch() (domain.Profile, bool, error) {
+	if in.Patch == nil {
+		return domain.Profile{}, false, nil
+	}
 	if !api.IsObject(in.Patch) {
 		return domain.Profile{}, false, api.Err(400, "BAD_REQUEST", "patch must be an object")
 	}

@@ -77,7 +77,7 @@ func (h *harness) session(ctx context.Context, p *auth.Principal, _ auth.Content
 		ProfileDefaults: domain.DefaultProfile(),
 		Composer:        attach.Composer(),
 		Presets:         presets,
-		Features:        map[string]bool{"webSearch": engine.WebSearchReady(), "transcription": h.models.ServiceReady("router"), "speech": h.models.ServiceReady("router")},
+		Features:        map[string]bool{"webSearch": engine.WebSearchReady(), "transcription": h.models.ServiceReady("router"), "speech": h.models.ServiceReady("router"), "promptPresetEdits": true},
 	}, nil
 }
 
@@ -399,7 +399,7 @@ func (h *harness) updateProfile(ctx context.Context, p *auth.Principal, key auth
 		if clearsDefault {
 			profile.DefaultPromptPresetID = nil
 		}
-		return nil
+		return profile.ApplyPromptEdits(in.PromptEdits)
 	})
 	if err != nil {
 		return nil, err

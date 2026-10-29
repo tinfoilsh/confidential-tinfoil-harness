@@ -369,6 +369,67 @@ func MergeDeviceProfile(remote, local Profile, changed []string) Profile {
 	return merged
 }
 
+// PromptEdits change saved prompts and favorites one at a time, on the
+// profile as stored when they apply, so a client never sends back a copy of
+// a whole list that it read before another device changed it.
+type PromptEdits struct {
+	// SavePromptPresets adds each prompt, or replaces the one with its id
+	// where it stands.
+	SavePromptPresets []CustomPreset `json:"savePromptPresets"`
+	// DeletePromptPresetIDs removes each prompt, which is then no longer a
+	// favorite or the default.
+	DeletePromptPresetIDs         []string `json:"deletePromptPresetIds"`
+	AddFavoritePromptPresetIDs    []string `json:"addFavoritePromptPresetIds"`
+	RemoveFavoritePromptPresetIDs []string `json:"removeFavoritePromptPresetIds"`
+}
+
+// Validate refuses edits that name a prompt without an id or name.
+func (e *PromptEdits) Validate() error {
+	if slices.ContainsFunc(e.SavePromptPresets, unnamedPreset) {
+		return api.Err(400, "BAD_REQUEST", "A custom preset requires an id and name")
+	}
+	for _, ids := range [][]string{e.DeletePromptPresetIDs, e.AddFavoritePromptPresetIDs, e.RemoveFavoritePromptPresetIDs} {
+		if slices.Contains(ids, "") {
+			return api.Err(400, "BAD_REQUEST", "A prompt id is required")
+		}
+	}
+	return nil
+}
+
+// ApplyPromptEdits applies edits to the profile, refusing them when a list
+// would grow past what a profile holds.
+func (p *Profile) ApplyPromptEdits(e PromptEdits) error {
+	presets := slices.Clone(p.CustomPromptPresets)
+	for _, preset := range e.SavePromptPresets {
+		if i := slices.IndexFunc(presets, func(kept CustomPreset) bool { return kept.ID == preset.ID }); i >= 0 {
+			presets[i] = preset
+		} else {
+			presets = append(presets, preset)
+		}
+	}
+	presets = slices.DeleteFunc(presets, func(preset CustomPreset) bool { return slices.Contains(e.DeletePromptPresetIDs, preset.ID) })
+	unfavored := slices.Concat(e.DeletePromptPresetIDs, e.RemoveFavoritePromptPresetIDs)
+	favorites := slices.DeleteFunc(slices.Clone(p.FavoritePromptPresetIDs), func(id string) bool { return slices.Contains(unfavored, id) })
+	for _, id := range e.AddFavoritePromptPresetIDs {
+		if !slices.Contains(favorites, id) && !slices.Contains(e.DeletePromptPresetIDs, id) {
+			favorites = append(favorites, id)
+		}
+	}
+	if len(presets) > maxProfileList || len(favorites) > maxProfileList {
+		return api.Err(400, "BAD_REQUEST", "The profile cannot hold that many saved prompts or favorites")
+	}
+	if !reflect.DeepEqual(presets, p.CustomPromptPresets) {
+		p.CustomPromptPresets = presets
+	}
+	if !slices.Equal(favorites, p.FavoritePromptPresetIDs) {
+		p.FavoritePromptPresetIDs = favorites
+	}
+	if id := ValueOr(p.DefaultPromptPresetID, ""); id != "" && slices.Contains(e.DeletePromptPresetIDs, id) {
+		p.DefaultPromptPresetID = new("")
+	}
+	return nil
+}
+
 // Personalized reports whether the prompt carries the user's preferences.
 func (p *Profile) Personalized() bool {
 	return p.IsUsingPersonalization == nil || *p.IsUsingPersonalization
