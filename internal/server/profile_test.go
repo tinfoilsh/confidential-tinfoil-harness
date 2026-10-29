@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -87,6 +88,113 @@ func TestAStoredProfileReadsUpgradedAndKeepsTheUpgradeOnceChanged(t *testing.T) 
 	row, _ := rows.Load(context.Background(), p, key, "profile", "profile")
 	if data := rowJSON(row); data["isUsingCustomPrompt"] != false || data["themeMode"] != nil {
 		t.Fatalf("the stored profile is %v", data)
+	}
+}
+
+// The apps' own profile sync keeps members of its own in the profile row and
+// merges it field by field by edit clocks it trusts only while clockVersion
+// is the row's revision. A change through the harness keeps those members
+// and advances the clock of each field it changes, and only those.
+func TestAProfileChangeKeepsTheAppsMembersAndAdvancesTheirClocks(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	p := &auth.Principal{ID: "alice"}
+	stored := api.Object{"nickname": "Sam", "isDarkMode": true, "projectUploadPreference": "ask", "version": 4, "clockVersion": 4,
+		"fieldClocks": api.Object{"nickname": api.Object{"v": 7, "w": "web"}, "isDarkMode": api.Object{"v": 9, "w": "ios"}}}
+	rows.rows[rowMapKey(p, "profile", "profile")] = domain.StoredRow{ID: "profile", ETag: "4", Data: api.Raw(stored)}
+	if w := postRoute(h, "/v1/profile/update", api.Object{"key": keyBase64(key), "patch": api.Object{"profession": "Pilot"}}, "alice"); w.Code != 200 {
+		t.Fatalf("HTTP %d %s", w.Code, w.Body)
+	}
+	row, _ := rows.Load(context.Background(), p, key, "profile", "profile")
+	data := rowJSON(row)
+	if data["isDarkMode"] != true || data["projectUploadPreference"] != "ask" || data["nickname"] != "Sam" || data["profession"] != "Pilot" {
+		t.Fatalf("the stored profile is %v", data)
+	}
+	clocks := api.Obj(data["fieldClocks"])
+	want := api.Object{"nickname": map[string]any{"v": float64(7), "w": "web"}, "isDarkMode": map[string]any{"v": float64(9), "w": "ios"}, "profession": map[string]any{"v": float64(10), "w": "harness"}}
+	if !reflect.DeepEqual(clocks, want) {
+		t.Fatalf("the stored clocks are %v", clocks)
+	}
+	if revision := strconv.Itoa(api.Int(data["clockVersion"])); revision != row.ETag || data["version"] != data["clockVersion"] {
+		t.Fatalf("clocks marked current at %v, version %v, for a row at revision %s", data["clockVersion"], data["version"], row.ETag)
+	}
+}
+
+// The apps' own profile sync refuses a whole profile when a saved prompt
+// lacks its text or numeric dates, so every stored prompt has them.
+func TestASavedPromptIsStoredWithWhatTheAppsRequire(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	p := &auth.Principal{ID: "alice"}
+	patch := api.Object{"customPromptPresets": []any{api.Object{"id": "user:bare", "name": "Bare"},
+		api.Object{"id": "user:dated", "name": "Dated", "systemPrompt": "Be brief", "createdAt": 1000, "updatedAt": "yesterday"}}}
+	if w := postRoute(h, "/v1/profile/update", api.Object{"key": keyBase64(key), "patch": patch}, "alice"); w.Code != 200 {
+		t.Fatalf("HTTP %d %s", w.Code, w.Body)
+	}
+	row, _ := rows.Load(context.Background(), p, key, "profile", "profile")
+	presets := presetsByID(rowJSON(row))
+	bare, dated := presets["user:bare"], presets["user:dated"]
+	if created, _ := bare["createdAt"].(float64); bare["description"] != "" || bare["systemPrompt"] != "" || created <= 0 || bare["updatedAt"] != bare["createdAt"] {
+		t.Fatalf("a prompt saved with only a name is stored as %v", bare)
+	}
+	if dated["systemPrompt"] != "Be brief" || dated["createdAt"] != float64(1000) || dated["updatedAt"] != float64(1000) {
+		t.Fatalf("a prompt saved with a date that is not a number is stored as %v", dated)
+	}
+	// A device's copy that leaves the text unset is the same prompt, not a
+	// conflicting one.
+	device := api.Object{"customPromptPresets": []any{api.Object{"id": "user:bare", "name": "Bare"}}}
+	if merged := presetsByID(profileOf(t, postRoute(h, "/v1/profile/merge", api.Object{"key": keyBase64(key), "profile": device}, "alice"))); len(merged) != 2 {
+		t.Fatalf("the device's unchanged prompt merged as %v", merged)
+	}
+}
+
+// Saved prompts and favorites change one at a time on the profile as stored,
+// so a client that read the profile before another device changed it, or has
+// not read it yet, cannot drop that device's prompts.
+func TestPromptEditsApplyToTheStoredProfile(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	var session struct {
+		Features map[string]bool `json:"features"`
+	}
+	if json.Unmarshal(postRoute(h, "/v1/session", api.Object{}, "alice").Body.Bytes(), &session); !session.Features["promptPresetEdits"] {
+		t.Fatalf("the session does not offer prompt edits: %v", session.Features)
+	}
+	p := &auth.Principal{ID: "alice"}
+	stored := api.Object{"customPromptPresets": []any{
+		api.Object{"id": "user:a", "name": "A", "systemPrompt": "first", "createdAt": 1, "updatedAt": 1},
+		api.Object{"id": "user:b", "name": "B", "systemPrompt": "second", "createdAt": 2, "updatedAt": 2}},
+		"favoritePromptPresetIds": []any{"user:b", "student"}, "defaultPromptPresetId": "user:b"}
+	rows.rows[rowMapKey(p, "profile", "profile")] = domain.StoredRow{ID: "profile", ETag: "1", Data: api.Raw(stored)}
+	edit := func(edits api.Object) api.Object {
+		edits["key"] = keyBase64(key)
+		return profileOf(t, postRoute(h, "/v1/profile/update", edits, "alice"))
+	}
+	ids := func(profile api.Object) (ids []string) {
+		for _, preset := range api.Arr(profile["customPromptPresets"]) {
+			ids = append(ids, api.Str(api.Obj(preset)["id"]))
+		}
+		return ids
+	}
+	profile := edit(api.Object{"savePromptPresets": []any{api.Object{"id": "user:c", "name": "C"}, api.Object{"id": "user:a", "name": "A2", "systemPrompt": "edited"}},
+		"addFavoritePromptPresetIds": []any{"user:c", "student"}})
+	if got := ids(profile); !reflect.DeepEqual(got, []string{"user:a", "user:b", "user:c"}) || presetsByID(profile)["user:a"]["systemPrompt"] != "edited" {
+		t.Fatalf("saving a new and an edited prompt left %v", profile["customPromptPresets"])
+	}
+	if favorites := profile["favoritePromptPresetIds"]; !reflect.DeepEqual(favorites, []any{"user:b", "student", "user:c"}) {
+		t.Fatalf("adding favorites left %v", favorites)
+	}
+	profile = edit(api.Object{"deletePromptPresetIds": []any{"user:b"}, "removeFavoritePromptPresetIds": []any{"student"}})
+	row, _ := rows.Load(context.Background(), p, key, "profile", "profile")
+	if got := ids(profile); !reflect.DeepEqual(got, []string{"user:a", "user:c"}) || !reflect.DeepEqual(profile["favoritePromptPresetIds"], []any{"user:c"}) || rowJSON(row)["defaultPromptPresetId"] != "" {
+		t.Fatalf("removing the default prompt left %v and stored %v", profile, rowJSON(row))
+	}
+	// An emptied list is stored empty, which the apps' own profile sync reads
+	// as cleared rather than as not synced yet.
+	edit(api.Object{"deletePromptPresetIds": []any{"user:a", "user:c"}})
+	row, _ = rows.Load(context.Background(), p, key, "profile", "profile")
+	if presets, stored := rowJSON(row)["customPromptPresets"]; !stored || len(api.Arr(presets)) != 0 {
+		t.Fatalf("removing every prompt stored %v", rowJSON(row))
+	}
+	if w := postRoute(h, "/v1/profile/update", api.Object{"key": keyBase64(key), "savePromptPresets": []any{api.Object{"id": "user:d"}}}, "alice"); w.Code != 400 {
+		t.Fatalf("a prompt without a name: HTTP %d", w.Code)
 	}
 }
 

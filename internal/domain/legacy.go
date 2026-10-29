@@ -563,8 +563,9 @@ func ReadProfile(data []byte) (StoredProfile, error) {
 	case err != nil:
 		return StoredProfile{}, err
 	case current:
-		var profile StoredProfile
-		return profile, readCurrent(data, &profile)
+		profile := StoredProfile{Others: otherMembers(data)}
+		err := readCurrent(data, &profile)
+		return profile, err
 	}
 	var stored struct {
 		StoredProfile
@@ -573,6 +574,7 @@ func ReadProfile(data []byte) (StoredProfile, error) {
 	readLenient(data, &stored)
 	profile := stored.StoredProfile
 	profile.UpdatedAt = string(stored.UpdatedAt)
+	profile.Others = otherMembers(data)
 	// The migrated prompt is dated by the profile, or by undatedProfile for a
 	// profile without a date, so each read of a profile not yet stored again
 	// makes the same one.

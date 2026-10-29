@@ -7,6 +7,7 @@ import (
 	"maps"
 	"net/http"
 	"slices"
+	"strconv"
 
 	"github.com/google/uuid"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
@@ -298,8 +299,7 @@ func (s *Store) MutateProfile(ctx context.Context, p *auth.Principal, key auth.C
 		if bytes.Equal(before, api.Raw(profile)) {
 			return errProfileUnchanged
 		}
-		profile.UpdatedAt = api.Timestamp()
-		profile.RecordVersion = domain.RecordVersion
+		profile.PrepareWrite(row.Data, nextRevision(row, exists), api.Now())
 		row.Data = api.Raw(profile)
 		return nil
 	})
@@ -310,6 +310,20 @@ func (s *Store) MutateProfile(ctx context.Context, p *auth.Principal, key auth.C
 }
 
 var errProfileUnchanged = errors.New("profile unchanged")
+
+// nextRevision is the revision a push of row creates, as the control plane
+// counts them, or 0 when its revision is not a count. A row created where one
+// was deleted continues the deleted row's count, which a load cannot see.
+func nextRevision(row *domain.StoredRow, exists bool) int {
+	if !exists {
+		return 1
+	}
+	n, err := strconv.Atoi(row.ETag)
+	if err != nil {
+		return 0
+	}
+	return n + 1
+}
 
 // Projects
 
