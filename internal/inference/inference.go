@@ -74,10 +74,16 @@ func PinnedName(model string) string {
 // SDK never tries to persist a secret under the read-only home directory.
 var cacheFallback = tinfoil.WithUserCacheSecret(api.Token())
 
+// attestedTLS pins the TLS connection to the key an enclave's attestation
+// names, so headers, status codes and bodiless requests, which EHBP leaves
+// open, reach no one else. Every enclave the harness dials directly uses it;
+// only the gateway, which relays to replicas, needs bodies sealed instead.
+var attestedTLS = tinfoil.WithTransport(tinfoil.TransportTLS)
+
 // Attest verifies an enclave the harness dials directly.
 func Attest(ctx context.Context, enclave, repo, usageSecret string) (*http.Client, error) {
 	return startupAttestation.run(ctx, func() (*http.Client, error) {
-		verified, err := tinfoil.NewClientWithOptions(tinfoil.WithEnclave(enclave), tinfoil.WithRepo(repo), cacheFallback)
+		verified, err := tinfoil.NewClientWithOptions(tinfoil.WithEnclave(enclave), tinfoil.WithRepo(repo), attestedTLS, cacheFallback)
 		if err != nil {
 			return nil, err
 		}

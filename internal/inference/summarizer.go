@@ -90,6 +90,7 @@ type modelSummarizer struct {
 // enclave-bound transport.
 func NewSummarizer(apiKey, model string) (Summarizer, error) {
 	secureClient, err := tinfoil.NewClientWithOptions(
+		attestedTLS,
 		cacheFallback,
 		tinfoil.WithOpenAIOptions(
 			option.WithAPIKey(apiKey),

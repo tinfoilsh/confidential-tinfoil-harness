@@ -104,7 +104,7 @@ func openTools(ctx context.Context, req *Request, model string, progress func(st
 }
 
 func (f *toolEnclave) dial(ctx context.Context, header http.Header, progress func(string, string, float64)) (*session, error) {
-	// Nil means unverified at startup; the default client would seal to nothing.
+	// Nil means unverified at startup; the default client would reach an unverified host.
 	if f.client == nil {
 		return nil, errors.New("enclave did not verify at startup")
 	}
