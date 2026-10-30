@@ -31,10 +31,6 @@ func Respond(w http.ResponseWriter, result any, err error) {
 
 const MaxRequestBody = 8 << 20
 
-// MaxResponseBody bounds a downstream answer: a converted document, or an
-// attachment, base64 encoded.
-const MaxResponseBody = 96 << 20
-
 // ReadBody reads a request body of at most limit bytes that holds one JSON
 // object.
 func ReadBody(w http.ResponseWriter, r *http.Request, limit int64) (json.RawMessage, error) {

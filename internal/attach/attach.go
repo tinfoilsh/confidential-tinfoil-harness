@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"cmp"
 	"context"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -167,8 +166,6 @@ func Composer() ComposerView {
 		DictationMaxSeconds: dictationMaxSeconds,
 	}
 }
-
-func randomBytes(n int) []byte { b := make([]byte, n); rand.Read(b); return b }
 
 func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	p, err := at.Auth.Authenticate(r, r.URL.Path == "/v1/transcriptions" || r.URL.Path == "/v1/attachments/upload")
