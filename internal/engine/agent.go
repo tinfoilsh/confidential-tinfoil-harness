@@ -34,8 +34,8 @@ const (
 func (eng *Engine) loop(ctx context.Context, out *Stream, req *Request, m *inference.Model) error {
 	apiKey := auth.CallerKey(ctx)
 	inRun := usagereporting.Context{
-		ContextID:     req.runID,
-		RootRequestID: req.runID,
+		ContextID:     req.usageID,
+		RootRequestID: req.usageID,
 		ParentService: "harness",
 		APIKeyHash:    usagereporting.HashAPIKey(apiKey),
 		Depth:         1,

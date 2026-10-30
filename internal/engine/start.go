@@ -141,7 +141,7 @@ func (eng *Engine) prepareTurn(ctx context.Context, r *Run, p *auth.Principal, c
 			return nil, err
 		}
 	}
-	request, model, err := eng.BuildRequest(&working, &profile, project, docs, turn, r.Log.ID)
+	request, model, err := eng.BuildRequest(&working, &profile, project, docs, turn, r.usageID)
 	if err != nil {
 		return nil, err
 	}
@@ -331,7 +331,7 @@ func activeRun(runID string) *domain.ActiveRun {
 }
 
 func usageForRun(r *Run) usagereporting.Context {
-	return usagereporting.Context{ContextID: r.Log.ID, RootRequestID: r.Log.ID, ParentService: "harness", APIKeyHash: usagereporting.HashAPIKey(string(r.credential.Key)), Depth: 1}
+	return usagereporting.Context{ContextID: r.usageID, RootRequestID: r.usageID, ParentService: "harness", APIKeyHash: usagereporting.HashAPIKey(string(r.credential.Key)), Depth: 1}
 }
 
 // runQueue starts queued turns until one runs or the chat's queue empties.

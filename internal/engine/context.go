@@ -31,7 +31,7 @@ type Request struct {
 	reminder                   json.RawMessage
 	threadID                   string
 	conversation               string // the chat the run is classified under: an ask's source thread
-	runID                      string
+	usageID                    string // the run's id in usage reports
 	model                      string
 	cacheScope                 string            // partitions the enclave's prompt cache per caller; a namespace, not a credential
 	widgets                    []domain.Widget   // what the caller draws: advertised, never dialled
@@ -183,11 +183,11 @@ func timeReminder(now time.Time, zone string) (string, error) {
 	return "<system-reminder>Current time: " + englishTime(now.In(loc), zone) + " (" + zone + ")</system-reminder>", nil
 }
 
-func (eng *Engine) BuildRequest(thread *domain.Thread, profile *domain.Profile, project *domain.Project, documents []domain.ProjectDocument, in *TurnRequest, runID string) (*Request, *inference.Model, error) {
+func (eng *Engine) BuildRequest(thread *domain.Thread, profile *domain.Profile, project *domain.Project, documents []domain.ProjectDocument, in *TurnRequest, usageID string) (*Request, *inference.Model, error) {
 	c := eng.Models.Catalog.Get()
 	options := in.Options
 	name := cmp.Or(thread.Model, "auto")
-	req := &Request{threadID: thread.ID, runID: runID, model: name}
+	req := &Request{threadID: thread.ID, usageID: usageID, model: name}
 	req.conversation = req.threadID
 	if in.Kind == "ask" {
 		req.conversation = in.ThreadID
