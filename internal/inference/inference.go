@@ -75,9 +75,9 @@ func PinnedName(model string) string {
 var cacheFallback = tinfoil.WithUserCacheSecret(api.Token())
 
 // attestedTLS pins the TLS connection to the key an enclave's attestation
-// names, so its headers, status and every body, not only request bodies,
-// reach no one else. Every enclave the harness dials directly uses it; only
-// the gateway, which relays to replicas, needs bodies sealed instead.
+// names, so headers, status codes and bodiless requests, which EHBP leaves
+// open, reach no one else. Every enclave the harness dials directly uses it;
+// only the gateway, which relays to replicas, needs bodies sealed instead.
 var attestedTLS = tinfoil.WithTransport(tinfoil.TransportTLS)
 
 // Attest verifies an enclave the harness dials directly.
