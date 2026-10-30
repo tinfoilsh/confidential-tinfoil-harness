@@ -39,14 +39,13 @@ func TestPutAttachmentStoresOnceUnderAnIdentityDerivedFromTheUpload(t *testing.T
 	h := newRowsHarness(t)
 	ctx := context.Background()
 	data := []byte("the attachment's bytes")
-	id, key, err := h.store.PutAttachment(ctx, h.p, "chat-1", "att_client", data)
+	id, key, err := h.store.PutAttachment(ctx, h.p, h.key, "chat-1", "att_client", data)
 	if err != nil {
 		t.Fatalf("put: %v", err)
 	}
-	// The id and key are a stored format: every attachment the control
-	// plane indexes was derived this way, so the derivation cannot move.
-	if id != "731ff64a558f3da1814546a65ddcc43b3412" || key != "85n3muQp1OYTr9zUE0otPzIRQpqXPjHieXlCxkpBpoc=" || !domain.EnclaveAttachmentID.MatchString(id) {
-		t.Fatalf("derived id=%s key=%s", id, key)
+	derivedID, derivedKey, _ := attachmentMaterials(h.key, "att_client", "chat-1", h.p.ID, data)
+	if id != derivedID || key != base64.StdEncoding.EncodeToString(derivedKey) || !domain.EnclaveAttachmentID.MatchString(id) {
+		t.Fatalf("stored id=%s key=%s, want the derived id=%s", id, key, derivedID)
 	}
 	rawKey, _ := base64.StdEncoding.DecodeString(key)
 	tenant, _ := buckets.TenantForUser(h.p.ID)
@@ -60,13 +59,13 @@ func TestPutAttachmentStoresOnceUnderAnIdentityDerivedFromTheUpload(t *testing.T
 	if chat != "chat-1" || owner != h.p.ID {
 		t.Fatalf("indexed under chat %q for %q, want chat-1 for the caller", chat, owner)
 	}
-	if again, againKey, err := h.store.PutAttachment(ctx, h.p, "chat-1", "att_client", data); err != nil || again != id || againKey != key || len(h.bk.Tokens()) != 1 {
+	if again, againKey, err := h.store.PutAttachment(ctx, h.p, h.key, "chat-1", "att_client", data); err != nil || again != id || againKey != key || len(h.bk.Tokens()) != 1 {
 		t.Fatalf("the same upload again: id=%s key=%s err=%v over %d objects, want the same id and key over one", again, againKey, err, len(h.bk.Tokens()))
 	}
-	if other, _, err := h.store.PutAttachment(ctx, h.p, "chat-2", "att_client", data); err != nil || other == id {
+	if other, _, err := h.store.PutAttachment(ctx, h.p, h.key, "chat-2", "att_client", data); err != nil || other == id {
 		t.Fatalf("the same upload under another chat: id=%s err=%v, want another id", other, err)
 	}
-	if changed, _, err := h.store.PutAttachment(ctx, h.p, "chat-1", "att_client", []byte("other bytes")); err != nil || changed == id {
+	if changed, _, err := h.store.PutAttachment(ctx, h.p, h.key, "chat-1", "att_client", []byte("other bytes")); err != nil || changed == id {
 		t.Fatalf("the same client id over other bytes: id=%s err=%v, want another id", changed, err)
 	}
 	if read, err := h.store.GetAttachment(ctx, h.p, id, key); err != nil || !bytes.Equal(read, data) {
@@ -74,20 +73,47 @@ func TestPutAttachmentStoresOnceUnderAnIdentityDerivedFromTheUpload(t *testing.T
 	}
 }
 
+// The control plane knows every input of an attachment's derivation but
+// its bytes, so the content key salts it: another key derives another id
+// and key, and no key derives none.
+func TestAttachmentMaterialsAreKeyedByTheContentKey(t *testing.T) {
+	var key, other auth.ContentKey
+	for i := range key {
+		key[i], other[i] = byte(i), byte(i+1)
+	}
+	data := []byte("the attachment's bytes")
+	id, attachmentKey, err := attachmentMaterials(key, "att_client", "chat-1", "user_1", data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A retry that straddles a release must land on the same object, so the
+	// derivation under a given key does not move.
+	if id != "acf3650dc0584a60d76edc57277151d12bd7" || base64.StdEncoding.EncodeToString(attachmentKey) != "pXY+22/h8JNSPnQeGmro8UQnpIi/5W4Er4vvqhFdEIw=" {
+		t.Fatalf("derived id=%s key=%s", id, base64.StdEncoding.EncodeToString(attachmentKey))
+	}
+	otherID, otherKey, err := attachmentMaterials(other, "att_client", "chat-1", "user_1", data)
+	if err != nil || otherID == id || bytes.Equal(otherKey, attachmentKey) {
+		t.Fatalf("another content key derived id=%s (%v), want another id and key", otherID, err)
+	}
+	if _, _, err := attachmentMaterials(auth.ContentKey{}, "att_client", "chat-1", "user_1", data); !errors.Is(err, errAttachmentKeyless) {
+		t.Fatalf("no content key: %v, want a refusal", err)
+	}
+}
+
 func TestPutAttachmentRemovesBytesWhoseIndexTheControlPlaneRefused(t *testing.T) {
 	h := newRowsHarness(t)
 	ctx := context.Background()
 	data := []byte("bytes")
-	id, _, _ := attachmentMaterials("att_client", "chat-1", h.p.ID, data)
+	id, _, _ := attachmentMaterials(h.key, "att_client", "chat-1", h.p.ID, data)
 	h.cp.Mu.Lock()
 	h.cp.RegisterAttachmentIndexFailures[id] = []int{http.StatusForbidden, http.StatusServiceUnavailable}
 	h.cp.Mu.Unlock()
 	// A refusal proves the control plane holds no row for the bytes, so
 	// they go; a failure leaves them for the sweep, which may find a row.
-	if _, _, err := h.store.PutAttachment(ctx, h.p, "chat-1", "att_client", data); codeOf(err) != "UPSTREAM_REFUSED" || h.bk.Has(id) {
+	if _, _, err := h.store.PutAttachment(ctx, h.p, h.key, "chat-1", "att_client", data); codeOf(err) != "UPSTREAM_REFUSED" || h.bk.Has(id) {
 		t.Fatalf("after a refused registration: %v, bytes kept=%v", err, h.bk.Has(id))
 	}
-	if _, _, err := h.store.PutAttachment(ctx, h.p, "chat-1", "att_client", data); codeOf(err) != "UPSTREAM_REFUSED" || !h.bk.Has(id) {
+	if _, _, err := h.store.PutAttachment(ctx, h.p, h.key, "chat-1", "att_client", data); codeOf(err) != "UPSTREAM_REFUSED" || !h.bk.Has(id) {
 		t.Fatalf("after a failed registration: %v, bytes kept=%v", err, h.bk.Has(id))
 	}
 	h.cp.Mu.Lock()
@@ -102,12 +128,12 @@ func TestPutAttachmentWaitsOutAPurgeOfTheEarlierCopy(t *testing.T) {
 	h := newRowsHarness(t)
 	ctx := context.Background()
 	data := []byte("bytes")
-	id, _, _ := attachmentMaterials("att_client", "chat-1", h.p.ID, data)
+	id, _, _ := attachmentMaterials(h.key, "att_client", "chat-1", h.p.ID, data)
 	h.cp.Mu.Lock()
 	h.cp.ReserveAttachmentPurges[id] = 1
 	h.cp.Mu.Unlock()
 	started := time.Now()
-	stored, _, err := h.store.PutAttachment(ctx, h.p, "chat-1", "att_client", data)
+	stored, _, err := h.store.PutAttachment(ctx, h.p, h.key, "chat-1", "att_client", data)
 	if err != nil || stored != id || !h.bk.Has(id) {
 		t.Fatalf("put during a purge: id=%s err=%v stored=%v, want the bytes stored once the purge is over", stored, err, h.bk.Has(id))
 	}
@@ -169,11 +195,11 @@ func TestARunStoresAttachmentsUnderItsChatAlone(t *testing.T) {
 	ctx := context.Background()
 	run := *h.p
 	run.Grant = &auth.StorageGrant{ChatID: "chat-1", KeyID: h.kid, ExpiresAt: api.Now().Add(grantLifetime)}
-	id, key, err := h.store.PutAttachment(ctx, &run, "chat-1", "att_client", []byte("bytes"))
+	id, key, err := h.store.PutAttachment(ctx, &run, h.key, "chat-1", "att_client", []byte("bytes"))
 	if err != nil {
 		t.Fatalf("a run's put under its chat: %v", err)
 	}
-	if _, _, err := h.store.PutAttachment(ctx, &run, "chat-2", "att_client", []byte("bytes")); !errors.Is(err, errRunScope) {
+	if _, _, err := h.store.PutAttachment(ctx, &run, h.key, "chat-2", "att_client", []byte("bytes")); !errors.Is(err, errRunScope) {
 		t.Fatalf("a run's put under another chat: %v, want a refusal of the grant's scope", err)
 	}
 	export := *h.p
@@ -181,7 +207,7 @@ func TestARunStoresAttachmentsUnderItsChatAlone(t *testing.T) {
 	if data, err := h.store.GetAttachment(ctx, &export, id, key); err != nil || string(data) != "bytes" {
 		t.Fatalf("an export's get = %q (%v)", data, err)
 	}
-	if _, _, err := h.store.PutAttachment(ctx, &export, "chat-1", "att_other", []byte("bytes")); !errors.Is(err, errRunScope) {
+	if _, _, err := h.store.PutAttachment(ctx, &export, h.key, "chat-1", "att_other", []byte("bytes")); !errors.Is(err, errRunScope) {
 		t.Fatalf("an export's put: %v, want a refusal of the grant's scope", err)
 	}
 }

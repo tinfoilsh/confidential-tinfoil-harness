@@ -421,7 +421,7 @@ func (j *cloudImport) chat(ctx context.Context, id, projectID string, origin *do
 					j.warn("image attachment type rejected")
 					continue
 				}
-				attID, attKey, err := j.ar.Store.PutAttachment(ctx, j.p, id, importedImage(id, attachment.ArchivePath, uploads), data)
+				attID, attKey, err := j.ar.Store.PutAttachment(ctx, j.p, j.key, id, importedImage(id, attachment.ArchivePath, uploads), data)
 				uploads++
 				if err != nil {
 					j.warn("image attachment upload failed")

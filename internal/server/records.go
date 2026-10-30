@@ -296,7 +296,7 @@ func (h *harness) forkThread(ctx context.Context, p *auth.Principal, key auth.Co
 		}
 		return nil
 	})
-	if err := h.attachments.PlaceAttachments(ctx, p, fork.ID, &fork); err != nil {
+	if err := h.attachments.PlaceAttachments(ctx, p, key, fork.ID, &fork); err != nil {
 		return nil, err
 	}
 	attach.StripInlineAttachments(&fork)

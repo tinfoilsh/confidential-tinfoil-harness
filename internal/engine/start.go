@@ -127,7 +127,7 @@ func (eng *Engine) prepareTurn(ctx context.Context, r *Run, p *auth.Principal, c
 	// chat. An ask's stored source has attachments in buckets; a keyless thread
 	// carries its own. Image descriptions are stored, image bytes are not.
 	if !s.local {
-		if err := eng.Attachments.PlaceAttachments(ctx, p, s.ID, t); err != nil {
+		if err := eng.Attachments.PlaceAttachments(ctx, p, r.key, s.ID, t); err != nil {
 			return nil, err
 		}
 	}
