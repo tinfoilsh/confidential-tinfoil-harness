@@ -38,6 +38,7 @@ func NewEmbedder(apiKey, model string) (*Embedder, error) {
 		return client, nil
 	}
 	secureClient, err := tinfoil.NewClientWithOptions(
+		attestedTLS,
 		tinfoil.WithOpenAIOptions(
 			option.WithAPIKey(apiKey),
 			option.WithRequestTimeout(defaultRequestTimeout),
