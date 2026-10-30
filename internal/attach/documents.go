@@ -84,11 +84,13 @@ func Unreachable(err error) bool {
 // PlaceAttachments stores every attachment of a thread under the thread, in
 // the protocol 3 format, before the thread is pushed. It keeps the content
 // inline in the given copy, which is the one a prompt is built from.
-func (at *Service) PlaceAttachments(ctx context.Context, p *auth.Principal, threadID string, t *domain.Thread) error {
-	return t.EachAttachment(func(a *domain.Attachment) error { return at.placeAttachment(ctx, p, threadID, a) })
+func (at *Service) PlaceAttachments(ctx context.Context, p *auth.Principal, key auth.ContentKey, threadID string, t *domain.Thread) error {
+	defer clear(key[:])
+	return t.EachAttachment(func(a *domain.Attachment) error { return at.placeAttachment(ctx, p, key, threadID, a) })
 }
 
-func (at *Service) placeAttachment(ctx context.Context, p *auth.Principal, threadID string, a *domain.Attachment) error {
+func (at *Service) placeAttachment(ctx context.Context, p *auth.Principal, key auth.ContentKey, threadID string, a *domain.Attachment) error {
+	defer clear(key[:])
 	keyed := a.StorageKey() != ""
 	elsewhere := !domain.EnclaveAttachmentID.MatchString(a.ID) || cmp.Or(a.StorageThreadID, threadID) != threadID
 	var data []byte
@@ -134,11 +136,11 @@ func (at *Service) placeAttachment(ctx context.Context, p *auth.Principal, threa
 		return nil
 	}
 	defer clear(data)
-	storedID, key, err := at.Store.PutAttachment(ctx, p, threadID, a.ID, data)
+	storedID, attachmentKey, err := at.Store.PutAttachment(ctx, p, key, threadID, a.ID, data)
 	if err != nil {
 		return err
 	}
-	a.ID, a.EncryptionKey, a.StorageThreadID, a.Key = storedID, key, threadID, ""
+	a.ID, a.EncryptionKey, a.StorageThreadID, a.Key = storedID, attachmentKey, threadID, ""
 	return nil
 }
 
@@ -187,13 +189,14 @@ func (at *Service) InflateDocument(ctx context.Context, p *auth.Principal, a *do
 // references it does not hold under the row's chat: a row the web or iOS app wrote before the store
 // checked references may point at blobs filed under another chat or deleted
 // since.
-func (at *Service) RepairAttachments(ctx context.Context, p *auth.Principal, t *domain.Thread, missing []string) error {
+func (at *Service) RepairAttachments(ctx context.Context, p *auth.Principal, key auth.ContentKey, t *domain.Thread, missing []string) error {
+	defer clear(key[:])
 	return t.EachAttachment(func(a *domain.Attachment) error {
 		if !slices.Contains(missing, a.ID) {
 			return nil
 		}
 		a.StorageThreadID = "elsewhere"
-		if err := at.placeAttachment(ctx, p, t.ID, a); err != nil {
+		if err := at.placeAttachment(ctx, p, key, t.ID, a); err != nil {
 			return err
 		}
 		if a.StorageThreadID != t.ID {

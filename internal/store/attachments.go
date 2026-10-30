@@ -28,11 +28,13 @@ const (
 	attachmentIDBytes = 18
 	// attachmentKeySize is the per-attachment key buckets seals under.
 	attachmentKeySize = seal.KeySize
-	// The derivation of an attachment's id and key is a stored format:
-	// every id the control plane indexes came from it, and the same
-	// upload stored again must land on the same object.
-	attachmentIDInfo  = "tinfoil-attachment-id-v1"
-	attachmentKeyInfo = "tinfoil-attachment-key-v1"
+	// An attachment's id and key are derived from its upload, so the same
+	// upload stored again under the same content key lands on the same
+	// object. Nothing derives a stored attachment's again: reads use the
+	// id and key its chat embeds.
+	attachmentIDInfo   = "tinfoil-attachment-id-v1"
+	attachmentKeyInfo  = "tinfoil-attachment-key-v1"
+	attachmentSaltInfo = "tinfoil-attachment-salt-v1"
 	// reserveAttempts bounds the reservations of an id whose earlier
 	// copy the control plane is still purging; a purge finishes within
 	// seconds, and each wait is a step longer than the last.
@@ -46,20 +48,23 @@ var (
 	errAttachmentKeyMismatch = api.Err(422, "ATTACHMENT_UNSUPPORTED", "The attachment key does not match")
 	errAttachmentNotStored   = api.Err(502, "UPSTREAM_REFUSED", "The attachment could not be stored")
 	errAttachmentNotRead     = api.Err(502, "UPSTREAM_REFUSED", "The attachment could not be read")
+	errAttachmentKeyless     = errors.New("an attachment is derived under a content key")
 )
 
 // PutAttachment stores data as an attachment of chatID and returns its id
 // and the key that opens it, base64, as a chat embeds it. The same upload
-// stored again is the same id and key over the same object; the same
-// client id with other bytes, or under another chat, is another object.
-func (s *Store) PutAttachment(ctx context.Context, p *auth.Principal, chatID, clientID string, data []byte) (string, string, error) {
+// stored again under the same content key is the same id and key over the
+// same object; the same client id with other bytes, or under another chat,
+// is another object.
+func (s *Store) PutAttachment(ctx context.Context, p *auth.Principal, contentKey auth.ContentKey, chatID, clientID string, data []byte) (string, string, error) {
+	defer clear(contentKey[:])
 	if chatID == "" || clientID == "" {
 		return "", "", api.Err(400, "BAD_REQUEST", "a chat id and an attachment id are required")
 	}
 	if p.Grant != nil && !(*grantScope)(p.Grant).permitsPutAttachment(chatID) {
 		return "", "", errRunScope
 	}
-	id, key, err := attachmentMaterials(clientID, chatID, p.ID, data)
+	id, key, err := attachmentMaterials(contentKey, clientID, chatID, p.ID, data)
 	if err != nil {
 		return "", "", err
 	}
@@ -127,17 +132,28 @@ func (s *Store) reserveAttachment(ctx context.Context, p *auth.Principal, id, ch
 
 // attachmentMaterials is an attachment's id and key, derived from who
 // stores it, the chat it is under, the client's id for the upload and a
-// digest of the bytes. Each input is length-prefixed, so none can run
-// into the next.
-func attachmentMaterials(clientID, chatID, owner string, data []byte) (string, []byte, error) {
+// digest of the bytes, salted with a subkey of the content key. The
+// control plane knows all but the bytes, so without the salt it could
+// check any guess at an attachment's bytes against its id. Each input is
+// length-prefixed, so none can run into the next.
+func attachmentMaterials(contentKey auth.ContentKey, clientID, chatID, owner string, data []byte) (string, []byte, error) {
+	defer clear(contentKey[:])
+	if contentKey == (auth.ContentKey{}) {
+		return "", nil, errAttachmentKeyless
+	}
+	salt := make([]byte, seal.KeySize)
+	defer seal.Zero(salt)
+	if _, err := io.ReadFull(hkdf.New(sha256.New, contentKey[:], nil, []byte(attachmentSaltInfo)), salt); err != nil {
+		return "", nil, err
+	}
 	digest := sha256.Sum256(data)
 	ikm := encodeIKM(clientID, chatID, owner, hex.EncodeToString(digest[:]))
 	id := make([]byte, attachmentIDBytes)
-	if _, err := io.ReadFull(hkdf.New(sha256.New, ikm, nil, []byte(attachmentIDInfo)), id); err != nil {
+	if _, err := io.ReadFull(hkdf.New(sha256.New, ikm, salt, []byte(attachmentIDInfo)), id); err != nil {
 		return "", nil, err
 	}
 	key := make([]byte, attachmentKeySize)
-	if _, err := io.ReadFull(hkdf.New(sha256.New, ikm, nil, []byte(attachmentKeyInfo)), key); err != nil {
+	if _, err := io.ReadFull(hkdf.New(sha256.New, ikm, salt, []byte(attachmentKeyInfo)), key); err != nil {
 		return "", nil, err
 	}
 	return hex.EncodeToString(id), key, nil

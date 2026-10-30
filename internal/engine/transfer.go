@@ -138,7 +138,7 @@ func (eng *Engine) ImportThread(ctx context.Context, p *auth.Principal, key auth
 		return nil, err
 	}
 	row := &domain.ThreadRow{Thread: thread}
-	if err := eng.Attachments.PlaceAttachments(ctx, p, id, &row.Thread); err != nil {
+	if err := eng.Attachments.PlaceAttachments(ctx, p, key, id, &row.Thread); err != nil {
 		return nil, err
 	}
 	attach.StripInlineAttachments(&row.Thread)

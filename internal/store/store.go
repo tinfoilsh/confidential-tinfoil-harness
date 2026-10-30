@@ -176,7 +176,7 @@ func (s *Store) ThreadPage(ctx context.Context, p *auth.Principal, key auth.Cont
 // Repairer places the attachments a pushed chat names that the control
 // plane does not hold under it.
 type Repairer interface {
-	RepairAttachments(context.Context, *auth.Principal, *domain.Thread, []string) error
+	RepairAttachments(context.Context, *auth.Principal, auth.ContentKey, *domain.Thread, []string) error
 }
 
 // SaveThread pushes a chat at the revision it was read at. A chat naming
@@ -193,7 +193,7 @@ func (s *Store) SaveThread(ctx context.Context, p *auth.Principal, key auth.Cont
 		}
 		if e := api.AsError(err); e.Code != "MISSING_ATTACHMENT" || repaired {
 			return err
-		} else if err := s.Repair.RepairAttachments(ctx, p, &row.Thread, e.Missing); err != nil {
+		} else if err := s.Repair.RepairAttachments(ctx, p, key, &row.Thread, e.Missing); err != nil {
 			return err
 		}
 	}
