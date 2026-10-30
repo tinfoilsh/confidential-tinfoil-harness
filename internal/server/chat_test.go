@@ -1795,6 +1795,13 @@ func TestWebSearchIsNeverBilled(t *testing.T) {
 		if strings.Contains(string(api.Raw(usage)), events[0].RunID) {
 			t.Fatalf("a usage report names the run: %+v", usage)
 		}
+		for name, values := range call.header {
+			for _, value := range values {
+				if strings.Contains(value, events[0].RunID) {
+					t.Fatalf("header %s names the run: %s", name, value)
+				}
+			}
+		}
 	}
 }
 
