@@ -225,7 +225,7 @@
       "additionalProperties": false
     },
     "name": "render_link_preview",
-    "description": "Display a rich preview card for a single web link. Use when linking to an article, page, or resource and you want to surface title, description, and favicon. The card fetches metadata (title, description, site name, image, favicon) from the opengraph-metadata.tinfoil.sh enclave. Provide only the URL and a fallback title — every other field is resolved server-side.",
+    "description": "Display a rich preview card for a single web link. Use when linking to an article, page, or resource and you want to surface title, description, and favicon. The card fetches metadata (title, description, site name, image, favicon) for the page. Provide only the URL and a fallback title — every other field is resolved server-side.",
     "promptHint": "rich preview card for a single web link",
     "surface": "inline"
   },
