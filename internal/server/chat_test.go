@@ -1762,12 +1762,23 @@ func TestWebSearchIsNeverBilled(t *testing.T) {
 	enclave := serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
 		return nil, api.Object{"results": []api.Object{}}
 	})
-	h, _, key := testChatHarness(t, toolTurns(toolCallChunk(0, "one", "web_search", `{"query":"cats"}`)+toolCallChunk(1, "two", "web_search", `{"query":"dogs"}`), nil))
+	turns := toolTurns(toolCallChunk(0, "one", "web_search", `{"query":"cats"}`)+toolCallChunk(1, "two", "web_search", `{"query":"dogs"}`), nil)
+	modelContexts := make(chan string, 1)
+	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if usage, ok, err := usagereporting.FromHeaders(r.Header, "test-usage-secret", time.Now(), time.Minute); err == nil && ok {
+			select {
+			case modelContexts <- usage.ContextID:
+			default:
+			}
+		}
+		turns(w, r)
+	})
 	events := finishedRun(t, h, "/v1/threads/turn", searchInput(key))
 	calls := enclave.list()
 	if len(calls) != 2 {
 		t.Fatalf("the enclave saw %d calls", len(calls))
 	}
+	run := <-modelContexts
 	for _, call := range calls {
 		usage, ok, err := usagereporting.FromHeaders(call.header, "test-usage-secret", time.Now(), time.Minute)
 		if err != nil || !ok {
@@ -1777,8 +1788,12 @@ func TestWebSearchIsNeverBilled(t *testing.T) {
 		if usage.BillCustomerRequest {
 			t.Fatalf("search was marked billable: %+v", usage)
 		}
-		if usage.ContextID != events[0].RunID || usage.RootRequestID != events[0].RunID || usage.ParentService != "harness" || usage.Depth != 1 || !usagereporting.VerifyAPIKeyHash(chatTokenOf("alice"), usage.APIKeyHash) {
+		if usage.ContextID != run || usage.RootRequestID != run || usage.ParentService != "harness" || usage.Depth != 1 || !usagereporting.VerifyAPIKeyHash(chatTokenOf("alice"), usage.APIKeyHash) {
 			t.Fatalf("search lost the run's identity: %+v", usage)
+		}
+		// Usage headers leave the enclave; the run id admits followers.
+		if strings.Contains(string(api.Raw(usage)), events[0].RunID) {
+			t.Fatalf("a usage report names the run: %+v", usage)
 		}
 	}
 }

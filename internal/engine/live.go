@@ -105,6 +105,11 @@ type Run struct {
 
 	// yielded marks an active run stopped so a queued turn starts now.
 	yielded bool
+
+	// usageID names the run in the usage reports its calls carry in
+	// headers, which leave the enclave. The run's own id never does: for a
+	// keyless run it is the only secret that admits a follower.
+	usageID string
 }
 
 // HoldsKey reports whether the run still holds its caller's content key.
