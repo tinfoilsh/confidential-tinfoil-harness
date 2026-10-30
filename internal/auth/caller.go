@@ -29,11 +29,6 @@ func WithUsage(ctx context.Context, usage usagereporting.Context) context.Contex
 	return context.WithValue(ctx, usageKey{}, usage)
 }
 
-// WithoutUsage has ctx's requests report no usage.
-func WithoutUsage(ctx context.Context) context.Context {
-	return context.WithValue(ctx, usageKey{}, false)
-}
-
 // Usage is the usage ctx's requests report, if any.
 func Usage(ctx context.Context) (usagereporting.Context, bool) {
 	usage, ok := ctx.Value(usageKey{}).(usagereporting.Context)

@@ -2116,8 +2116,3 @@ func (h *harness) useAuth(a *auth.Authenticator) {
 func (h *harness) atControlplane(url string) {
 	h.controlplane, h.models.Controlplane, h.archives.Controlplane = url, url, url
 }
-
-// caller is a request context carrying one API key.
-func caller(apiKey string) context.Context {
-	return auth.WithCallerKey(context.Background(), apiKey)
-}
