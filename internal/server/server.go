@@ -46,9 +46,9 @@ func Run() {
 		slog.Error("USAGE_CONTEXT_SECRET is required: without it every turn of a run bills as its own request")
 		os.Exit(1)
 	}
-	gw, controlplane := strings.TrimRight(os.Getenv("TINFOIL_GATEWAY_URL"), "/"), strings.TrimRight(os.Getenv("TINFOIL_CONTROLPLANE_URL"), "/")
-	if gw == "" || controlplane == "" {
-		slog.Error("TINFOIL_GATEWAY_URL and TINFOIL_CONTROLPLANE_URL are required")
+	controlplane := strings.TrimRight(os.Getenv("TINFOIL_CONTROLPLANE_URL"), "/")
+	if controlplane == "" {
+		slog.Error("TINFOIL_CONTROLPLANE_URL is required")
 		os.Exit(1)
 	}
 
@@ -60,7 +60,7 @@ func Run() {
 		slog.Error("prepare the temporary directory", "error", err)
 		os.Exit(1)
 	}
-	h := &harness{models: &inference.Models{Gateway: gw, Controlplane: controlplane},
+	h := &harness{models: &inference.Models{Controlplane: controlplane},
 		controlplane: controlplane,
 		store:        &store.Store{Reseals: jobs.New[store.ResealReport](store.ResealBudget, store.ResealRetention)}}
 
@@ -90,7 +90,7 @@ func Run() {
 		h.engine.Wait(ctx)
 	}()
 
-	slog.Info("listening", "addr", listenAddr, "gateway", gw, "models", inference.Served(h.models.Offer.Get()), "safeguards", h.engine.Safeguards != nil)
+	slog.Info("listening", "addr", listenAddr, "models", inference.Served(h.models.Offer.Get()), "safeguards", h.engine.Safeguards != nil)
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		slog.Error("serve", "error", err)
 		os.Exit(1)

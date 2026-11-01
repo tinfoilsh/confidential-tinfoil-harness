@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -24,8 +23,6 @@ import (
 type Models struct {
 	Auto         *Model
 	Catalog      CatalogCache
-	Gateway      string
-	Client       *http.Client
 	Offer        Offer
 	Services     map[string]*Service
 	Controlplane string
@@ -34,15 +31,18 @@ type Models struct {
 	Summarizer Summarizer
 }
 
-// The pinned repo is the trust anchor; the gateway's catalog supplies the rest.
+// A model the harness serves through the router, which verifies the replica
+// it relays each request to.
 type Model struct {
 	Endpoint string
 	Name     string
 	Vision   bool
-	Context  int // usable prompt budget, in tokens
 
-	Client *http.Client // seals each request to a verified replica
+	Client *http.Client // pinned to the attested router
 }
+
+// chatCompletionsPath is where the router takes model turns.
+const chatCompletionsPath = "/v1/chat/completions"
 
 // pin is a model the harness serves: its repository, and the name the
 // system prompt gives it.
@@ -76,8 +76,7 @@ var cacheFallback = tinfoil.WithUserCacheSecret(api.Token())
 
 // attestedTLS pins the TLS connection to the key an enclave's attestation
 // names, so headers, status codes and bodiless requests, which EHBP leaves
-// open, reach no one else. Every enclave the harness dials directly uses it;
-// only the gateway, which relays to replicas, needs bodies sealed instead.
+// open, reach no one else. Every enclave the harness dials uses it.
 var attestedTLS = tinfoil.WithTransport(tinfoil.TransportTLS)
 
 // Attest verifies an enclave the harness dials directly.
@@ -93,100 +92,17 @@ func Attest(ctx context.Context, enclave, repo, usageSecret string) (*http.Clien
 	})
 }
 
-// NewGateway seals each model request to a replica of the model it names,
-// verified on first use against the pinned repository.
-func NewGateway(gateway string, catalog func() tinfoil.Catalog) (*tinfoil.Gateway, error) {
-	pins := map[string]tinfoil.ModelPin{}
-	for _, p := range pinned {
-		pins[p.name] = tinfoil.ModelPin{Repo: p.repo}
-	}
-	return tinfoil.NewGateway(gateway+"/v1/", catalog, tinfoil.GatewayOptions{ClientOptions: []tinfoil.ClientOption{cacheFallback}, ModelPins: pins, PinnedModelsOnly: true})
-}
-
-// Offer holds the pinned models the gateway last offered. The SDK reads
-// the catalog on every request, so a stored catalog is never mutated.
+// Offer holds the models the harness serves now.
 type Offer struct {
-	mu      sync.RWMutex
-	models  []*Model
-	catalog tinfoil.Catalog
+	mu     sync.RWMutex
+	models []*Model
 }
 
-func (c *Offer) Get() []*Model        { c.mu.RLock(); defer c.mu.RUnlock(); return c.models }
-func (c *Offer) SDK() tinfoil.Catalog { c.mu.RLock(); defer c.mu.RUnlock(); return c.catalog }
-func (c *Offer) Set(models []*Model, catalog tinfoil.Catalog) {
+func (c *Offer) Get() []*Model { c.mu.RLock(); defer c.mu.RUnlock(); return c.models }
+func (c *Offer) Set(models []*Model) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.models, c.catalog = models, catalog
-}
-
-// RefreshOffer serves the models the gateway offers and this harness pins.
-//
-// The catalog is plaintext config, not a trust input. It can name any host, but
-// a host that does not attest against the pinned repo is never sealed to, and
-// the context and vision flags it reports only decide which runs are offered
-// which model -- a wrong one costs a refusal or a gateway error, never
-// confidentiality. That is what lets the enclave list live in one place, on the
-// side that already owns replica placement. The gateway omits pools without a
-// healthy replica, so a catalog that offers no pinned model keeps the last one.
-func (inf *Models) RefreshOffer(ctx context.Context) {
-	offered, err := fetchCatalog(ctx, inf.Gateway)
-	if err != nil {
-		slog.Warn("gateway catalog unavailable", "error", err)
-		return
-	}
-	models, catalog := offerModels(offered, inf.Client)
-	if len(models) == 0 {
-		slog.Warn("gateway offers no pinned model; keeping the last catalog")
-		return
-	}
-	inf.Offer.Set(models, catalog)
-}
-
-func offerModels(offered map[string]catalogEntry, client *http.Client) ([]*Model, tinfoil.Catalog) {
-	models, catalog := []*Model{}, tinfoil.Catalog{}
-	for _, p := range pinned {
-		entry, ok := offered[p.name]
-		if !ok || len(entry.Hosts) == 0 {
-			continue
-		}
-		if entry.Repo != p.repo {
-			slog.Warn("gateway offers a pinned model from another repository", "model", p.name, "repo", entry.Repo)
-			continue
-		}
-		models = append(models, &Model{Name: p.name, Vision: entry.Vision, Context: entry.Context, Client: client})
-		catalog[p.name] = tinfoil.CatalogEntry{Repo: entry.Repo, Hosts: slices.Clone(entry.Hosts)}
-	}
-	return models, catalog
-}
-
-// catalogEntry is the gateway's description of one model pool.
-type catalogEntry struct {
-	Repo    string   `json:"repo"`
-	Hosts   []string `json:"hosts"`
-	Vision  bool     `json:"vision"`
-	Context int      `json:"context"`
-}
-
-// fetchCatalog reads the pools the gateway routes to. It needs no API key: the
-// harness holds none, and every caller's key belongs to a request.
-func fetchCatalog(ctx context.Context, gateway string) (map[string]catalogEntry, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gateway+"/catalog", nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("read catalog: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("read catalog: gateway answered %d", resp.StatusCode)
-	}
-	var offered map[string]catalogEntry
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&offered); err != nil {
-		return nil, fmt.Errorf("decode catalog: %w", err)
-	}
-	return offered, nil
+	c.models = models
 }
 
 func Served(models []*Model) string {
@@ -202,15 +118,9 @@ type Service struct {
 	Client *http.Client
 }
 
-// Boot verifies the gateway and the downstream enclaves, and reads the
-// catalog of models the harness serves, which it keeps refreshing.
+// Boot verifies the router and reads the catalog of models the harness
+// serves, which it keeps refreshing.
 func (inf *Models) Boot(ctx context.Context, usageSecret string) error {
-	gw, err := NewGateway(inf.Gateway, inf.Offer.SDK)
-	if err != nil {
-		return fmt.Errorf("configure gateway %s: %w", inf.Gateway, err)
-	}
-	// Outermost: the SDK salts each caller's prompt cache with the key set here.
-	inf.Client = &http.Client{Transport: &auth.CallerTransport{Inner: gw.HTTPClient().Transport, UsageSecret: usageSecret}}
 	host := os.Getenv("TINFOIL_ROUTER_ENCLAVE")
 	if host == "" {
 		return errors.New("TINFOIL_ROUTER_ENCLAVE is required")
@@ -221,7 +131,7 @@ func (inf *Models) Boot(ctx context.Context, usageSecret string) error {
 	}
 	router := &Service{URL: "https://" + host, Client: client}
 	inf.Services = map[string]*Service{"router": router}
-	inf.Auto = &Model{Name: "auto", Client: router.Client, Endpoint: router.URL + "/v1/chat/completions"}
+	inf.Auto = &Model{Name: "auto", Client: router.Client, Endpoint: router.URL + chatCompletionsPath}
 	if err := inf.RefreshCatalog(ctx); err != nil {
 		return err
 	}
@@ -236,7 +146,7 @@ func (inf *Models) Boot(ctx context.Context, usageSecret string) error {
 				return
 			case <-tick.C:
 				refresh++
-				// Every minute until the gateway first offers a model, then every five.
+				// Every minute until the controlplane first lists a model, then every five.
 				if refresh%5 == 0 || len(inf.Offer.Get()) == 0 {
 					if err := inf.RefreshCatalog(ctx); err != nil {
 						slog.Warn("catalog refresh refused", "error", err)
@@ -268,17 +178,13 @@ type UsageSink interface {
 }
 
 func (inf *Models) Completion(ctx context.Context, m *Model, payload api.Object) (string, error) {
-	endpoint := m.Endpoint
-	if endpoint == "" {
-		endpoint = inf.Gateway + "/v1/chat/completions"
-	}
 	payload["stream"] = false
 	// Without a scope of its own, a request would share the process-wide
 	// cache secret with everyone holding the same credential.
 	if _, scoped := payload["user_cache_secret"]; !scoped {
 		payload["user_cache_secret"] = api.Token()
 	}
-	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(api.Raw(payload)))
+	req, err := http.NewRequestWithContext(ctx, "POST", m.Endpoint, bytes.NewReader(api.Raw(payload)))
 	if err != nil {
 		return "", err
 	}

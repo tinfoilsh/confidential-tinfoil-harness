@@ -229,11 +229,7 @@ func clip(out string, limit int) string {
 }
 
 func (eng *Engine) turn(ctx context.Context, out *Stream, m *inference.Model, payload []byte, widgets map[string]domain.Widget) ([]ToolCall, string, error) {
-	endpoint := m.Endpoint
-	if endpoint == "" {
-		endpoint = eng.Models.Gateway + "/v1/chat/completions"
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.Endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return nil, "", err
 	}
@@ -242,7 +238,7 @@ func (eng *Engine) turn(ctx context.Context, out *Stream, m *inference.Model, pa
 
 	resp, err := m.Client.Do(req)
 	if err != nil {
-		return nil, "", fmt.Errorf("gateway: %w", err)
+		return nil, "", fmt.Errorf("model request: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {

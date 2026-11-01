@@ -321,7 +321,7 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 	t.Cleanup(searchServer.Close)
 	rows := &memoryRows{rows: map[string]domain.StoredRow{}, sealed: map[string]auth.ContentKey{}, cp: storage, bk: bk}
 	cpClient := controlplane.NewClient(cp.URL, nil, controlplane.WithServiceSecret(testStorageSecret))
-	h := &harness{models: &inference.Models{Gateway: server.URL, Controlplane: cp.URL, Services: map[string]*inference.Service{}}, controlplane: cp.URL,
+	h := &harness{models: &inference.Models{Controlplane: cp.URL, Services: map[string]*inference.Service{}}, controlplane: cp.URL,
 		store: &store.Store{Rows: rows, Controlplane: cpClient, Buckets: buckets.NewClient(bkServer.URL, testBucket, nil), Reseals: jobs.New[store.ResealReport](store.ResealBudget, store.ResealRetention)}}
 	h.search = search.New(cpClient, buckets.NewClient(searchServer.URL, testSearchBucket, nil), stubEmbedder{}, rows)
 	h.store.Search = h.search
@@ -331,8 +331,8 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 	h.engine = &engine.Engine{Store: h.store, Models: h.models, Attachments: h.attachments, Auth: h.auth}
 	h.archives = &archives.Service{Scratch: archives.NewScratch(t.TempDir(), 1<<30), CPClient: cp.Client(), Store: h.store, Attachments: h.attachments, Auth: h.auth, Controlplane: cp.URL,
 		Imports: jobs.New[archives.ImportReport](archives.ImportBudget, archives.ImportRetention)}
-	m := &inference.Model{Name: "kimi-k3", Context: 8192, Client: &http.Client{Transport: &auth.CallerTransport{Inner: server.Client().Transport, UsageSecret: "test-usage-secret"}}}
-	h.models.Offer.Set([]*inference.Model{m}, nil)
+	m := &inference.Model{Name: "kimi-k3", Endpoint: server.URL + "/v1/chat/completions", Client: &http.Client{Transport: &auth.CallerTransport{Inner: server.Client().Transport, UsageSecret: "test-usage-secret"}}}
+	h.models.Offer.Set([]*inference.Model{m})
 	h.models.Auto = m
 	h.models.Catalog.Set(&domain.Catalog{Models: []api.Object{{"modelName": "kimi-k3", "name": "Kimi K3", "budgetWindow": 8192, "multimodal": false, "chatConfig": api.Object{}}}, Prompt: "You are {MODEL_NAME}. {USER_PREFERENCES}", Presets: domain.BuiltInPresets()})
 
@@ -1951,7 +1951,7 @@ func heldScreening(t *testing.T, h *harness, hold chan struct{}) func() []engine
 	t.Cleanup(sidecar.Close)
 	h.engine.Safeguards = engine.NewSubmitter(sidecar.URL)
 	// As deployed, auto is the router, not one of the gateway's models.
-	h.models.Auto = &inference.Model{Name: "auto", Client: h.models.Offer.Get()[0].Client}
+	h.models.Auto = &inference.Model{Name: "auto", Endpoint: h.models.Offer.Get()[0].Endpoint, Client: h.models.Offer.Get()[0].Client}
 	return func() []engine.Submission {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()

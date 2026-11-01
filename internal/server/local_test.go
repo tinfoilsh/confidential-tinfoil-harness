@@ -421,7 +421,7 @@ func TestAutoReadsImagesAndTextModelsReadTheirDescriptions(t *testing.T) {
 		}
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n")
 	})
-	h.models.Offer.Set(append(h.models.Offer.Get(), &inference.Model{Name: "gemma4-31b", Vision: true, Context: 8192, Client: h.models.Offer.Get()[0].Client}), h.models.Offer.SDK())
+	h.models.Offer.Set(append(h.models.Offer.Get(), &inference.Model{Name: "gemma4-31b", Vision: true, Endpoint: h.models.Offer.Get()[0].Endpoint, Client: h.models.Offer.Get()[0].Client}))
 	for _, name := range []string{"auto", "kimi-k3"} {
 		requests = nil
 		in := localInput("", api.Object{})
@@ -462,7 +462,7 @@ func TestChatsShareAPromptCacheOnlyThroughTheClientsSecret(t *testing.T) {
 		}
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n")
 	})
-	h.models.Offer.Set(append(h.models.Offer.Get(), &inference.Model{Name: "gemma4-31b", Vision: true, Context: 8192, Client: h.models.Offer.Get()[0].Client}), h.models.Offer.SDK())
+	h.models.Offer.Set(append(h.models.Offer.Get(), &inference.Model{Name: "gemma4-31b", Vision: true, Endpoint: h.models.Offer.Get()[0].Endpoint, Client: h.models.Offer.Get()[0].Client}))
 	scopesOf := func(in api.Object, user string) []string {
 		t.Helper()
 		mu.Lock()
