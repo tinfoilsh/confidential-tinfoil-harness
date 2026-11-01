@@ -44,6 +44,9 @@ type Model struct {
 	Client *http.Client // seals each request to a verified replica
 }
 
+// chatCompletionsPath is where the gateway and the router take model turns.
+const chatCompletionsPath = "/v1/chat/completions"
+
 // pin is a model the harness serves: its repository, and the name the
 // system prompt gives it.
 type pin struct{ name, repo, display string }
@@ -139,7 +142,29 @@ func (inf *Models) RefreshOffer(ctx context.Context) {
 		slog.Warn("gateway offers no pinned model; keeping the last catalog")
 		return
 	}
-	inf.Offer.Set(models, catalog)
+	inf.Offer.Set(inf.routeUnoffered(models), catalog)
+}
+
+// routeUnoffered serves the pinned models the gateway does not offer through
+// the router, as Auto is, until the gateway offers them. The router verifies
+// the replica it relays each of their turns to; they stay out of the gateway
+// client's catalog, so nothing is sealed to them through the gateway.
+func (inf *Models) routeUnoffered(models []*Model) []*Model {
+	router := inf.Services["router"]
+	if router == nil {
+		return models
+	}
+	var routed []string
+	for _, p := range pinned {
+		if !slices.ContainsFunc(models, func(m *Model) bool { return m.Name == p.name }) {
+			models = append(models, &Model{Name: p.name, Endpoint: router.URL + chatCompletionsPath, Client: router.Client})
+			routed = append(routed, p.name)
+		}
+	}
+	if len(routed) > 0 {
+		slog.Info("serving models the gateway does not offer through the router", "models", strings.Join(routed, ", "))
+	}
+	return models
 }
 
 func offerModels(offered map[string]catalogEntry, client *http.Client) ([]*Model, tinfoil.Catalog) {
@@ -221,7 +246,7 @@ func (inf *Models) Boot(ctx context.Context, usageSecret string) error {
 	}
 	router := &Service{URL: "https://" + host, Client: client}
 	inf.Services = map[string]*Service{"router": router}
-	inf.Auto = &Model{Name: "auto", Client: router.Client, Endpoint: router.URL + "/v1/chat/completions"}
+	inf.Auto = &Model{Name: "auto", Client: router.Client, Endpoint: router.URL + chatCompletionsPath}
 	if err := inf.RefreshCatalog(ctx); err != nil {
 		return err
 	}
@@ -270,7 +295,7 @@ type UsageSink interface {
 func (inf *Models) Completion(ctx context.Context, m *Model, payload api.Object) (string, error) {
 	endpoint := m.Endpoint
 	if endpoint == "" {
-		endpoint = inf.Gateway + "/v1/chat/completions"
+		endpoint = inf.Gateway + chatCompletionsPath
 	}
 	payload["stream"] = false
 	// Without a scope of its own, a request would share the process-wide

@@ -91,3 +91,46 @@ func TestGatewayOfferFollowsTheCatalogAndKeepsTheLastGoodOne(t *testing.T) {
 		t.Fatal("the gateway client did not follow the refreshed catalog")
 	}
 }
+
+func TestModelsTheGatewayDoesNotOfferRunThroughTheRouter(t *testing.T) {
+	var catalog atomic.Value
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, catalog.Load().(string))
+	}))
+	defer gateway.Close()
+	sealing, routing := &http.Client{}, &http.Client{}
+	models := &Models{Gateway: gateway.URL, Client: sealing, Services: map[string]*Service{"router": {URL: "https://router.example", Client: routing}}}
+	sdk, err := NewGateway("https://gateway.example", models.Offer.SDK)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offered := func() map[string]Model {
+		byName := map[string]Model{}
+		for _, m := range models.Offer.Get() {
+			byName[m.Name] = *m
+		}
+		return byName
+	}
+	gemma := `"gemma4-31b": {"repo": "tinfoilsh/confidential-gemma4-31b", "hosts": ["gemma.example"], "context": 131072, "vision": true}`
+	catalog.Store(`{` + gemma + `}`)
+	models.RefreshOffer(context.Background())
+	got := offered()
+	if len(got) != len(pinned) {
+		t.Fatalf("offered %d models, want every pinned one: %+v", len(got), got)
+	}
+	if got["gemma4-31b"] != (Model{Name: "gemma4-31b", Vision: true, Context: 131072, Client: sealing}) {
+		t.Fatalf("a model the gateway offers left the gateway: %+v", got["gemma4-31b"])
+	}
+	if got["kimi-k3"] != (Model{Name: "kimi-k3", Endpoint: "https://router.example/v1/chat/completions", Client: routing}) {
+		t.Fatalf("a model the gateway does not offer is not served through the router: %+v", got["kimi-k3"])
+	}
+	if sdk.Serves("kimi-k3") {
+		t.Fatal("the gateway client would seal to a model the gateway does not offer")
+	}
+
+	catalog.Store(`{` + gemma + `, "kimi-k3": {"repo": "tinfoilsh/confidential-kimi-k3", "hosts": ["kimi.example"], "context": 262144}}`)
+	models.RefreshOffer(context.Background())
+	if got := offered()["kimi-k3"]; got != (Model{Name: "kimi-k3", Context: 262144, Client: sealing}) || !sdk.Serves("kimi-k3") {
+		t.Fatalf("a model the gateway offers again still runs through the router: %+v", got)
+	}
+}
