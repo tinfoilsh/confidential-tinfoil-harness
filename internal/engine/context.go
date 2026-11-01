@@ -41,11 +41,10 @@ type Request struct {
 
 // cacheScope is the prompt cache a chat's turns share: the chats of one
 // client, told apart by the secret it sends, or one chat alone when it sends
-// none. The gateway routes model requests by a hash of the prompt keyed with
-// this scope, so it must hold something the gateway cannot work out from the
-// credential it sees: the client's secret, or the chat id, which never
-// leaves the enclaves. Signed-out callers behind one address hold the same
-// free key, so neither is the key alone.
+// none. The router salts the engine's prompt cache with this scope, so it
+// must hold something besides the credential: the client's secret, or the
+// chat id. Signed-out callers behind one address hold the same free key, so
+// neither is the key alone.
 func cacheScope(p *auth.Principal, threadID, clientSecret string) string {
 	scope := p.Scope() + "\x00client:" + clientSecret
 	if clientSecret == "" {

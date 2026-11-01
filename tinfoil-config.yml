@@ -27,7 +27,6 @@ containers:
     image: "ghcr.io/tinfoilsh/confidential-tinfoil-harness@sha256:0000000000000000000000000000000000000000000000000000000000000000"
     networks: [upstream, storage]
     env:
-      - TINFOIL_GATEWAY_URL: https://inference-gateway.tinfoil.sh
       - TINFOIL_CONTROLPLANE_URL: https://api.tinfoil.sh
       - CLERK_ISSUER: https://clerk.tinfoil.sh
       - TINFOIL_TOOLS_ENCLAVE: websearch.tinfoil.sh

@@ -139,4 +139,4 @@ type Refusal struct {
 	RetryAfter int
 }
 
-func (r *Refusal) Error() string { return fmt.Sprintf("gateway returned %d: %s", r.Status, r.Detail) }
+func (r *Refusal) Error() string { return fmt.Sprintf("model returned %d: %s", r.Status, r.Detail) }

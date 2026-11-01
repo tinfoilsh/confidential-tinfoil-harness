@@ -3,15 +3,9 @@ package inference
 import (
 	"context"
 	"errors"
-	"io"
 	"net/http"
-	"net/http/httptest"
-	"reflect"
-	"sync/atomic"
 	"testing"
 	"time"
-
-	tinfoil "github.com/tinfoilsh/tinfoil-go"
 )
 
 type discardedAttestationTransport struct{ closed chan struct{} }
@@ -41,53 +35,5 @@ func TestAttestationTimeoutDiscardsLateClient(t *testing.T) {
 	good := &http.Client{}
 	if client, err := runner.run(context.Background(), func() (*http.Client, error) { return good, nil }); client != good || err != nil {
 		t.Fatalf("prompt verification lost its client: client=%p err=%v", client, err)
-	}
-}
-
-func TestGatewayOfferFollowsTheCatalogAndKeepsTheLastGoodOne(t *testing.T) {
-	var catalog atomic.Value
-	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body := catalog.Load().(string)
-		if r.URL.Path != "/catalog" || body == "" {
-			w.WriteHeader(http.StatusBadGateway)
-			return
-		}
-		io.WriteString(w, body)
-	}))
-	defer gateway.Close()
-	sealing := &http.Client{}
-	h := struct{ models *Models }{&Models{Gateway: gateway.URL, Client: sealing}}
-	sdk, err := NewGateway("https://gateway.example", h.models.Offer.SDK)
-	if err != nil {
-		t.Fatal(err)
-	}
-	catalog.Store(`{
-		"kimi-k3": {"repo": "tinfoilsh/confidential-kimi-k3", "hosts": ["kimi-1.example", "kimi-2.example"], "context": 262144, "vision": true},
-		"gemma4-31b": {"repo": "tinfoilsh/confidential-other", "hosts": ["gemma.example"], "context": 131072},
-		"gpt-oss-120b": {"repo": "tinfoilsh/confidential-gpt-oss-120b", "hosts": [], "context": 131072},
-		"unpinned": {"repo": "tinfoilsh/confidential-unpinned", "hosts": ["unpinned.example"], "context": 8192}
-	}`)
-	h.models.RefreshOffer(context.Background())
-	offered := h.models.Offer.Get()
-	if len(offered) != 1 || *offered[0] != (Model{Name: "kimi-k3", Vision: true, Context: 262144, Client: sealing}) {
-		t.Fatalf("offered models are not the pinned models the gateway routes: %+v", offered)
-	}
-	if want := (tinfoil.Catalog{"kimi-k3": {Repo: "tinfoilsh/confidential-kimi-k3", Hosts: []string{"kimi-1.example", "kimi-2.example"}}}); !reflect.DeepEqual(h.models.Offer.SDK(), want) {
-		t.Fatalf("SDK catalog = %v, want %v", h.models.Offer.SDK(), want)
-	}
-	if !sdk.Serves("kimi-k3") || sdk.Serves("gemma4-31b") || sdk.Serves("gpt-oss-120b") || sdk.Serves("unpinned") {
-		t.Fatal("the gateway client would seal to a model outside the pinned catalog")
-	}
-	for _, body := range []string{"", "{}", `{"unpinned": {"repo": "tinfoilsh/confidential-unpinned", "hosts": ["unpinned.example"], "context": 8192}}`} {
-		catalog.Store(body)
-		h.models.RefreshOffer(context.Background())
-		if offered := h.models.Offer.Get(); len(offered) != 1 || offered[0].Name != "kimi-k3" || !sdk.Serves("kimi-k3") {
-			t.Fatalf("catalog %q replaced the last one that offered a pinned model", body)
-		}
-	}
-	catalog.Store(`{"gemma4-31b": {"repo": "tinfoilsh/confidential-gemma4-31b", "hosts": ["gemma.example"], "context": 131072}}`)
-	h.models.RefreshOffer(context.Background())
-	if Served(h.models.Offer.Get()) != "gemma4-31b" || sdk.Serves("kimi-k3") || !sdk.Serves("gemma4-31b") {
-		t.Fatal("the gateway client did not follow the refreshed catalog")
 	}
 }

@@ -39,24 +39,28 @@ func fetchConfig(ctx context.Context, client *http.Client, base, path string, ou
 	return json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(out)
 }
 func (inf *Models) RefreshCatalog(ctx context.Context) error {
-	inf.RefreshOffer(ctx)
 	client := &http.Client{Timeout: 15 * time.Second}
-	var models []api.Object
-	if err := fetchConfig(ctx, client, inf.Controlplane, "/api/config/models", &models); err != nil {
+	var config []api.Object
+	if err := fetchConfig(ctx, client, inf.Controlplane, "/api/config/models", &config); err != nil {
 		return err
 	}
-	c := buildCatalog(models, inf.Offer.Get())
+	c, models := buildCatalog(config, inf.Services["router"])
 	// The first catalog may offer only Auto; a later one without models keeps the last.
 	if len(c.Models) == 0 && inf.Catalog.Get() != nil {
-		return errors.New("no configured chat model is offered by the gateway")
+		return errors.New("no configured chat model is pinned")
 	}
+	inf.Offer.Set(models)
 	inf.Catalog.Set(c)
 	return nil
 }
-func buildCatalog(config []api.Object, models []*Model) *domain.Catalog {
+
+// buildCatalog lists the configured chat models this harness pins, each
+// served through the router.
+func buildCatalog(config []api.Object, router *Service) (*domain.Catalog, []*Model) {
 	prompt := domain.BuiltInPrompt()
 	c := &domain.Catalog{Prompt: prompt.SystemPrompt, Rules: prompt.Rules, WidgetHeader: prompt.GenUI.Header, EnabledWidgets: slices.Clone(prompt.GenUI.EnabledWidgets), Models: []api.Object{}, Presets: domain.BuiltInPresets()}
-	var unpinned []string
+	var unpinned, unsized []string
+	var models []*Model
 	for _, definition := range config {
 		if !api.Bool(definition["chat"], false) || api.Str(definition["type"]) != "chat" {
 			continue
@@ -75,22 +79,21 @@ func buildCatalog(config []api.Object, models []*Model) *domain.Catalog {
 			unpinned = append(unpinned, name)
 			continue
 		}
-		for _, model := range models {
-			if model.Name == name {
-				def := maps.Clone(definition)
-				// A prompt must fit both the replica and the window the product configures.
-				window := model.Context
-				if configured > 0 && (window <= 0 || configured < window) {
-					window = configured
-				}
-				def["budgetWindow"] = window
-				c.Models = append(c.Models, def)
-				break
-			}
+		// The configured window is the only prompt budget a model has.
+		if configured <= 0 {
+			unsized = append(unsized, name)
+			continue
 		}
+		def := maps.Clone(definition)
+		def["budgetWindow"] = configured
+		c.Models = append(c.Models, def)
+		models = append(models, &Model{Name: name, Vision: api.Bool(definition["multimodal"], false), Endpoint: router.URL + chatCompletionsPath, Client: router.Client})
 	}
 	if len(unpinned) > 0 {
 		slog.Warn("skipping controlplane chat models without a pinned repository", "models", strings.Join(unpinned, ", "))
 	}
-	return c
+	if len(unsized) > 0 {
+		slog.Warn("skipping controlplane chat models without a context window", "models", strings.Join(unsized, ", "))
+	}
+	return c, models
 }

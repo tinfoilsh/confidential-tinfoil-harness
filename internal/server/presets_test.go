@@ -36,8 +36,8 @@ func presetHarness(t *testing.T) (*harness, *memoryRows, auth.ContentKey, chan s
 		asked <- api.Str(body["model"])
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n")
 	})
-	client := h.models.Offer.Get()[0].Client
-	h.models.Offer.Set(append(h.models.Offer.Get(), &inference.Model{Name: "gemma4-31b", Context: 8192, Client: client}, &inference.Model{Name: "gpt-oss-120b", Context: 8192, Client: client}), h.models.Offer.SDK())
+	endpoint, client := h.models.Offer.Get()[0].Endpoint, h.models.Offer.Get()[0].Client
+	h.models.Offer.Set(append(h.models.Offer.Get(), &inference.Model{Name: "gemma4-31b", Endpoint: endpoint, Client: client}, &inference.Model{Name: "gpt-oss-120b", Endpoint: endpoint, Client: client}))
 	c := h.models.Catalog.Get()
 	c.Models = append(c.Models, api.Object{"modelName": "gemma4-31b", "name": "Gemma", "budgetWindow": 8192, "chatConfig": api.Object{}},
 		api.Object{"modelName": "gpt-oss-120b", "name": "Free", "paid": false, "budgetWindow": 8192, "chatConfig": api.Object{}})

@@ -20,11 +20,11 @@ import (
 
 func TestCatalogRefreshAcceptsControlplaneArray(t *testing.T) {
 	definitions := []api.Object{
-		{"modelName": "deepseek-v4-1-flash", "repo": "tinfoilsh/confidential-deepseek-v4-1-flash", "type": "chat", "chat": true},
+		{"modelName": "deepseek-v4-1-flash", "repo": "tinfoilsh/confidential-deepseek-v4-1-flash", "type": "chat", "chat": true, "multimodal": true, "chatConfig": api.Object{"contextWindowTokens": 524288}},
 		{"modelName": "glm-5-3", "repo": "tinfoilsh/confidential-glm5-3-nvfp4", "type": "chat", "chat": true, "chatConfig": api.Object{"contextWindowTokens": 524288}},
 		{"modelName": "glm-5-3-flash", "repo": "tinfoilsh/confidential-glm5-3-flash", "type": "chat", "chat": true},
-		{"modelName": "gemma4-31b", "repo": "tinfoilsh/confidential-gemma4-31b", "type": "chat", "chat": true, "chatConfig": api.Object{"contextWindowTokens": 1048576}},
-		{"modelName": "llama3-3-70b", "repo": "tinfoilsh/confidential-llama3-3-70b", "type": "chat", "chat": true},
+		{"modelName": "gemma4-31b", "repo": "tinfoilsh/confidential-gemma4-31b", "type": "chat", "chat": true, "multimodal": true, "chatConfig": api.Object{"contextWindowTokens": 262144}},
+		{"modelName": "llama3-3-70b", "repo": "tinfoilsh/confidential-llama3-3-70b", "type": "chat", "chat": true, "chatConfig": api.Object{"contextWindowTokens": 131072}},
 		{"modelName": "new-model", "repo": "tinfoilsh/confidential-new-model", "type": "chat", "chat": true, "chatConfig": api.Object{"contextWindowTokens": 65536}},
 		{"modelName": "deepseek-v4-flash", "repo": "tinfoilsh/confidential-deepseek-v4-flash", "type": "chat", "chat": true, "deprecated": true},
 	}
@@ -32,11 +32,6 @@ func TestCatalogRefreshAcceptsControlplaneArray(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var response any
 		switch r.URL.Path {
-		case "/catalog":
-			io.WriteString(w, `{"glm-5-3": {"repo": "tinfoilsh/confidential-glm5-3-nvfp4", "hosts": ["glm.example"], "context": 1048576},
-				"gemma4-31b": {"repo": "tinfoilsh/confidential-gemma4-31b", "hosts": ["gemma.example"], "context": 262144, "vision": true},
-				"llama3-3-70b": {"repo": "tinfoilsh/confidential-llama3-3-70b", "hosts": ["llama.example"], "context": 131072}}`)
-			return
 		case "/api/config/models":
 			response = definitions
 			switch mode.Load() {
@@ -58,21 +53,36 @@ func TestCatalogRefreshAcceptsControlplaneArray(t *testing.T) {
 		json.NewEncoder(w).Encode(response)
 	}))
 	defer server.Close()
-	h := &harness{models: &inference.Models{Gateway: server.URL, Controlplane: server.URL}}
+	router := &http.Client{}
+	h := &harness{models: &inference.Models{Controlplane: server.URL, Services: map[string]*inference.Service{"router": {URL: "https://router.example", Client: router}}}}
 	if err := h.models.RefreshCatalog(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	catalog := h.models.Catalog.Get()
-	if len(catalog.Models) != 3 || catalog.Definition("glm-5-3") == nil || catalog.Definition("gemma4-31b") == nil || catalog.Definition("llama3-3-70b") == nil {
+	want := map[string]int{"deepseek-v4-1-flash": 524288, "glm-5-3": 524288, "gemma4-31b": 262144, "llama3-3-70b": 131072}
+	if len(catalog.Models) != len(want) {
 		t.Fatalf("wrong available models: %v", catalog.Models)
 	}
-	if catalog.Definition("deepseek-v4-1-flash") != nil || catalog.Definition("glm-5-3-flash") != nil || catalog.Definition("new-model") != nil {
-		t.Fatal("advertised a model the gateway does not offer or the harness does not pin")
-	}
-	for name, want := range map[string]int{"glm-5-3": 524288, "gemma4-31b": 262144, "llama3-3-70b": 131072} {
-		if got := api.Int(catalog.Definition(name)["budgetWindow"]); got != want {
-			t.Errorf("%s budget = %d, want the smaller of the replica and configured windows, %d", name, got, want)
+	for name, window := range want {
+		if got := api.Int(catalog.Definition(name)["budgetWindow"]); got != window {
+			t.Errorf("%s budget = %d, want its configured window, %d", name, got, window)
 		}
+	}
+	if catalog.Definition("glm-5-3-flash") != nil || catalog.Definition("new-model") != nil {
+		t.Fatal("advertised a model without a configured window or that the harness does not pin")
+	}
+	offered := map[string]inference.Model{}
+	for _, m := range h.models.Offer.Get() {
+		offered[m.Name] = *m
+	}
+	for name := range want {
+		vision := name == "deepseek-v4-1-flash" || name == "gemma4-31b"
+		if got := offered[name]; got != (inference.Model{Name: name, Vision: vision, Endpoint: "https://router.example/v1/chat/completions", Client: router}) {
+			t.Errorf("%s is not served through the router as configured: %+v", name, got)
+		}
+	}
+	if len(offered) != len(want) {
+		t.Fatalf("offered models outside the catalog: %+v", offered)
 	}
 	if catalog.Fallback != 65536 || len(catalog.Deprecated) != 1 {
 		t.Fatal("lost the configured fallback window or deprecated model metadata")
@@ -87,38 +97,37 @@ func TestCatalogRefreshAcceptsControlplaneArray(t *testing.T) {
 			if err := h.models.RefreshCatalog(context.Background()); err == nil {
 				t.Fatal("invalid catalog accepted")
 			}
-			if h.models.Catalog.Get() != catalog {
+			if h.models.Catalog.Get() != catalog || len(h.models.Offer.Get()) != len(want) {
 				t.Fatal("failed refresh replaced the last valid catalog")
 			}
 		})
 	}
 }
 
-func TestHarnessStartsBeforeTheGatewayOffersAModel(t *testing.T) {
-	var offered atomic.Bool
+func TestHarnessStartsBeforeTheControlplaneListsAModel(t *testing.T) {
+	var listed atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/catalog":
-			if !offered.Load() {
-				io.WriteString(w, `{}`)
-				return
-			}
-			io.WriteString(w, `{"kimi-k3": {"repo": "tinfoilsh/confidential-kimi-k3", "hosts": ["kimi.example"], "context": 262144}}`)
 		case "/v1/chat/completions":
 			io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n")
 		case "/api/config/models":
-			json.NewEncoder(w).Encode([]api.Object{{"modelName": "kimi-k3", "name": "Kimi K3", "repo": "tinfoilsh/confidential-kimi-k3", "type": "chat", "chat": true, "chatConfig": api.Object{"contextWindowTokens": 8192}}})
+			repo := "tinfoilsh/confidential-unpinned"
+			if listed.Load() {
+				repo = "tinfoilsh/confidential-kimi-k3"
+			}
+			json.NewEncoder(w).Encode([]api.Object{{"modelName": "kimi-k3", "name": "Kimi K3", "repo": repo, "type": "chat", "chat": true, "chatConfig": api.Object{"contextWindowTokens": 8192}}})
 		default:
 			http.NotFound(w, r)
 		}
 	}))
 	defer server.Close()
 	h, _, _ := testChatHarness(t, nil)
-	h.models.Gateway, h.models.Controlplane, h.controlplane = server.URL, server.URL, server.URL
-	h.models.Offer.Set(nil, nil)
+	h.models.Controlplane, h.controlplane = server.URL, server.URL
+	h.models.Services["router"] = &inference.Service{URL: server.URL, Client: server.Client()}
+	h.models.Offer.Set(nil)
 	h.models.Catalog.Set(nil)
 	if err := h.models.RefreshCatalog(context.Background()); err != nil {
-		t.Fatalf("an empty gateway catalog stopped startup: %v", err)
+		t.Fatalf("a catalog without models stopped startup: %v", err)
 	}
 	var session struct {
 		DefaultModel string       `json:"defaultModel"`
@@ -133,9 +142,9 @@ func TestHarnessStartsBeforeTheGatewayOffersAModel(t *testing.T) {
 	if events := eventsIn(t, postRoute(h, "/v1/threads/turn", turn, "")); events[len(events)-1].Type != "RUN_FINISHED" {
 		t.Fatalf("Auto did not run within the configured window: %+v", events[len(events)-1])
 	}
-	offered.Store(true)
+	listed.Store(true)
 	if err := h.models.RefreshCatalog(context.Background()); err != nil || h.models.Catalog.Get().Definition("kimi-k3") == nil {
-		t.Fatalf("a model the gateway now offers was not advertised: %v", err)
+		t.Fatalf("a model the controlplane now lists was not advertised: %v", err)
 	}
 }
 
