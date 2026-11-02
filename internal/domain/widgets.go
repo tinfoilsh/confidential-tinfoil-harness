@@ -110,6 +110,9 @@ func WidgetFailure(w Widget, args string) json.RawMessage {
 	problem := "arguments are not valid JSON"
 	if json.Unmarshal([]byte(cmp.Or(args, "{}")), &value) == nil {
 		err := w.Resolved.Validate(value)
+		if err == nil && w.Name == QuestionsWidget {
+			_, err = readQuestions(args)
+		}
 		if err == nil {
 			return nil
 		}
