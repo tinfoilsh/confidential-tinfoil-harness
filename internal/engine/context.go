@@ -562,12 +562,16 @@ func englishTime(now time.Time, zone string) string {
 // prompt: about the 2,500 words its task asks for at most.
 const summaryReserve = 4096
 
-// preflightBudget refuses a turn whose prompt would not fit even once its
-// chat is compacted: one whose system prompt and tools, or whose question
-// beside a summary of the messages before it, fill more of the window than
-// a prompt may.
+// preflightBudget refuses a turn whose prompt does not fit and would not fit
+// even once its chat is compacted: one whose system prompt and tools, or
+// whose question beside a summary of the messages before it, fill more of
+// the window than a prompt may.
 func preflightBudget(req *Request) error {
-	fixed := fixedCost(req, req.webSearch, api.Raw(req.rendered))
+	definitions := api.Raw(req.rendered)
+	if _, err := BudgetConversation(req, req.webSearch, definitions); err == nil {
+		return nil
+	}
+	fixed := fixedCost(req, req.webSearch, definitions)
 	if fixed > req.limit() {
 		return api.Err(413, "CONTEXT_TOO_LARGE", "The system and tools exceed the context window")
 	}

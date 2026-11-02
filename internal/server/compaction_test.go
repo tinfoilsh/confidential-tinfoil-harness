@@ -70,7 +70,7 @@ func compactionOf(goal string) string {
 	return b.String()
 }
 
-// filler is text of about ten tokens a repeat, which fills a test model's
+// filler is text of twenty tokens a repeat, which fills a test model's
 // window quickly.
 func filler(repeats int) string { return strings.Repeat("0 1 2 3 4 5 6 7 8 9 ", repeats) }
 
@@ -321,17 +321,24 @@ func TestAToolExchangeThatOutgrowsTheWindowCompactsTheChat(t *testing.T) {
 	}
 }
 
-// A question too large to fit beside a summary of the chat before it is
-// refused before anything is summarized.
-func TestAQuestionTooLargeForTheWindowIsRefusedBeforeCompacting(t *testing.T) {
+// A question is refused before anything is summarized only when its chat's
+// prompt does not fit and the question would not fit beside a summary of the
+// messages before it either.
+func TestAQuestionIsRefusedOnlyWhenNoCompactionCouldFitIt(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	summarized := false
 	h.compactWith(func(string, string) (string, error) { summarized = true; return "", nil })
-	storeCompacted(rows, "chat-1")
-	in := continueInput(key, "chat-1")
-	in["content"] = filler(400)
-	w := postRoute(h, "/v1/threads/turn", in, "alice")
-	if w.Code != http.StatusRequestEntityTooLarge || !strings.Contains(w.Body.String(), "CONTEXT_TOO_LARGE") || summarized {
+	storeCompacted(rows, "fits")
+	longCompacted(rows, "outgrown")
+	ask := func(id string) *httptest.ResponseRecorder {
+		in := continueInput(key, id)
+		in["content"] = filler(125)
+		return postRoute(h, "/v1/threads/turn", in, "alice")
+	}
+	if events := eventsIn(t, ask("fits")); events[len(events)-1].Type != "RUN_FINISHED" || eventOfType(events, "COMPACTION_START") != nil {
+		t.Fatalf("a question whose prompt fits ended with %+v", events[len(events)-1])
+	}
+	if w := ask("outgrown"); w.Code != http.StatusRequestEntityTooLarge || !strings.Contains(w.Body.String(), "CONTEXT_TOO_LARGE") || summarized {
 		t.Fatalf("HTTP %d %s, summarized %v", w.Code, w.Body, summarized)
 	}
 }
