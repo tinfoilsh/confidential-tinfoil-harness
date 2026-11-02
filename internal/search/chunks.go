@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/searchindex"
 )
 
@@ -25,6 +26,7 @@ const (
 type chatText struct {
 	Title    string `json:"title"`
 	Messages []struct {
+		Role    string `json:"role"`
 		Content string `json:"content"`
 	} `json:"messages"`
 }
@@ -43,8 +45,9 @@ func chatChunks(plaintext []byte) []string {
 	if title := strings.TrimSpace(chat.Title); title != "" {
 		parts = append(parts, title)
 	}
+	// A compaction marker's summary repeats the messages before it.
 	for _, m := range chat.Messages {
-		if content := strings.TrimSpace(m.Content); content != "" {
+		if content := strings.TrimSpace(m.Content); content != "" && m.Role != domain.CompactionRole {
 			parts = append(parts, content)
 		}
 	}

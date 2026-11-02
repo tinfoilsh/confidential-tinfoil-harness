@@ -36,9 +36,11 @@ info:
     - A client keeps a ThreadRecord whole, members it does not know included,
       and sends it back as it was returned.
     - A change to what a ThreadRecord or a stored row holds changes its
-      recordVersion. The harness reads a record in its current version as
+      recordVersion. The harness reads a record in a version it knows as
       written, reads one without a version as an older client kept it, and
-      refuses any other with RECORD_UNSUPPORTED. A member of a stored row it
+      refuses any other with RECORD_UNSUPPORTED. It knows versions 1 and 2;
+      version 2 adds compaction markers to chats and is otherwise version 1.
+      A harness reads a version before it writes it. A member of a stored row it
       does not name is read past, since other clients of the same rows write
       members of their own; the harness leaves such members out when it
       writes the row back, except in the profile row. There it keeps them,
@@ -377,6 +379,7 @@ paths:
       operationId: messageDelete
       summary: Delete a message
       tags: [threads]
+      description: Deletes a message, and every compaction marker after it, whose summary covered it. A compaction marker itself is not deleted.
       requestBody:
         required: true
         content:
@@ -391,7 +394,7 @@ paths:
       operationId: messageUpdate
       summary: Edit a reply
       tags: [threads]
-      description: Edits a reply's text in place.
+      description: Edits a reply's text in place, and deletes every compaction marker after it, whose summary covered the reply as it was.
       requestBody:
         required: true
         content:
@@ -2175,7 +2178,7 @@ components:
         id: {type: string}
         role: {$ref: "#/components/schemas/Role"}
         createdAt: {type: string}
-        content: {type: string, description: "A question's text."}
+        content: {type: string, description: "A question's text, or a compaction marker's summary."}
         timeline: {type: array, items: {$ref: "#/components/schemas/Block"}, description: "A reply's steps."}
         quote: {type: string}
         model: {type: string}
@@ -2186,6 +2189,26 @@ components:
         annotations: {type: array, items: {$ref: "#/components/schemas/Annotation"}}
         attachments: {type: array, items: {$ref: "#/components/schemas/AttachmentView"}}
         answers: {type: array, items: {$ref: "#/components/schemas/WidgetAnswers"}, description: "A question's answers to questions widgets, as it sent them to the model."}
+        compaction: {$ref: "#/components/schemas/Compaction"}
+
+    Compaction:
+      description: |
+        What a compaction marker records of its summary. A compaction marker
+        is a message of role compaction whose content summarizes every message
+        before it, which the model reads in their place. It always sits
+        directly before a question. A client shows the messages before a
+        chat's latest marker as ones the model no longer reads, and the marker
+        as a step the user can open to read the summary. The marker is not one
+        of the chat's messages: messageCount leaves it out, and a client offers
+        no action on it.
+      type: object
+      required: [messages, startedAt, endedAt, model, version]
+      properties:
+        messages: {type: integer, description: "How many messages the summary covers, those an earlier marker covered included."}
+        startedAt: {type: number, description: "When the summary was started, in epoch milliseconds."}
+        endedAt: {type: number, description: "When the summary was written, in epoch milliseconds."}
+        model: {type: string, description: "The model that wrote the summary."}
+        version: {type: integer, description: "The version of the instructions it was written under."}
 
     WidgetAnswers:
       description: What the user had answered of one questions widget when they sent a question, with the questions' text, so it reads the same however the widget changes later.
@@ -2213,9 +2236,9 @@ components:
         label: {type: string}
 
     Role:
-      description: Who wrote a message. A client leaves out a message whose role it does not know.
+      description: Who wrote a message, or compaction for a compaction marker. A client leaves out a message whose role it does not know.
       anyOf:
-        - {type: string, enum: [user, assistant]}
+        - {type: string, enum: [user, assistant, compaction]}
         - {type: string}
 
     MessageUsage:
@@ -2391,6 +2414,7 @@ components:
         isError: {type: boolean}
         isInterrupted: {type: boolean}
         answers: {type: array, items: {$ref: "#/components/schemas/WidgetAnswers"}}
+        compaction: {$ref: "#/components/schemas/Compaction"}
 
     ThreadInput:
       description: "A device chat as its client sends it: a ThreadRecord the harness returned, sent back whole, or a record without a recordVersion that an older client kept or a client made for a new chat. The harness refuses a ThreadRecord with a member its version does not have."

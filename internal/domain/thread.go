@@ -10,6 +10,11 @@ import (
 // writes. A change to what they hold changes it.
 const RecordVersion = 1
 
+// readVersions are the formats a record is read in as written: this
+// harness's, and version 2, which adds compaction markers to chats and is
+// otherwise the same.
+var readVersions = []int{1, 2}
+
 // Thread is a chat in the thread format: what the harness stores in the cloud,
 // what a device keeps, and what a device chat's run returns.
 type Thread struct {
@@ -56,6 +61,49 @@ type Message struct {
 	// Answers are what the user had answered of each questions widget whose
 	// answers changed since an earlier message, as this message sent them.
 	Answers []WidgetAnswers `json:"answers,omitzero"`
+	// Compaction is set on a compaction marker, whose content is its summary.
+	Compaction *Compaction `json:"compaction,omitempty"`
+}
+
+// CompactionRole is the role of a compaction marker: a message whose content
+// summarizes every message before it, which the model reads in their place.
+const CompactionRole = "compaction"
+
+// Compaction is what a compaction marker records of its summary.
+type Compaction struct {
+	// Messages is how many messages the summary covers, those an earlier
+	// marker covered included.
+	Messages int `json:"messages"`
+	// StartedAt and EndedAt are when the summary was written, in epoch
+	// milliseconds.
+	StartedAt float64 `json:"startedAt"`
+	EndedAt   float64 `json:"endedAt"`
+	// Model wrote the summary under version Version of its instructions.
+	Model   string `json:"model"`
+	Version int    `json:"version"`
+}
+
+// LatestCompaction is the index of the last compaction marker among
+// messages, or -1 when there is none.
+func LatestCompaction(messages []Message) int {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == CompactionRole {
+			return i
+		}
+	}
+	return -1
+}
+
+// DropCompactionsAfter removes every compaction marker after the message at
+// index, each of which summarizes that message as it was.
+func (t *Thread) DropCompactionsAfter(index int) {
+	messages := slices.Clone(t.Messages[:index+1])
+	for _, m := range t.Messages[index+1:] {
+		if m.Role != CompactionRole {
+			messages = append(messages, m)
+		}
+	}
+	t.Messages = messages
 }
 
 // Block is one step of a reply: text, reasoning, or a tool call. What tools
@@ -255,6 +303,10 @@ func (m *Message) clone() Message {
 		copy.Attachments[i].Pages = clonedSlice(copy.Attachments[i].Pages)
 	}
 	copy.Annotations = clonedSlice(m.Annotations)
+	if m.Compaction != nil {
+		compaction := *m.Compaction
+		copy.Compaction = &compaction
+	}
 	return copy
 }
 

@@ -59,7 +59,7 @@ type messageInput struct {
 const maxLocalMessages = 10000
 
 // MessageRoles are the roles a client's message may have.
-var MessageRoles = []string{"user", "assistant"}
+var MessageRoles = []string{"user", "assistant", CompactionRole}
 
 func ValidateLocalThread(data []byte) error {
 	var thread threadInput
@@ -71,7 +71,7 @@ func ValidateLocalThread(data []byte) error {
 	}
 	for _, message := range thread.Messages {
 		if !slices.Contains(MessageRoles, message.Role) {
-			return api.Err(400, "BAD_REQUEST", "A message role must be user or assistant")
+			return api.Err(400, "BAD_REQUEST", "A message role must be user, assistant or compaction")
 		}
 		if message.ID != "" && !api.IsIdentifier(message.ID) {
 			return api.Err(400, "BAD_REQUEST", "A message id must be a valid identifier")

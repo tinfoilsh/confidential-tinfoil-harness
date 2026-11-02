@@ -29,7 +29,7 @@ type ThreadSummary struct {
 
 func Summarize(t *Thread) ThreadSummary {
 	s := ThreadSummary{ID: t.ID, Title: t.Title, TitleState: t.TitleState, CreatedAt: Present(t.CreatedAt), UpdatedAt: Present(t.UpdatedAt), ProjectID: t.ProjectID, Model: t.Model,
-		WebSearchEnabled: t.WebSearchEnabled, Pinned: t.Pinned, ContextUsage: t.ContextUsage, MessageCount: max(0, len(t.Messages)-t.HiddenCount), Flagged: t.Flagged}
+		WebSearchEnabled: t.WebSearchEnabled, Pinned: t.Pinned, ContextUsage: t.ContextUsage, MessageCount: t.MessageCount(), Flagged: t.Flagged}
 	s.ActivityAt = t.activityAt()
 	// The hint lapses with the run's deadline. One naming no instance was
 	// stored by a process from before runs named theirs, whose runs ended
@@ -40,6 +40,18 @@ func Summarize(t *Thread) ThreadSummary {
 		}
 	}
 	return s
+}
+
+// MessageCount is how many messages the chat shows. A compaction marker is
+// shown, but is not one of its messages.
+func (t *Thread) MessageCount() int {
+	count := 0
+	for _, m := range t.Messages[min(len(t.Messages), t.HiddenCount):] {
+		if m.Role != CompactionRole {
+			count++
+		}
+	}
+	return count
 }
 
 func (t *Thread) activityAt() string {
@@ -119,11 +131,12 @@ type MessageView struct {
 	Content          *string         `json:"content,omitempty"`
 	Attachments      []Attachment    `json:"attachments,omitempty"`
 	Answers          []WidgetAnswers `json:"answers,omitzero"`
+	Compaction       *Compaction     `json:"compaction,omitempty"`
 }
 
 func ViewMessage(m *Message) MessageView {
 	view := MessageView{ID: m.ID, Role: m.Role, CreatedAt: m.CreatedAt, Quote: m.Quote, Model: m.Model, ModelDisplayName: m.ModelDisplayName,
-		IsError: m.IsError, IsInterrupted: m.IsInterrupted, Usage: m.Usage, Annotations: m.Annotations, Answers: m.Answers}
+		IsError: m.IsError, IsInterrupted: m.IsInterrupted, Usage: m.Usage, Annotations: m.Annotations, Answers: m.Answers, Compaction: m.Compaction}
 	if m.Role == "assistant" {
 		view.Timeline = CheckedWidgets(m.Timeline)
 		if view.Timeline == nil {

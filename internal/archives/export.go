@@ -61,7 +61,12 @@ func (ar *Service) ShareThread(ctx context.Context, p *auth.Principal, _ auth.Co
 		t = row.Thread
 	}
 	payload := domain.SharePayload{V: 1, Title: t.Title, Messages: []domain.ShareMessage{}, CreatedAt: domain.Millis(t.CreatedAt)}
+	// A share shows the conversation; the summaries the model read in place
+	// of its older messages are not part of it.
 	for _, m := range t.Messages {
+		if m.Role == domain.CompactionRole {
+			continue
+		}
 		shared := domain.ShareMessage{Role: m.Role, Content: m.Content, Timestamp: domain.Millis(m.CreatedAt), Timeline: domain.CheckedWidgets(m.Timeline), ModelDisplayName: m.ModelDisplayName, IsError: m.IsError, Quote: m.Quote, Annotations: m.Annotations, Answers: m.Answers}
 		for _, a := range m.Attachments {
 			view := domain.ViewAttachment(&a)
@@ -785,12 +790,17 @@ func indentedJSON(v any, prefix string) ([]byte, error) {
 
 func (e *conversationsExport) chat(t *domain.Thread, projectID string, image func(*domain.Attachment) ([]byte, error), document func(*domain.Attachment) error) error {
 	c := exportConversation{UUID: t.ID, Name: t.Title, CreatedAt: exportTime(t.CreatedAt, t.UpdatedAt), UpdatedAt: exportTime(t.UpdatedAt, t.CreatedAt), ProjectID: projectID, ChatMessages: []exportMessage{}}
-	for index, m := range t.Messages {
+	// The summaries of compacted messages are not part of the conversation,
+	// nor counted in its messages' ids.
+	for _, m := range t.Messages {
+		if m.Role == domain.CompactionRole {
+			continue
+		}
 		sender := "assistant"
 		if m.Role == "user" {
 			sender = "human"
 		}
-		message := exportMessage{UUID: fmt.Sprintf("%s_msg_%d", t.ID, index), Text: m.Content, Sender: sender, CreatedAt: exportTime(m.CreatedAt, t.CreatedAt)}
+		message := exportMessage{UUID: fmt.Sprintf("%s_msg_%d", t.ID, len(c.ChatMessages)), Text: m.Content, Sender: sender, CreatedAt: exportTime(m.CreatedAt, t.CreatedAt)}
 		if m.Role == "assistant" {
 			message.Text = cmp.Or(m.Content, TimelineText(m.Timeline, "content"))
 			if thoughts := TimelineText(m.Timeline, "thinking"); thoughts != "" {

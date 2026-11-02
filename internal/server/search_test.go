@@ -218,7 +218,7 @@ func TestSearchCountsTheChatsItCannotOpen(t *testing.T) {
 			broken.Data = []byte("[]")
 			rows.rows[rowMapKey(p, "chat", "broken")] = broken
 			later := rows.rows[rowMapKey(p, "chat", "later")]
-			editRow(&later, func(data api.Object) { data["recordVersion"] = domain.RecordVersion + 1 })
+			editRow(&later, func(data api.Object) { data["recordVersion"] = laterRecordVersion })
 			rows.rows[rowMapKey(p, "chat", "later")] = later
 			rows.unfetched = tc.unfetched
 
