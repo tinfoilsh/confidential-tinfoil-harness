@@ -109,10 +109,11 @@ func (a *modelAccount) Complete(ctx context.Context, c Completion) (Completed, e
 		}
 		return Completed{}, err
 	}
-	done := Completed{Usage: api.Usage{Prompt: response.Usage.PromptTokens, Completion: response.Usage.CompletionTokens, Total: response.Usage.TotalTokens}}
-	if len(response.Choices) > 0 {
-		done.Text, done.FinishReason = response.Choices[0].Message.Content, string(response.Choices[0].FinishReason)
+	if len(response.Choices) == 0 {
+		return Completed{}, errors.New("inference: the model answered with no choices")
 	}
+	done := Completed{Text: response.Choices[0].Message.Content, FinishReason: string(response.Choices[0].FinishReason),
+		Usage: api.Usage{Prompt: response.Usage.PromptTokens, Completion: response.Usage.CompletionTokens, Total: response.Usage.TotalTokens}}
 	// What the harness spends of its own account, by what spent it.
 	slog.Info("account completion", "task", c.Task, "model", c.Model, "promptTokens", done.Usage.Prompt, "completionTokens", done.Usage.Completion, "finishReason", done.FinishReason, "duration", time.Since(started))
 	return done, nil
