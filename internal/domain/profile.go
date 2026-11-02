@@ -376,6 +376,10 @@ type PromptEdits struct {
 	// SavePromptPresets adds each prompt, or replaces the one with its id
 	// where it stands.
 	SavePromptPresets []CustomPreset `json:"savePromptPresets"`
+	// UpdatePromptPresets sets the members each update names on the stored
+	// prompt with its id, so a client that read the prompt before another
+	// device changed it changes only what its user did.
+	UpdatePromptPresets []PresetUpdate `json:"updatePromptPresets"`
 	// DeletePromptPresetIDs removes each prompt, which is then no longer a
 	// favorite or the default.
 	DeletePromptPresetIDs         []string `json:"deletePromptPresetIds"`
@@ -383,10 +387,55 @@ type PromptEdits struct {
 	RemoveFavoritePromptPresetIDs []string `json:"removeFavoritePromptPresetIds"`
 }
 
+// PresetUpdate is a change to a saved prompt: the members it names. A null
+// model or web search setting clears it.
+type PresetUpdate struct {
+	ID               string               `json:"id"`
+	Name             *string              `json:"name,omitempty"`
+	Description      *string              `json:"description,omitempty"`
+	SystemPrompt     *string              `json:"systemPrompt,omitempty"`
+	Model            api.Nullable[string] `json:"model,omitzero"`
+	WebSearchEnabled api.Nullable[bool]   `json:"webSearchEnabled,omitzero"`
+	UpdatedAt        json.RawMessage      `json:"updatedAt,omitempty"`
+}
+
+func (u PresetUpdate) applied(preset CustomPreset) CustomPreset {
+	if u.Name != nil {
+		preset.Name = *u.Name
+	}
+	if u.Description != nil {
+		preset.Description = u.Description
+	}
+	if u.SystemPrompt != nil {
+		preset.SystemPrompt = u.SystemPrompt
+	}
+	if u.Model.Set {
+		preset.Model = u.Model.Value
+	}
+	if u.WebSearchEnabled.Set {
+		preset.WebSearchEnabled = u.WebSearchEnabled.Value
+	}
+	if len(u.UpdatedAt) > 0 {
+		preset.UpdatedAt = u.UpdatedAt
+	}
+	return preset
+}
+
 // Validate refuses edits that name a prompt without an id or name.
 func (e *PromptEdits) Validate() error {
 	if slices.ContainsFunc(e.SavePromptPresets, unnamedPreset) {
 		return api.Err(400, "BAD_REQUEST", "A custom preset requires an id and name")
+	}
+	for _, update := range e.UpdatePromptPresets {
+		if update.ID == "" || update.Name != nil && *update.Name == "" {
+			return api.Err(400, "BAD_REQUEST", "A custom preset requires an id and name")
+		}
+		if err := update.Model.Check("model"); err != nil {
+			return err
+		}
+		if err := update.WebSearchEnabled.Check("webSearchEnabled"); err != nil {
+			return err
+		}
 	}
 	for _, ids := range [][]string{e.DeletePromptPresetIDs, e.AddFavoritePromptPresetIDs, e.RemoveFavoritePromptPresetIDs} {
 		if slices.Contains(ids, "") {
@@ -405,6 +454,12 @@ func (p *Profile) ApplyPromptEdits(e PromptEdits) error {
 			presets[i] = preset
 		} else {
 			presets = append(presets, preset)
+		}
+	}
+	// A prompt another device deleted stays deleted.
+	for _, update := range e.UpdatePromptPresets {
+		if i := slices.IndexFunc(presets, func(kept CustomPreset) bool { return kept.ID == update.ID }); i >= 0 {
+			presets[i] = update.applied(presets[i])
 		}
 	}
 	presets = slices.DeleteFunc(presets, func(preset CustomPreset) bool { return slices.Contains(e.DeletePromptPresetIDs, preset.ID) })
@@ -462,8 +517,15 @@ func LocalProfile(data []byte) *Profile {
 func (c *Catalog) EffectiveProfile(p Profile) Profile {
 	p.CustomPromptPresets = slices.Clone(p.CustomPromptPresets)
 	for i := range p.CustomPromptPresets {
-		if model := p.CustomPromptPresets[i].Model; model != nil && c.retired(*model) {
+		model := p.CustomPromptPresets[i].Model
+		if model == nil {
+			continue
+		}
+		name := presetModel(*model)
+		if c.retired(name) {
 			p.CustomPromptPresets[i].Model = nil
+		} else {
+			p.CustomPromptPresets[i].Model = new(name)
 		}
 	}
 	p.SelectedModel = new(c.SelectedModel(&p))

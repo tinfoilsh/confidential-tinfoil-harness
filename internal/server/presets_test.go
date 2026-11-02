@@ -17,12 +17,13 @@ import (
 )
 
 // savedPresets are prompts a user saved: one choosing an offered model with
-// web search off, one naming a model no longer offered, and one naming a
-// model that serves only Auto.
+// web search off, one naming a model no longer offered, one naming a model
+// that serves only Auto, and one naming an earlier design's Auto tier.
 var savedPresets = []any{
 	api.Object{"id": "user:fast", "name": "Fast", "systemPrompt": "Be brief.", "model": "gemma4-31b", "webSearchEnabled": false},
 	api.Object{"id": "user:gone", "name": "Gone", "model": "retired-model", "webSearchEnabled": false},
 	api.Object{"id": "user:free", "name": "Free", "model": "gpt-oss-120b", "webSearchEnabled": false},
+	api.Object{"id": "user:auto", "name": "Auto", "model": "auto-smart", "webSearchEnabled": false},
 }
 
 // presetHarness offers kimi-k3 and gemma4-31b, and serves gpt-oss-120b
@@ -44,8 +45,10 @@ func presetHarness(t *testing.T) (*harness, *memoryRows, auth.ContentKey, chan s
 	return h, rows, key, asked
 }
 
+// presetProfile is a profile in the current format, which a read does not
+// upgrade.
 func presetProfile() api.Object {
-	return api.Object{"customPromptPresets": savedPresets, "defaultPromptPresetId": "user:fast", "selectedModel": "kimi-k3"}
+	return api.Object{"recordVersion": domain.RecordVersion, "customPromptPresets": savedPresets, "defaultPromptPresetId": "user:fast", "selectedModel": "kimi-k3"}
 }
 
 // storedChat is a stored chat as the harness reads it back.
@@ -72,6 +75,7 @@ func TestANewChatTakesItsPresetsSettingsUnlessItsTurnSetsThem(t *testing.T) {
 		{"turn's model", nil, api.Object{"model": "kimi-k3"}, "kimi-k3", false},
 		{"unoffered model", "user:gone", api.Object{}, "kimi-k3", false},
 		{"model behind Auto", "user:free", api.Object{}, "kimi-k3", false},
+		{"earlier Auto tier", "user:auto", api.Object{}, domain.AutoModelName, false},
 	} {
 		in := sendInput(key)
 		in["options"] = tc.options

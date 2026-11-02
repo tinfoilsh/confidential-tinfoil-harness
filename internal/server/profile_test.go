@@ -198,6 +198,59 @@ func TestPromptEditsApplyToTheStoredProfile(t *testing.T) {
 	}
 }
 
+// An update changes only the members it names, so a client that read a
+// prompt before another device set its model and web search does not drop
+// them by renaming it, and a null clears a setting.
+func TestAPromptUpdateChangesOnlyWhatItNames(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	var session struct {
+		Features map[string]bool `json:"features"`
+	}
+	if json.Unmarshal(postRoute(h, "/v1/session", api.Object{}, "alice").Body.Bytes(), &session); !session.Features["promptPresetUpdates"] {
+		t.Fatalf("the session does not offer prompt updates: %v", session.Features)
+	}
+	p := &auth.Principal{ID: "alice"}
+	stored := api.Object{"customPromptPresets": []any{api.Object{"id": "user:a", "name": "A", "systemPrompt": "first", "model": "glm-5-3", "webSearchEnabled": false, "createdAt": 1, "updatedAt": 1}}}
+	rows.rows[rowMapKey(p, "profile", "profile")] = domain.StoredRow{ID: "profile", ETag: "1", Data: api.Raw(stored)}
+	update := func(fields api.Object) api.Object {
+		profileOf(t, postRoute(h, "/v1/profile/update", api.Object{"key": keyBase64(key), "updatePromptPresets": []any{fields}}, "alice"))
+		row, _ := rows.Load(context.Background(), p, key, "profile", "profile")
+		return presetsByID(rowJSON(row))["user:a"]
+	}
+	if renamed := update(api.Object{"id": "user:a", "name": "A2", "updatedAt": 5}); renamed["name"] != "A2" || renamed["systemPrompt"] != "first" ||
+		renamed["model"] != "glm-5-3" || renamed["webSearchEnabled"] != false || renamed["updatedAt"] != float64(5) {
+		t.Fatalf("renaming the prompt stored %v", renamed)
+	}
+	if cleared := update(api.Object{"id": "user:a", "model": nil, "webSearchEnabled": true}); cleared["model"] != nil || cleared["webSearchEnabled"] != true || cleared["name"] != "A2" {
+		t.Fatalf("clearing the model and turning web search on stored %v", cleared)
+	}
+	// A prompt another device deleted stays deleted.
+	if profile := profileOf(t, postRoute(h, "/v1/profile/update", api.Object{"key": keyBase64(key), "updatePromptPresets": []any{api.Object{"id": "user:gone", "name": "Back"}}}, "alice")); presetsByID(profile)["user:gone"] != nil {
+		t.Fatalf("an update brought back a deleted prompt: %v", profile["customPromptPresets"])
+	}
+	for _, refused := range []api.Object{{"id": "user:a", "name": ""}, {"id": "user:a", "model": 3}} {
+		if w := postRoute(h, "/v1/profile/update", api.Object{"key": keyBase64(key), "updatePromptPresets": []any{refused}}, "alice"); w.Code != 400 {
+			t.Fatalf("the update %v: HTTP %d", refused, w.Code)
+		}
+		row, _ := rows.Load(context.Background(), p, key, "profile", "profile")
+		if kept := presetsByID(rowJSON(row))["user:a"]; kept["name"] != "A2" || kept["webSearchEnabled"] != true {
+			t.Fatalf("the refused update %v stored %v", refused, kept)
+		}
+	}
+}
+
+// A saved prompt naming an earlier design's Auto tier, as an older client may
+// still write one, reads as Auto rather than as a retired model.
+func TestASavedPromptOnAnEarlierAutoTierReadsAsAuto(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	p := &auth.Principal{ID: "alice"}
+	stored := api.Object{"recordVersion": domain.RecordVersion, "customPromptPresets": []any{api.Object{"id": "user:a", "name": "A", "model": "auto-smart", "createdAt": 1, "updatedAt": 1}}}
+	rows.rows[rowMapKey(p, "profile", "profile")] = domain.StoredRow{ID: "profile", ETag: "1", Data: api.Raw(stored)}
+	if preset := presetsByID(profileOf(t, postRoute(h, "/v1/profile/get", api.Object{"key": keyBase64(key)}, "alice")))["user:a"]; preset["model"] != domain.AutoModelName {
+		t.Fatalf("the prompt read as %v", preset)
+	}
+}
+
 // A device's settings upgrade as a stored profile reads, and its invalid
 // fields are dropped rather than refusing the request.
 func TestADeviceProfileUpgradesAsAStoredOneReads(t *testing.T) {
