@@ -342,3 +342,24 @@ func TestAQuestionIsRefusedOnlyWhenNoCompactionCouldFitIt(t *testing.T) {
 		t.Fatalf("HTTP %d %s, summarized %v", w.Code, w.Body, summarized)
 	}
 }
+
+// A session offers compaction only while the catalog lists the model that
+// writes its summaries, without which a long chat's turn fails.
+func TestASessionOffersCompactionOnlyWithItsModel(t *testing.T) {
+	h, _, _ := testChatHarness(t, nil)
+	offered := func() bool {
+		var session struct {
+			Features map[string]bool `json:"features"`
+		}
+		json.Unmarshal(postRoute(h, "/v1/session", api.Object{}, "alice").Body.Bytes(), &session)
+		return session.Features["compaction"]
+	}
+	h.engine.Summaries = summarize.New(summarizerFunc(nil), &h.models.Catalog, "kimi-k3", longSummaryModel)
+	if offered() {
+		t.Fatal("a session offered compaction on a model the catalog does not list")
+	}
+	h.compactWith(nil)
+	if !offered() {
+		t.Fatal("a session did not offer compaction on a model the catalog lists")
+	}
+}

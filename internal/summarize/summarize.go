@@ -86,11 +86,22 @@ func (s *Service) Summarize(ctx context.Context, task *Task, in Input) (Result, 
 	return result, err
 }
 
-func (s *Service) summarize(ctx context.Context, task *Task, model string, in Input) (Result, error) {
-	var def api.Object
+// Ready reports whether the catalog lists the model task runs on, without
+// which its summaries fail.
+func (s *Service) Ready(task *Task) bool {
+	return s != nil && s.definition(task) != nil
+}
+
+// definition is how the catalog describes the model task runs on, or nil.
+func (s *Service) definition(task *Task) api.Object {
 	if c := s.catalog.Get(); c != nil {
-		def = c.Definition(model)
+		return c.Definition(s.models[task.Role])
 	}
+	return nil
+}
+
+func (s *Service) summarize(ctx context.Context, task *Task, model string, in Input) (Result, error) {
+	def := s.definition(task)
 	if def == nil {
 		return Result{}, fmt.Errorf("%w: the %s model %q is not in the catalog", ErrUnavailable, task.Role, model)
 	}
