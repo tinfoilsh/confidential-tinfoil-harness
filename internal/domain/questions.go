@@ -101,6 +101,10 @@ func (q *question) picked(ids []string) ([]string, error) {
 // a reply: each question named takes the options picked, or none to leave it
 // unanswered. Questions not named keep their answers.
 func AnswerQuestions(m *Message, callID string, changes map[string]*[]string) error {
+	// Only a reply's widgets are read for the answers the next message sends.
+	if m.Role != "assistant" {
+		return api.Err(400, "BAD_REQUEST", "Only a reply takes answers")
+	}
 	index := slices.IndexFunc(m.Timeline, func(b Block) bool { return b.Type == "tool_call" && b.CallID() == callID })
 	if index < 0 {
 		return api.Err(409, "REVISION_CONFLICT", "The widget was removed")

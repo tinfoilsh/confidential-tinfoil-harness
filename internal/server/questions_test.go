@@ -137,16 +137,17 @@ func TestAnswersTheWidgetDoesNotOfferAreRefused(t *testing.T) {
 		t.Fatalf("answering: HTTP %d %s", w.Code, w.Body.String())
 	}
 	for _, tc := range []struct {
-		name, call string
-		answers    api.Object
-		code       string
+		name, message, call string
+		answers             api.Object
+		code                string
 	}{
-		{"an option the widget does not offer", "quiz", api.Object{"q1": []any{"d"}}, "REVISION_CONFLICT"},
-		{"a question the widget does not ask", "quiz", api.Object{"q9": []any{"a"}}, "REVISION_CONFLICT"},
-		{"two options for a single choice", "quiz", api.Object{"q1": []any{"a", "b"}}, "BAD_REQUEST"},
-		{"a widget that asks nothing", "clock", api.Object{"q1": []any{"a"}}, "BAD_REQUEST"},
+		{"an option the widget does not offer", "a1", "quiz", api.Object{"q1": []any{"d"}}, "REVISION_CONFLICT"},
+		{"a question the widget does not ask", "a1", "quiz", api.Object{"q9": []any{"a"}}, "REVISION_CONFLICT"},
+		{"two options for a single choice", "a1", "quiz", api.Object{"q1": []any{"a", "b"}}, "BAD_REQUEST"},
+		{"a widget that asks nothing", "a1", "clock", api.Object{"q1": []any{"a"}}, "BAD_REQUEST"},
+		{"a message that is not a reply", "u1", "quiz", api.Object{"q1": []any{"a"}}, "BAD_REQUEST"},
 	} {
-		w := answer(h, key, tc.call, tc.answers)
+		w := postRoute(h, "/v1/threads/messages/answer", api.Object{"key": keyBase64(key), "threadId": "chat-1", "messageId": tc.message, "toolCallId": tc.call, "answers": tc.answers}, "alice")
 		if code := api.Obj(api.Obj(api.Parsed(w.Body.Bytes()))["error"])["code"]; w.Code == 200 || code != tc.code {
 			t.Errorf("%s: HTTP %d %s", tc.name, w.Code, w.Body.String())
 		}
