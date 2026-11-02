@@ -47,9 +47,9 @@ func TestACompletionAsksTheModelAsItsCallerSays(t *testing.T) {
 		t.Fatalf("the completion read %+v, %v", done, err)
 	}
 	sent := (*requests)[0]
-	messages, _ := sent["messages"].([]any)
+	prompt := []any{map[string]any{"role": "system", "content": "be brief"}, map[string]any{"role": "user", "content": "the text"}}
 	if sent["model"] != "long-model" || sent["max_completion_tokens"] != 64.0 || sent["temperature"] != 0.2 || sent["user_cache_secret"] != "scope" ||
-		!reflect.DeepEqual(sent["chat_template_kwargs"], map[string]any{"enable_thinking": false}) || len(messages) != 2 {
+		!reflect.DeepEqual(sent["chat_template_kwargs"], map[string]any{"enable_thinking": false}) || !reflect.DeepEqual(sent["messages"], prompt) {
 		t.Fatalf("the request was %v", sent)
 	}
 	if _, err := account.Complete(context.Background(), Completion{Model: "m", User: "x", MaxTokens: 1}); err != nil {
