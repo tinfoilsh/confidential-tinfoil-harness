@@ -232,6 +232,10 @@ func TestAPromptUpdateChangesOnlyWhatItNames(t *testing.T) {
 		if w := postRoute(h, "/v1/profile/update", api.Object{"key": keyBase64(key), "updatePromptPresets": []any{refused}}, "alice"); w.Code != 400 {
 			t.Fatalf("the update %v: HTTP %d", refused, w.Code)
 		}
+		row, _ := rows.Load(context.Background(), p, key, "profile", "profile")
+		if kept := presetsByID(rowJSON(row))["user:a"]; kept["name"] != "A2" || kept["webSearchEnabled"] != true {
+			t.Fatalf("the refused update %v stored %v", refused, kept)
+		}
 	}
 }
 

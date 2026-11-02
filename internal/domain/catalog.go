@@ -144,7 +144,7 @@ func (c *Catalog) ApplyPreset(t *Thread, profile *Profile, id *string) {
 	if saved == nil {
 		return
 	}
-	if model := ValueOr(saved.Model, ""); model != "" && c.Offers(model) {
+	if model := presetModel(ValueOr(saved.Model, "")); model != "" && c.Offers(model) {
 		t.Model = model
 	}
 	t.WebSearchEnabled = ValueOr(saved.WebSearchEnabled, t.WebSearchEnabled)
@@ -161,6 +161,15 @@ const AutoModelName = "auto"
 // legacyAutoModels are the Auto tiers of an earlier design, which old chats
 // and settings name.
 var legacyAutoModels = []string{"auto-smart", "auto-fast"}
+
+// presetModel is the model a saved prompt names: an earlier design's Auto
+// tier, as an older client may still write one, is Auto.
+func presetModel(name string) string {
+	if slices.Contains(legacyAutoModels, name) {
+		return AutoModelName
+	}
+	return name
+}
 
 func normalizeModel(name string) string {
 	if name == "" || slices.Contains(legacyAutoModels, name) {

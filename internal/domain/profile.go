@@ -521,12 +521,7 @@ func (c *Catalog) EffectiveProfile(p Profile) Profile {
 		if model == nil {
 			continue
 		}
-		name := *model
-		// An earlier design's Auto tier, as an older client may still write
-		// one, is Auto.
-		if slices.Contains(legacyAutoModels, name) {
-			name = AutoModelName
-		}
+		name := presetModel(*model)
 		if c.retired(name) {
 			p.CustomPromptPresets[i].Model = nil
 		} else {
