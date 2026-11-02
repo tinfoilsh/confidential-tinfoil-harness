@@ -14,6 +14,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/pages"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/search"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/summarize"
 )
 
 // The control plane answers a row's read or write within controlplaneTimeout;
@@ -62,9 +63,11 @@ func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
 	if err != nil {
 		return err
 	}
-	if h.models.Summarizer, err = inference.NewSummarizer(apiKey, summaryModel); err != nil {
+	account, err := inference.NewAccount(apiKey)
+	if err != nil {
 		return err
 	}
+	h.summaries = summarize.New(account, &h.models.Catalog, summaryModel, summaryModel)
 	h.pages = pages.New(contextDevKey)
 	rows := &store.Rows{Controlplane: cp, Buckets: bk}
 	h.search = search.New(cp, sbk, embedder, rows)

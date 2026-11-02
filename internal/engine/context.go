@@ -10,10 +10,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/tiktoken-go/tokenizer"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
@@ -82,22 +80,6 @@ func responseLanguage(profile *domain.Profile, locale string) string {
 		}
 	}
 	return promptLanguage
-}
-
-var encoder = sync.OnceValue(func() tokenizer.Codec {
-	enc, err := tokenizer.Get(tokenizer.Cl100kBase)
-	if err != nil {
-		panic(err)
-	}
-	return enc
-})
-
-func tokenCount(s string) int {
-	count, err := encoder().Count(s)
-	if err != nil {
-		return len([]byte(s))
-	}
-	return count
 }
 
 func escapePrompt(s string) string {
@@ -444,15 +426,15 @@ func messageTokens(message json.RawMessage) int {
 	json.Unmarshal(message, &m)
 	content := m["content"]
 	delete(m, "content")
-	count := 4 + tokenCount(string(api.Raw(m)))
+	count := 4 + inference.Tokens(string(api.Raw(m)))
 	if text, ok := content.(string); ok {
-		return count + tokenCount(text)
+		return count + inference.Tokens(text)
 	}
 	for _, p := range api.Arr(content) {
 		if api.Obj(p)["type"] == "image_url" {
 			count += imageTokens
 		} else {
-			count += tokenCount(api.Str(api.Obj(p)["text"]))
+			count += inference.Tokens(api.Str(api.Obj(p)["text"]))
 		}
 	}
 	return count
@@ -479,7 +461,7 @@ func BudgetConversation(req *Request, searching bool, definitions json.RawMessag
 	if req.widgetHint != "" {
 		system += "\n\n" + req.widgetHint
 	}
-	budget := req.window*4/5 - tokenCount(system) - tokenCount(string(definitions)) - messageTokens(req.reminder) - 8
+	budget := req.window*4/5 - inference.Tokens(system) - inference.Tokens(string(definitions)) - messageTokens(req.reminder) - 8
 	if budget < 0 {
 		return nil, api.Err(413, "CONTEXT_TOO_LARGE", "The system and tools exceed the context window")
 	}
@@ -524,7 +506,7 @@ func role(message json.RawMessage) string {
 // Trim only complete older user turns as tool output grows. The current user
 // request and its entire tool exchange stay together, including the reminder.
 func trimToolHistory(req *Request, messages []json.RawMessage, defs json.RawMessage) ([]json.RawMessage, error) {
-	cost := tokenCount(string(defs))
+	cost := inference.Tokens(string(defs))
 	for _, message := range messages {
 		cost += messageTokens(message)
 	}
@@ -587,7 +569,7 @@ func requestContextUsage(req *Request) *domain.ContextUsage {
 	if req.webSearch {
 		system += "\n\n" + searchInstructions
 	}
-	used := tokenCount(system) + tokenCount(string(api.Raw(req.rendered))) + messageTokens(req.reminder) + 8
+	used := inference.Tokens(system) + inference.Tokens(string(api.Raw(req.rendered))) + messageTokens(req.reminder) + 8
 	for _, cost := range req.groupCosts() {
 		used += cost
 	}

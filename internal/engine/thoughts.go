@@ -7,7 +7,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/summarize"
 )
 
 // A reply's reasoning is summarized while it thinks, as the web client did:
@@ -39,12 +39,13 @@ type thoughtSummaries struct {
 // thoughtSummaries starts following a run's reasoning, unless the harness
 // has no summarizer.
 func (eng *Engine) thoughtSummaries(ctx context.Context, out *Stream, assembler *domain.MessageAssembler) *thoughtSummaries {
-	summarizer := eng.Models.Summarizer
-	if summarizer == nil {
+	summaries := eng.Summaries
+	if summaries == nil {
 		return nil
 	}
 	return &thoughtSummaries{ctx: ctx, out: out, assembler: assembler, summarize: func(ctx context.Context, text string) (string, error) {
-		return summarizer.Summarize(ctx, inference.ThoughtsSummary, text)
+		summary, err := summaries.Summarize(ctx, summarize.Thoughts, summarize.Input{Documents: []summarize.Document{{Text: text}}})
+		return summary.Text, err
 	}}
 }
 

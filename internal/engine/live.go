@@ -10,6 +10,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/summarize"
 )
 
 type Engine struct {
@@ -19,6 +20,9 @@ type Engine struct {
 	Auth        *auth.Authenticator
 	Models      *inference.Models
 	Store       *store.Store
+	// Summaries title chats and label reasoning; nil when the harness has
+	// none.
+	Summaries *summarize.Service
 }
 
 // liveRuns holds what this instance is executing: each chat's running reply

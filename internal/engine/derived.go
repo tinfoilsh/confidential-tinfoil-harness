@@ -7,7 +7,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/summarize"
 )
 
 // titleSource is the text a title summarizes: the first user message, or the
@@ -33,7 +33,7 @@ func titleSource(t *domain.Thread) string {
 }
 
 func (eng *Engine) generateTitle(ctx context.Context, r *Run, p *auth.Principal, titleState string, text string) {
-	if eng.Models.Summarizer == nil || titleState != "placeholder" {
+	if eng.Summaries == nil || titleState != "placeholder" {
 		return
 	}
 	words := strings.Fields(text)
@@ -41,11 +41,11 @@ func (eng *Engine) generateTitle(ctx context.Context, r *Run, p *auth.Principal,
 		return
 	}
 	text = strings.Join(words[:min(len(words), 100)], " ")
-	summary, err := eng.Models.Summarizer.Summarize(ctx, inference.TitleSummary, text)
+	summary, err := eng.Summaries.Summarize(ctx, summarize.Title, summarize.Input{Documents: []summarize.Document{{Text: text}}})
 	if err != nil {
 		return
 	}
-	title := strings.Trim(strings.TrimSpace(summary), "\"'")
+	title := strings.Trim(summary.Text, "\"'")
 	if title == "" {
 		return
 	}

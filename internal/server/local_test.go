@@ -135,7 +135,7 @@ func TestLocalTurnFieldsAreRefusedOutsideLocalThreads(t *testing.T) {
 
 func TestLocalTitleIsGeneratedWithoutStorage(t *testing.T) {
 	h, rows, _ := testChatHarness(t, nil)
-	h.models.Summarizer = summarizerFunc(func(inference.SummaryStyle, string) (string, error) { return "\"Local title\"", nil })
+	h.summarizeWith(func(string, string) (string, error) { return "\"Local title\"", nil })
 	events := eventsIn(t, postRoute(h, "/v1/threads/turn", localInput("", api.Object{"messages": []any{}}), "alice"))
 	if rows.calls != 0 {
 		t.Fatalf("local title used storage %d times", rows.calls)
@@ -251,7 +251,7 @@ func TestADeviceChatRunReturnsItsUpdatedThread(t *testing.T) {
 		}
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"an answer\"}}]}\n\ndata: [DONE]\n\n")
 	})
-	h.models.Summarizer = summarizerFunc(func(inference.SummaryStyle, string) (string, error) { return "Device title", nil })
+	h.summarizeWith(func(string, string) (string, error) { return "Device title", nil })
 	in := localInput("", api.Object{"messages": []any{}})
 	id := api.Str(in["threadId"])
 	in["content"] = "what is this?"
