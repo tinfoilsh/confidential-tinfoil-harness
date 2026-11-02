@@ -2462,7 +2462,7 @@ components:
         thread: {$ref: "#/components/schemas/ThreadRecord"}
 
     SharedThread:
-      description: An opened share, whose attachments name the key that reads each blob.
+      description: An opened share, whose attachments name the key that reads each blob. A share holds the conversation without its compaction markers.
       type: object
       required: [title, createdAt, messages]
       properties:
