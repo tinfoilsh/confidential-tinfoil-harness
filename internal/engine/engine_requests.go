@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"regexp"
 	"slices"
-	"strings"
 
 	"github.com/google/uuid"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
@@ -139,9 +138,6 @@ func (in *TurnRequest) validateContent() error {
 	}
 	if pixels > attach.MaxTurnResizePixels {
 		return api.Err(413, "ATTACHMENT_TOO_LARGE", "The turn's images hold more pixels than one turn can resize")
-	}
-	if in.Kind == "send" && strings.TrimSpace(domain.ValueOr(in.Content, "")) == "" && strings.TrimSpace(domain.ValueOr(in.Quote, "")) == "" && len(in.Attachments) == 0 {
-		return api.Err(400, "BAD_REQUEST", "A message or attachment is required")
 	}
 	return nil
 }

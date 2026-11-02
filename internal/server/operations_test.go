@@ -10,11 +10,12 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
-// tripThread is a chat with an image, two questions and two replies.
+// tripThread is a chat with an image, two questions and two replies, the
+// first of which asks a quiz.
 func tripThread() api.Object {
 	return api.Object{"title": "Trip", "titleState": "generated", "createdAt": "2026-01-01T00:00:00Z", "model": "kimi-k3", "webSearchEnabled": true, "messages": []any{
 		api.Object{"id": "u1", "role": "user", "content": "plan a trip", "attachments": []any{api.Object{"id": "img", "type": "image", "fileName": "map.png", "mimeType": "image/png", "base64": "aW1n", "thumbnailBase64": "dGh1bWI="}}},
-		api.Object{"id": "a1", "role": "assistant", "content": "first, pack", "timeline": []any{api.Object{"id": "t1", "type": "thinking", "content": "think"}, api.Object{"id": "c1", "type": "content", "content": "first, pack"}}},
+		api.Object{"id": "a1", "role": "assistant", "content": "first, pack", "timeline": []any{api.Object{"id": "t1", "type": "thinking", "content": "think"}, api.Object{"id": "c1", "type": "content", "content": "first, pack"}, quizCall()}},
 		api.Object{"id": "u2", "role": "user", "content": "go on"},
 		api.Object{"id": "a2", "role": "assistant", "content": "then go", "timeline": []any{api.Object{"id": "c2", "type": "content", "content": "then go"}}},
 	}}
@@ -55,6 +56,7 @@ func TestDeviceAndStoredChatsChangeTheSameWay(t *testing.T) {
 	}{
 		{"/v1/threads/update", api.Object{"id": "chat-1", "title": "Renamed", "presetId": "user:fast"}},
 		{"/v1/threads/messages/update", api.Object{"threadId": "chat-1", "messageId": "a1", "content": "first, pack light"}},
+		{"/v1/threads/messages/answer", api.Object{"threadId": "chat-1", "messageId": "a1", "toolCallId": "quiz", "answers": api.Object{"q1": []any{"b"}, "q2": []any{"x", "y"}}}},
 		{"/v1/threads/messages/delete", api.Object{"threadId": "chat-1", "messageId": "u2"}},
 	} {
 		cloud := api.Object{"key": keyBase64(key)}
@@ -75,7 +77,9 @@ func TestDeviceAndStoredChatsChangeTheSameWay(t *testing.T) {
 	}
 	messages := api.Arr(device["messages"])
 	image := api.Obj(api.Arr(api.Obj(messages[0])["attachments"])[0])
-	if device["model"] != "gemma4-31b" || device["titleState"] != "manual" || len(messages) != 3 || image["base64"] != nil || image["thumbnail"] != "dGh1bWI=" {
+	quiz := api.Obj(api.Arr(api.Obj(messages[1])["timeline"])[2])
+	if device["model"] != "gemma4-31b" || device["titleState"] != "manual" || len(messages) != 3 || image["base64"] != nil || image["thumbnail"] != "dGh1bWI=" ||
+		!reflect.DeepEqual(quiz["answers"], map[string]any{"q1": []any{"b"}, "q2": []any{"x", "y"}}) {
 		t.Fatalf("the device chat was answered as %v", device)
 	}
 	// The harness names a fork, which keeps its attachments' ids.

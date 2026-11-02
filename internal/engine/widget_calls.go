@@ -47,7 +47,7 @@ func (eng *Engine) retryWidget(ctx context.Context, r *Run, req *Request, m *inf
 	}
 	content = domain.WidgetArguments(strings.TrimSpace(content))
 	var value any
-	if json.Unmarshal([]byte(content), &value) != nil || declaration.Resolved.Validate(value) != nil {
+	if json.Unmarshal([]byte(content), &value) != nil || domain.WidgetFailure(declaration, content) != nil {
 		return api.Err(502, "UPSTREAM_REFUSED", "The replacement widget arguments do not match the schema")
 	}
 	id := r.input.ToolCallID

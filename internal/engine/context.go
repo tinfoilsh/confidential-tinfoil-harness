@@ -330,6 +330,13 @@ func userContent(message *domain.Message, vision bool, loc *time.Location) any {
 		}
 		text = prefix
 	}
+	if len(message.Answers) > 0 {
+		answers := domain.AnswersPrompt(message.Answers)
+		if text != "" {
+			answers += "\n\n" + text
+		}
+		text = answers
+	}
 	docs, descriptions := []string{}, []string{}
 	parts, images := []api.Object{}, []api.Object{}
 	for i := range message.Attachments {

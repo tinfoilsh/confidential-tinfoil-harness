@@ -198,6 +198,9 @@ func Invoke(ctx context.Context, out *Stream, set *Toolset, call ToolCall) (mess
 			content = api.Object{"error": api.AsError(err).Message}
 		}
 		out.emit(domain.ToolCallResult{MessageID: "msg_" + api.Token(), ToolCallID: call.ID, Role: "tool", Content: api.Raw(content)})
+		if call.Name == domain.QuestionsWidget {
+			return answered(call.ID, domain.QuestionsShown)
+		}
 		return answered(call.ID, "[rendered for the user]")
 	}
 	out.activity(call)

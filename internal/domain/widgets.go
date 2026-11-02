@@ -110,6 +110,9 @@ func WidgetFailure(w Widget, args string) json.RawMessage {
 	problem := "arguments are not valid JSON"
 	if json.Unmarshal([]byte(cmp.Or(args, "{}")), &value) == nil {
 		err := w.Resolved.Validate(value)
+		if err == nil && w.Name == QuestionsWidget {
+			_, err = readQuestions(args)
+		}
 		if err == nil {
 			return nil
 		}
@@ -330,7 +333,8 @@ func ReplaceWidget(t *Thread, messageID, callID, expected string, replacement Re
 			if block.Arguments != expected && block.Arguments != replacement.Arguments {
 				return api.Err(409, "REVISION_CONFLICT", "The widget changed during its retry")
 			}
-			block.Arguments, block.Result = replacement.Arguments, replacement.Result
+			// Answers belong to the questions the user was shown.
+			block.Arguments, block.Result, block.Answers = replacement.Arguments, replacement.Result, nil
 			return nil
 		}
 	}

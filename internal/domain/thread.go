@@ -53,6 +53,9 @@ type Message struct {
 	Usage            json.RawMessage `json:"usage,omitempty"`
 	IsError          *bool           `json:"isError,omitempty"`
 	IsInterrupted    *bool           `json:"isInterrupted,omitempty"`
+	// Answers are what the user had answered of each questions widget whose
+	// answers changed since an earlier message, as this message sent them.
+	Answers []WidgetAnswers `json:"answers,omitzero"`
 }
 
 // Block is one step of a reply: text, reasoning, or a tool call. What tools
@@ -76,6 +79,10 @@ type Block struct {
 	StartedAt float64 `json:"startedAt,omitempty"`
 	EndedAt   float64 `json:"endedAt,omitempty"`
 	Duration  float64 `json:"duration,omitempty"`
+	// Answers are the options the user picked in a questions widget, by
+	// question id. A question absent from them is unanswered. They are
+	// replaced whole, never changed in place, so copies of a block share them.
+	Answers map[string][]string `json:"answers,omitempty"`
 	// InvalidArguments marks a widget call whose arguments the widget's
 	// current declaration refuses, so its client offers to regenerate them.
 	// It is worked out again for whatever clients are sent, never taken
