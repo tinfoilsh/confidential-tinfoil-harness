@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
@@ -29,8 +30,9 @@ const (
 	windowShareTenths = 9
 	// minPartTokens is the least room a part of an input needs.
 	minPartTokens = 1024
-	// documentOverhead is what a document's tag costs beside its text.
-	documentOverhead = 16
+	// documentOverhead is what the line breaks around a document's tags
+	// and text cost beside them.
+	documentOverhead = 4
 	// concurrentCalls bounds the calls each role's model takes at once
 	// from this instance; more wait.
 	concurrentCalls = 8
@@ -122,7 +124,9 @@ func take(docs []Document, budget int) (part, rest []Document, err error) {
 	}
 	used := 0
 	for i, d := range docs {
-		cost := inference.Tokens(d.Text) + documentOverhead
+		open, end := d.tags()
+		overhead := inference.Tokens(open) + inference.Tokens(end) + documentOverhead
+		cost := inference.Tokens(d.Text) + overhead
 		if used+cost <= budget {
 			part, used = append(part, d), used+cost
 			continue
@@ -130,11 +134,16 @@ func take(docs []Document, budget int) (part, rest []Document, err error) {
 		if len(part) > 0 {
 			return part, docs[i:], nil
 		}
-		pieces := split(d.Text, budget-documentOverhead)
-		if len(pieces) < 2 {
-			return []Document{d}, docs[i+1:], nil
+		if overhead >= budget {
+			return nil, nil, ErrTooLarge
 		}
+		pieces := split(d.Text, budget-overhead)
 		first, more := d, d
+		if len(pieces) < 2 {
+			// Only the whitespace split leaves out made the text too large.
+			first.Text = strings.Join(pieces, "")
+			return []Document{first}, docs[i+1:], nil
+		}
 		first.Text = pieces[0]
 		more.Text = strings.Join(pieces[1:], "\n\n")
 		more.Attrs = append(append([]Attr{}, d.Attrs...), Attr{"part", "continued"})
@@ -144,7 +153,8 @@ func take(docs []Document, budget int) (part, rest []Document, err error) {
 }
 
 // split cuts text into pieces of at most budget tokens, between paragraphs
-// where it can and between words where it cannot.
+// where it can, between words where it cannot, and within a word larger
+// than a piece, such as an encoded file, between its runes.
 func split(text string, budget int) []string {
 	var pieces, current []string
 	used := 0
@@ -166,6 +176,11 @@ func split(text string, budget int) []string {
 		flush("\n\n")
 		for _, word := range strings.Fields(paragraph) {
 			cost := inference.Tokens(word) + 1
+			if cost > budget {
+				flush(" ")
+				pieces = append(pieces, chunks(word, budget-1)...)
+				continue
+			}
 			if used+cost > budget {
 				flush(" ")
 			}
@@ -175,6 +190,25 @@ func split(text string, budget int) []string {
 	}
 	flush("\n\n")
 	return pieces
+}
+
+// chunks cuts s between runes into chunks of at most limit bytes, so of at
+// most limit tokens, since no token is shorter than a byte. A chunk holds a
+// rune even when the rune is longer than limit.
+func chunks(s string, limit int) []string {
+	var cut []string
+	limit = max(1, limit)
+	for len(s) > limit {
+		at := limit
+		for at > 0 && !utf8.RuneStart(s[at]) {
+			at--
+		}
+		if at == 0 {
+			_, at = utf8.DecodeRuneInString(s)
+		}
+		cut, s = append(cut, s[:at]), s[at:]
+	}
+	return append(cut, s)
 }
 
 // call asks for one summary, again after a failure worth retrying, up to

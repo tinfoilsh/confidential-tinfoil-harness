@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
@@ -137,6 +139,51 @@ func TestASummaryIsCheckedAndRetriedOnlyWhenRetryingCanHelp(t *testing.T) {
 		}
 	}
 }
+
+// Every call fits its model's window with room for its output, however long
+// a document's words or attributes: a word larger than a part, such as an
+// encoded file, is cut between its runes, and no text is left out.
+func TestEveryCallFitsTheModel(t *testing.T) {
+	const window = 4000
+	words := make([]string, 300)
+	for i := range words {
+		words[i] = fmt.Sprintf("w%d", i)
+	}
+	named := make([]Document, 6)
+	for i := range named {
+		named[i] = Document{Kind: "attachment", Attrs: []Attr{{"name", strings.Repeat("name ", 500)}}, Text: strings.Join(words, " ")}
+	}
+	for name, docs := range map[string][]Document{
+		"a word larger than a part": {{Kind: "message", Text: strings.Repeat("é0aZ", 6000)}},
+		"documents named at length": named,
+	} {
+		account := &scripted{answer: func(int, inference.Completion) (inference.Completed, error) { return answered("summary") }}
+		if _, err := service(account, window).Summarize(context.Background(), folded, Input{Documents: docs}); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		var read, want strings.Builder
+		for _, d := range docs {
+			want.WriteString(d.Text)
+		}
+		for _, c := range account.asked {
+			if used := inference.Tokens(c.System) + inference.Tokens(c.User) + int(c.MaxTokens); used > window {
+				t.Fatalf("%s: a call filled %d tokens of a %d-token window", name, used, window)
+			}
+			for _, text := range documentText.FindAllStringSubmatch(c.User, -1) {
+				if !utf8.ValidString(text[1]) {
+					t.Fatalf("%s: a part cut a rune", name)
+				}
+				read.WriteString(text[1])
+			}
+		}
+		if read.String() != want.String() {
+			t.Fatalf("%s: the calls read %d bytes of %d", name, read.Len(), want.Len())
+		}
+	}
+}
+
+// documentText is the text of each document a call reads.
+var documentText = regexp.MustCompile(`(?s)<(?:message|attachment)[^>]*>\n(.*?)\n</(?:message|attachment)>`)
 
 // A document cannot close the tag it is read in or pose as another, while
 // other angle brackets in it stay as written.

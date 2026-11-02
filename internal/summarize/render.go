@@ -20,6 +20,16 @@ type Attr struct {
 	Name, Value string
 }
 
+// tags are the opening and closing tags a document is read in.
+func (d Document) tags() (open, end string) {
+	var b strings.Builder
+	b.WriteString("<" + d.Kind)
+	for _, a := range d.Attrs {
+		b.WriteString(" " + a.Name + `="` + attrEscaper.Replace(a.Value) + `"`)
+	}
+	return b.String() + ">", "</" + d.Kind + ">"
+}
+
 // earlierTag holds what a summary of the input before a part said.
 const earlierTag = "previous_summary"
 
@@ -63,11 +73,8 @@ func (t *Task) user(earlier string, docs []Document) string {
 	}
 	b.WriteString("<" + t.Frame + ">")
 	for _, d := range docs {
-		b.WriteString("\n<" + d.Kind)
-		for _, a := range d.Attrs {
-			b.WriteString(" " + a.Name + `="` + attrEscaper.Replace(a.Value) + `"`)
-		}
-		b.WriteString(">\n" + neutral(d.Text) + "\n</" + d.Kind + ">")
+		open, end := d.tags()
+		b.WriteString("\n" + open + "\n" + neutral(d.Text) + "\n" + end)
 	}
 	b.WriteString("\n</" + t.Frame + ">")
 	if t.Closing != "" {
