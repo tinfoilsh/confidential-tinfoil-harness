@@ -30,7 +30,7 @@ func (eng *Engine) retryWidget(ctx context.Context, r *Run, req *Request, m *inf
 			break
 		}
 	}
-	conversation, err := BudgetConversation(req, false, nil)
+	conversation, err := fitted(ctx, req, false, nil)
 	if err != nil {
 		return err
 	}

@@ -66,16 +66,17 @@ func TestRunsShowTheChatTheHarnessKeeps(t *testing.T) {
 		io.WriteString(w, `{"error":{"message":"Daily request limit reached.","type":"insufficient_quota","code":"insufficient_quota"}}`)
 	}
 	for _, tc := range []struct {
-		name, description      string
-		model                  http.HandlerFunc
-		search, local, replays bool
+		name, description                string
+		model                            http.HandlerFunc
+		search, local, replays, compacts bool
 	}{
-		{"reply", "A reply streamed into a new chat.", streamed("data: {\"choices\":[{\"delta\":{\"content\":\"Hello there.\"}}]}\n\ndata: [DONE]\n\n"), false, false, false},
-		{"reasoning", "A reply that reasons before it answers.", streamed("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Thinking it over.\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"The answer.\"}}]}\n\ndata: [DONE]\n\n"), false, false, false},
-		{"search", "A reply that searches the web, shows what it found as the search runs, and answers from it.", toolTurns(toolCallChunk(0, "s", "web_search", `{"query":"cats"}`), nil), true, false, false},
-		{"refused", "A run the model refuses because the caller's quota is used up.", refused, false, false, false},
-		{"device-chat", "A turn of a chat kept on the device, whose earlier messages the run shows first.", streamed("data: {\"choices\":[{\"delta\":{\"content\":\"Second answer.\"}}]}\n\ndata: [DONE]\n\n"), false, true, false},
-		{"replayed", "A reply whose whole stream arrives twice.", streamed("data: {\"choices\":[{\"delta\":{\"content\":\"Said once.\"}}]}\n\ndata: [DONE]\n\n"), false, false, true},
+		{"reply", "A reply streamed into a new chat.", streamed("data: {\"choices\":[{\"delta\":{\"content\":\"Hello there.\"}}]}\n\ndata: [DONE]\n\n"), false, false, false, false},
+		{"reasoning", "A reply that reasons before it answers.", streamed("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Thinking it over.\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"The answer.\"}}]}\n\ndata: [DONE]\n\n"), false, false, false, false},
+		{"search", "A reply that searches the web, shows what it found as the search runs, and answers from it.", toolTurns(toolCallChunk(0, "s", "web_search", `{"query":"cats"}`), nil), true, false, false, false},
+		{"refused", "A run the model refuses because the caller's quota is used up.", refused, false, false, false, false},
+		{"device-chat", "A turn of a chat kept on the device, whose earlier messages the run shows first.", streamed("data: {\"choices\":[{\"delta\":{\"content\":\"Second answer.\"}}]}\n\ndata: [DONE]\n\n"), false, true, false, false},
+		{"replayed", "A reply whose whole stream arrives twice.", streamed("data: {\"choices\":[{\"delta\":{\"content\":\"Said once.\"}}]}\n\ndata: [DONE]\n\n"), false, false, true, false},
+		{"compaction", "A turn of a device chat too long for the model's window, which first summarizes the messages before its question into a compaction marker.", streamed("data: {\"choices\":[{\"delta\":{\"content\":\"Second answer.\"}}]}\n\ndata: [DONE]\n\n"), false, true, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.search {
@@ -88,6 +89,9 @@ func TestRunsShowTheChatTheHarnessKeeps(t *testing.T) {
 			switch {
 			case tc.search:
 				in = searchInput(key)
+			case tc.compacts:
+				h.compactWith(func(string, string) (string, error) { return compactionOf("The user asked a first question."), nil })
+				in = localInput("", longThread())
 			case tc.local:
 				in = localInput("", priorThread())
 			}
@@ -185,7 +189,7 @@ func conformance(t *testing.T, name, description string, frames []fixtureFrame, 
 // build: a question's text, and a reply's timeline steps.
 func projectedMessage(m domain.MessageView) api.Object {
 	out := api.Object{"id": m.ID, "role": m.Role}
-	if m.Role == "user" {
+	if m.Role == "user" || m.Role == domain.CompactionRole {
 		out["content"] = domain.ValueOr(m.Content, "")
 	}
 	timeline := []api.Object{}
@@ -218,6 +222,7 @@ var (
 	volatileIDs    = regexp.MustCompile(`\d{13}_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{32}`)
 	moments        = regexp.MustCompile(`\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z`)
 	eventTimestamp = regexp.MustCompile(`^(\{"type":"[A-Z_]+","timestamp":")[^"]*"`)
+	epochMillis    = regexp.MustCompile(`("(?:startedAt|endedAt)":)\d+(?:\.\d+)?`)
 	fixtureEpoch   = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 )
 
@@ -225,6 +230,7 @@ var (
 // the event's own a second after the one before it, every other the same.
 func stableFrame(frame fixtureFrame) fixtureFrame {
 	event := moments.ReplaceAll(frame.Event, []byte(fixtureEpoch.Format(time.RFC3339)))
+	event = epochMillis.ReplaceAll(event, []byte("${1}"+strconv.FormatInt(fixtureEpoch.UnixMilli(), 10)))
 	emitted := fixtureEpoch.Add(time.Duration(frame.ID) * time.Second).Format(time.RFC3339)
 	return fixtureFrame{ID: frame.ID, Event: eventTimestamp.ReplaceAll(event, []byte("${1}"+emitted+`"`))}
 }

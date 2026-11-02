@@ -8,11 +8,11 @@ import (
 
 // RecordVersion is the format of the rows and device records this harness
 // writes. A change to what they hold changes it.
-const RecordVersion = 1
+const RecordVersion = 2
 
-// readVersions are the formats a record is read in as written: this
-// harness's, and version 2, which adds compaction markers to chats and is
-// otherwise the same.
+// readVersions are the formats a record is read in as written: version 1,
+// and version 2, which adds compaction markers to chats and is otherwise the
+// same.
 var readVersions = []int{1, 2}
 
 // Thread is a chat in the thread format: what the harness stores in the cloud,

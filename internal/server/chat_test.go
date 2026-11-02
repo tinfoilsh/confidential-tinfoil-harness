@@ -545,6 +545,7 @@ type event struct {
 	Message    string              `json:"message,omitempty"`
 	Metadata   json.RawMessage     `json:"metadata,omitempty"`
 	Display    *domain.ToolDisplay `json:"display,omitempty"`
+	Outcome    string              `json:"outcome,omitempty"`
 }
 
 func eventsIn(t *testing.T, w *httptest.ResponseRecorder) []event {

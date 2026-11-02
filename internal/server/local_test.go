@@ -342,7 +342,7 @@ func TestOldDeviceChatsUpgradeIntoThreads(t *testing.T) {
 	m := func(index int) string { return id + "-message-" + strconv.Itoa(index) }
 	want := api.Object{
 		"id": id, "title": "Cats", "titleState": "generated", "model": "auto", "webSearchEnabled": false, "pinned": false,
-		"createdAt": "2026-03-01T10:00:00Z", "updatedAt": "2026-03-01T10:05:00Z", "projectId": nil, "presetId": nil, "activeRun": nil, "recordVersion": 1,
+		"createdAt": "2026-03-01T10:00:00Z", "updatedAt": "2026-03-01T10:05:00Z", "projectId": nil, "presetId": nil, "activeRun": nil, "recordVersion": domain.RecordVersion,
 		"messages": []any{
 			api.Object{"id": m(0), "role": "user", "content": "What is in this picture?", "createdAt": "2026-03-01T10:00:01Z", "attachments": []any{
 				api.Object{"id": "a1b2", "kind": "image", "fileName": "cat.png", "mimeType": "image/png", "thumbnail": "dGh1bWI=", "size": 8},

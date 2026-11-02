@@ -20,8 +20,8 @@ type Engine struct {
 	Auth        *auth.Authenticator
 	Models      *inference.Models
 	Store       *store.Store
-	// Summaries title chats and label reasoning; nil when the harness has
-	// none.
+	// Summaries title chats, label reasoning and compact chats; nil when
+	// the harness has none.
 	Summaries *summarize.Service
 }
 
@@ -106,6 +106,7 @@ type Run struct {
 	replacement              domain.ReplacedWidget
 	profile                  *domain.Profile // a local thread's settings, sent by its client
 	screening                *screening
+	compacted                *compaction // what the run's compaction left, once it compacted
 
 	// yielded marks an active run stopped so a queued turn starts now.
 	yielded bool

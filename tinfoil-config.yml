@@ -40,13 +40,16 @@ containers:
       - SEARCH_INDEXES_BUCKET: "sync-search-indexes"
       - EMBEDDING_MODEL: "nomic-embed-text"
       - SUMMARY_MODEL: "llama3-3-70b"
+      # Summarizes a chat's older messages when its prompt outgrows the chat
+      # model's window, reading them in parts that fit its own.
+      - LONG_SUMMARY_MODEL: "glm-5-3"
     secrets:
       - USAGE_CONTEXT_SECRET
       # The control plane's service secret for its storage API, which the
       # harness seals rows and stores attachments through.
       - SYNC_ENCLAVE_SECRET
-      # Embeds chat text and search queries, and names chats and labels
-      # reasoning, through the inference service.
+      # Embeds chat text and search queries, names chats, labels reasoning
+      # and summarizes long chats, through the inference service.
       - TINFOIL_API_KEY
       # Reads link previews through context.dev, with zero data retention.
       - CONTEXT_DEV_API_KEY

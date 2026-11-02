@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"slices"
@@ -22,6 +23,7 @@ import (
 
 type Request struct {
 	refreshAuth                func(context.Context) (auth.Credential, error)
+	compact                    func(context.Context) error // compacts the chat, once, when its prompt would not fit
 	params                     api.Object
 	System, widgetHint, policy string
 	window                     int
@@ -453,7 +455,12 @@ func (req *Request) groupCosts() []int {
 	return req.costs
 }
 
-func BudgetConversation(req *Request, searching bool, definitions json.RawMessage) ([]json.RawMessage, error) {
+// limit is the share of the model's window a prompt may fill, which leaves
+// the rest to the reply.
+func (req *Request) limit() int { return req.window * 4 / 5 }
+
+// system is the system prompt a turn sends.
+func (req *Request) system(searching bool) string {
 	system := req.System
 	if searching {
 		system += "\n\n" + searchInstructions
@@ -461,37 +468,66 @@ func BudgetConversation(req *Request, searching bool, definitions json.RawMessag
 	if req.widgetHint != "" {
 		system += "\n\n" + req.widgetHint
 	}
-	budget := req.window*4/5 - inference.Tokens(system) - inference.Tokens(string(definitions)) - messageTokens(req.reminder) - 8
-	if budget < 0 {
+	return system
+}
+
+// fixedCost is what a turn's prompt fills before its history: the system
+// prompt, the tools and the reminder.
+func fixedCost(req *Request, searching bool, definitions json.RawMessage) int {
+	return inference.Tokens(req.system(searching)) + inference.Tokens(string(definitions)) + messageTokens(req.reminder) + 8
+}
+
+// fits reports whether a prompt and the tools it offers fill no more of the
+// window than a prompt may.
+func fits(req *Request, messages []json.RawMessage, definitions json.RawMessage) bool {
+	cost := inference.Tokens(string(definitions))
+	for _, message := range messages {
+		cost += messageTokens(message)
+	}
+	return cost <= req.limit()
+}
+
+// promptOf is a turn's prompt: the system prompt, the history the model
+// reads, and the reminder.
+func promptOf(req *Request, searching bool) []json.RawMessage {
+	messages := []json.RawMessage{}
+	if system := req.system(searching); strings.TrimSpace(system) != "" {
+		messages = append(messages, api.Raw(api.Object{"role": "system", "content": system}))
+	}
+	for _, group := range req.Groups {
+		messages = append(messages, group...)
+	}
+	return append(messages, req.reminder)
+}
+
+// BudgetConversation is a turn's prompt, refused when it fills more of the
+// window than a prompt may.
+func BudgetConversation(req *Request, searching bool, definitions json.RawMessage) ([]json.RawMessage, error) {
+	if fixedCost(req, searching, definitions) > req.limit() {
 		return nil, api.Err(413, "CONTEXT_TOO_LARGE", "The system and tools exceed the context window")
 	}
-	start, costs := len(req.Groups), req.groupCosts()
-	for i := len(req.Groups) - 1; i >= 0; i-- {
-		cost := costs[i]
-		if cost > budget {
-			if i == len(req.Groups)-1 {
-				return nil, api.Err(413, "CONTEXT_TOO_LARGE", "The latest message exceeds the context window")
-			}
-			break
-		}
-		budget -= cost
-		start = i
+	messages := promptOf(req, searching)
+	if !fits(req, messages, definitions) {
+		return nil, api.Err(413, "CONTEXT_TOO_LARGE", "The conversation exceeds the context window")
 	}
-	// A history window starts with a user message; tool result groups stay intact.
-	for start < len(req.Groups) {
-		if len(req.Groups[start]) > 0 && strings.Contains(string(req.Groups[start][0]), `"role":"user"`) {
-			break
-		}
-		start++
+	return messages, nil
+}
+
+// fitted is a turn's prompt, compacting the chat first when the prompt
+// would not fit.
+func fitted(ctx context.Context, req *Request, searching bool, definitions json.RawMessage) ([]json.RawMessage, error) {
+	messages, err := BudgetConversation(req, searching, definitions)
+	if err == nil || fixedCost(req, searching, definitions) > req.limit() || req.compact == nil {
+		return messages, err
 	}
-	conversation := []json.RawMessage{}
-	if strings.TrimSpace(system) != "" {
-		conversation = append(conversation, api.Raw(api.Object{"role": "system", "content": system}))
+	compact := req.compact
+	req.compact = nil
+	if err := compact(ctx); errors.Is(err, errNothingToCompact) {
+		return nil, api.Err(413, "CONTEXT_TOO_LARGE", "The latest message exceeds the context window")
+	} else if err != nil {
+		return nil, err
 	}
-	for _, group := range req.Groups[start:] {
-		conversation = append(conversation, group...)
-	}
-	return append(conversation, req.reminder), nil
+	return BudgetConversation(req, searching, definitions)
 }
 
 // role is who wrote a model message.
@@ -501,42 +537,6 @@ func role(message json.RawMessage) string {
 	}
 	json.Unmarshal(message, &m)
 	return m.Role
-}
-
-// Trim only complete older user turns as tool output grows. The current user
-// request and its entire tool exchange stay together, including the reminder.
-func trimToolHistory(req *Request, messages []json.RawMessage, defs json.RawMessage) ([]json.RawMessage, error) {
-	cost := inference.Tokens(string(defs))
-	for _, message := range messages {
-		cost += messageTokens(message)
-	}
-	limit := req.window * 4 / 5
-	if cost <= limit {
-		return messages, nil
-	}
-	start := 0
-	if len(messages) > 0 && role(messages[0]) == "system" {
-		start = 1
-	}
-	anchor := -1
-	for i, message := range messages {
-		if role(message) == "user" && string(message) != string(req.reminder) {
-			anchor = i
-		}
-	}
-	end := start
-	for end < anchor && cost > limit {
-		cost -= messageTokens(messages[end])
-		end++
-		for end < anchor && role(messages[end]) != "user" {
-			cost -= messageTokens(messages[end])
-			end++
-		}
-	}
-	if cost > limit {
-		return nil, api.Err(413, "CONTEXT_TOO_LARGE", "The current tool exchange exceeds the context window")
-	}
-	return append(append([]json.RawMessage{}, messages[:start]...), messages[end:]...), nil
 }
 
 func englishTime(now time.Time, zone string) string {
@@ -558,12 +558,39 @@ func englishTime(now time.Time, zone string) string {
 	return now.Format("Monday, January 2, 2006 at 03:04 PM ") + name
 }
 
-func preflightBudget(request *Request) error {
-	_, err := BudgetConversation(request, request.webSearch, api.Raw(request.rendered))
-	return err
+// summaryReserve is the room a compaction marker's summary takes in a
+// prompt: about the 2,500 words its task asks for at most.
+const summaryReserve = 4096
+
+// preflightBudget refuses a turn whose prompt would not fit even once its
+// chat is compacted: one whose system prompt and tools, or whose question
+// beside a summary of the messages before it, fill more of the window than
+// a prompt may.
+func preflightBudget(req *Request) error {
+	fixed := fixedCost(req, req.webSearch, api.Raw(req.rendered))
+	if fixed > req.limit() {
+		return api.Err(413, "CONTEXT_TOO_LARGE", "The system and tools exceed the context window")
+	}
+	question := len(req.Groups) - 1
+	for question > 0 && role(req.Groups[question][0]) != "user" {
+		question--
+	}
+	kept := fixed
+	if question > 0 {
+		kept += summaryReserve
+	}
+	for _, cost := range req.groupCosts()[max(0, question):] {
+		kept += cost
+	}
+	if kept > req.limit() {
+		return api.Err(413, "CONTEXT_TOO_LARGE", "The latest message exceeds the context window")
+	}
+	return nil
 }
 
-// Report the full requested history so the UI can show when older turns are omitted.
+// requestContextUsage is what the turn's prompt fills, before its tools run,
+// of the share of the window a prompt may fill. It may pass that share, which
+// the turn's compaction then brings it back under.
 func requestContextUsage(req *Request) *domain.ContextUsage {
 	system := req.System + "\n\n" + req.widgetHint
 	if req.webSearch {
@@ -573,6 +600,6 @@ func requestContextUsage(req *Request) *domain.ContextUsage {
 	for _, cost := range req.groupCosts() {
 		used += cost
 	}
-	limit := req.window * 4 / 5
+	limit := req.limit()
 	return &domain.ContextUsage{UsedTokens: used, LimitTokens: limit, Percentage: float64(used) * 100 / float64(max(1, limit))}
 }

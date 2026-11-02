@@ -3,17 +3,22 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/summarize"
 )
 
 // compactionSummary is what the marker of compactedThread says of the
@@ -37,6 +42,46 @@ func compactedThread(id string) api.Object {
 // storeCompacted stores compactedThread for alice under id.
 func storeCompacted(rows *memoryRows, id string) {
 	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", id)] = domain.StoredRow{ID: id, ETag: "1", Data: api.Raw(compactedThread(id))}
+}
+
+// longSummaryModel writes the tests' compaction summaries, with a window
+// that holds their long chats.
+const longSummaryModel = "long-summary"
+
+// compactWith has f write the harness's summaries, a compaction's on
+// longSummaryModel.
+func (h *harness) compactWith(f summarizerFunc) {
+	c := h.models.Catalog.Get()
+	c.Models = append(c.Models, api.Object{"modelName": longSummaryModel, "name": "Long summary", "budgetWindow": 1 << 20, "chatConfig": api.Object{}})
+	h.engine.Summaries = summarize.New(f, &h.models.Catalog, "kimi-k3", longSummaryModel)
+}
+
+// compactionOf is a summary in the form a compaction asks for, whose first
+// section says goal.
+func compactionOf(goal string) string {
+	var b strings.Builder
+	for i, section := range summarize.Compaction.Sections {
+		body := "None"
+		if i == 0 {
+			body = goal
+		}
+		fmt.Fprintf(&b, "## %s\n%s\n\n", section.Heading, body)
+	}
+	return b.String()
+}
+
+// filler is text of about ten tokens a repeat, which fills a test model's
+// window quickly.
+func filler(repeats int) string { return strings.Repeat("0 1 2 3 4 5 6 7 8 9 ", repeats) }
+
+// longThread is a device chat whose first answer alone fills the test
+// model's share of its window.
+func longThread() api.Object {
+	answer := filler(350)
+	return api.Object{"title": "Kept title", "createdAt": "2026-01-01T00:00:00Z", "messages": []any{
+		api.Object{"id": "m1", "role": "user", "content": "first question"},
+		api.Object{"id": "m2", "role": "assistant", "content": answer, "timeline": []any{api.Object{"id": "b1", "type": "content", "content": answer}}},
+	}}
 }
 
 // promptOf records the messages each model turn is sent, as role and text.
@@ -148,5 +193,141 @@ func TestAShareLeavesOutCompactionMarkers(t *testing.T) {
 	}
 	if !reflect.DeepEqual(roles, []string{"user", "assistant", "user", "assistant"}) {
 		t.Fatalf("the share holds %v", shared)
+	}
+}
+
+// longCompacted stores for alice a compacted chat whose exchange after its
+// marker fills the test model's share of its window.
+func longCompacted(rows *memoryRows, id string) {
+	thread := compactedThread(id)
+	answer := filler(350)
+	recent := api.Obj(api.Arr(thread["messages"])[4])
+	recent["content"], recent["timeline"] = answer, []any{api.Object{"id": "b4", "type": "content", "content": answer}}
+	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", id)] = domain.StoredRow{ID: id, ETag: "1", Data: api.Raw(thread)}
+}
+
+// A turn whose prompt would outgrow the window first summarizes the messages
+// after the chat's latest marker, merged into that marker's summary, into a
+// new marker before its question; the model then reads that summary and the
+// question alone, and later turns read the chat from the new marker.
+func TestALongChatIsCompactedBeforeItsQuestion(t *testing.T) {
+	prompts := make(chan []string, 2)
+	h, rows, key := testChatHarness(t, promptOf(prompts))
+	var asked []string
+	h.compactWith(func(task, text string) (string, error) {
+		if task == summarize.Compaction.Name {
+			asked = append(asked, text)
+		}
+		return compactionOf("The user plans a lighthouse tour of Maine."), nil
+	})
+	longCompacted(rows, "chat-1")
+	events := finishedRun(t, h, "/v1/threads/turn", continueInput(key, "chat-1"))
+	if len(asked) != 1 || !strings.Contains(asked[0], "<previous_summary>\n"+compactionSummary+"\n</previous_summary>") ||
+		!strings.Contains(asked[0], `<message from="user" sent=`) || !strings.Contains(asked[0], "recent question") || strings.Contains(asked[0], "old question") || strings.Contains(asked[0], "test message") {
+		t.Fatalf("the summarizer was asked %q", asked)
+	}
+	prompt := <-prompts
+	if len(prompt) != 3 || !strings.Contains(prompt[1], "lighthouse tour of Maine") || !strings.HasSuffix(prompt[1], "test message") || strings.Contains(prompt[1], "recent answer") {
+		t.Fatalf("the model was sent %q", prompt)
+	}
+	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
+	chat := mustRead(domain.ReadThreadRow(row))
+	marker := chat.Messages[5]
+	if len(chat.Messages) != 8 || marker.Role != domain.CompactionRole || chat.Messages[6].Content != "test message" || marker.Compaction == nil ||
+		marker.Compaction.Messages != 4 || marker.Compaction.Model != longSummaryModel || chat.ContextUsage == nil || chat.ContextUsage.Percentage >= 100 || rowJSON(row)["recordVersion"] != 2.0 {
+		t.Fatalf("the turn stored %s", row.Data)
+	}
+	types := []string{}
+	for _, e := range events {
+		types = append(types, e.Type)
+	}
+	start, end := slices.Index(types, "COMPACTION_START"), slices.Index(types, "COMPACTION_END")
+	if start < 0 || end != start+1 || types[end+1] != "STATE_SNAPSHOT" || events[start].MessageID != marker.ID || slices.Index(types, "TEXT_MESSAGE_CHUNK") < end {
+		t.Fatalf("the run sent %v", types)
+	}
+	finishedRun(t, h, "/v1/threads/turn", continueInput(key, "chat-1"))
+	if prompt := <-prompts; len(asked) != 1 || len(prompt) != 5 || !strings.Contains(prompt[1], "lighthouse tour of Maine") {
+		t.Fatalf("the next turn compacted again (%d) or was sent %q", len(asked), prompt)
+	}
+}
+
+// A compaction that fails ends the run with an error the client retries,
+// and the model never reads a chat cut to fit. Retrying compacts it.
+func TestAFailedCompactionEndsTheRunWithoutCuttingTheChat(t *testing.T) {
+	prompts := make(chan []string, 1)
+	h, rows, key := testChatHarness(t, promptOf(prompts))
+	failing := true
+	h.compactWith(func(string, string) (string, error) {
+		if failing {
+			return "", &inference.Refused{Status: http.StatusBadRequest}
+		}
+		return compactionOf("The user plans a lighthouse tour of Maine."), nil
+	})
+	longCompacted(rows, "chat-1")
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", continueInput(key, "chat-1"), "alice"))
+	last := events[len(events)-1]
+	if end := eventOfType(events, "COMPACTION_END"); end == nil || end.Outcome != domain.CompactionFailed || last.Type != "RUN_ERROR" || last.Code != "COMPACTION_FAILED" || len(prompts) != 0 {
+		t.Fatalf("the run ended with %s %s after compacting %+v", last.Type, last.Code, end)
+	}
+	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
+	if chat := mustRead(domain.ReadThreadRow(row)); len(chat.Messages) != 6 || chat.Messages[5].Content != "test message" || domain.LatestCompaction(chat.Messages) != 2 {
+		t.Fatalf("the failed run stored %s", row.Data)
+	}
+	failing = false
+	retry := continueInput(key, "chat-1")
+	retry["kind"] = "retry"
+	delete(retry, "content")
+	finishedRun(t, h, "/v1/threads/turn", retry)
+	if prompt := <-prompts; len(prompt) != 3 || !strings.Contains(prompt[1], "lighthouse tour of Maine") || !strings.HasSuffix(prompt[1], "test message") {
+		t.Fatalf("the retry sent %q", prompt)
+	}
+}
+
+// A tool exchange that outgrows the window compacts the history before the
+// question, and the model goes on with the summary, the question and the
+// exchange so far.
+func TestAToolExchangeThatOutgrowsTheWindowCompactsTheChat(t *testing.T) {
+	serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
+		return nil, api.Object{"results": []api.Object{{"title": "Tides", "url": "https://tides.test", "content": filler(400)}}}
+	})
+	sent := make(chan []any, 1)
+	h, rows, key := testChatHarness(t, toolTurns(toolCallChunk(0, "s", "web_search", `{"query":"tides"}`), sent))
+	h.models.Catalog.Get().Models[0]["budgetWindow"] = 16384
+	h.compactWith(func(string, string) (string, error) {
+		return compactionOf("The user plans a lighthouse tour of Maine."), nil
+	})
+	longCompacted(rows, "chat-1")
+	in := searchInput(key)
+	in["threadId"] = "chat-1"
+	events := finishedRun(t, h, "/v1/threads/turn", in)
+	messages := <-sent
+	roles := []string{}
+	for _, m := range messages {
+		roles = append(roles, api.Str(api.Obj(m)["role"]))
+	}
+	if !reflect.DeepEqual(roles, []string{"system", "user", "user", "assistant", "tool"}) || !strings.Contains(api.Str(api.Obj(messages[1])["content"]), "lighthouse tour of Maine") || toolMessage(messages, "s") == "" {
+		t.Fatalf("after the search the model was sent %v", roles)
+	}
+	if result, start := slices.IndexFunc(events, func(e event) bool { return e.Type == "TOOL_CALL_RESULT" }), slices.IndexFunc(events, func(e event) bool { return e.Type == "COMPACTION_START" }); result < 0 || start < result {
+		t.Fatal("the chat was not compacted once the search had outgrown the window")
+	}
+	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
+	if chat := mustRead(domain.ReadThreadRow(row)); domain.LatestCompaction(chat.Messages) != 5 || chat.Messages[6].Content != "test message" || chat.Messages[7].Content != "done" {
+		t.Fatalf("the run stored %s", row.Data)
+	}
+}
+
+// A question too large to fit beside a summary of the chat before it is
+// refused before anything is summarized.
+func TestAQuestionTooLargeForTheWindowIsRefusedBeforeCompacting(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	summarized := false
+	h.compactWith(func(string, string) (string, error) { summarized = true; return "", nil })
+	storeCompacted(rows, "chat-1")
+	in := continueInput(key, "chat-1")
+	in["content"] = filler(400)
+	w := postRoute(h, "/v1/threads/turn", in, "alice")
+	if w.Code != http.StatusRequestEntityTooLarge || !strings.Contains(w.Body.String(), "CONTEXT_TOO_LARGE") || summarized {
+		t.Fatalf("HTTP %d %s, summarized %v", w.Code, w.Body, summarized)
 	}
 }

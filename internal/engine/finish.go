@@ -60,7 +60,16 @@ func (eng *Engine) finishRun(r *Run, runErr error) {
 			committed = append(committed, domain.CommittedReply{ID: m.ID, Model: m.Model, ModelDisplayName: m.ModelDisplayName, Usage: m.Usage, IsError: m.IsError, IsInterrupted: m.IsInterrupted, Annotations: m.Annotations})
 		}
 	}
+	compacted := r.compacted
 	commit := func(t *domain.Thread) error {
+		// The run's compaction is kept before its question, even when the
+		// reply then failed, unless that question is gone.
+		if compacted != nil && t.MessageIndex(compacted.marker.ID) < 0 {
+			if at := t.MessageIndex(compacted.beforeID); at >= 0 {
+				t.Messages = slices.Insert(t.Messages, at, compacted.marker)
+				t.ContextUsage = compacted.usage
+			}
+		}
 		if r.retryTarget != nil && r.replacement.Arguments != "" {
 			if err := domain.ReplaceWidget(t, r.retryTarget.parentID, r.input.ToolCallID, r.retryTarget.block.Arguments, r.replacement); err != nil {
 				return err
