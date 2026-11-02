@@ -47,7 +47,8 @@ func (h *harness) changes(ctx context.Context, p *auth.Principal, _ auth.Content
 // threadOperations change a stored chat or a device chat in one way each.
 func (h *harness) threadOperations() map[string]jsonEndpoint {
 	return map[string]jsonEndpoint{"/v1/threads/update": decoded(h.updateThread), "/v1/threads/fork": decoded(h.forkThread),
-		"/v1/threads/messages/delete": decoded(h.deleteMessage), "/v1/threads/messages/update": decoded(h.updateMessage)}
+		"/v1/threads/messages/delete": decoded(h.deleteMessage), "/v1/threads/messages/update": decoded(h.updateMessage),
+		"/v1/threads/messages/answer": decoded(h.answerQuestions)}
 }
 
 func (h *harness) session(ctx context.Context, p *auth.Principal, _ auth.ContentKey, _ json.RawMessage) (any, error) {
@@ -328,6 +329,11 @@ func (h *harness) updateMessage(ctx context.Context, p *auth.Principal, key auth
 		}
 		domain.ReplaceReplyText(&t.Messages[index], *in.Content)
 		return nil
+	})
+}
+func (h *harness) answerQuestions(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *answerRequest) (any, error) {
+	return h.changeMessages(ctx, p, key, &in.messageRequest, func(t *domain.Thread, index int) error {
+		return domain.AnswerQuestions(&t.Messages[index], in.ToolCallID, in.Answers)
 	})
 }
 func (h *harness) changeMessages(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *messageRequest, change func(*domain.Thread, int) error) (any, error) {

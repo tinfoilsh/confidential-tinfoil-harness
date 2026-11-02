@@ -77,6 +77,28 @@ func (in *messageRequest) Validate() error {
 	return in.ThreadSource.Validate()
 }
 
+// answerRequest changes the answers the user gave in a reply's questions
+// widget: each question named takes the options picked, or null to leave it
+// unanswered.
+type answerRequest struct {
+	messageRequest
+	ToolCallID string               `json:"toolCallId"`
+	Answers    map[string]*[]string `json:"answers"`
+}
+
+func (in *answerRequest) Validate() error {
+	if err := in.messageRequest.Validate(); err != nil {
+		return err
+	}
+	if in.ToolCallID == "" {
+		return api.Err(400, "BAD_REQUEST", "toolCallId is required")
+	}
+	if len(in.Answers) == 0 {
+		return api.Err(400, "BAD_REQUEST", "answers must name a question")
+	}
+	return nil
+}
+
 type searchRequest struct {
 	Query string `json:"query"`
 	Limit int    `json:"limit"`

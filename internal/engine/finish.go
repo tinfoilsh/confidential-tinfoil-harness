@@ -71,6 +71,8 @@ func (eng *Engine) finishRun(r *Run, runErr error) {
 				if index < 0 {
 					t.Messages = append(t.Messages, m)
 				} else if continued && m.ID == reply {
+					// Answers given while the reply was continued are kept.
+					m.KeepAnswers(&t.Messages[index])
 					t.Messages[index] = m
 				}
 			}

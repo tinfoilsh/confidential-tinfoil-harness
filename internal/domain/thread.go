@@ -76,6 +76,10 @@ type Block struct {
 	StartedAt float64 `json:"startedAt,omitempty"`
 	EndedAt   float64 `json:"endedAt,omitempty"`
 	Duration  float64 `json:"duration,omitempty"`
+	// Answers are the options the user picked in a questions widget, by
+	// question id. A question absent from them is unanswered. They are
+	// replaced whole, never changed in place, so copies of a block share them.
+	Answers map[string][]string `json:"answers,omitempty"`
 	// InvalidArguments marks a widget call whose arguments the widget's
 	// current declaration refuses, so its client offers to regenerate them.
 	// It is worked out again for whatever clients are sent, never taken
