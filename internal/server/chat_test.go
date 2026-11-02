@@ -593,6 +593,27 @@ func TestManagedTurnStoresV2AndKeepsKeyOutOfEvents(t *testing.T) {
 		t.Fatalf("foreign user followed: %d", wrong.Code)
 	}
 }
+func TestATurnCountsTheUsageItsStreamEndsWith(t *testing.T) {
+	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		// Every chunk carries the usage so far, as the router has vLLM send it.
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"an\"}}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":1}}\n\n"+
+			"data: {\"choices\":[{\"delta\":{\"content\":\"swer\"}}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":2}}\n\n"+
+			"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":3}}\n\ndata: [DONE]\n\n")
+	})
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", sendInput(key), "alice"))
+	row, err := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var usage domain.MessageUsage
+	if err := json.Unmarshal(mustRead(domain.ReadThreadRow(row)).Messages[1].Usage, &usage); err != nil {
+		t.Fatal(err)
+	}
+	if usage != (domain.MessageUsage{PromptTokens: 100, CompletionTokens: 3}) {
+		t.Fatalf("usage = %+v, want the totals the stream ended with", usage)
+	}
+}
+
 func TestFirstTurnUsesProjectAndPreset(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	p := &auth.Principal{ID: "alice"}

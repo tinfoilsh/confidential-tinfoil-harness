@@ -249,6 +249,14 @@ func (eng *Engine) turn(ctx context.Context, out *Stream, m *inference.Model, pa
 	out.mu.Lock()
 	out.modelAccepted = true
 	out.mu.Unlock()
+	// The router has vLLM attach the usage so far to every chunk, so only
+	// the last one a turn streams counts, once the turn ends.
+	var usage json.RawMessage
+	defer func() {
+		if len(usage) > 0 {
+			out.Meter(usage)
+		}
+	}()
 	var calls []ToolCall
 	ended := false
 	var answer, reasoningText strings.Builder
@@ -307,8 +315,8 @@ func (eng *Engine) turn(ctx context.Context, out *Stream, m *inference.Model, pa
 			out.concreteModel = chunk.Model
 			out.mu.Unlock()
 		}
-		if len(chunk.Usage) > 0 {
-			out.Meter(chunk.Usage)
+		if len(chunk.Usage) > 0 && string(chunk.Usage) != "null" {
+			usage = chunk.Usage
 		}
 		if len(chunk.Choices) == 0 {
 			continue
