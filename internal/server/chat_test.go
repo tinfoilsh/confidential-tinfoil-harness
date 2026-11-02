@@ -1351,6 +1351,45 @@ func TestCASReappliesPatchToTheChangedRow(t *testing.T) {
 		t.Fatalf("the patch overwrote the concurrent change: %v", row.Data)
 	}
 }
+
+// The model reads when each question was sent, in the user's zone, from the
+// time the chat holds, so the next turn renders the history alike and hits
+// the prompt cache. Replies carry no time, so the model does not write one.
+func TestTheModelReadsWhenEachQuestionWasSent(t *testing.T) {
+	prompts := make(chan []any, 1)
+	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		var body api.Object
+		json.NewDecoder(r.Body).Decode(&body)
+		prompts <- api.Arr(body["messages"])
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"Nearly\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	alice := &auth.Principal{ID: "alice"}
+	rows.rows[rowMapKey(alice, "chat", "lunch")] = domain.StoredRow{ID: "lunch", ETag: "1", Data: api.Raw(api.Object{"title": "Lunch", "titleState": "manual", "model": "kimi-k3", "createdAt": "2026-07-01T18:59:00Z", "messages": []any{
+		api.Object{"id": "u1", "role": "user", "content": "When is lunch?", "createdAt": "2026-07-01T19:00:00Z"},
+		api.Object{"id": "a1", "role": "assistant", "content": "At noon", "createdAt": "2026-07-01T19:00:05Z"},
+	}})}
+	in := continueInput(key, "lunch")
+	in["content"] = "Is it time yet?"
+	api.Obj(in["options"])["timezone"] = "America/Los_Angeles"
+	finishedRun(t, h, "/v1/threads/turn", in)
+	prompt := <-prompts
+	if len(prompt) != 5 || !reflect.DeepEqual(prompt[1:3], []any{
+		map[string]any{"role": "user", "content": "<system-reminder>Sent: Wednesday, July 1, 2026 at 12:00 PM PDT</system-reminder>\n\nWhen is lunch?"},
+		map[string]any{"role": "assistant", "content": "At noon"},
+	}) {
+		t.Fatalf("the model was asked %v", prompt)
+	}
+	row, _ := rows.Load(context.Background(), alice, key, "chat", "lunch")
+	sent, err := time.Parse(time.RFC3339Nano, mustRead(domain.ReadThreadRow(row)).Messages[2].CreatedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zone, _ := time.LoadLocation("America/Los_Angeles")
+	if want := sentOpening + sent.In(zone).Format("Monday, January 2, 2006 at 03:04 PM MST") + "</system-reminder>\n\nIs it time yet?"; api.Obj(prompt[3])["content"] != want {
+		t.Fatalf("the new question was sent as %q, not the time the chat keeps for it", api.Obj(prompt[3])["content"])
+	}
+}
+
 func TestPromptEscapingReasoningAndBudget(t *testing.T) {
 	h, _, key := testChatHarness(t, nil)
 	thread := &domain.Thread{ID: "t", Messages: []domain.Message{{Role: "user", Content: "hello"}}, Model: "kimi-k3"}
@@ -1368,7 +1407,7 @@ func TestPromptEscapingReasoningAndBudget(t *testing.T) {
 		t.Fatal("oversized final message accepted")
 	}
 	message := &domain.Message{Role: "assistant", Timeline: []domain.Block{{Type: "thinking", Content: "reason"}, {Type: "tool_call", ToolCallID: "c", Name: "render_chart", Arguments: "{}"}}}
-	group := engine.RenderMessage(message, false, "tool-call-only")
+	group := engine.RenderMessage(message, false, "tool-call-only", time.UTC)
 	if len(group) != 2 || !strings.Contains(string(group[0]), "reasoning_content") {
 		t.Fatal("tool reasoning policy lost")
 	}
@@ -1450,10 +1489,33 @@ func toolCallChunk(index int, id, name, args string) string {
 }
 
 // lastRequest decodes the messages a model turn was sent.
+// lastRequest is the messages a model request carries, each question read
+// past the reminder of when it was sent.
 func lastRequest(r *http.Request) []any {
 	var body api.Object
 	json.NewDecoder(r.Body).Decode(&body)
-	return api.Arr(body["messages"])
+	messages := api.Arr(body["messages"])
+	for _, m := range messages {
+		if message := api.Obj(m); message["role"] == "user" {
+			if content, ok := message["content"].(string); ok {
+				message["content"] = withoutSent(content)
+			}
+		}
+	}
+	return messages
+}
+
+// sentOpening opens the reminder of when a question was sent.
+const sentOpening = "<system-reminder>Sent: "
+
+// withoutSent is a question past the reminder of when it was sent, which
+// only the test of that reminder reads.
+func withoutSent(content string) string {
+	if !strings.HasPrefix(content, sentOpening) {
+		return content
+	}
+	_, question, _ := strings.Cut(content, "</system-reminder>")
+	return strings.TrimPrefix(question, "\n\n")
 }
 
 func TestToolArgumentsAreRepairedBeforeTheCall(t *testing.T) {
@@ -1961,6 +2023,11 @@ func heldScreening(t *testing.T, h *harness, hold chan struct{}) func() []engine
 	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var sub engine.Submission
 		json.NewDecoder(r.Body).Decode(&sub)
+		for i, message := range sub.Messages {
+			if message.Role == "user" {
+				sub.Messages[i].Content = withoutSent(message.Content)
+			}
+		}
 		mu.Lock()
 		got = append(got, sub)
 		mu.Unlock()

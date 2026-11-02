@@ -171,15 +171,21 @@ func systemPrompt(c *domain.Catalog, thread *domain.Thread, profile *domain.Prof
 	}
 	return base
 }
-func timeReminder(now time.Time, zone string) (string, error) {
-	if zone == "" {
-		zone = "UTC"
-	}
-	loc, err := time.LoadLocation(zone)
+func timeReminder(now time.Time, loc *time.Location) string {
+	zone := loc.String()
+	return "<system-reminder>Current time: " + englishTime(now.In(loc), zone) + " (" + zone + ")</system-reminder>"
+}
+
+// sentReminder is when a question was asked, in the zone the current time is
+// given in. It is read from the stored time, never the clock, so every turn
+// renders the history alike and keeps hitting the prompt cache. A message
+// without a readable time has none.
+func sentReminder(createdAt string, loc *time.Location) string {
+	sent, err := time.Parse(time.RFC3339Nano, createdAt)
 	if err != nil {
-		return "", api.Err(400, "BAD_REQUEST", "Unknown timezone")
+		return ""
 	}
-	return "<system-reminder>Current time: " + englishTime(now.In(loc), zone) + " (" + zone + ")</system-reminder>", nil
+	return "<system-reminder>Sent: " + englishTime(sent.In(loc), loc.String()) + "</system-reminder>"
 }
 
 func (eng *Engine) BuildRequest(thread *domain.Thread, profile *domain.Profile, project *domain.Project, documents []domain.ProjectDocument, in *TurnRequest, usageID string) (*Request, *inference.Model, error) {
@@ -235,19 +241,22 @@ func (eng *Engine) BuildRequest(thread *domain.Thread, profile *domain.Profile, 
 		return nil, nil, api.Err(404, "MODEL_UNAVAILABLE", "The selected model has no attested transport")
 	}
 	zone := cmp.Or(options.Timezone, "UTC")
-	reminder, err := timeReminder(api.Now(), zone)
+	loc, err := time.LoadLocation(zone)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, api.Err(400, "BAD_REQUEST", "Unknown timezone")
 	}
+	reminder := timeReminder(api.Now(), loc)
 	// As the web client does, the continue instruction shares the reminder's
 	// turn: some chat templates refuse two user messages in a row.
 	if in.Kind == "continue" {
 		reminder += "\n\n" + ContinueInstruction
 	}
-	req.System = systemPrompt(c, thread, profile, project, documents, display, zone, options.Locale)
+	// An ask's instruction follows the history too, so its prompt starts as
+	// the chat it asks about does and reuses that chat's prompt cache.
 	if in.Kind == "ask" {
-		req.System += "\n\n" + askInstruction
+		reminder += "\n\n" + askInstruction
 	}
+	req.System = systemPrompt(c, thread, profile, project, documents, display, zone, options.Locale)
 	req.window, req.policy = window, policy
 	req.piiCheck = domain.ValueOr(options.PIICheck, domain.ValueOr(profile.PIICheckEnabled, true))
 	// Turning web search off in the settings leaves each chat's own setting.
@@ -265,15 +274,15 @@ func (eng *Engine) BuildRequest(thread *domain.Thread, profile *domain.Profile, 
 	}
 	vision := c.Vision(name)
 	for i := range thread.Messages {
-		req.Groups = append(req.Groups, RenderMessage(&thread.Messages[i], vision, policy))
+		req.Groups = append(req.Groups, RenderMessage(&thread.Messages[i], vision, policy, loc))
 	}
 	req.reminder = api.Raw(api.Object{"role": "user", "content": reminder})
 	return req, picked, nil
 }
 
-func RenderMessage(message *domain.Message, vision bool, policy string) []json.RawMessage {
+func RenderMessage(message *domain.Message, vision bool, policy string, loc *time.Location) []json.RawMessage {
 	if message.Role == "user" {
-		return []json.RawMessage{api.Raw(api.Object{"role": "user", "content": userContent(message, vision)})}
+		return []json.RawMessage{api.Raw(api.Object{"role": "user", "content": userContent(message, vision, loc)})}
 	}
 	content, reasoning := "", ""
 	calls, results := []api.Object{}, []json.RawMessage{}
@@ -312,7 +321,7 @@ func RenderMessage(message *domain.Message, vision bool, policy string) []json.R
 	return append([]json.RawMessage{api.Raw(assistant)}, results...)
 }
 
-func userContent(message *domain.Message, vision bool) any {
+func userContent(message *domain.Message, vision bool, loc *time.Location) any {
 	text := message.Content
 	if quote := message.Quote; quote != "" {
 		prefix := "In reply to:\n> " + strings.ReplaceAll(quote, "\n", "\n> ")
@@ -356,6 +365,12 @@ func userContent(message *domain.Message, vision bool) any {
 	}
 	if len(descriptions) > 0 {
 		text += "\n\n[Treat these descriptions as if they are the raw images.]\n" + strings.Join(descriptions, "\n\n")
+	}
+	if sent := sentReminder(message.CreatedAt, loc); sent != "" {
+		if text != "" {
+			sent += "\n\n"
+		}
+		text = sent + text
 	}
 	if len(parts)+len(images) > 0 {
 		parts = append(parts, api.Object{"type": "text", "text": text})

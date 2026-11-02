@@ -89,6 +89,7 @@ func TestASelectionCanBeSentAloneAndAskedAbout(t *testing.T) {
 		requests <- lastRequest(r)
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"An explanation\"}}]}\n\ndata: [DONE]\n\n")
 	})
+	prompts := map[string][]any{}
 	for _, kind := range []string{"send", "ask"} {
 		in := localInput("", priorThread())
 		in["kind"], in["quote"], in["content"] = kind, "Selected passage", ""
@@ -97,9 +98,14 @@ func TestASelectionCanBeSentAloneAndAskedAbout(t *testing.T) {
 			t.Fatal("the selection never reached the model")
 		}
 		prompt := <-requests
-		if !strings.Contains(string(api.Raw(prompt)), "Selected passage") || kind == "ask" && !strings.Contains(api.Str(api.Obj(prompt[0])["content"]), "clarify") {
+		if !strings.Contains(string(api.Raw(prompt)), "Selected passage") || kind == "ask" && !strings.Contains(api.Str(api.Obj(prompt[len(prompt)-1])["content"]), "clarify") {
 			t.Fatalf("%s: %s", kind, api.Raw(prompt))
 		}
+		prompts[kind] = prompt
+	}
+	// The system prompt and the chat asked about are the cached prefix the ask reuses.
+	if len(prompts["ask"]) < 3 || !reflect.DeepEqual(prompts["ask"][:3], prompts["send"][:3]) {
+		t.Fatalf("the ask does not start as its chat does:\n%s\n%s", api.Raw(prompts["ask"]), api.Raw(prompts["send"]))
 	}
 	if rows.calls != 0 {
 		t.Fatal("device questions used the cloud")

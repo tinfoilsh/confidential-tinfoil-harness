@@ -52,9 +52,7 @@ func eventOfType(events []event, kind string) *event {
 func TestLocalTurnUsesClientTranscriptWithoutStorage(t *testing.T) {
 	var prompt []any
 	h, rows, _ := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
-		var payload api.Object
-		json.NewDecoder(r.Body).Decode(&payload)
-		prompt = api.Arr(payload["messages"])
+		prompt = lastRequest(r)
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"second answer\"}}]}\n\ndata: [DONE]\n\n")
 	})
 	thread := priorThread()
@@ -200,9 +198,7 @@ func TestAnonymousLocalTranscriptMayOmitImageBytes(t *testing.T) {
 func TestLocalAskHidesTheTranscriptItStartsFrom(t *testing.T) {
 	var prompt []any
 	h, rows, _ := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
-		var payload api.Object
-		json.NewDecoder(r.Body).Decode(&payload)
-		prompt = api.Arr(payload["messages"])
+		prompt = lastRequest(r)
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"side answer\"}}]}\n\ndata: [DONE]\n\n")
 	})
 	in := localInput("0000000000004_local", priorThread())

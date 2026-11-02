@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
@@ -118,7 +119,7 @@ func TestStoredToolCallsReplayWithRepairedArguments(t *testing.T) {
 	var assistant struct {
 		ToolCalls []toolCallJSON `json:"tool_calls"`
 	}
-	json.Unmarshal(RenderMessage(message, false, "none")[0], &assistant)
+	json.Unmarshal(RenderMessage(message, false, "none", time.UTC)[0], &assistant)
 	var got []string
 	for _, call := range assistant.ToolCalls {
 		got = append(got, call.Function.Arguments)
