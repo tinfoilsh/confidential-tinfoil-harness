@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -361,5 +362,53 @@ func TestASessionOffersCompactionOnlyWithItsModel(t *testing.T) {
 	h.compactWith(nil)
 	if !offered() {
 		t.Fatal("a session did not offer compaction on a model the catalog lists")
+	}
+}
+
+// A compacted widget retry whose call changed while it ran fails, and its
+// chat keeps the compaction the retry made.
+func TestAWidgetRetryKeepsItsCompactionWhenItsCallChanged(t *testing.T) {
+	var stored atomic.Pointer[memoryRows]
+	changed := `{"stats":[{"label":"Count","value":3}]}`
+	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		rows := stored.Load()
+		rows.mu.Lock()
+		name := rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat-1")
+		row := rows.rows[name]
+		editRow(&row, func(data api.Object) {
+			for _, m := range api.Arr(data["messages"]) {
+				for _, block := range api.Arr(api.Obj(m)["timeline"]) {
+					if api.Obj(block)["toolCallId"] == "call" {
+						api.Obj(block)["arguments"] = changed
+					}
+				}
+			}
+		})
+		rows.rows[name] = row
+		rows.mu.Unlock()
+		json.NewEncoder(w).Encode(api.Object{"choices": []api.Object{{"message": api.Object{"content": `{"stats":"[{\"label\":\"Count\",\"value\":2}]"}`}}}})
+	})
+	stored.Store(rows)
+	h.models.Catalog.Get().EnabledWidgets = []string{"render_stat_cards"}
+	h.compactWith(func(string, string) (string, error) { return compactionOf("The user asked for statistics."), nil })
+	answer := filler(350)
+	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat-1")] = domain.StoredRow{ID: "chat-1", ETag: "1", Data: api.Raw(api.Object{"createdAt": "2026-01-01T00:00:00Z", "title": "Stats", "titleState": "manual", "model": "kimi-k3", "messages": []any{
+		api.Object{"id": "m1", "role": "user", "content": "first question"},
+		api.Object{"id": "m2", "role": "assistant", "content": answer, "timeline": []any{api.Object{"type": "content", "id": "b2", "content": answer}}},
+		api.Object{"id": "m3", "role": "user", "content": "show a stat"},
+		api.Object{"id": "m4", "role": "assistant", "content": "a stat", "timeline": []any{api.Object{"type": "content", "id": "b4", "content": "a stat"},
+			api.Object{"type": "tool_call", "id": "call", "toolCallId": "call", "name": "render_stat_cards", "arguments": `{"stats":[{"label":"Count","value":1}]}`}}},
+	}})}
+	in := continueInput(key, "chat-1")
+	in["kind"], in["toolCallId"], in["widgets"] = "retryToolCall", "call", []any{"render_stat_cards"}
+	delete(in, "content")
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice"))
+	if last := events[len(events)-1]; last.Type != "RUN_ERROR" || last.Code != "REVISION_CONFLICT" || eventOfType(events, "COMPACTION_END") == nil {
+		t.Fatalf("the retry ended with %s %s", last.Type, last.Code)
+	}
+	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
+	chat := mustRead(domain.ReadThreadRow(row))
+	if len(chat.Messages) != 5 || chat.Messages[2].Role != domain.CompactionRole || chat.Messages[4].Timeline[1].Arguments != changed {
+		t.Fatalf("the retry stored %s", row.Data)
 	}
 }
