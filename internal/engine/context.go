@@ -244,10 +244,12 @@ func (eng *Engine) BuildRequest(thread *domain.Thread, profile *domain.Profile, 
 	if in.Kind == "continue" {
 		reminder += "\n\n" + ContinueInstruction
 	}
-	req.System = systemPrompt(c, thread, profile, project, documents, display, zone, options.Locale)
+	// An ask's instruction follows the history too, so its prompt starts as
+	// the chat it asks about does and reuses that chat's prompt cache.
 	if in.Kind == "ask" {
-		req.System += "\n\n" + askInstruction
+		reminder += "\n\n" + askInstruction
 	}
+	req.System = systemPrompt(c, thread, profile, project, documents, display, zone, options.Locale)
 	req.window, req.policy = window, policy
 	req.piiCheck = domain.ValueOr(options.PIICheck, domain.ValueOr(profile.PIICheckEnabled, true))
 	// Turning web search off in the settings leaves each chat's own setting.
