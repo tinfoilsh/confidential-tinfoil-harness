@@ -254,9 +254,11 @@ func AnswersPrompt(answers []WidgetAnswers) string {
 		}
 		b.WriteString(":")
 		for i, q := range w.Questions {
+			// An option is named by its id too, which tells apart options
+			// that read the same.
 			labels := []string{}
 			for _, o := range q.Selected {
-				labels = append(labels, o.Label)
+				labels = append(labels, fmt.Sprintf("[%s] %s", o.ID, o.Label))
 			}
 			answer := strings.Join(labels, "; ")
 			switch {

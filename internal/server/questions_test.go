@@ -86,7 +86,7 @@ func TestAnswersReachTheModelWithTheNextQuestion(t *testing.T) {
 		text, _ := sent.Messages[len(sent.Messages)-2].Content.(string)
 		return text
 	}
-	answers := "<question_answers>\nThe user's answers to the questions of render_questions call quiz (Driving quiz):\n1. A red curb means\nAnswer: Buses only\n2. Which lights are on at night?\nAnswer: (none selected)\n</question_answers>"
+	answers := "<question_answers>\nThe user's answers to the questions of render_questions call quiz (Driving quiz):\n1. A red curb means\nAnswer: [b] Buses only\n2. Which lights are on at night?\nAnswer: (none selected)\n</question_answers>"
 	submit := continueInput(key, "chat-1")
 	delete(submit, "content")
 	finishedRun(t, h, "/v1/threads/turn", submit)
@@ -105,7 +105,7 @@ func TestAnswersReachTheModelWithTheNextQuestion(t *testing.T) {
 	again := continueInput(key, "chat-1")
 	again["content"] = "grade me"
 	finishedRun(t, h, "/v1/threads/turn", again)
-	if got, want := lastQuestion(), strings.Replace(answers, "Buses only", "Loading only", 1)+"\n\ngrade me"; got != want {
+	if got, want := lastQuestion(), strings.Replace(answers, "[b] Buses only", "[c] Loading only", 1)+"\n\ngrade me"; got != want {
 		t.Fatalf("a changed answer was sent as %q, want %q", got, want)
 	}
 	stored := storedChat(t, rows, key, "chat-1")
