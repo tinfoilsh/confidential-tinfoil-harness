@@ -81,6 +81,10 @@ var (
 	nullableMembers = []string{"presetId", "color"}
 )
 
+// currentCompaction are the members a compaction marker's record requires:
+// what its summary covers, and what wrote it.
+var currentCompaction = []string{"messages", "startedAt", "endedAt", "model", "version"}
+
 // readCurrentThread reads a chat in the current format into v, whose
 // thread is t, refusing one whose messages or values that format does not
 // allow.
@@ -93,7 +97,12 @@ func readCurrentThread(data []byte, v any, t *Thread) error {
 	}
 	json.Unmarshal(data, &shape)
 	for _, message := range shape.Messages {
-		if !holds(message, currentMessage) {
+		var marker struct {
+			Role       string          `json:"role"`
+			Compaction json.RawMessage `json:"compaction"`
+		}
+		json.Unmarshal(message, &marker)
+		if !holds(message, currentMessage) || marker.Role == CompactionRole && !holds(marker.Compaction, currentCompaction) {
 			return errRecordUnsupported
 		}
 	}

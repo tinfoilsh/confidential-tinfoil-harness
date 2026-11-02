@@ -157,6 +157,10 @@ func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 			current(data)
 			data["pinned"] = "yes"
 		},
+		"unrecorded marker": func(data api.Object) {
+			current(data)
+			data["messages"] = append(api.Arr(data["messages"]), api.Object{"id": "c1", "role": "compaction", "createdAt": "2026-01-01T00:00:00Z", "content": "a summary"})
+		},
 	}
 	// A member another client of the same rows added does not make a record
 	// unreadable; a missing or nulled one the format requires does.
