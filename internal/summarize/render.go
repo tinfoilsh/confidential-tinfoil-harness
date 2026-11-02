@@ -3,6 +3,7 @@ package summarize
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -89,23 +90,51 @@ func neutralizer(tags []string) func(string) string {
 	return func(text string) string { return pattern.ReplaceAllString(text, "&lt;$1") }
 }
 
-// check is the summary a call wrote, refused when the model was cut off,
-// wrote nothing, or left out a section or wrote them out of order.
+// finishedReason is the finish reason of a model that ended its answer
+// itself, rather than being cut off or filtered.
+const finishedReason = "stop"
+
+// check is the summary a call wrote, refused when the model did not end it
+// itself, wrote nothing, or did not write exactly the task's sections in
+// order.
 func (t *Task) check(text, finishReason string) (string, error) {
-	if finishReason == "length" {
-		return "", fmt.Errorf("%w: it reached the output limit", ErrInvalid)
+	if finishReason != finishedReason {
+		return "", fmt.Errorf("%w: it ended with finish reason %q", ErrInvalid, finishReason)
 	}
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return "", fmt.Errorf("%w: it is empty", ErrInvalid)
 	}
-	at := 0
-	for _, s := range t.Sections {
-		found := regexp.MustCompile(`(?m)^## ` + regexp.QuoteMeta(s.Heading) + `[ \t]*$`).FindStringIndex(text[at:])
-		if found == nil {
-			return "", fmt.Errorf("%w: it has no %q section in its place", ErrInvalid, s.Heading)
-		}
-		at += found[1]
+	if len(t.Sections) == 0 {
+		return text, nil
+	}
+	want := make([]string, len(t.Sections))
+	for i, s := range t.Sections {
+		want[i] = s.Heading
+	}
+	if got := headings(text); !slices.Equal(got, want) {
+		return "", fmt.Errorf("%w: its sections are %q", ErrInvalid, got)
 	}
 	return text, nil
+}
+
+// headings are the level-two headings of Markdown text, in order, leaving
+// out lines of fenced code, where a summary may quote Markdown verbatim.
+func headings(text string) []string {
+	var found []string
+	fence := ""
+	for line := range strings.Lines(text) {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case fence != "":
+			if strings.HasPrefix(trimmed, fence) {
+				fence = ""
+			}
+		case strings.HasPrefix(trimmed, "```"), strings.HasPrefix(trimmed, "~~~"):
+			fence = trimmed[:3]
+		case strings.HasPrefix(line, "## "):
+			found = append(found, strings.TrimSpace(strings.TrimPrefix(line, "## ")))
+		}
+	}
+	return found
 }

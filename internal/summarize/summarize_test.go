@@ -96,8 +96,9 @@ func TestAnInputTooLargeForATaskThatDoesNotFoldIsRefused(t *testing.T) {
 	}
 }
 
-// A summary without its sections in order, or cut off, fails its check and
-// is asked for again; a refusal another call would repeat is not.
+// A summary without exactly its sections in order, or that the model did not
+// end itself, fails its check and is asked for again; a refusal another call
+// would repeat is not. A heading quoted in a code block is not a section.
 func TestASummaryIsCheckedAndRetriedOnlyWhenRetryingCanHelp(t *testing.T) {
 	sectioned := &Task{Name: "sectioned", Version: 1, Role: Long, Instructions: "Summarize.", Sections: []Section{{"First", "one"}, {"Second", "two"}}, Frame: "transcript", MaxTokens: 64, Timeout: time.Second, Attempts: 2}
 	in := Input{Documents: []Document{{Kind: "message", Text: "hello"}}}
@@ -108,14 +109,18 @@ func TestASummaryIsCheckedAndRetriedOnlyWhenRetryingCanHelp(t *testing.T) {
 		want    error
 	}{
 		{"out of order, then whole", []func() (inference.Completed, error){
-			func() (inference.Completed, error) { return answered("## Second\ntwo\n## First\none") },
+			func() (inference.Completed, error) { return answered("## Second\ntwo\n## First\none\n## Second\ntwo") },
 			func() (inference.Completed, error) { return answered("## First\none\n\n## Second\ntwo") }}, 2, nil},
-		{"cut off twice", []func() (inference.Completed, error){
+		{"quoting Markdown", []func() (inference.Completed, error){
+			func() (inference.Completed, error) {
+				return answered("## First\nThe draft:\n```markdown\n## Second\n## Intro\n```\n## Second\ntwo")
+			}}, 1, nil},
+		{"cut off, then filtered", []func() (inference.Completed, error){
 			func() (inference.Completed, error) {
 				return inference.Completed{Text: "## First\none", FinishReason: "length"}, nil
 			},
 			func() (inference.Completed, error) {
-				return inference.Completed{Text: "## First\none", FinishReason: "length"}, nil
+				return inference.Completed{Text: "## First\none\n## Second\ntwo", FinishReason: "content_filter"}, nil
 			}}, 2, ErrInvalid},
 		{"refused as malformed", []func() (inference.Completed, error){
 			func() (inference.Completed, error) { return inference.Completed{}, &inference.Refused{Status: 400} }}, 1, ErrUnavailable},
