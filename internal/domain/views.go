@@ -118,11 +118,12 @@ type MessageView struct {
 	Timeline         []Block         `json:"timeline,omitzero"`
 	Content          *string         `json:"content,omitempty"`
 	Attachments      []Attachment    `json:"attachments,omitempty"`
+	Answers          []WidgetAnswers `json:"answers,omitzero"`
 }
 
 func ViewMessage(m *Message) MessageView {
 	view := MessageView{ID: m.ID, Role: m.Role, CreatedAt: m.CreatedAt, Quote: m.Quote, Model: m.Model, ModelDisplayName: m.ModelDisplayName,
-		IsError: m.IsError, IsInterrupted: m.IsInterrupted, Usage: m.Usage, Annotations: m.Annotations}
+		IsError: m.IsError, IsInterrupted: m.IsInterrupted, Usage: m.Usage, Annotations: m.Annotations, Answers: m.Answers}
 	if m.Role == "assistant" {
 		view.Timeline = CheckedWidgets(m.Timeline)
 		if view.Timeline == nil {
@@ -166,15 +167,16 @@ type SharePayload struct {
 }
 
 type ShareMessage struct {
-	Role             string       `json:"role"`
-	Content          string       `json:"content"`
-	Timestamp        int64        `json:"timestamp"`
-	Timeline         []Block      `json:"timeline"`
-	ModelDisplayName string       `json:"modelDisplayName,omitempty"`
-	IsError          *bool        `json:"isError,omitempty"`
-	Quote            string       `json:"quote,omitempty"`
-	Annotations      []Annotation `json:"annotations,omitempty"`
-	Attachments      []Attachment `json:"attachments,omitempty"`
+	Role             string          `json:"role"`
+	Content          string          `json:"content"`
+	Timestamp        int64           `json:"timestamp"`
+	Timeline         []Block         `json:"timeline"`
+	ModelDisplayName string          `json:"modelDisplayName,omitempty"`
+	IsError          *bool           `json:"isError,omitempty"`
+	Quote            string          `json:"quote,omitempty"`
+	Annotations      []Annotation    `json:"annotations,omitempty"`
+	Attachments      []Attachment    `json:"attachments,omitempty"`
+	Answers          []WidgetAnswers `json:"answers,omitempty"`
 }
 
 // SharedThread is an opened share, whose attachments name the key that

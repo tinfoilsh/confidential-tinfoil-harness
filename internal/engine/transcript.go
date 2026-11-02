@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"strings"
+
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
@@ -54,7 +56,16 @@ func applyTurn(t *domain.Thread, in *TurnRequest, messageID string, attachments 
 		content, quote = domain.ValueOr(in.Quote, ""), ""
 	}
 	if in.Kind != "regenerate" && in.Kind != "retryToolCall" && in.Kind != "continue" && in.Kind != "answer" {
-		messages = append(messages, domain.Message{ID: messageID, Role: "user", Content: content, Quote: quote, Attachments: attachments, CreatedAt: api.Timestamp()})
+		message := domain.Message{ID: messageID, Role: "user", Content: content, Quote: quote, Attachments: attachments, CreatedAt: api.Timestamp()}
+		// A question sends the answers the user gave since the last one, so
+		// later changes leave what earlier replies read as it was.
+		if in.Kind == "send" || in.Kind == "edit" {
+			message.Answers = domain.PendingAnswers(messages)
+		}
+		if in.Kind == "send" && strings.TrimSpace(content) == "" && strings.TrimSpace(quote) == "" && len(attachments) == 0 && len(message.Answers) == 0 {
+			return api.Err(400, "BAD_REQUEST", "A message, attachment or answer is required")
+		}
+		messages = append(messages, message)
 	}
 	t.Messages = messages
 	return nil

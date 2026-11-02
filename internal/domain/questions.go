@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
@@ -138,6 +139,85 @@ func AnswerQuestions(m *Message, callID string, changes map[string]*[]string) er
 	return nil
 }
 
+// WidgetAnswers is what the user had answered of one questions widget when
+// they sent a message. It holds the questions' text, so the message reads
+// the same however the widget changes later.
+type WidgetAnswers struct {
+	ToolCallID string             `json:"toolCallId"`
+	Title      string             `json:"title,omitempty"`
+	Questions  []AnsweredQuestion `json:"questions"`
+}
+
+// AnsweredQuestion is a question and the options picked for it. An answered
+// question may have none picked, as a checklist with nothing ticked.
+type AnsweredQuestion struct {
+	ID       string           `json:"id"`
+	Prompt   string           `json:"prompt"`
+	Answered bool             `json:"answered"`
+	Selected []QuestionOption `json:"selected"`
+}
+
+// answersOf is what a questions widget's call holds answered now.
+func answersOf(b *Block) (WidgetAnswers, bool) {
+	asked, ok := answerableQuestions(b)
+	if !ok {
+		return WidgetAnswers{}, false
+	}
+	answers := WidgetAnswers{ToolCallID: b.CallID(), Title: asked.Title, Questions: []AnsweredQuestion{}}
+	for _, q := range asked.Questions {
+		ids, answered := b.Answers[q.ID]
+		item := AnsweredQuestion{ID: q.ID, Prompt: q.Prompt, Answered: answered, Selected: []QuestionOption{}}
+		for _, o := range q.Options {
+			if slices.Contains(ids, o.ID) {
+				item.Selected = append(item.Selected, o)
+			}
+		}
+		answers.Questions = append(answers.Questions, item)
+	}
+	return answers, true
+}
+
+// picks are the options picked for each answered question, by its id.
+func (w *WidgetAnswers) picks() map[string][]string {
+	picks := map[string][]string{}
+	for _, q := range w.Questions {
+		if !q.Answered {
+			continue
+		}
+		picks[q.ID] = []string{}
+		for _, o := range q.Selected {
+			picks[q.ID] = append(picks[q.ID], o.ID)
+		}
+	}
+	return picks
+}
+
+// PendingAnswers are the answers a new message after messages sends: those
+// of each questions widget whose answers changed since a message last sent
+// them, or that no message has sent yet.
+func PendingAnswers(messages []Message) []WidgetAnswers {
+	sent := map[string]map[string][]string{}
+	for _, m := range messages {
+		for _, answers := range m.Answers {
+			sent[answers.ToolCallID] = answers.picks()
+		}
+	}
+	var pending []WidgetAnswers
+	for i := range messages {
+		if messages[i].Role != "assistant" {
+			continue
+		}
+		for j := range messages[i].Timeline {
+			current, ok := answersOf(&messages[i].Timeline[j])
+			if !ok || maps.EqualFunc(current.picks(), sent[current.ToolCallID], slices.Equal) {
+				continue
+			}
+			pending = append(pending, current)
+		}
+	}
+	return pending
+}
+
 // KeepAnswers gives the questions widgets of a reply the answers another
 // copy of it holds, as a continued reply takes those given while it ran.
 func (m *Message) KeepAnswers(from *Message) {
@@ -157,4 +237,33 @@ func (m *Message) KeepAnswers(from *Message) {
 			b.Answers = answers
 		}
 	}
+}
+
+// AnswersPrompt is how a message's answers read to the model.
+func AnswersPrompt(answers []WidgetAnswers) string {
+	var b strings.Builder
+	b.WriteString("<question_answers>")
+	for _, w := range answers {
+		fmt.Fprintf(&b, "\nThe user's answers to the questions of %s call %s", QuestionsWidget, w.ToolCallID)
+		if w.Title != "" {
+			fmt.Fprintf(&b, " (%s)", w.Title)
+		}
+		b.WriteString(":")
+		for i, q := range w.Questions {
+			labels := []string{}
+			for _, o := range q.Selected {
+				labels = append(labels, o.Label)
+			}
+			answer := strings.Join(labels, "; ")
+			switch {
+			case !q.Answered:
+				answer = "(not answered)"
+			case len(labels) == 0:
+				answer = "(none selected)"
+			}
+			fmt.Fprintf(&b, "\n%d. %s\nAnswer: %s", i+1, q.Prompt, answer)
+		}
+	}
+	b.WriteString("\n</question_answers>")
+	return b.String()
 }

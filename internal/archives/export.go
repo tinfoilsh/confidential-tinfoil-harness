@@ -62,7 +62,7 @@ func (ar *Service) ShareThread(ctx context.Context, p *auth.Principal, _ auth.Co
 	}
 	payload := domain.SharePayload{V: 1, Title: t.Title, Messages: []domain.ShareMessage{}, CreatedAt: domain.Millis(t.CreatedAt)}
 	for _, m := range t.Messages {
-		shared := domain.ShareMessage{Role: m.Role, Content: m.Content, Timestamp: domain.Millis(m.CreatedAt), Timeline: domain.CheckedWidgets(m.Timeline), ModelDisplayName: m.ModelDisplayName, IsError: m.IsError, Quote: m.Quote, Annotations: m.Annotations}
+		shared := domain.ShareMessage{Role: m.Role, Content: m.Content, Timestamp: domain.Millis(m.CreatedAt), Timeline: domain.CheckedWidgets(m.Timeline), ModelDisplayName: m.ModelDisplayName, IsError: m.IsError, Quote: m.Quote, Annotations: m.Annotations, Answers: m.Answers}
 		for _, a := range m.Attachments {
 			view := domain.ViewAttachment(&a)
 			view.EncryptionKey = a.EncryptionKey

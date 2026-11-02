@@ -54,6 +54,80 @@ func savedAnswers(t *testing.T, rows *memoryRows, key auth.ContentKey) map[strin
 	return storedChat(t, rows, key, "chat-1").Messages[1].Timeline[1].Answers
 }
 
+// Answers are saved as the user picks them, and start no turn. The next
+// question carries those that changed since one last did, which is how the
+// model reads them, and keeps them as they were when it was sent.
+func TestAnswersReachTheModelWithTheNextQuestion(t *testing.T) {
+	var prompt string
+	h, rows, key := testChatHarness(t, capturePrompt(&prompt))
+	shares := fakeShares(t, h)
+	storeQuiz(rows, quizThread())
+	for _, picks := range []api.Object{{"q1": []any{"b"}}, {"q2": []any{}}} {
+		if w := answer(h, key, "quiz", picks); w.Code != 200 {
+			t.Fatalf("answering %v: HTTP %d %s", picks, w.Code, w.Body.String())
+		}
+	}
+	if saved := savedAnswers(t, rows, key); !reflect.DeepEqual(saved, map[string][]string{"q1": {"b"}, "q2": {}}) || prompt != "" {
+		t.Fatalf("the answers were saved as %v, and the model was asked %q", saved, prompt)
+	}
+	// What the model read last of the user: the question before the time
+	// reminder that ends every prompt.
+	lastQuestion := func() string {
+		t.Helper()
+		var sent struct {
+			Messages []struct {
+				Content any `json:"content"`
+			} `json:"messages"`
+		}
+		json.Unmarshal([]byte(prompt), &sent)
+		if len(sent.Messages) < 2 {
+			t.Fatalf("the model was asked %s", prompt)
+		}
+		text, _ := sent.Messages[len(sent.Messages)-2].Content.(string)
+		return text
+	}
+	answers := "<question_answers>\nThe user's answers to the questions of render_questions call quiz (Driving quiz):\n1. A red curb means\nAnswer: Buses only\n2. Which lights are on at night?\nAnswer: (none selected)\n</question_answers>"
+	submit := continueInput(key, "chat-1")
+	delete(submit, "content")
+	finishedRun(t, h, "/v1/threads/turn", submit)
+	if got := lastQuestion(); got != answers {
+		t.Fatalf("a question of answers alone read as %q", got)
+	}
+	next := continueInput(key, "chat-1")
+	next["content"] = "what next?"
+	finishedRun(t, h, "/v1/threads/turn", next)
+	if got := lastQuestion(); got != "what next?" {
+		t.Fatalf("answers that did not change were sent again: %q", got)
+	}
+	if w := answer(h, key, "quiz", api.Object{"q1": []any{"c"}}); w.Code != 200 {
+		t.Fatalf("changing an answer: HTTP %d %s", w.Code, w.Body.String())
+	}
+	again := continueInput(key, "chat-1")
+	again["content"] = "grade me"
+	finishedRun(t, h, "/v1/threads/turn", again)
+	if got, want := lastQuestion(), strings.Replace(answers, "Buses only", "Loading only", 1)+"\n\ngrade me"; got != want {
+		t.Fatalf("a changed answer was sent as %q, want %q", got, want)
+	}
+	stored := storedChat(t, rows, key, "chat-1")
+	if len(stored.Messages) != 8 || len(stored.Messages[4].Answers) != 0 {
+		t.Fatalf("the chat holds %+v", stored.Messages)
+	}
+	if first, latest := stored.Messages[2].Answers, stored.Messages[6].Answers; len(first) != 1 || len(latest) != 1 || first[0].Questions[0].Selected[0].Label != "Buses only" || latest[0].Questions[0].Selected[0].Label != "Loading only" {
+		t.Fatalf("the questions keep the answers %+v and %+v", first, latest)
+	}
+	empty := continueInput(key, "chat-1")
+	delete(empty, "content")
+	if w := postRoute(h, "/v1/threads/turn", empty, "alice"); w.Code != 400 {
+		t.Fatalf("a question with nothing to send: HTTP %d %s", w.Code, w.Body.String())
+	}
+	link := api.Str(api.Obj(api.Parsed(postRoute(h, "/v1/threads/share", api.Object{"key": keyBase64(key), "threadId": "chat-1"}, "alice").Body.Bytes()))["url"])
+	uploaded, _ := shares.uploaded("chat-1")
+	shared := api.Arr(api.Obj(api.Parsed(sharedPayload(t, link, uploaded)))["messages"])
+	if len(shared) != 8 || len(api.Arr(api.Obj(shared[2])["answers"])) != 1 {
+		t.Fatalf("the share holds %v", shared)
+	}
+}
+
 // An answer the widget does not offer is refused and leaves the answers
 // saved before it; null leaves a question unanswered.
 func TestAnswersTheWidgetDoesNotOfferAreRefused(t *testing.T) {

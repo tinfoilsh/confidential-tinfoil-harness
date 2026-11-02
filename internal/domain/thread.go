@@ -53,6 +53,9 @@ type Message struct {
 	Usage            json.RawMessage `json:"usage,omitempty"`
 	IsError          *bool           `json:"isError,omitempty"`
 	IsInterrupted    *bool           `json:"isInterrupted,omitempty"`
+	// Answers are what the user had answered of each questions widget whose
+	// answers changed since an earlier message, as this message sent them.
+	Answers []WidgetAnswers `json:"answers,omitzero"`
 }
 
 // Block is one step of a reply: text, reasoning, or a tool call. What tools

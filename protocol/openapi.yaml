@@ -419,8 +419,10 @@ paths:
       description: |
         Saves the options the user picked in a questions widget of a reply,
         without starting a turn. Each question named takes the options picked,
-        and the others keep their answers. A widget, question or option the
-        chat no longer holds is refused with REVISION_CONFLICT.
+        and the others keep their answers. The next question the user sends
+        carries the answers that changed, which is how the model reads them.
+        A widget, question or option the chat no longer holds is refused with
+        REVISION_CONFLICT.
       requestBody:
         required: true
         content:
@@ -1703,7 +1705,7 @@ components:
         profile: {$ref: "#/components/schemas/ProfileInput"}
         projectId: {type: [string, "null"]}
         presetId: {type: [string, "null"]}
-        content: {type: string}
+        content: {type: string, description: "A send without content, a quote or an attachment sends only the answers the user changed since their last question, and is refused when there are none."}
         quote: {type: string}
         messageId: {type: string, description: "The message an edit, regenerate, continue or retry acts on."}
         toolCallId: {type: string, description: "The widget call a retryToolCall regenerates."}
@@ -2182,6 +2184,32 @@ components:
         usage: {$ref: "#/components/schemas/MessageUsage"}
         annotations: {type: array, items: {$ref: "#/components/schemas/Annotation"}}
         attachments: {type: array, items: {$ref: "#/components/schemas/AttachmentView"}}
+        answers: {type: array, items: {$ref: "#/components/schemas/WidgetAnswers"}, description: "A question's answers to questions widgets, as it sent them to the model."}
+
+    WidgetAnswers:
+      description: What the user had answered of one questions widget when they sent a question, with the questions' text, so it reads the same however the widget changes later.
+      type: object
+      required: [toolCallId, questions]
+      properties:
+        toolCallId: {type: string}
+        title: {type: string}
+        questions: {type: array, items: {$ref: "#/components/schemas/AnsweredQuestion"}}
+
+    AnsweredQuestion:
+      type: object
+      required: [id, prompt, answered, selected]
+      properties:
+        id: {type: string}
+        prompt: {type: string}
+        answered: {type: boolean, description: "False for a question left unanswered. An answered question may have nothing selected, as a checklist with nothing ticked."}
+        selected: {type: array, items: {$ref: "#/components/schemas/QuestionOption"}}
+
+    QuestionOption:
+      type: object
+      required: [id, label]
+      properties:
+        id: {type: string}
+        label: {type: string}
 
     Role:
       description: Who wrote a message. A client leaves out a message whose role it does not know.
@@ -2361,6 +2389,7 @@ components:
         usage: {$ref: "#/components/schemas/MessageUsage"}
         isError: {type: boolean}
         isInterrupted: {type: boolean}
+        answers: {type: array, items: {$ref: "#/components/schemas/WidgetAnswers"}}
 
     ThreadInput:
       description: "A device chat as its client sends it: a ThreadRecord the harness returned, sent back whole, or a record without a recordVersion that an older client kept or a client made for a new chat. The harness refuses a ThreadRecord with a member its version does not have."
@@ -2432,6 +2461,7 @@ components:
               isInterrupted: {type: boolean}
               usage: {$ref: "#/components/schemas/MessageUsage"}
               annotations: {type: array, items: {$ref: "#/components/schemas/Annotation"}}
+              answers: {type: array, items: {$ref: "#/components/schemas/WidgetAnswers"}}
               attachments:
                 type: array
                 items:
