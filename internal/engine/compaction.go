@@ -157,7 +157,8 @@ func replyText(m *domain.Message) string {
 }
 
 // callLine says what a tool call did: what a search looked for and found,
-// which page was read, or what a widget showed the user.
+// which page was read, or what a widget showed the user. A search or read
+// that found nothing says so, so its sources are not taken as read.
 func callLine(b *domain.Block) string {
 	display := b.Display
 	if display == nil {
@@ -171,14 +172,26 @@ func callLine(b *domain.Block) string {
 		return strings.Join(named, "; ")
 	}
 	switch {
+	case b.Name == "web_search" && display != nil && display.Status != "completed":
+		return `Tried to search the web for "` + display.Query + `", but ` + unfinished(display)
 	case b.Name == "web_search" && display != nil:
 		return `Searched the web for "` + display.Query + `". Results: ` + cmp.Or(sources(), "none")
+	case b.Name == "web_fetch" && display != nil && display.Status != "completed":
+		return "Tried to read " + display.URL + ", but " + unfinished(display)
 	case b.Name == "web_fetch" && display != nil:
 		return "Read " + cmp.Or(sources(), display.URL)
 	case strings.HasPrefix(b.Name, "render_"):
 		return "Showed the user the " + b.Name + " widget with " + domain.HistoryArgs(cmp.Or(b.Arguments, "{}"))
 	}
 	return "Called " + b.Name
+}
+
+// unfinished is how a search or read that returned nothing ended.
+func unfinished(display *domain.ToolDisplay) string {
+	if display.Status == "failed" {
+		return "it failed"
+	}
+	return "it was stopped before it finished"
 }
 
 // attachmentDocument is a file attached to a question, as a compaction reads

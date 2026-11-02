@@ -197,12 +197,15 @@ func TestAShareLeavesOutCompactionMarkers(t *testing.T) {
 }
 
 // longCompacted stores for alice a compacted chat whose exchange after its
-// marker fills the test model's share of its window.
+// marker fills the test model's share of its window, and whose reply tried
+// to read a page and failed.
 func longCompacted(rows *memoryRows, id string) {
 	thread := compactedThread(id)
 	answer := filler(350)
 	recent := api.Obj(api.Arr(thread["messages"])[4])
-	recent["content"], recent["timeline"] = answer, []any{api.Object{"id": "b4", "type": "content", "content": answer}}
+	recent["content"], recent["timeline"] = answer, []any{
+		api.Object{"id": "f4", "type": "tool_call", "toolCallId": "f4", "name": "web_fetch", "arguments": `{"url":"https://tides.test"}`, "complete": true, "result": api.Object{"error": "tool_error"}},
+		api.Object{"id": "b4", "type": "content", "content": answer}}
 	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", id)] = domain.StoredRow{ID: id, ETag: "1", Data: api.Raw(thread)}
 }
 
@@ -223,7 +226,8 @@ func TestALongChatIsCompactedBeforeItsQuestion(t *testing.T) {
 	longCompacted(rows, "chat-1")
 	events := finishedRun(t, h, "/v1/threads/turn", continueInput(key, "chat-1"))
 	if len(asked) != 1 || !strings.Contains(asked[0], "<previous_summary>\n"+compactionSummary+"\n</previous_summary>") ||
-		!strings.Contains(asked[0], `<message from="user" sent=`) || !strings.Contains(asked[0], "recent question") || strings.Contains(asked[0], "old question") || strings.Contains(asked[0], "test message") {
+		!strings.Contains(asked[0], `<message from="user" sent=`) || !strings.Contains(asked[0], "recent question") || strings.Contains(asked[0], "old question") || strings.Contains(asked[0], "test message") ||
+		!strings.Contains(asked[0], "[Tried to read https://tides.test, but it failed]") {
 		t.Fatalf("the summarizer was asked %q", asked)
 	}
 	prompt := <-prompts
