@@ -10,7 +10,7 @@ import (
 
 // HandleFollow re-attaches a client to a run that is live on this instance.
 func (eng *Engine) HandleFollow(w http.ResponseWriter, r *http.Request) {
-	p, err := eng.Auth.Caller(r, true)
+	p, err := eng.Auth.RunCaller(r)
 	if err != nil {
 		api.Respond(w, nil, err)
 		return
