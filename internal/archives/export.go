@@ -36,6 +36,8 @@ type Service struct {
 	Store        *store.Store
 	// Imports runs each caller's cloud import.
 	Imports *jobs.Runner[ImportReport]
+	// anonymous are the signed-out callers with an archive running.
+	anonymous anonymousArchives
 }
 
 func (ar *Service) ShareThread(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *ShareRequest) (any, error) {
@@ -229,14 +231,24 @@ type spooledPart struct {
 
 func (ar *Service) HandleExport(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
-	// An archive calls no model, so any signed-in caller may make one,
-	// with or without chat access.
-	p, err := ar.Auth.Authenticate(r, false)
+	// An archive calls no model, so any caller may make one, with or
+	// without chat access: a signed-out caller of the chats its tab keeps.
+	p, err := ar.Auth.Caller(r, true)
 	if err != nil {
 		api.Respond(w, nil, err)
 		return
 	}
-	size, err := requestSize(r, maxExportBody)
+	limit := int64(maxExportBody)
+	if p.Anonymous {
+		limit = maxAnonymousExportBody
+		end, err := ar.anonymous.start(p)
+		if err != nil {
+			api.Respond(w, nil, err)
+			return
+		}
+		defer end()
+	}
+	size, err := requestSize(r, limit)
 	if err != nil {
 		api.Respond(w, nil, err)
 		return
@@ -248,8 +260,11 @@ func (ar *Service) HandleExport(w http.ResponseWriter, r *http.Request) {
 	}
 	defer lease.Release()
 	lift := ar.Scratch.idleBody(w, r)
-	r.Body = http.MaxBytesReader(w, r.Body, maxExportBody)
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	form, err := readExportForm(r, lease, func(options exportOptions) error {
+		if p.Anonymous && len(options.Key) != 0 {
+			return auth.ErrAnonymousCloud
+		}
 		return ar.Store.AuthorizeArchive(r.Context(), p, options.Key, "export")
 	})
 	if err != nil {

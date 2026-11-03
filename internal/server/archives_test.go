@@ -1054,6 +1054,127 @@ func TestExportsOutliveTheirFirstGrant(t *testing.T) {
 	}
 }
 
+// A signed-out caller exports the chats its tab sends, and imports archives
+// into its tab, the web app's plain conversations.json among them; the
+// cloud stays out of its reach.
+func TestSignedOutCallersMoveTheirTabsChats(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	thread := api.Object{"id": "tab-chat", "title": "Tab chat", "messages": []any{api.Object{"id": "m", "role": "user", "content": "hello"}}}
+	w := archiveRoute(h, "/v1/export", "", optionsPart(api.Object{"format": "conversations"}), threadPart(thread))
+	if w.Code != 200 || w.Header().Get("Content-Type") != "application/zip" {
+		t.Fatalf("export: HTTP %d %s", w.Code, w.Body.String())
+	}
+	result := importOf(t, h, "", w.Body.Bytes(), "tinfoil-chats.zip", api.Object{"target": "device"})
+	if len(result.threads) != 1 || result.threads[0].Title != "Tab chat" || result.threads[0].Messages[0].Content != "hello" || result.done.JobID != nil {
+		t.Fatalf("the export imported back: %+v", result)
+	}
+	plain, _ := unzipped(t, fixture(t, "web-conversations-export.zip"))
+	old := importOf(t, h, "", plain["conversations.json"], "conversations.json", api.Object{"target": "device"})
+	titles := []string{}
+	for _, thread := range old.threads {
+		titles = append(titles, thread.Title)
+	}
+	if !slices.Contains(titles, "Quarterly chart") || !slices.Contains(titles, "Trip 🌅 plans (fork)") {
+		t.Fatalf("the web app's conversations.json imported %v", titles)
+	}
+	file := formPart{name: "file", filename: "conversations.json", data: plain["conversations.json"]}
+	for _, refused := range []struct {
+		path  string
+		parts []formPart
+	}{
+		{"/v1/export", []formPart{optionsPart(api.Object{"format": "native", "key": keyBase64(key)})}},
+		{"/v1/import", []formPart{optionsPart(api.Object{"target": "cloud"}), file}},
+		{"/v1/import", []formPart{optionsPart(api.Object{"target": "device", "key": keyBase64(key)}), file}},
+	} {
+		w := archiveRoute(h, refused.path, "", refused.parts...)
+		if e := api.Obj(api.Obj(api.Parsed(w.Body.Bytes()))["error"]); w.Code != 401 || e["code"] != "UNAUTHENTICATED" || e["action"] != api.ActionStop {
+			t.Fatalf("%s %s: HTTP %d %s", refused.path, refused.parts[0].data, w.Code, w.Body.String())
+		}
+	}
+	if rows.calls != 0 {
+		t.Fatalf("signed-out archives made %d store calls", rows.calls)
+	}
+}
+
+// A signed-out caller's archive is smaller than a signed-in caller's, one
+// runs per caller at a time, and only a few run at once, while signed-in
+// callers' archives still do.
+func TestSignedOutArchivesAreBounded(t *testing.T) {
+	h, _, _ := testChatHarness(t, nil)
+	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "OK") }))
+	t.Cleanup(cp.Close)
+	h.useAuth(testAuth(cp))
+	dir := t.TempDir()
+	h.archives.Scratch = archives.NewScratch(dir, 1<<30)
+	server := httptest.NewServer(h.routes())
+	t.Cleanup(server.Close)
+	as := func(key string) func(*http.Request) {
+		return func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+key) }
+	}
+
+	for _, path := range []string{"/v1/import", "/v1/export"} {
+		for _, tc := range []struct {
+			sign    func(*http.Request)
+			refused bool
+		}{{as("free_large-tab"), true}, {func(r *http.Request) { signIn(r, "alice") }, false}} {
+			r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(""))
+			r.ContentLength = 40 << 20
+			tc.sign(r)
+			w := httptest.NewRecorder()
+			h.routes().ServeHTTP(w, r)
+			if refused := w.Code == http.StatusRequestEntityTooLarge; refused != tc.refused {
+				t.Fatalf("a declared 40 MiB to %s: HTTP %d %s", path, w.Code, w.Body.String())
+			}
+		}
+	}
+
+	conversation := formPart{name: "file", filename: "conversations.json", data: api.Raw([]api.Object{{"uuid": "c", "name": "Hi", "chat_messages": []api.Object{{"sender": "human", "text": "hi"}}}})}
+	importAs := func(key string) *httptest.ResponseRecorder {
+		return archiveRequest(h, "/v1/import", as(key), optionsPart(api.Object{"target": "device"}), conversation)
+	}
+	// stall starts a caller's import, and sends its archive but not the end
+	// of the form.
+	stall := func(key string) net.Conn {
+		body, contentType := archiveForm(optionsPart(api.Object{"target": "device"}), conversation)
+		conn, err := net.Dial("tcp", server.Listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { conn.Close() })
+		fmt.Fprintf(conn, "POST /v1/import HTTP/1.1\r\nHost: harness\r\nAuthorization: Bearer %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n", key, contentType, len(body))
+		conn.Write(body[:bytes.LastIndex(body, []byte("\r\n--"))])
+		return conn
+	}
+	first := stall("free_tab-1")
+	waitForSpooled(t, dir, 1)
+	if w := importAs("free_tab-1"); w.Code != http.StatusTooManyRequests || !strings.Contains(w.Body.String(), "RATE_LIMITED") {
+		t.Fatalf("a second archive of the same caller: HTTP %d %s", w.Code, w.Body.String())
+	}
+	running := 1
+	for ; ; running++ {
+		if w := importAs("free_another-tab"); w.Code == http.StatusServiceUnavailable && strings.Contains(w.Body.String(), "TEMP_SPACE_BUSY") {
+			break
+		} else if w.Code != 200 || running > 16 {
+			t.Fatalf("with %d signed-out archives running: HTTP %d %s", running, w.Code, w.Body.String())
+		}
+		stall(fmt.Sprintf("free_tab-%d", running+1))
+		waitForSpooled(t, dir, running+1)
+	}
+	if w := archiveRoute(h, "/v1/import", "alice", optionsPart(api.Object{"target": "device"}), conversation); w.Code != 200 || running < 2 {
+		t.Fatalf("a signed-in import beside %d signed-out archives: HTTP %d %s", running, w.Code, w.Body.String())
+	}
+	first.Close()
+	for start := time.Now(); ; time.Sleep(time.Millisecond) {
+		w := importAs("free_tab-1")
+		if w.Code == 200 {
+			break
+		}
+		if time.Since(start) > 10*time.Second {
+			t.Fatalf("the caller's ended archive still holds its place: HTTP %d %s", w.Code, w.Body.String())
+		}
+	}
+}
+
 // Archives share the scratch space: a request that could never fit is
 // refused, one that fits waits for space, and one that waits too long is
 // told to retry.

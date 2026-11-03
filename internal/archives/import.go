@@ -66,14 +66,24 @@ type importOptions struct {
 }
 
 func (ar *Service) HandleImport(w http.ResponseWriter, r *http.Request) {
-	// An archive calls no model, so any signed-in caller may make one,
-	// with or without chat access.
-	p, err := ar.Auth.Authenticate(r, false)
+	// An archive calls no model, so any caller may make one, with or
+	// without chat access: a signed-out caller into its tab.
+	p, err := ar.Auth.Caller(r, true)
 	if err != nil {
 		api.Respond(w, nil, err)
 		return
 	}
-	size, err := requestSize(r, maxImportBody)
+	limit := int64(maxImportBody)
+	if p.Anonymous {
+		limit = maxAnonymousImportBody
+		end, err := ar.anonymous.start(p)
+		if err != nil {
+			api.Respond(w, nil, err)
+			return
+		}
+		defer end()
+	}
+	size, err := requestSize(r, limit)
 	if err != nil {
 		api.Respond(w, nil, err)
 		return
@@ -85,8 +95,11 @@ func (ar *Service) HandleImport(w http.ResponseWriter, r *http.Request) {
 	}
 	defer lease.Release()
 	lift := ar.Scratch.idleBody(w, r)
-	r.Body = http.MaxBytesReader(w, r.Body, maxImportBody)
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	upload, options, err := readImportForm(r, lease, func(options importOptions) error {
+		if p.Anonymous && (options.Target == "cloud" || len(options.Key) != 0) {
+			return auth.ErrAnonymousCloud
+		}
 		if options.Target != "cloud" {
 			return nil
 		}
