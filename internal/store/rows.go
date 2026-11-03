@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -267,8 +268,9 @@ func (r *Rows) Pull(ctx context.Context, p *auth.Principal, key auth.ContentKey,
 	target := seal.Key{Bytes: key[:], KeyIDHex: keyID(key)}
 	// A legacy row is resealed under the key as it is read, but the control
 	// plane accepts that only under the registered current key. One probe
-	// per pull spares every row a refused reseal when the key is another.
-	canRewrap := r.currentPrimaryKeyIs(ctx, p, target.KeyIDHex)
+	// per pull, made only once a legacy row is read, spares every row a
+	// refused reseal when the key is another.
+	canRewrap := sync.OnceValue(func() bool { return r.currentPrimaryKeyIs(ctx, p, target.KeyIDHex) })
 	for start := 0; start < len(ids); start += PullBatch {
 		r.pullBatch(ctx, p, target, scope, ids[start:min(len(ids), start+PullBatch)], canRewrap, true, &rows, failed)
 	}
@@ -286,7 +288,7 @@ type pulled struct {
 // pullBatch fetches each distinct id once, concurrently, and appends the
 // rows opened in request order. Ids the control plane could not serve are
 // fetched once more together; those it still cannot are reported as such.
-func (r *Rows) pullBatch(ctx context.Context, p *auth.Principal, target seal.Key, scope string, ids []string, canRewrap, retry bool, rows *[]domain.StoredRow, failed map[string]error) {
+func (r *Rows) pullBatch(ctx context.Context, p *auth.Principal, target seal.Key, scope string, ids []string, canRewrap func() bool, retry bool, rows *[]domain.StoredRow, failed map[string]error) {
 	// Concurrent reads of one legacy id would race their reseal, leaving
 	// one copy at a stale revision.
 	results := make(map[string]*pulled, len(ids))
@@ -327,7 +329,7 @@ func (r *Rows) pullBatch(ctx context.Context, p *auth.Principal, target seal.Key
 	}
 }
 
-func (r *Rows) pullOne(ctx context.Context, p *auth.Principal, target seal.Key, scope, id string, canRewrap bool) pulled {
+func (r *Rows) pullOne(ctx context.Context, p *auth.Principal, target seal.Key, scope, id string, canRewrap func() bool) pulled {
 	blob, err := r.Controlplane.GetBlob(ctx, scope, id, string(p.JWT), p.ID)
 	if err != nil {
 		var cpe *controlplane.Error
@@ -367,7 +369,7 @@ func (r *Rows) pullOne(ctx context.Context, p *auth.Principal, target seal.Key, 
 		seal.Zero(row.Data)
 		return pulled{err: errRowUnreadable}
 	}
-	if legacy && canRewrap {
+	if legacy && canRewrap() {
 		// Best effort: a row that stays legacy is still read, and the
 		// next read reseals it.
 		if etag, err := r.rewrapRow(ctx, p, scope, id, row.Data, blob.ETag, target); err == nil {
