@@ -311,11 +311,16 @@ func (h *harness) forkThread(ctx context.Context, p *auth.Principal, key auth.Co
 // Message actions change a chat's transcript.
 func (h *harness) deleteMessage(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *messageRequest) (any, error) {
 	return h.changeMessages(ctx, p, key, in, func(t *domain.Thread, index int) error {
+		if t.Messages[index].Role == domain.CompactionRole {
+			return api.Err(400, "BAD_REQUEST", "A compaction marker is not deleted")
+		}
 		// As on the web client, a chat keeps its last message.
-		if len(t.Messages) == 1 {
+		if t.MessageCount() == 1 {
 			return api.Err(400, "BAD_REQUEST", "A chat keeps its last message")
 		}
 		t.Messages = slices.Delete(t.Messages, index, index+1)
+		// A summary of the deleted message must not keep what it said.
+		t.DropCompactionsAfter(index - 1)
 		return nil
 	})
 }
@@ -328,6 +333,7 @@ func (h *harness) updateMessage(ctx context.Context, p *auth.Principal, key auth
 			return api.Err(400, "BAD_REQUEST", "Only a reply is edited in place")
 		}
 		domain.ReplaceReplyText(&t.Messages[index], *in.Content)
+		t.DropCompactionsAfter(index)
 		return nil
 	})
 }

@@ -13,8 +13,8 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
-// A row or device record names the format it is in. One in the current
-// format is read as written. One that names no format was written before
+// A row or device record names the format it is in. One in a format of
+// readVersions is read as written. One that names no format was written before
 // formats were named, by the web and iOS apps, the old web client, or a
 // client's blank record of a new chat, and the legacy reader reads it into
 // the current format. One in any other format is refused.
@@ -28,16 +28,16 @@ import (
 // read, as a later harness writes, or that breaks the format it names.
 var errRecordUnsupported = api.Err(409, "RECORD_UNSUPPORTED", "The record is in a format this harness cannot read")
 
-// currentFormat reports whether a record is in the current format, as
-// opposed to one written before formats were named.
+// currentFormat reports whether a record is in a format of readVersions,
+// as opposed to one written before formats were named.
 func currentFormat(data []byte) (bool, error) {
 	var marker struct {
 		RecordVersion int `json:"recordVersion"`
 	}
-	if json.Unmarshal(data, &marker) != nil || marker.RecordVersion != 0 && marker.RecordVersion != RecordVersion {
+	if json.Unmarshal(data, &marker) != nil || marker.RecordVersion != 0 && !slices.Contains(readVersions, marker.RecordVersion) {
 		return false, errRecordUnsupported
 	}
-	return marker.RecordVersion == RecordVersion, nil
+	return marker.RecordVersion != 0, nil
 }
 
 // readCurrent reads a record in the current format into v, refusing one
@@ -81,6 +81,10 @@ var (
 	nullableMembers = []string{"presetId", "color"}
 )
 
+// currentCompaction are the members a compaction marker's record requires:
+// what its summary covers, and what wrote it.
+var currentCompaction = []string{"messages", "startedAt", "endedAt", "model", "version"}
+
 // readCurrentThread reads a chat in the current format into v, whose
 // thread is t, refusing one whose messages or values that format does not
 // allow.
@@ -93,11 +97,16 @@ func readCurrentThread(data []byte, v any, t *Thread) error {
 	}
 	json.Unmarshal(data, &shape)
 	for _, message := range shape.Messages {
-		if !holds(message, currentMessage) {
+		var marker struct {
+			Role       string          `json:"role"`
+			Compaction json.RawMessage `json:"compaction"`
+		}
+		json.Unmarshal(message, &marker)
+		if !holds(message, currentMessage) || marker.Role == CompactionRole && !holds(marker.Compaction, currentCompaction) {
 			return errRecordUnsupported
 		}
 	}
-	if !slices.Contains(titleStates, t.TitleState) || slices.ContainsFunc(t.Messages, func(m Message) bool { return m.Role != "user" && m.Role != "assistant" }) {
+	if !slices.Contains(titleStates, t.TitleState) || slices.ContainsFunc(t.Messages, func(m Message) bool { return !slices.Contains(MessageRoles, m.Role) }) {
 		return errRecordUnsupported
 	}
 	return nil

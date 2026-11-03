@@ -117,6 +117,9 @@ func TestStoredRowsNameTheirFormat(t *testing.T) {
 	}
 }
 
+// laterRecordVersion is a format newer than any this harness reads.
+const laterRecordVersion = 3
+
 // A record is read by the format it names: the current one as written, and
 // one older clients wrote, naming none, through the legacy reader. One naming
 // another format is refused, as is one in the current format leaving out or
@@ -137,7 +140,7 @@ func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 	formats := map[string]func(api.Object){
 		"legacy":  func(api.Object) {},
 		"current": current,
-		"later":   func(data api.Object) { data["recordVersion"] = domain.RecordVersion + 1 },
+		"later":   func(data api.Object) { data["recordVersion"] = laterRecordVersion },
 		"extra": func(data api.Object) {
 			current(data)
 			data["mood"] = "sunny"
@@ -153,6 +156,10 @@ func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 		"mistyped": func(data api.Object) {
 			current(data)
 			data["pinned"] = "yes"
+		},
+		"unrecorded marker": func(data api.Object) {
+			current(data)
+			data["messages"] = append(api.Arr(data["messages"]), api.Object{"id": "c1", "role": "compaction", "createdAt": "2026-01-01T00:00:00Z", "content": "a summary"})
 		},
 	}
 	// A member another client of the same rows added does not make a record
@@ -199,13 +206,13 @@ func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 	if slices.Sort(listed); !slices.Equal(listed, []string{"current", "extra", "legacy"}) {
 		t.Errorf("the list holds %v", listed)
 	}
-	rows.rows[rowMapKey(p, "project", "later")] = domain.StoredRow{ID: "later", ETag: "1", Data: api.Raw(api.Object{"name": "Trip", "recordVersion": domain.RecordVersion + 1})}
+	rows.rows[rowMapKey(p, "project", "later")] = domain.StoredRow{ID: "later", ETag: "1", Data: api.Raw(api.Object{"name": "Trip", "recordVersion": laterRecordVersion})}
 	if w := postRoute(h, "/v1/projects/get", api.Object{"key": keyBase64(key), "id": "later"}, "alice"); !refused(w) {
 		t.Errorf("opening a project in a later format: HTTP %d %s", w.Code, w.Body)
 	}
 	trip := "trip"
 	rows.rows[rowMapKey(p, "project", trip)] = domain.StoredRow{ID: trip, ETag: "1", Data: api.Raw(api.Object{"name": "Trip"})}
-	for doc, data := range map[string]api.Object{"notes": {"filename": "notes.md"}, "later": {"filename": "later.md", "recordVersion": domain.RecordVersion + 1}} {
+	for doc, data := range map[string]api.Object{"notes": {"filename": "notes.md"}, "later": {"filename": "later.md", "recordVersion": laterRecordVersion}} {
 		rows.rows[rowMapKey(p, "project_document", trip+"/"+doc)] = domain.StoredRow{ID: trip + "/" + doc, ETag: "1", Data: api.Raw(data), Project: &trip, ProjectSet: true}
 	}
 	if w := postRoute(h, "/v1/projects/get", api.Object{"key": keyBase64(key), "id": trip}, "alice"); !refused(w) {
@@ -225,7 +232,7 @@ func TestRecordsAreReadByTheFormatTheyName(t *testing.T) {
 	if left := (archives.BackupOmission{Kind: "project_document", SourceID: "later", ParentSourceID: trip, Category: "invalid", Reason: "row_unreadable"}); w.Code != http.StatusOK || manifest.Counts.ProjectDocuments != 1 || !slices.Contains(manifest.Omissions, left) {
 		t.Errorf("backing up a project with a document in a later format: HTTP %d %+v", w.Code, manifest)
 	}
-	rows.rows[rowMapKey(p, "profile", "profile")] = domain.StoredRow{ID: "profile", ETag: "1", Data: api.Raw(api.Object{"nickname": "Sam", "recordVersion": domain.RecordVersion + 1})}
+	rows.rows[rowMapKey(p, "profile", "profile")] = domain.StoredRow{ID: "profile", ETag: "1", Data: api.Raw(api.Object{"nickname": "Sam", "recordVersion": laterRecordVersion})}
 	if w := postRoute(h, "/v1/profile/get", api.Object{"key": keyBase64(key)}, "alice"); !refused(w) {
 		t.Errorf("opening a profile in a later format: HTTP %d %s", w.Code, w.Body)
 	}

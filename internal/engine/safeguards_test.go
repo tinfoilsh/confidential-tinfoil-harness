@@ -84,7 +84,7 @@ func TestSubmitter_TrimsOversizedHistory(t *testing.T) {
 
 func TestScreeningIsThePromptAndHistoryWithoutToolResults(t *testing.T) {
 	h := &Engine{Safeguards: &Submitter{}}
-	req := &Request{System: "be helpful", conversation: "chat-1", Groups: [][]json.RawMessage{
+	req := &Request{System: "be helpful", conversation: "chat-1", history: [][]json.RawMessage{
 		{api.Raw(api.Object{"role": "user", "content": []any{api.Object{"type": "text", "text": "look"}, api.Object{"type": "image_url", "image_url": api.Object{"url": "data:..."}}}})},
 		{api.Raw(api.Object{"role": "assistant", "content": "", "reasoning_content": "hidden", "tool_calls": []any{api.Object{"id": "c1"}}}), api.Raw(api.Object{"role": "tool", "tool_call_id": "c1", "content": "42"})},
 		{api.Raw(api.Object{"role": "user", "content": "thanks"})},

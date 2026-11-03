@@ -84,7 +84,7 @@ func TestAnswersReachTheModelWithTheNextQuestion(t *testing.T) {
 			t.Fatalf("the model was asked %s", prompt)
 		}
 		text, _ := sent.Messages[len(sent.Messages)-2].Content.(string)
-		return text
+		return withoutSent(text)
 	}
 	answers := "<question_answers>\nThe user's answers to the questions of render_questions call quiz (Driving quiz):\n1. A red curb means\nAnswer: [b] Buses only\n2. Which lights are on at night?\nAnswer: (none selected)\n</question_answers>"
 	submit := continueInput(key, "chat-1")

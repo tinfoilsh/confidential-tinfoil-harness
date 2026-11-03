@@ -755,6 +755,15 @@ func TestChunksCutOnMessageBoundariesAndNeverSplitARune(t *testing.T) {
 	}
 }
 
+// A compaction marker's summary repeats the messages before it, so a search
+// would find the chat twice for them.
+func TestACompactionSummaryIsNotIndexed(t *testing.T) {
+	chat := []byte(`{"title": "T", "messages": [{"role": "user", "content": "the question"}, {"role": "compaction", "content": "a summary of the question"}, {"role": "user", "content": "the next question"}]}`)
+	if chunks := chatChunks(chat); !slices.Equal(chunks, []string{"T\nthe question\nthe next question"}) {
+		t.Fatalf("the chat was indexed as %q", chunks)
+	}
+}
+
 func chunkLengths(chunks []string) []int {
 	lengths := make([]int, len(chunks))
 	for i, chunk := range chunks {

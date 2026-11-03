@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -37,6 +38,14 @@ type Request struct {
 	widgets                    []domain.Widget   // what the caller draws: advertised, never dialled
 	rendered                   []json.RawMessage // their declarations
 	webSearch, piiCheck        bool
+	// Groups are the history the model reads: each message after the chat's
+	// latest compaction marker, the first carrying the marker's summary.
+	// history is every message but the markers, as the safeguards classify
+	// the chat. Both are read from messages, the chat as the prompt reads it.
+	history  [][]json.RawMessage
+	messages []domain.Message
+	vision   bool
+	loc      *time.Location
 }
 
 // cacheScope is the prompt cache a chat's turns share: the chats of one
@@ -272,12 +281,56 @@ func (eng *Engine) BuildRequest(thread *domain.Thread, profile *domain.Profile, 
 			req.widgetHint += "\n- " + w.Name + ": " + w.Hint
 		}
 	}
-	vision := c.Vision(name)
-	for i := range thread.Messages {
-		req.Groups = append(req.Groups, RenderMessage(&thread.Messages[i], vision, policy, loc))
-	}
+	req.messages, req.vision, req.loc = thread.Messages, c.Vision(name), loc
+	req.render()
 	req.reminder = api.Raw(api.Object{"role": "user", "content": reminder})
 	return req, picked, nil
+}
+
+// render reads the chat into the history the model reads, from its latest
+// compaction marker on, and into the history the safeguards classify.
+func (req *Request) render() {
+	req.Groups, req.history, req.costs = nil, nil, nil
+	latest := domain.LatestCompaction(req.messages)
+	for i := range req.messages {
+		m := &req.messages[i]
+		if m.Role == domain.CompactionRole {
+			continue
+		}
+		group := RenderMessage(m, req.vision, req.policy, req.loc)
+		req.history = append(req.history, group)
+		if i > latest {
+			req.Groups = append(req.Groups, group)
+		}
+	}
+	if latest >= 0 {
+		req.Groups = withSummary(req.Groups, req.messages[latest].Content)
+	}
+}
+
+// compactedNote tells the model what a compaction marker's summary is.
+const compactedNote = "The earlier part of this conversation was compacted into this summary to fit the context window. Treat it as your memory of those messages. Files, images and pages from that part are no longer available; ask the user to share them again if you need their exact content. Do not mention this summary unless the user asks about earlier messages."
+
+// summaryTags are the tags the summary is wrapped in, which its own text
+// cannot close.
+var summaryTags = regexp.MustCompile(`(?i)<(/?conversation_summary)`)
+
+// withSummary puts a compaction marker's summary at the start of the history
+// that follows it: in the question that opens it, so no two user messages
+// follow each other, or alone before a reply that opens it.
+func withSummary(groups [][]json.RawMessage, summary string) [][]json.RawMessage {
+	text := "<conversation_summary>\n" + compactedNote + "\n\n" + summaryTags.ReplaceAllString(summary, "&lt;$1") + "\n</conversation_summary>"
+	if len(groups) == 0 || role(groups[0][0]) != "user" {
+		return append([][]json.RawMessage{{api.Raw(api.Object{"role": "user", "content": text})}}, groups...)
+	}
+	question := api.Obj(api.Parsed(groups[0][0]))
+	if content, ok := question["content"].(string); ok {
+		question["content"] = text + "\n\n" + content
+	} else {
+		question["content"] = append([]any{api.Object{"type": "text", "text": text}}, api.Arr(question["content"])...)
+	}
+	first := append([]json.RawMessage{api.Raw(question)}, groups[0][1:]...)
+	return append([][]json.RawMessage{first}, groups[1:]...)
 }
 
 func RenderMessage(message *domain.Message, vision bool, policy string, loc *time.Location) []json.RawMessage {

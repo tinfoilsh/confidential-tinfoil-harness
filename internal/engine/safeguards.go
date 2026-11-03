@@ -145,9 +145,10 @@ type screening struct {
 	messages     []SafeguardMessage
 }
 
-// screening captures the prompt and history a run was asked, without tool
-// results. Turns through auto are screened here too: the router is not told
-// their chat, so the control plane ignores the router's report of them.
+// screening captures the prompt and the chat's whole history a run was
+// asked, without tool results or the summaries that stand in for compacted
+// messages. Turns through auto are screened here too: the router is not
+// told their chat, so the control plane ignores the router's report of them.
 func (eng *Engine) screening(req *Request) *screening {
 	if eng.Safeguards == nil {
 		return nil
@@ -156,7 +157,7 @@ func (eng *Engine) screening(req *Request) *screening {
 	if req.System != "" {
 		messages = append(messages, SafeguardMessage{Role: "system", Content: req.System})
 	}
-	for _, group := range req.Groups {
+	for _, group := range req.history {
 		for _, encoded := range group {
 			var message struct {
 				Role    string `json:"role"`
