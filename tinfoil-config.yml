@@ -24,7 +24,7 @@ networks:
 
 containers:
   - name: harness
-    image: "ghcr.io/tinfoilsh/confidential-tinfoil-harness@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    image: "ghcr.io/tinfoilsh/confidential-tinfoil-harness@sha256:6edb00d7b041b93c2f9786f99ca02de895ee267c5618e42f8fbd7ab9a27a7698" # v0.2.3
     networks: [upstream, storage]
     env:
       - TINFOIL_CONTROLPLANE_URL: https://api.tinfoil.sh
