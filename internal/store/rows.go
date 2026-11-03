@@ -414,7 +414,8 @@ func (r *Rows) Load(ctx context.Context, p *auth.Principal, key auth.ContentKey,
 }
 
 // listStatus is one page of row ids, newest first: a project's chats, or
-// a project's documents, or every row of a scope.
+// a project's documents, or every row of a scope. It leaves deletes out,
+// which would otherwise page it and serve the same rows again.
 func (r *Rows) listStatus(ctx context.Context, p *auth.Principal, scope, cursor, project string, limit int) ([]string, string, error) {
 	if !seal.Scope(scope).Valid() {
 		return nil, "", api.Err(400, "BAD_REQUEST", "invalid scope")
@@ -426,7 +427,7 @@ func (r *Rows) listStatus(ctx context.Context, p *auth.Principal, scope, cursor,
 	if scope == "chat" {
 		chatsOf = project
 	}
-	list, err := r.Controlplane.ListStatus(ctx, scope, cursor, limit, string(p.JWT), p.ID, chatsOf, "desc")
+	list, err := r.Controlplane.ListStatus(ctx, scope, cursor, limit, string(p.JWT), p.ID, chatsOf, "desc", true)
 	if err != nil {
 		return nil, "", FromControlplane(err)
 	}

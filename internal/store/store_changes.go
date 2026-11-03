@@ -44,7 +44,7 @@ func (s *Store) StorageChanges(ctx context.Context, p *auth.Principal) (any, err
 		if scope == "profile" {
 			direction = "asc"
 		}
-		list, err := s.Controlplane.ListStatus(ctx, scope, "", 1, string(p.JWT), p.ID, "", direction)
+		list, err := s.Controlplane.ListStatus(ctx, scope, "", 1, string(p.JWT), p.ID, "", direction, false)
 		if err != nil {
 			return nil, FromControlplane(err)
 		}

@@ -755,7 +755,14 @@ func (c *Client) DeleteAllProjects(ctx context.Context, req DeleteAllProjectsReq
 	return &out, nil
 }
 
-func (c *Client) ListStatus(ctx context.Context, scope, cursor string, limit int, jwt, clerkUserID, projectID, direction string) (*ListStatusResponse, error) {
+// listStatusOmitDeletes asks list-status for live rows alone: no deletes,
+// and a cursor that pages past live rows only.
+const listStatusOmitDeletes = "omit"
+
+// ListStatus is one page of a scope's rows and deletes. omitDeletes leaves
+// the deletes out, so a listing of what exists is not paged by them; a
+// control plane without the option still sends them.
+func (c *Client) ListStatus(ctx context.Context, scope, cursor string, limit int, jwt, clerkUserID, projectID, direction string, omitDeletes bool) (*ListStatusResponse, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
@@ -771,6 +778,9 @@ func (c *Client) ListStatus(ctx context.Context, scope, cursor string, limit int
 	}
 	if direction != "" {
 		q.Set("direction", direction)
+	}
+	if omitDeletes {
+		q.Set("deletes", listStatusOmitDeletes)
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"?"+q.Encode(), nil)
 	if err != nil {

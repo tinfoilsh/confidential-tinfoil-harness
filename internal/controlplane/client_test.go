@@ -590,13 +590,16 @@ func TestListStatusEncodesQuery(t *testing.T) {
 		if _, ok := r.URL.Query()["direction"]; ok {
 			t.Errorf("direction should be omitted when empty: %q", r.URL.Query().Get("direction"))
 		}
+		if _, ok := r.URL.Query()["deletes"]; ok {
+			t.Errorf("deletes should be omitted unless left out: %q", r.URL.Query().Get("deletes"))
+		}
 		json.NewEncoder(w).Encode(ListStatusResponse{
 			Updates:    []BlobMeta{{ID: "a", ETag: "1", KeyID: strings.Repeat("a", 32)}},
 			NextCursor: "c2",
 		})
 	})
 	c := NewClient(st.server.URL, nil)
-	resp, err := c.ListStatus(context.Background(), "chat", "c1", 50, "j", "user_x", "proj_1", "")
+	resp, err := c.ListStatus(context.Background(), "chat", "c1", 50, "j", "user_x", "proj_1", "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -611,10 +614,13 @@ func TestListStatusEncodesDirection(t *testing.T) {
 		if got := r.URL.Query().Get("direction"); got != "desc" {
 			t.Errorf("direction: got %q want desc", got)
 		}
+		if got := r.URL.Query().Get("deletes"); got != "omit" {
+			t.Errorf("deletes: got %q want omit", got)
+		}
 		json.NewEncoder(w).Encode(ListStatusResponse{})
 	})
 	c := NewClient(st.server.URL, nil)
-	if _, err := c.ListStatus(context.Background(), "project", "", 50, "j", "user_x", "", "desc"); err != nil {
+	if _, err := c.ListStatus(context.Background(), "project", "", 50, "j", "user_x", "", "desc", true); err != nil {
 		t.Fatal(err)
 	}
 }

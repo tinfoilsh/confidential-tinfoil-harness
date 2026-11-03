@@ -585,6 +585,14 @@ func TestListPagesNewestFirstAndSelectsAProjectsRows(t *testing.T) {
 	h := newRowsHarness(t)
 	ctx := context.Background()
 	p1, p2 := "p1", "p2"
+	var withDeletes atomic.Int32
+	h.cp.Mu.Lock()
+	h.cp.CaptureHeaders = func(r *http.Request) {
+		if r.URL.Path == "/api/sync/list-status" && r.URL.Query().Get("deletes") != "omit" {
+			withDeletes.Add(1)
+		}
+	}
+	h.cp.Mu.Unlock()
 	for i, chat := range []struct {
 		id      string
 		project *string
@@ -627,6 +635,9 @@ func TestListPagesNewestFirstAndSelectsAProjectsRows(t *testing.T) {
 	page, err := h.rows.List(ctx, h.p, h.key, "chat", "", "", 10)
 	if err != nil || len(page.Rows) != 3 || codeOf(page.Unreadable["c4"]) != "KEY_MISMATCH" {
 		t.Fatalf("page with a row under another key: rows=%v unreadable=%v err=%v", ids(page), page.Unreadable, err)
+	}
+	if withDeletes.Load() != 0 {
+		t.Fatalf("%d listings asked for deletes, which would page them", withDeletes.Load())
 	}
 }
 
