@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/ed25519"
@@ -113,7 +114,7 @@ func TestLargeBodiesAreReadOnlyAfterAuthentication(t *testing.T) {
 		{"/v1/threads/update", "", "", 401},
 		{"/v1/threads/update", "free_refused-key", "", 401},
 		{"/v1/threads/get", "free_refused-key", "", 401},
-		{"/v1/threads/follow", "free_refused-key", "", 401},
+		{"/v1/threads/follow", "forged-session", "", 401},
 		{"/v1/attachments/get-public", "free_refused-key", "", 401},
 		{"/v1/speech", "free_refused-key", "", 401},
 		{"/v1/import", "forged-session", "", 401},
@@ -191,15 +192,12 @@ func TestAnonymousReconnectUsesKeyPossessionInsteadOfIP(t *testing.T) {
 		t.Fatal(err)
 	}
 	awaitFrame(t, run.Log, "TEXT_MESSAGE_CHUNK")
-	if err := h.auth.Recognize(context.Background(), run.Principal); err != nil {
-		t.Fatal(err)
-	}
 	for _, tc := range []struct {
 		key, ip string
 		want    int
 	}{
 		{"free_anonymous-key", "198.51.100.9:1234", 200},
-		{"free_other-client", "192.0.2.1:1234", 401},
+		{"free_other-client", "192.0.2.1:1234", 404},
 		{"", "192.0.2.1:1234", 401},
 	} {
 		body := api.Raw(api.Object{"threadId": run.Thread.ID, "runId": run.Log.ID})
@@ -222,6 +220,92 @@ func TestAnonymousReconnectUsesKeyPossessionInsteadOfIP(t *testing.T) {
 		if strings.Contains(response.Body.String(), "free_anonymous-key") {
 			t.Fatal("credential leaked into run events")
 		}
+	}
+}
+
+// A signed-out caller's free key expires at the end of its day, and its
+// client fetches another. The expired key still follows and stops the run
+// it started, without the control plane being asked about it, but starts no
+// new turn.
+func TestAnExpiredFreeKeyStillReachesTheRunItStarted(t *testing.T) {
+	model, release := heldModel()
+	h, _, _ := testChatHarness(t, model)
+	t.Cleanup(release)
+	var expired atomic.Bool
+	var validations atomic.Int32
+	cp := httptest.NewServer(unflagged(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/shim/validate-key" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		validations.Add(1)
+		if expired.Load() {
+			w.WriteHeader(http.StatusUnauthorized)
+			io.WriteString(w, `{"error":{"code":"invalid_api_key"}}`)
+			return
+		}
+		io.WriteString(w, "OK")
+	}))
+	t.Cleanup(cp.Close)
+	h.useAuth(testAuth(cp))
+	const freeKey = "free_yesterdays-key"
+	request := func(path string, in api.Object) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(api.Raw(in)))
+		r.Header.Set("Authorization", "Bearer "+freeKey)
+		return r
+	}
+	server := httptest.NewServer(h.routes())
+	t.Cleanup(server.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	turn, _ := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/v1/threads/turn", bytes.NewReader(api.Raw(localInput("", api.Object{}))))
+	turn.Header.Set("Authorization", "Bearer "+freeKey)
+	streamed, err := server.Client().Do(turn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer streamed.Body.Close()
+	frames := bufio.NewScanner(streamed.Body)
+	next := func() (e event) {
+		for frames.Scan() {
+			if data, ok := strings.CutPrefix(frames.Text(), "data: "); ok {
+				if err := json.Unmarshal([]byte(data), &e); err != nil {
+					t.Fatal(err)
+				}
+				return e
+			}
+		}
+		return e
+	}
+	started := next()
+	if streamed.StatusCode != 200 || started.Type != "RUN_STARTED" || validations.Load() != 1 {
+		t.Fatalf("the turn answered HTTP %d with %+v after %d validations", streamed.StatusCode, started, validations.Load())
+	}
+	// A fresh authenticator stands in for one that has since forgotten it
+	// validated the key.
+	expired.Store(true)
+	h.useAuth(testAuth(cp))
+	run := api.Object{"threadId": started.ThreadID, "runId": started.RunID}
+	if events := eventsIn(t, replayOf(h, request("/v1/threads/follow", run))); events[0].RunID != started.RunID {
+		t.Fatalf("following the run replayed %+v", events[0])
+	}
+	stopped := httptest.NewRecorder()
+	h.routes().ServeHTTP(stopped, request("/v1/threads/cancel", run))
+	if stopped.Code != 200 {
+		t.Fatalf("stopping the run: HTTP %d %s", stopped.Code, stopped.Body.String())
+	}
+	var last event
+	for e := next(); e.Type != ""; e = next() {
+		last = e
+	}
+	var metadata domain.RunMetadata
+	if last.Type != "RUN_FINISHED" || json.Unmarshal(last.Metadata, &metadata) != nil || !domain.ValueOr(metadata.Cancelled, false) || validations.Load() != 1 {
+		t.Fatalf("the run ended with %+v after %d validations", last, validations.Load())
+	}
+	refused := httptest.NewRecorder()
+	h.routes().ServeHTTP(refused, request("/v1/threads/turn", localInput("", api.Object{})))
+	if refused.Code != 401 || validations.Load() != 2 {
+		t.Fatalf("a turn with the expired key: HTTP %d after %d validations", refused.Code, validations.Load())
 	}
 }
 

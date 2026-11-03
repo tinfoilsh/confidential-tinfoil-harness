@@ -24,8 +24,7 @@ func (h *harness) apiRoutes() []routeSpec {
 		{"/v1/changes", false, false, h.changes},
 		{"/v1/threads/list", false, true, decoded(h.listThreads)}, {"/v1/threads/get", false, true, decoded(h.getThread)},
 		{"/v1/threads/delete", false, true, decoded(h.deleteThread)},
-		{"/v1/threads/search", false, true, decoded(h.searchThreads)}, {"/v1/threads/cancel", true, false, decoded(h.engine.CancelThread)},
-		{"/v1/threads/queue/send", true, false, decoded(h.engine.SendQueued)}, {"/v1/threads/queue/remove", true, false, decoded(h.engine.RemoveQueued)}, {"/v1/threads/share", false, false, decoded(h.archives.ShareThread)},
+		{"/v1/threads/search", false, true, decoded(h.searchThreads)}, {"/v1/threads/share", false, false, decoded(h.archives.ShareThread)},
 		{"/v1/threads/share/revoke", false, false, decoded(h.archives.RevokeShare)}, {"/v1/threads/share/status", false, false, decoded(h.archives.ShareStatus)},
 		{"/v1/threads/transcript", false, true, decoded(h.engine.ThreadTranscript)},
 		{"/v1/profile/get", false, true, h.getProfile}, {"/v1/profile/update", false, true, decoded(h.updateProfile)}, {"/v1/profile/upgrade", true, false, decoded(h.upgradeDeviceProfile)},
@@ -51,6 +50,12 @@ func (h *harness) threadOperations() map[string]jsonEndpoint {
 	return map[string]jsonEndpoint{"/v1/threads/update": decoded(h.updateThread), "/v1/threads/fork": decoded(h.forkThread),
 		"/v1/threads/messages/delete": decoded(h.deleteMessage), "/v1/threads/messages/update": decoded(h.updateMessage),
 		"/v1/threads/messages/answer": decoded(h.answerQuestions)}
+}
+
+// runOperations act on a live run or a turn queued behind one.
+func (h *harness) runOperations() map[string]jsonEndpoint {
+	return map[string]jsonEndpoint{"/v1/threads/cancel": decoded(h.engine.CancelThread),
+		"/v1/threads/queue/send": decoded(h.engine.SendQueued), "/v1/threads/queue/remove": decoded(h.engine.RemoveQueued)}
 }
 
 func (h *harness) session(ctx context.Context, p *auth.Principal, _ auth.ContentKey, _ json.RawMessage) (any, error) {

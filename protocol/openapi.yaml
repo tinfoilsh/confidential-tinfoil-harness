@@ -192,7 +192,7 @@ paths:
     post:
       operationId: cancel
       summary: Stop a run
-      description: Stops the chat's running reply. The turns queued behind it end too, each with a cancelled RUN_FINISHED, so the harness keeps nothing of a chat once its reply stops.
+      description: Stops the chat's running reply. The turns queued behind it end too, each with a cancelled RUN_FINISHED, so the harness keeps nothing of a chat once its reply stops. A turn still queued is removed instead, as queue/remove removes it, and the reply before it goes on.
       tags: [runs]
       parameters: [{$ref: "#/components/parameters/HarnessInstance"}]
       requestBody:
@@ -1330,7 +1330,7 @@ components:
     identity:
       type: http
       scheme: bearer
-      description: A Clerk session token, or a free_ key for a signed-out caller.
+      description: A Clerk session token, or a free_ key for a signed-out caller. A signed-out caller's request about a run already started, to follow or cancel it or to send or remove a turn queued behind it, carries the key the run started under, which is accepted for it even once it has expired.
     chatAccess:
       type: apiKey
       in: header

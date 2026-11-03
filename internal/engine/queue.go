@@ -20,6 +20,9 @@ func (eng *Engine) CancelThread(ctx context.Context, p *auth.Principal, _ auth.C
 	}
 	eng.Live.mu.Lock()
 	defer eng.Live.mu.Unlock()
+	if eng.removeQueued(r) {
+		return struct{}{}, nil
+	}
 	if r.Thread.Active != r || r.ending {
 		return nil, api.Err(409, "RUN_IN_FLIGHT", "This run is no longer active")
 	}
@@ -70,17 +73,26 @@ func (eng *Engine) RemoveQueued(ctx context.Context, p *auth.Principal, _ auth.C
 	}
 	eng.Live.mu.Lock()
 	defer eng.Live.mu.Unlock()
+	if !eng.removeQueued(r) {
+		return nil, api.Err(409, "RUN_IN_FLIGHT", "The queued turn has started")
+	}
+	return struct{}{}, nil
+}
+
+// removeQueued ends a turn still waiting in its chat's queue, and reports
+// whether it was waiting; live.mu is held.
+func (eng *Engine) removeQueued(r *Run) bool {
 	s := r.Thread
 	index := slices.Index(s.Queue, r)
 	if index < 0 {
-		return nil, api.Err(409, "RUN_IN_FLIGHT", "The queued turn has started")
+		return false
 	}
 	s.Queue = slices.Delete(s.Queue, index, index+1)
 	r.cancelled = true
 	eng.endQueued(r, nil)
 	queueChanged(s)
 	eng.dropIdle(s)
-	return struct{}{}, nil
+	return true
 }
 
 // StopThread stops a chat being deleted: its running reply is cancelled and

@@ -85,6 +85,9 @@ func (h *harness) handlers() map[string]http.HandlerFunc {
 	for path, handler := range h.threadOperations() {
 		add("POST "+path, h.threadOperation(handler))
 	}
+	for path, handler := range h.runOperations() {
+		add("POST "+path, h.runOperation(handler))
+	}
 	return handlers
 }
 
@@ -164,6 +167,27 @@ func (h *harness) threadOperation(handler jsonEndpoint) http.HandlerFunc {
 		target.ClearKey()
 		result, err := handler(r.Context(), p, key, body)
 		api.Respond(w, result, auth.WithQuota(p, api.RateLimit{}, err))
+	}
+}
+
+// runOperation serves a route about a run already started, whose caller
+// RunCaller knows. The route checks the content key its body names against
+// the run's.
+func (h *harness) runOperation(handler jsonEndpoint) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		p, err := h.auth.RunCaller(r)
+		if err != nil {
+			api.Respond(w, nil, err)
+			return
+		}
+		body, err := api.ReadBody(w, r, api.MaxRequestBody)
+		defer clear(body)
+		if err != nil {
+			api.Respond(w, nil, err)
+			return
+		}
+		result, err := handler(r.Context(), p, auth.ContentKey{}, body)
+		api.Respond(w, result, err)
 	}
 }
 

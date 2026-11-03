@@ -16,6 +16,16 @@ func (a *Authenticator) Caller(r *http.Request, anonymous bool) (*Principal, err
 	return p, a.Recognize(r.Context(), p)
 }
 
+// RunCaller is who a request about a run already started is from. Such a
+// request admits no work and spends no quota, and reaches only runs started
+// under the caller's identity. A signed-out caller is known by its free key
+// alone, without asking the control plane, which refuses the key once its
+// day ends: holding the key a run started under is the proof the run's own
+// caller gave.
+func (a *Authenticator) RunCaller(r *http.Request) (*Principal, error) {
+	return a.Authenticate(r, true)
+}
+
 // WithQuota gives a refusal for an exhausted quota the caller's quota as the
 // refusal leaves it. A signed-out caller's is the one its request held.
 func WithQuota(p *Principal, held api.RateLimit, err error) error {
