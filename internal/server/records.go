@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
@@ -84,23 +85,32 @@ func (h *harness) session(ctx context.Context, p *auth.Principal, _ auth.Content
 }
 
 func (h *harness) listThreads(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *listRequest) (any, error) {
-	list, next, err := h.store.ThreadSummaries(ctx, p, key, in.Cursor, in.ProjectID, in.Limit)
-	if err != nil {
-		return nil, err
+	var (
+		list             []domain.ThreadSummary
+		next             string
+		pins             []string
+		flags            auth.ChatFlags
+		listErr, pinsErr error
+		loads            sync.WaitGroup
+	)
+	loads.Go(func() { list, next, listErr = h.store.ThreadSummaries(ctx, p, key, in.Cursor, in.ProjectID, in.Limit) })
+	loads.Go(func() { pins, pinsErr = h.store.PinnedIDs(ctx, p, key) })
+	loads.Go(func() { flags = h.auth.FlaggedChats(ctx, p) })
+	loads.Wait()
+	if listErr != nil {
+		return nil, listErr
 	}
-	pins, err := h.store.PinnedIDs(ctx, p, key)
-	if err != nil {
-		return nil, err
+	if pinsErr != nil {
+		return nil, pinsErr
 	}
-	flags := h.auth.FlaggedChats(ctx, p)
 	for i := range list {
 		list[i].Pinned = list[i].Pinned || slices.Contains(pins, list[i].ID)
 		list[i].Flagged = list[i].Flagged || flags[list[i].ID]
 	}
 	var pinned []domain.ThreadSummary
 	if in.Cursor == "" {
-		pinned, err = h.pinnedThreads(ctx, p, key, pins, list, flags)
-		if err != nil {
+		var err error
+		if pinned, err = h.pinnedThreads(ctx, p, key, pins, list, flags); err != nil {
 			return nil, err
 		}
 	}
@@ -111,14 +121,25 @@ func (h *harness) listThreads(ctx context.Context, p *auth.Principal, key auth.C
 	}{list, next, pinned}, nil
 }
 func (h *harness) getThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *windowRequest) (any, error) {
-	row, err := h.store.LoadThread(ctx, p, key, in.ID)
-	if err != nil {
-		return nil, err
+	var (
+		row             *domain.ThreadRow
+		pins            []string
+		flags           auth.ChatFlags
+		rowErr, pinsErr error
+		loads           sync.WaitGroup
+	)
+	loads.Go(func() { row, rowErr = h.store.LoadThread(ctx, p, key, in.ID) })
+	loads.Go(func() { pins, pinsErr = h.store.PinnedIDs(ctx, p, key) })
+	loads.Go(func() { flags = h.auth.FlaggedChats(ctx, p) })
+	loads.Wait()
+	if rowErr != nil {
+		return nil, rowErr
 	}
-	if err := h.store.ApplyPins(ctx, p, key, []*domain.ThreadRow{row}); err != nil {
-		return nil, err
+	if pinsErr != nil {
+		return nil, pinsErr
 	}
-	markFlagged(h.auth.FlaggedChats(ctx, p), &row.Thread)
+	row.Pinned = row.Pinned || slices.Contains(pins, row.ID)
+	markFlagged(flags, &row.Thread)
 	return domain.Window(row, in.Before, in.Limit), nil
 }
 func (h *harness) updateThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *updateThreadRequest) (any, error) {
