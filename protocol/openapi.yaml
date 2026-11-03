@@ -192,7 +192,7 @@ paths:
     post:
       operationId: cancel
       summary: Stop a run
-      description: Stops the chat's running reply. The turns queued behind it end too, each with a cancelled RUN_FINISHED, so the harness keeps nothing of a chat once its reply stops.
+      description: Stops the chat's running reply. The turns queued behind it end too, each with a cancelled RUN_FINISHED, so the harness keeps nothing of a chat once its reply stops. A turn still queued is removed instead, as queue/remove removes it, and the reply before it goes on.
       tags: [runs]
       parameters: [{$ref: "#/components/parameters/HarnessInstance"}]
       requestBody:

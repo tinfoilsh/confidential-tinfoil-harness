@@ -1253,6 +1253,61 @@ func TestCancelCommitsPartialAndEndsQueue(t *testing.T) {
 	}
 }
 
+// A stop for a turn still queued removes it from the queue: its stream ends
+// cancelled, it never reaches the model, and the reply before it goes on.
+func TestStoppingAQueuedTurnRemovesIt(t *testing.T) {
+	held, release := heldModel()
+	var calls atomic.Int32
+	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		held(w, r)
+	})
+	t.Cleanup(release)
+	p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
+	run, err := h.engine.AcceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[engine.TurnRequest](sendInput(key)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitFrame(t, run.Log, "TEXT_MESSAGE_CHUNK")
+	queued, err := h.engine.AcceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[engine.TurnRequest](continueInput(key, run.Thread.ID)))
+	if err != nil || !queued.Queued {
+		t.Fatalf("turn not queued: %v", err)
+	}
+	if w := postRoute(h, "/v1/threads/cancel", api.Object{"key": keyBase64(key), "threadId": run.Thread.ID, "runId": queued.Log.ID}, "alice"); w.Code != 200 {
+		t.Fatalf("stopping the queued turn: HTTP %d %s", w.Code, w.Body.String())
+	}
+	select {
+	case <-queued.Finished:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the queued turn did not end with the stop")
+	}
+	var metadata domain.RunMetadata
+	if ended := eventsOf(t, queued.Log); ended[len(ended)-1].Type != "RUN_FINISHED" || json.Unmarshal(ended[len(ended)-1].Metadata, &metadata) != nil || !domain.ValueOr(metadata.Cancelled, false) {
+		t.Fatalf("the queued turn ended with %+v", ended[len(ended)-1])
+	}
+	// The running reply's client is told the queue emptied.
+	var queue []any
+	for _, e := range eventsOf(t, run.Log) {
+		for _, patch := range api.Arr(e.Delta) {
+			if api.Obj(patch)["path"] == "/queue" {
+				queue = api.Arr(api.Obj(patch)["value"])
+			}
+		}
+	}
+	if queue == nil || len(queue) != 0 {
+		t.Fatalf("the running reply was last told the queue is %v", queue)
+	}
+	release()
+	<-run.Finished
+	metadata = domain.RunMetadata{}
+	if ended := eventsOf(t, run.Log); ended[len(ended)-1].Type != "RUN_FINISHED" || json.Unmarshal(ended[len(ended)-1].Metadata, &metadata) != nil || domain.ValueOr(metadata.Cancelled, true) {
+		t.Fatalf("the running reply ended with %+v", ended[len(ended)-1])
+	}
+	if threads, runs, requests := liveCount(h); calls.Load() != 1 || threads+runs+requests != 0 {
+		t.Fatalf("the model was called %d times, and %d chats, %d runs and %d requests are live", calls.Load(), threads, runs, requests)
+	}
+}
+
 // eventsOf is every event a run's log holds.
 func eventsOf(t *testing.T, log *engine.Log) []event {
 	t.Helper()
