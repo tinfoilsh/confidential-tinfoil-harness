@@ -58,6 +58,8 @@ type memoryRows struct {
 	// unfetched is a row the store cannot serve in time.
 	unfetched string
 	calls     int
+	// loads counts the rows opened, by scope.
+	loads map[string]int
 	// What the harness stores beside the rows: attachment bytes in bk,
 	// and in cp their index, the legacy attachments and the change ledger.
 	cp *cpstub.Store
@@ -117,6 +119,7 @@ func (s *memoryRows) Load(_ context.Context, p *auth.Principal, key auth.Content
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
+	s.loads[scope]++
 	name := rowMapKey(p, scope, id)
 	row, ok := s.rows[name]
 	if !ok {
@@ -198,6 +201,19 @@ func (s *memoryRows) List(_ context.Context, p *auth.Principal, key auth.Content
 		page.Rows = append(page.Rows, *row.Copy())
 	}
 	return page, nil
+}
+func (s *memoryRows) Revisions(_ context.Context, p *auth.Principal, scope, _, project string, _ int) ([]store.Revision, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls++
+	listed := []store.Revision{}
+	for name, row := range s.rows {
+		if !strings.HasPrefix(name, p.Scope()+"/"+scope+"/") || project != "" && rowProject(row) != project {
+			continue
+		}
+		listed = append(listed, store.Revision{ID: row.ID, ETag: row.ETag, Project: domain.Present(rowProject(row))})
+	}
+	return listed, "", nil
 }
 func (s *memoryRows) Push(_ context.Context, p *auth.Principal, key auth.ContentKey, scope string, row *domain.StoredRow, _ string) (string, error) {
 	s.mu.Lock()
@@ -329,7 +345,7 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 	searchObjects.HandleFunc("/"+testSearchBucket+"/{key}", bucketstub.NewStore().Handle)
 	searchServer := httptest.NewServer(searchObjects)
 	t.Cleanup(searchServer.Close)
-	rows := &memoryRows{rows: map[string]domain.StoredRow{}, sealed: map[string]auth.ContentKey{}, cp: storage, bk: bk}
+	rows := &memoryRows{rows: map[string]domain.StoredRow{}, sealed: map[string]auth.ContentKey{}, loads: map[string]int{}, cp: storage, bk: bk}
 	cpClient := controlplane.NewClient(cp.URL, nil, controlplane.WithServiceSecret(testStorageSecret))
 	h := &harness{models: &inference.Models{Controlplane: cp.URL, Services: map[string]*inference.Service{}}, controlplane: cp.URL,
 		store: &store.Store{Rows: rows, Controlplane: cpClient, Buckets: buckets.NewClient(bkServer.URL, testBucket, nil), Reseals: jobs.New[store.ResealReport](store.ResealBudget, store.ResealRetention)}}

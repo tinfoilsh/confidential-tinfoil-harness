@@ -31,12 +31,20 @@ func Summarize(t *Thread) ThreadSummary {
 	s := ThreadSummary{ID: t.ID, Title: t.Title, TitleState: t.TitleState, CreatedAt: Present(t.CreatedAt), UpdatedAt: Present(t.UpdatedAt), ProjectID: t.ProjectID, Model: t.Model,
 		WebSearchEnabled: t.WebSearchEnabled, Pinned: t.Pinned, ContextUsage: t.ContextUsage, MessageCount: t.MessageCount(), Flagged: t.Flagged}
 	s.ActivityAt = t.activityAt()
-	// The hint lapses with the run's deadline. One naming no instance was
-	// stored by a process from before runs named theirs, whose runs ended
-	// when it did.
+	// One naming no instance was stored by a process from before runs
+	// named theirs, whose runs ended when it did.
 	if run := t.ActiveRun; run != nil && run.Instance != "" {
-		if expires, err := time.Parse(time.RFC3339Nano, run.ExpiresAt); err == nil && api.Now().Before(expires) {
-			s.ActiveRun = &ActiveRun{RunID: run.RunID, ExpiresAt: run.ExpiresAt, Instance: run.Instance}
+		s.ActiveRun = &ActiveRun{RunID: run.RunID, ExpiresAt: run.ExpiresAt, Instance: run.Instance}
+	}
+	return s.Current()
+}
+
+// Current is the summary as it reads now: its run hint lapses with the
+// run's deadline.
+func (s ThreadSummary) Current() ThreadSummary {
+	if run := s.ActiveRun; run != nil {
+		if expires, err := time.Parse(time.RFC3339Nano, run.ExpiresAt); err != nil || !api.Now().Before(expires) {
+			s.ActiveRun = nil
 		}
 	}
 	return s

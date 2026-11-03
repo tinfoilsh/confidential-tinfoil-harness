@@ -84,22 +84,22 @@ func (h *harness) session(ctx context.Context, p *auth.Principal, _ auth.Content
 }
 
 func (h *harness) listThreads(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *listRequest) (any, error) {
-	rows, next, err := h.store.ThreadPage(ctx, p, key, in.Cursor, in.ProjectID, in.Limit)
+	list, next, err := h.store.ThreadSummaries(ctx, p, key, in.Cursor, in.ProjectID, in.Limit)
 	if err != nil {
 		return nil, err
 	}
-	if err := h.store.ApplyPins(ctx, p, key, rows); err != nil {
+	pins, err := h.store.PinnedIDs(ctx, p, key)
+	if err != nil {
 		return nil, err
 	}
 	flags := h.auth.FlaggedChats(ctx, p)
-	list := []domain.ThreadSummary{}
-	for _, row := range rows {
-		markFlagged(flags, &row.Thread)
-		list = append(list, domain.Summarize(&row.Thread))
+	for i := range list {
+		list[i].Pinned = list[i].Pinned || slices.Contains(pins, list[i].ID)
+		list[i].Flagged = list[i].Flagged || flags[list[i].ID]
 	}
 	var pinned []domain.ThreadSummary
 	if in.Cursor == "" {
-		pinned, err = h.pinnedThreads(ctx, p, key, flags)
+		pinned, err = h.pinnedThreads(ctx, p, key, pins, list, flags)
 		if err != nil {
 			return nil, err
 		}
@@ -160,28 +160,35 @@ func (h *harness) updateThread(ctx context.Context, p *auth.Principal, key auth.
 	return domain.Summarize(&row.Thread), nil
 }
 
-func (h *harness) pinnedThreads(ctx context.Context, p *auth.Principal, key auth.ContentKey, flags auth.ChatFlags) ([]domain.ThreadSummary, error) {
-	ids, err := h.store.PinnedIDs(ctx, p, key)
+// pinnedThreads are the favorites pins names, in its order. One the listed
+// page holds is not opened again.
+func (h *harness) pinnedThreads(ctx context.Context, p *auth.Principal, key auth.ContentKey, pins []string, listed []domain.ThreadSummary, flags auth.ChatFlags) ([]domain.ThreadSummary, error) {
+	byID := make(map[string]domain.ThreadSummary, len(pins))
+	for _, summary := range listed {
+		byID[summary.ID] = summary
+	}
+	unlisted := []string{}
+	for _, id := range pins {
+		if _, ok := byID[id]; !ok {
+			unlisted = append(unlisted, id)
+		}
+	}
+	opened, err := h.store.ThreadSummaryBatch(ctx, p, key, unlisted)
 	if err != nil {
 		return nil, err
+	}
+	for _, summary := range opened {
+		byID[summary.ID] = summary
 	}
 	threads := []domain.ThreadSummary{}
-	rows, err := h.store.ThreadBatch(ctx, p, key, ids)
-	if err != nil {
-		return nil, err
-	}
-	byID := make(map[string]*domain.ThreadRow, len(rows))
-	for _, row := range rows {
-		byID[row.ID] = row
-	}
-	for _, id := range ids {
-		row := byID[id]
-		if row == nil {
+	for _, id := range pins {
+		summary, ok := byID[id]
+		if !ok {
 			continue
 		}
-		row.Pinned = true
-		markFlagged(flags, &row.Thread)
-		threads = append(threads, domain.Summarize(&row.Thread))
+		summary.Pinned = true
+		summary.Flagged = summary.Flagged || flags[id]
+		threads = append(threads, summary)
 	}
 	return threads, nil
 }
