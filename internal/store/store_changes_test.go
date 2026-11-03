@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"net/http"
 	"reflect"
 	"testing"
 	"time"
@@ -20,6 +21,12 @@ func TestChangeTokensDigestTheLedgersEdgeAsClientsHoldThem(t *testing.T) {
 	h.cp.SetBlob("project", "p2", cpstub.Blob{ETag: 2, Body: []byte("sealed"), UpdatedAt: at.Add(time.Minute)})
 	h.cp.Mu.Lock()
 	h.cp.SourceRevision = 42
+	// A deletion changes a token only when the ledger's edge holds deletes.
+	h.cp.CaptureHeaders = func(r *http.Request) {
+		if deletes := r.URL.Query().Get("deletes"); deletes != "" {
+			t.Errorf("a token's listing asked for deletes=%s", deletes)
+		}
+	}
 	h.cp.Mu.Unlock()
 	tokens, err := h.store.StorageChanges(context.Background(), h.p)
 	if err != nil {

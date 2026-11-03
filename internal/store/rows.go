@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -48,6 +49,8 @@ type RowStore interface {
 	Load(context.Context, *auth.Principal, auth.ContentKey, string, string) (*domain.StoredRow, error)
 	Pull(context.Context, *auth.Principal, auth.ContentKey, string, []string) ([]domain.StoredRow, map[string]error, error)
 	List(context.Context, *auth.Principal, auth.ContentKey, string, string, string, int) (Page, error)
+	// Revisions is one page of the rows List would open, unopened.
+	Revisions(context.Context, *auth.Principal, string, string, string, int) ([]Revision, string, error)
 	Push(context.Context, *auth.Principal, auth.ContentKey, string, *domain.StoredRow, string) (string, error)
 	// Remove deletes a row whatever its revision; a missing row is gone.
 	Remove(context.Context, *auth.Principal, auth.ContentKey, string, string) error
@@ -64,6 +67,13 @@ type Page struct {
 	// one sealed to a retired key, and why. A page lists them rather than
 	// failing, so one row cannot hide the rest.
 	Unreadable map[string]error
+}
+
+// Revision is a row as a listing names it, unopened: its id and revision,
+// and for a chat the project the control plane files it under.
+type Revision struct {
+	ID, ETag string
+	Project  *string
 }
 
 const (
@@ -267,8 +277,9 @@ func (r *Rows) Pull(ctx context.Context, p *auth.Principal, key auth.ContentKey,
 	target := seal.Key{Bytes: key[:], KeyIDHex: keyID(key)}
 	// A legacy row is resealed under the key as it is read, but the control
 	// plane accepts that only under the registered current key. One probe
-	// per pull spares every row a refused reseal when the key is another.
-	canRewrap := r.currentPrimaryKeyIs(ctx, p, target.KeyIDHex)
+	// per pull, made only once a legacy row is read, spares every row a
+	// refused reseal when the key is another.
+	canRewrap := sync.OnceValue(func() bool { return r.currentPrimaryKeyIs(ctx, p, target.KeyIDHex) })
 	for start := 0; start < len(ids); start += PullBatch {
 		r.pullBatch(ctx, p, target, scope, ids[start:min(len(ids), start+PullBatch)], canRewrap, true, &rows, failed)
 	}
@@ -286,7 +297,7 @@ type pulled struct {
 // pullBatch fetches each distinct id once, concurrently, and appends the
 // rows opened in request order. Ids the control plane could not serve are
 // fetched once more together; those it still cannot are reported as such.
-func (r *Rows) pullBatch(ctx context.Context, p *auth.Principal, target seal.Key, scope string, ids []string, canRewrap, retry bool, rows *[]domain.StoredRow, failed map[string]error) {
+func (r *Rows) pullBatch(ctx context.Context, p *auth.Principal, target seal.Key, scope string, ids []string, canRewrap func() bool, retry bool, rows *[]domain.StoredRow, failed map[string]error) {
 	// Concurrent reads of one legacy id would race their reseal, leaving
 	// one copy at a stale revision.
 	results := make(map[string]*pulled, len(ids))
@@ -327,7 +338,7 @@ func (r *Rows) pullBatch(ctx context.Context, p *auth.Principal, target seal.Key
 	}
 }
 
-func (r *Rows) pullOne(ctx context.Context, p *auth.Principal, target seal.Key, scope, id string, canRewrap bool) pulled {
+func (r *Rows) pullOne(ctx context.Context, p *auth.Principal, target seal.Key, scope, id string, canRewrap func() bool) pulled {
 	blob, err := r.Controlplane.GetBlob(ctx, scope, id, string(p.JWT), p.ID)
 	if err != nil {
 		var cpe *controlplane.Error
@@ -367,7 +378,7 @@ func (r *Rows) pullOne(ctx context.Context, p *auth.Principal, target seal.Key, 
 		seal.Zero(row.Data)
 		return pulled{err: errRowUnreadable}
 	}
-	if legacy && canRewrap {
+	if legacy && canRewrap() {
 		// Best effort: a row that stays legacy is still read, and the
 		// next read reseals it.
 		if etag, err := r.rewrapRow(ctx, p, scope, id, row.Data, blob.ETag, target); err == nil {
@@ -411,9 +422,10 @@ func (r *Rows) Load(ctx context.Context, p *auth.Principal, key auth.ContentKey,
 	return nil, api.Err(404, "THREAD_NOT_FOUND", "The requested data was not found")
 }
 
-// listStatus is one page of row ids, newest first: a project's chats, or
-// a project's documents, or every row of a scope.
-func (r *Rows) listStatus(ctx context.Context, p *auth.Principal, scope, cursor, project string, limit int) ([]string, string, error) {
+// listStatus is one page of rows, newest first: a project's chats, or a
+// project's documents, or every row of a scope. It leaves deletes out,
+// which would otherwise page it and serve the same rows again.
+func (r *Rows) listStatus(ctx context.Context, p *auth.Principal, scope, cursor, project string, limit int) ([]Revision, string, error) {
 	if !seal.Scope(scope).Valid() {
 		return nil, "", api.Err(400, "BAD_REQUEST", "invalid scope")
 	}
@@ -424,30 +436,39 @@ func (r *Rows) listStatus(ctx context.Context, p *auth.Principal, scope, cursor,
 	if scope == "chat" {
 		chatsOf = project
 	}
-	list, err := r.Controlplane.ListStatus(ctx, scope, cursor, limit, string(p.JWT), p.ID, chatsOf, "desc")
+	list, err := r.Controlplane.ListStatus(ctx, scope, cursor, limit, string(p.JWT), p.ID, chatsOf, "desc", true)
 	if err != nil {
 		return nil, "", FromControlplane(err)
 	}
-	ids := []string{}
+	listed := []Revision{}
 	for _, item := range list.Updates {
 		// The control plane files only chats by project. Document ids name
 		// their project, so select them before any document is opened.
 		if scope == "project_document" && project != "" && !strings.HasPrefix(item.ID, project+"/") {
 			continue
 		}
-		ids = append(ids, item.ID)
+		listed = append(listed, Revision{ID: item.ID, ETag: item.ETag, Project: item.ProjectID})
 	}
-	return ids, list.NextCursor, nil
+	return listed, list.NextCursor, nil
+}
+
+// revisionIDs are the ids of listed rows, in order.
+func revisionIDs(listed []Revision) []string {
+	ids := make([]string, len(listed))
+	for i, row := range listed {
+		ids[i] = row.ID
+	}
+	return ids
 }
 
 func (r *Rows) IDs(ctx context.Context, p *auth.Principal, scope, project string) ([]string, error) {
 	all, cursor := []string{}, ""
 	for {
-		ids, next, err := r.listStatus(ctx, p, scope, cursor, project, ListStatusPage)
+		listed, next, err := r.listStatus(ctx, p, scope, cursor, project, ListStatusPage)
 		if err != nil {
 			return nil, err
 		}
-		all = append(all, ids...)
+		all = append(all, revisionIDs(listed)...)
 		if next == "" {
 			return all, nil
 		}
@@ -458,18 +479,22 @@ func (r *Rows) IDs(ctx context.Context, p *auth.Principal, scope, project string
 	}
 }
 
-func (r *Rows) List(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, cursor, project string, limit int) (Page, error) {
-	defer clear(key[:])
+func (r *Rows) Revisions(ctx context.Context, p *auth.Principal, scope, cursor, project string, limit int) ([]Revision, string, error) {
 	if limit <= 0 || limit > maxListPage {
 		limit = defaultListPage
 	}
-	ids, next, err := r.listStatus(ctx, p, scope, cursor, project, limit)
+	return r.listStatus(ctx, p, scope, cursor, project, limit)
+}
+
+func (r *Rows) List(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, cursor, project string, limit int) (Page, error) {
+	defer clear(key[:])
+	listed, next, err := r.Revisions(ctx, p, scope, cursor, project, limit)
 	if err != nil {
 		return Page{}, err
 	}
 	page := Page{Rows: []domain.StoredRow{}, Next: next}
-	if len(ids) != 0 {
-		page.Rows, page.Unreadable, err = r.Pull(ctx, p, key, scope, ids)
+	if len(listed) != 0 {
+		page.Rows, page.Unreadable, err = r.Pull(ctx, p, key, scope, revisionIDs(listed))
 	}
 	return page, err
 }

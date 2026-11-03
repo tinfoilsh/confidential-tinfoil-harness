@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -333,6 +334,36 @@ func TestPullLeavesALegacyRowAsItIsUnderAnotherRegisteredKey(t *testing.T) {
 	}
 }
 
+// Only a legacy row's reseal depends on the registered key, so a pull of
+// current rows does not ask for it, and one with legacy rows asks once.
+func TestPullAsksForTheRegisteredKeyOnlyToResealLegacyRows(t *testing.T) {
+	h := newRowsHarness(t)
+	ctx := context.Background()
+	h.registered(h.kid)
+	h.push(t, "chat", "c1", `{"id":"c1"}`)
+	h.cp.SetBlob("chat", "c2", cpstub.Blob{ETag: 1, Body: sealLegacyV0(t, h.key, []byte(`{"id":"c2"}`))})
+	h.cp.SetBlob("chat", "c3", cpstub.Blob{ETag: 1, Body: sealLegacyV1(t, h.key, []byte(`{"id":"c3"}`))})
+	var probes atomic.Int32
+	h.cp.Mu.Lock()
+	h.cp.CaptureHeaders = func(r *http.Request) {
+		if r.URL.Path == "/api/sync/keys/current" {
+			probes.Add(1)
+		}
+	}
+	h.cp.Mu.Unlock()
+	if rows, _, err := h.rows.Pull(ctx, h.p, h.key, "chat", []string{"c1"}); err != nil || len(rows) != 1 || probes.Load() != 0 {
+		t.Fatalf("pull of a current row: rows=%d err=%v, and %d key probes, want none", len(rows), err, probes.Load())
+	}
+	if rows, _, err := h.rows.Pull(ctx, h.p, h.key, "chat", []string{"c1", "c2", "c3"}); err != nil || len(rows) != 3 || probes.Load() != 1 {
+		t.Fatalf("pull with legacy rows: rows=%d err=%v, and %d key probes, want one", len(rows), err, probes.Load())
+	}
+	for _, id := range []string{"c2", "c3"} {
+		if stored := h.stored("chat", id); stored.ETag != 2 || stored.KeyID != h.kid {
+			t.Fatalf("%s = %+v, want it resealed under the registered key", id, stored)
+		}
+	}
+}
+
 func TestChatPushReportsItsAttachmentsAndActivity(t *testing.T) {
 	h := newRowsHarness(t)
 	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))
@@ -554,6 +585,14 @@ func TestListPagesNewestFirstAndSelectsAProjectsRows(t *testing.T) {
 	h := newRowsHarness(t)
 	ctx := context.Background()
 	p1, p2 := "p1", "p2"
+	var withDeletes atomic.Int32
+	h.cp.Mu.Lock()
+	h.cp.CaptureHeaders = func(r *http.Request) {
+		if r.URL.Path == "/api/sync/list-status" && r.URL.Query().Get("deletes") != "omit" {
+			withDeletes.Add(1)
+		}
+	}
+	h.cp.Mu.Unlock()
 	for i, chat := range []struct {
 		id      string
 		project *string
@@ -596,6 +635,9 @@ func TestListPagesNewestFirstAndSelectsAProjectsRows(t *testing.T) {
 	page, err := h.rows.List(ctx, h.p, h.key, "chat", "", "", 10)
 	if err != nil || len(page.Rows) != 3 || codeOf(page.Unreadable["c4"]) != "KEY_MISMATCH" {
 		t.Fatalf("page with a row under another key: rows=%v unreadable=%v err=%v", ids(page), page.Unreadable, err)
+	}
+	if withDeletes.Load() != 0 {
+		t.Fatalf("%d listings asked for deletes, which would page them", withDeletes.Load())
 	}
 }
 

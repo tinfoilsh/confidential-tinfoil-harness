@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"sync"
 
 	"github.com/google/uuid"
+	"github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/buckets"
@@ -29,6 +31,9 @@ type Store struct {
 	Reseals *jobs.Runner[ResealReport]
 	// Search forgets a caller's search index when a new key fences it off.
 	Search SearchResetter
+
+	summariesOnce sync.Once
+	summaries     *expirable.LRU[summaryKey, keptSummary]
 }
 
 // SearchResetter drops what is held for a caller's search index once the
@@ -167,23 +172,6 @@ func (s *Store) RemoveThreadRevision(ctx context.Context, p *auth.Principal, key
 	return s.Rows.RemoveRevision(ctx, p, key, id, revision)
 }
 
-// ThreadPage is one page of a user's chats, newest first, or of a project's.
-func (s *Store) ThreadPage(ctx context.Context, p *auth.Principal, key auth.ContentKey, cursor, project string, limit int) ([]*domain.ThreadRow, string, error) {
-	page, err := s.Rows.List(ctx, p, key, "chat", cursor, project, limit)
-	if err != nil {
-		return nil, "", err
-	}
-	threads := make([]*domain.ThreadRow, 0, len(page.Rows))
-	for i := range page.Rows {
-		// A chat this harness cannot read is left out, as one the key cannot
-		// open is.
-		if t, err := domain.ReadThreadRow(&page.Rows[i]); err == nil {
-			threads = append(threads, t)
-		}
-	}
-	return threads, page.Next, nil
-}
-
 // Repairer places the attachments a pushed chat names that the control
 // plane does not hold under it.
 type Repairer interface {
@@ -192,6 +180,7 @@ type Repairer interface {
 
 // SaveThread pushes a chat at the revision it was read at. A chat naming
 // attachments the control plane does not hold under it is repaired once and pushed again.
+// Its summary is kept at the new revision, so a listing need not open it.
 func (s *Store) SaveThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, row *domain.ThreadRow) error {
 	row.RecordVersion = domain.RecordVersion
 	row.UpdatedAt = api.Timestamp()
@@ -200,6 +189,7 @@ func (s *Store) SaveThread(ctx context.Context, p *auth.Principal, key auth.Cont
 		err := s.Push(ctx, p, key, "chat", &stored)
 		if err == nil {
 			row.ETag = stored.ETag
+			s.keepSummary(p, keyID(key), row)
 			return nil
 		}
 		if e := api.AsError(err); e.Code != "MISSING_ATTACHMENT" || repaired {

@@ -283,3 +283,46 @@ func TestADocumentTheKeyCannotOpenIsNeverLeftOutUnsaid(t *testing.T) {
 		t.Errorf("backup: %+v, notes %+v", manifest, notes)
 	}
 }
+
+// Listing again opens no chat that is unchanged, and reads the favorites
+// once: a favorite the page lists is not opened again, and one another
+// client marked in the profile alone still shows.
+func TestListingAgainOpensNoUnchangedChat(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	for _, id := range []string{"c1", "c2", "c3"} {
+		storedThread(rows, "alice", id)
+	}
+	list := func() (threads, pinned map[string]bool) {
+		t.Helper()
+		var page struct {
+			Threads []domain.ThreadSummary `json:"threads"`
+			Pinned  []domain.ThreadSummary `json:"pinned"`
+		}
+		w := postRoute(h, "/v1/threads/list", api.Object{"key": keyBase64(key)}, "alice")
+		if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &page) != nil {
+			t.Fatalf("listing: HTTP %d %s", w.Code, w.Body)
+		}
+		threads, pinned = map[string]bool{}, map[string]bool{}
+		for _, summary := range page.Threads {
+			threads[summary.ID] = summary.Pinned
+		}
+		for _, summary := range page.Pinned {
+			pinned[summary.ID] = summary.Pinned
+		}
+		return threads, pinned
+	}
+	list()
+	rows.mu.Lock()
+	rows.rows["user:alice/profile/profile"] = domain.StoredRow{ID: "profile", ETag: "1", Data: api.Raw(api.Object{"pinnedChatIds": []string{"c2"}})}
+	clear(rows.loads)
+	rows.mu.Unlock()
+	threads, pinned := list()
+	if !reflect.DeepEqual(threads, map[string]bool{"c1": false, "c2": true, "c3": false}) || !reflect.DeepEqual(pinned, map[string]bool{"c2": true}) {
+		t.Fatalf("listed %v with favorites %v, want c2 a favorite", threads, pinned)
+	}
+	rows.mu.Lock()
+	defer rows.mu.Unlock()
+	if !reflect.DeepEqual(rows.loads, map[string]int{"profile": 1}) {
+		t.Fatalf("listing again opened %v, want the profile once and no chat", rows.loads)
+	}
+}
