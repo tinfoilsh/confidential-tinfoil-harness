@@ -88,19 +88,30 @@ func (s *Store) CommitRow(ctx context.Context, p *auth.Principal, key auth.Conte
 // EachRowOrUnreadable visits every row of a scope, or of a project's chats,
 // and names each row the control plane holds that the key cannot open.
 func (s *Store) EachRowOrUnreadable(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, project string, visit func(*domain.StoredRow) error, unreadable func(string)) error {
+	return s.EachPage(ctx, p, key, scope, project, func(rows []domain.StoredRow, unopened []string) error {
+		for _, id := range unopened {
+			unreadable(id)
+		}
+		for _, row := range rows {
+			if err := visit(&row); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// EachPage visits every page of a scope's rows, or of a project's chats,
+// with the ids of the rows on it the key cannot open.
+func (s *Store) EachPage(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, project string, visit func(rows []domain.StoredRow, unreadable []string) error) error {
 	cursor := ""
 	for {
 		page, err := s.Rows.List(ctx, p, key, scope, cursor, project, 100)
 		if err != nil {
 			return err
 		}
-		for _, id := range slices.Sorted(maps.Keys(page.Unreadable)) {
-			unreadable(id)
-		}
-		for _, row := range page.Rows {
-			if err := visit(&row); err != nil {
-				return err
-			}
+		if err := visit(page.Rows, slices.Sorted(maps.Keys(page.Unreadable))); err != nil {
+			return err
 		}
 		if page.Next == "" {
 			return nil

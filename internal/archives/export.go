@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"net/url"
@@ -35,6 +36,8 @@ type Service struct {
 	Store        *store.Store
 	// Imports runs each caller's cloud import.
 	Imports *jobs.Runner[ImportReport]
+	// anonymous are the signed-out callers with an archive running.
+	anonymous anonymousArchives
 }
 
 func (ar *Service) ShareThread(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *ShareRequest) (any, error) {
@@ -227,14 +230,25 @@ type spooledPart struct {
 }
 
 func (ar *Service) HandleExport(w http.ResponseWriter, r *http.Request) {
-	// An archive calls no model, so any signed-in caller may make one,
-	// with or without chat access.
-	p, err := ar.Auth.Authenticate(r, false)
+	started := time.Now()
+	// An archive calls no model, so any caller may make one, with or
+	// without chat access: a signed-out caller of the chats its tab keeps.
+	p, err := ar.Auth.Caller(r, true)
 	if err != nil {
 		api.Respond(w, nil, err)
 		return
 	}
-	size, err := requestSize(r, maxExportBody)
+	limit := int64(maxExportBody)
+	if p.Anonymous {
+		limit = maxAnonymousExportBody
+		end, err := ar.anonymous.start(p)
+		if err != nil {
+			api.Respond(w, nil, err)
+			return
+		}
+		defer end()
+	}
+	size, err := requestSize(r, limit)
 	if err != nil {
 		api.Respond(w, nil, err)
 		return
@@ -246,8 +260,11 @@ func (ar *Service) HandleExport(w http.ResponseWriter, r *http.Request) {
 	}
 	defer lease.Release()
 	lift := ar.Scratch.idleBody(w, r)
-	r.Body = http.MaxBytesReader(w, r.Body, maxExportBody)
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	form, err := readExportForm(r, lease, func(options exportOptions) error {
+		if p.Anonymous && len(options.Key) != 0 {
+			return auth.ErrAnonymousCloud
+		}
 		return ar.Store.AuthorizeArchive(r.Context(), p, options.Key, "export")
 	})
 	if err != nil {
@@ -270,9 +287,9 @@ func (ar *Service) HandleExport(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	switch form.options.Format {
 	case "native":
-		streamArchive(w, "tinfoil-backup.zip", func(out io.Writer) error { return ar.writeBackup(ctx, p, key, form, out) })
+		streamArchive(w, "tinfoil-backup.zip", func(out io.Writer) error { return ar.writeBackup(ctx, p, key, form, out, started) })
 	case "conversations":
-		streamArchive(w, "tinfoil-chats.zip", func(out io.Writer) error { return ar.writeConversations(ctx, p, key, form, lease, out) })
+		streamArchive(w, "tinfoil-chats.zip", func(out io.Writer) error { return ar.writeConversations(ctx, p, key, form, lease, out, started) })
 	case "claude-projects":
 		if key == nil {
 			api.Respond(w, nil, api.Err(401, "KEY_REQUIRED", "A content key is required"))
@@ -434,25 +451,30 @@ func (ar *Service) cloudImage(ctx context.Context, p *auth.Principal) func(*doma
 		if a.Base64 == "" && a.StorageKey() == "" {
 			return nil, errAttachmentMissing
 		}
-		data, err := ar.Attachments.Bytes(ctx, p, a)
-		if attach.Unreachable(err) {
-			return nil, errAttachmentMissing
-		}
-		return data, err
+		return readStored(ctx, func() ([]byte, error) { return ar.Attachments.Bytes(ctx, p, a) })
 	}
 }
 
 func (ar *Service) cloudDocument(ctx context.Context, p *auth.Principal) func(*domain.Attachment) error {
 	return func(a *domain.Attachment) error {
-		err := ar.Attachments.InflateDocument(ctx, p, a)
-		if attach.Unreachable(err) {
-			return errAttachmentMissing
-		}
+		_, err := readStored(ctx, func() (struct{}, error) { return struct{}{}, ar.Attachments.InflateDocument(ctx, p, a) })
 		return err
 	}
 }
 
-func missing(err error) bool { return err == errAttachmentMissing }
+// missing is whether an attachment's content is left out: its source does
+// not hold it, or did not serve it.
+func missing(err error) bool { return err == errAttachmentMissing || err == errAttachmentUnavailable }
+
+// logFailedExport records an export that failed as it was written: why, how
+// long its request ran, and how many chats it held by then.
+func logFailedExport(ctx context.Context, format string, started time.Time, chats int, err error) {
+	if err == nil {
+		return
+	}
+	e := api.AsError(err)
+	slog.Warn("export failed", "format", format, "code", e.Code, "status", e.HTTP, "canceled", ctx.Err() != nil, "elapsed", time.Since(started).Round(time.Millisecond), "chats", chats)
+}
 
 // streamArchive answers with an archive as it is written. A failure before
 // its first bytes is answered as an error; one after cuts the response,
@@ -487,11 +509,17 @@ func (a *archiveResponse) Write(p []byte) (int, error) {
 
 // writeBackup writes a native backup: the cloud's projects, documents and
 // chats when the key is given, then the device's chats.
-func (ar *Service) writeBackup(ctx context.Context, p *auth.Principal, key *auth.ContentKey, form *exportForm, out io.Writer) error {
+func (ar *Service) writeBackup(ctx context.Context, p *auth.Principal, key *auth.ContentKey, form *exportForm, out io.Writer, started time.Time) (err error) {
 	b := NewBackupWriter(out)
+	defer func() {
+		logFailedExport(ctx, "native", started, b.manifest.Counts.CloudChats+b.manifest.Counts.LocalChats, err)
+	}()
 	rel := backupRelationships{ProjectChats: []projectChatLink{}, ProjectDocuments: []projectDocumentLink{}, ChatImages: []chatImageLink{}}
 	cloudChats := map[string]bool{}
 	if key != nil {
+		if err := ar.renewGrant(ctx, p, key); err != nil {
+			return err
+		}
 		projects := map[string]bool{}
 		err := ar.Store.EachRowOrUnreadable(ctx, p, *key, "project", "", func(row *domain.StoredRow) error {
 			project, err := domain.ReadProject(row)
@@ -526,13 +554,9 @@ func (ar *Service) writeBackup(ctx context.Context, p *auth.Principal, key *auth
 		if err != nil {
 			return err
 		}
-		err = ar.Store.EachRowOrUnreadable(ctx, p, *key, "chat", "", func(row *domain.StoredRow) error {
-			read, err := domain.ReadThreadRow(row)
-			if err != nil {
-				b.omit(BackupOmission{Kind: "cloud_chat", SourceID: row.ID, Category: "invalid", Reason: "row_unreadable"})
-				return nil
-			}
-			t := read.Thread
+		err = ar.eachStoredChat(ctx, p, key, func(id string) {
+			b.omit(BackupOmission{Kind: "cloud_chat", SourceID: id, Category: "invalid", Reason: "row_unreadable"})
+		}, nil, func(t *domain.Thread, image func(*domain.Attachment) ([]byte, error), document func(*domain.Attachment) error) error {
 			cloudChats[t.ID] = true
 			if project := domain.ValueOr(t.ProjectID, ""); project != "" {
 				if projects[project] {
@@ -542,9 +566,7 @@ func (ar *Service) writeBackup(ctx context.Context, p *auth.Principal, key *auth
 					b.omit(BackupOmission{Kind: "relationship", SourceID: t.ID, ParentSourceID: project, Category: "unavailable", Reason: "project_reference_unavailable"})
 				}
 			}
-			return backupChat(b, &rel, "cloud_chats", &t, ar.cloudImage(ctx, p), ar.cloudDocument(ctx, p))
-		}, func(id string) {
-			b.omit(BackupOmission{Kind: "cloud_chat", SourceID: id, Category: "invalid", Reason: "row_unreadable"})
+			return backupChat(b, &rel, "cloud_chats", t, image, document)
 		})
 		if err != nil {
 			return err
@@ -571,13 +593,61 @@ func (ar *Service) writeBackup(ctx context.Context, p *auth.Principal, key *auth
 	return b.close(uuid.NewString(), api.Now())
 }
 
+// eachStoredChat hands write the stored chats page by page, with the reads
+// of each chat's attachments, leaving out those skip, when given, names. It
+// names each chat this harness or the key cannot read.
+func (ar *Service) eachStoredChat(ctx context.Context, p *auth.Principal, key *auth.ContentKey, unreadable func(id string), skip func(*domain.Thread) bool, write func(t *domain.Thread, image func(*domain.Attachment) ([]byte, error), document func(*domain.Attachment) error) error) error {
+	if err := ar.renewGrant(ctx, p, key); err != nil {
+		return err
+	}
+	return ar.Store.EachPage(ctx, p, *key, "chat", "", func(rows []domain.StoredRow, unopened []string) error {
+		for _, id := range unopened {
+			unreadable(id)
+		}
+		chats := make([]*domain.Thread, 0, len(rows))
+		for i := range rows {
+			read, err := domain.ReadThreadRow(&rows[i])
+			if err != nil {
+				unreadable(rows[i].ID)
+				continue
+			}
+			if skip == nil || !skip(&read.Thread) {
+				chats = append(chats, &read.Thread)
+			}
+		}
+		if err := ar.renewGrant(ctx, p, key); err != nil {
+			return err
+		}
+		reads := ar.readAhead(ctx, p, chats)
+		defer reads.close()
+		for k, t := range chats {
+			image, document := reads.chat(k)
+			if err := write(t, image, document); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// renewGrant has the export's grant last another while from now. An export
+// of many chats can outlive the grant it began with; the request it serves,
+// which ends with it, bounds it.
+func (ar *Service) renewGrant(ctx context.Context, p *auth.Principal, key *auth.ContentKey) error {
+	return ar.Store.AuthorizeArchive(ctx, p, key[:], "export")
+}
+
 // backupChat writes a chat with each of its images beside it. An image or
 // document whose content cannot be read is left out and listed as omitted.
 func backupChat(b *BackupWriter, rel *backupRelationships, kind string, t *domain.Thread, image func(*domain.Attachment) ([]byte, error), document func(*domain.Attachment) error) error {
 	entry := backupThread{Thread: *t, Messages: make([]backupMessage, 0, len(t.Messages))}
 	entry.ActiveRun, entry.LastRequestID, entry.LastRequestKind, entry.Flagged, entry.HiddenCount, entry.RecordVersion, entry.ImportedFrom = nil, "", "", false, 0, 0, nil
-	omit := func(id string) {
-		b.omit(BackupOmission{Kind: "attachment", SourceID: id, ParentSourceID: t.ID, Category: "unavailable", Reason: "attachment_not_found"})
+	omit := func(id string, err error) {
+		reason := "attachment_not_found"
+		if err == errAttachmentUnavailable {
+			reason = "attachment_unreadable"
+		}
+		b.omit(BackupOmission{Kind: "attachment", SourceID: id, ParentSourceID: t.ID, Category: "unavailable", Reason: reason})
 	}
 	addImage := func(meta backupImage, data []byte) error {
 		meta.MimeType, meta.SizeBytes = http.DetectContentType(data), new(int64(len(data)))
@@ -597,7 +667,7 @@ func backupChat(b *BackupWriter, rel *backupRelationships, kind string, t *domai
 			id := fmt.Sprintf("%s/%d/%d", t.ID, i, j)
 			if !a.IsImage() && !a.HasContent() && a.StorageKey() != "" {
 				if err := document(&a); missing(err) {
-					omit(id)
+					omit(id, err)
 					continue
 				} else if err != nil {
 					return err
@@ -608,7 +678,7 @@ func backupChat(b *BackupWriter, rel *backupRelationships, kind string, t *domai
 			if a.IsImage() {
 				data, err := image(&a)
 				if missing(err) {
-					omit(id)
+					omit(id, err)
 					continue
 				}
 				if err != nil {
@@ -629,7 +699,7 @@ func backupChat(b *BackupWriter, rel *backupRelationships, kind string, t *domai
 					}
 					data, err := base64.StdEncoding.DecodeString(encoded)
 					if err != nil {
-						omit(pageID)
+						omit(pageID, errAttachmentMissing)
 					} else if err := addImage(backupImage{ID: pageID, ChatID: t.ID, MessageIndex: i, AttachmentID: a.ID, Page: new(page.Page), FileName: fmt.Sprintf("%s-page-%d.jpg", a.ID, page.Page)}, data); err != nil {
 						return err
 					} else {
@@ -714,12 +784,13 @@ type conversationsExport struct {
 	manifest      ConversationsManifest
 }
 
-func (ar *Service) writeConversations(ctx context.Context, p *auth.Principal, key *auth.ContentKey, form *exportForm, lease *Lease, out io.Writer) error {
+func (ar *Service) writeConversations(ctx context.Context, p *auth.Principal, key *auth.ContentKey, form *exportForm, lease *Lease, out io.Writer, started time.Time) (err error) {
 	text, err := lease.create()
 	if err != nil {
 		return err
 	}
 	e := &conversationsExport{zip: zip.NewWriter(out), conversations: text, used: map[string]bool{}, manifest: ConversationsManifest{Version: 1, Attachments: []exportedFile{}, Warnings: []string{}}}
+	defer func() { logFailedExport(ctx, "conversations", started, e.manifest.ChatCount, err) }()
 	device := map[string]bool{}
 	for i := range form.threads {
 		t, err := form.thread(i)
@@ -732,18 +803,11 @@ func (ar *Service) writeConversations(ctx context.Context, p *auth.Principal, ke
 		}
 	}
 	if key != nil {
-		err := ar.Store.EachRow(ctx, p, *key, "chat", "", func(row *domain.StoredRow) error {
-			// A chat this harness cannot read is left out, as one the key cannot
-			// open is.
-			read, err := domain.ReadThreadRow(row)
-			if err != nil {
-				return nil
-			}
-			t := read.Thread
-			if device[t.ID] {
-				return nil
-			}
-			return e.chat(&t, domain.ValueOr(t.ProjectID, ""), ar.cloudImage(ctx, p), ar.cloudDocument(ctx, p))
+		// A chat this harness or the key cannot read is left out, and listed.
+		err := ar.eachStoredChat(ctx, p, key, func(id string) {
+			e.manifest.Warnings = append(e.manifest.Warnings, "Could not read chat "+id)
+		}, func(t *domain.Thread) bool { return device[t.ID] }, func(t *domain.Thread, image func(*domain.Attachment) ([]byte, error), document func(*domain.Attachment) error) error {
+			return e.chat(t, domain.ValueOr(t.ProjectID, ""), image, document)
 		})
 		if err != nil {
 			return err

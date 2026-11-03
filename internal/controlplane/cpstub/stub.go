@@ -123,6 +123,7 @@ type Store struct {
 	needsMigrationListings          int
 	DeleteAttachmentIndexFailures   map[string]int
 	RegisterAttachmentIndexFailures map[string][]int
+	AttachmentOwnerFailures         map[string][]int
 	ReserveAttachmentPurges         map[string]int
 	SearchConflict                  func(controlplane.SearchIndexState) controlplane.SearchIndexState
 	// CaptureHeaders sees every request before it is served, outside Mu.
@@ -143,6 +144,7 @@ func New() *Store {
 		NeedsMigrationFailures:          map[int]int{},
 		DeleteAttachmentIndexFailures:   map[string]int{},
 		RegisterAttachmentIndexFailures: map[string][]int{},
+		AttachmentOwnerFailures:         map[string][]int{},
 		ReserveAttachmentPurges:         map[string]int{},
 		purgeClaims:                     map[string]string{},
 		searchClaims:                    map[string]string{},
@@ -1056,7 +1058,13 @@ func (s *Store) handleDeleteAttachmentIndex(w http.ResponseWriter, r *http.Reque
 
 // handleAttachmentOwner names the user an indexed attachment belongs to.
 func (s *Store) handleAttachmentOwner(w http.ResponseWriter, r *http.Request) {
-	owner, ok := s.AttachmentOwners[r.PathValue("aid")]
+	aid := r.PathValue("aid")
+	if pending := s.AttachmentOwnerFailures[aid]; len(pending) > 0 {
+		s.AttachmentOwnerFailures[aid] = pending[1:]
+		w.WriteHeader(pending[0])
+		return
+	}
+	owner, ok := s.AttachmentOwners[aid]
 	if !ok || owner == "" {
 		w.WriteHeader(http.StatusNotFound)
 		return

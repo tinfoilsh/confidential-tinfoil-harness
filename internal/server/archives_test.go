@@ -19,8 +19,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -873,6 +875,302 @@ func TestArchivesNeedNoChatAccess(t *testing.T) {
 		chats := storedChats(restoredRows, "alice")
 		if chat := chats["Stored"]; len(chats) != 1 || len(chat.Messages) != 1 || chat.Messages[0].Role != "user" || chat.Messages[0].Content != "hi" {
 			t.Fatalf("%s restored %+v: %+v", name, result.done, chats)
+		}
+	}
+}
+
+// A stored attachment the storage services fail to serve is read again, and
+// left out once they keep failing, as a chat this harness or the key cannot
+// read is: the export goes on, and lists what it left out.
+func TestExportsLeaveOutWhatStorageDoesNotServe(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	alice := &auth.Principal{ID: "alice"}
+	recovered := pngFixture(t, 2, 2, 10)
+	recoveredID, recoveredKey := seedAttachment(rows, "alice", "chat-1", recovered)
+	failingID, failingKey := seedAttachment(rows, "alice", "chat-1", pngFixture(t, 3, 3, 20))
+	storedThread(rows, "alice", "chat-1",
+		api.Object{"id": recoveredID, "kind": "image", "fileName": "recovered.png", "encryptionKey": recoveredKey},
+		api.Object{"id": failingID, "kind": "image", "fileName": "failing.png", "encryptionKey": failingKey})
+	sealed := rowMapKey(alice, "chat", "chat-sealed")
+	rows.rows[sealed] = domain.StoredRow{ID: "chat-sealed", ETag: "1", Data: api.Raw(api.Object{"title": "Sealed", "messages": []any{}})}
+	rows.sealed[sealed] = randomKey()
+	rows.rows[rowMapKey(alice, "chat", "chat-future")] = domain.StoredRow{ID: "chat-future", ETag: "1", Data: api.Raw(api.Object{"recordVersion": 99, "messages": []any{}})}
+	failReads := func() {
+		rows.cp.Mu.Lock()
+		defer rows.cp.Mu.Unlock()
+		rows.cp.AttachmentOwnerFailures[recoveredID] = []int{http.StatusServiceUnavailable}
+		rows.cp.AttachmentOwnerFailures[failingID] = []int{http.StatusServiceUnavailable, http.StatusBadGateway, http.StatusServiceUnavailable}
+	}
+
+	failReads()
+	w := archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "conversations", "key": keyBase64(key)}))
+	if w.Code != 200 {
+		t.Fatalf("export: HTTP %d %s", w.Code, w.Body.String())
+	}
+	files, _ := unzipped(t, w.Body.Bytes())
+	var manifest archives.ConversationsManifest
+	json.Unmarshal(files[archives.ManifestPath], &manifest)
+	slices.Sort(manifest.Warnings)
+	want := []string{"Could not fetch attachment " + failingID, "Could not read chat chat-future", "Could not read chat chat-sealed"}
+	if manifest.ChatCount != 1 || len(manifest.Attachments) != 1 || !bytes.Equal(files[manifest.Attachments[0].ExportPath], recovered) || !reflect.DeepEqual(manifest.Warnings, want) {
+		t.Fatalf("conversations manifest: %+v", manifest)
+	}
+
+	failReads()
+	w = archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "native", "key": keyBase64(key)}))
+	if w.Code != 200 {
+		t.Fatalf("backup: HTTP %d %s", w.Code, w.Body.String())
+	}
+	files, _ = unzipped(t, w.Body.Bytes())
+	var backup archives.BackupManifest
+	json.Unmarshal(files[archives.ManifestPath], &backup)
+	omitted := map[string]string{}
+	for _, o := range backup.Omissions {
+		omitted[o.Kind+" "+o.SourceID] = o.Reason
+	}
+	wantOmitted := map[string]string{"attachment chat-1/0/1": "attachment_unreadable", "cloud_chat chat-sealed": "row_unreadable", "cloud_chat chat-future": "row_unreadable"}
+	if backup.Counts.CloudChats != 1 || backup.Counts.Images != 1 || !bytes.Equal(files[archives.BackupImagePath("chat-1/0/0", ".bin")], recovered) || !reflect.DeepEqual(omitted, wantOmitted) {
+		t.Fatalf("backup manifest: %+v", backup)
+	}
+}
+
+// pagedRows lists a user's rows in pages of size, by id, and grants an
+// operation its rows for lifetime; listing each page after the first takes
+// pause.
+type pagedRows struct {
+	*memoryRows
+	size            int
+	lifetime, pause time.Duration
+}
+
+func (s *pagedRows) AuthorizeStorage(_ context.Context, _ *auth.Principal, _ auth.ContentKey, operation, project string) (*auth.StorageGrant, error) {
+	return &auth.StorageGrant{Operation: operation, ProjectID: project, ExpiresAt: api.Now().Add(s.lifetime)}, nil
+}
+
+func (s *pagedRows) List(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, cursor, project string, limit int) (store.Page, error) {
+	all, err := s.memoryRows.List(ctx, p, key, scope, "", project, limit)
+	if err != nil {
+		return all, err
+	}
+	slices.SortFunc(all.Rows, func(a, b domain.StoredRow) int { return strings.Compare(a.ID, b.ID) })
+	start, _ := strconv.Atoi(cursor)
+	page := store.Page{Rows: all.Rows[start:min(start+s.size, len(all.Rows))], Unreadable: map[string]error{}}
+	if start == 0 {
+		page.Unreadable = all.Unreadable
+	} else {
+		time.Sleep(s.pause)
+	}
+	if end := start + len(page.Rows); end < len(all.Rows) {
+		page.Next = strconv.Itoa(end)
+	}
+	return page, nil
+}
+
+// An export reads the attachments of a page of stored chats a few at a
+// time, ahead of the chat it writes, and writes the chats as the page lists
+// them, whichever read ends first.
+func TestExportsReadAttachmentsAheadOfTheChatTheyWrite(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	h.store.Rows = &pagedRows{memoryRows: rows, size: 100, lifetime: time.Hour}
+	const chats = 10
+	var first string
+	want := []string{}
+	for i := range chats {
+		chat := fmt.Sprintf("chat-%02d", i)
+		id, blobKey := seedAttachment(rows, "alice", chat, pngFixture(t, 2, 2, uint8(i)))
+		storedThread(rows, "alice", chat, api.Object{"id": id, "kind": "image", "fileName": "photo.png", "encryptionKey": blobKey})
+		if i == 0 {
+			first = id
+		}
+		want = append(want, chat)
+	}
+	// The first chat's image is served once every other has been asked for,
+	// or a second has passed.
+	others := make(chan struct{}, chats)
+	var askedMeanwhile atomic.Int32
+	rows.cp.Mu.Lock()
+	rows.cp.CaptureHeaders = func(r *http.Request) {
+		id, ok := strings.CutPrefix(r.URL.Path, "/api/sync/attachment-owner/")
+		if !ok {
+			return
+		}
+		if id != first {
+			others <- struct{}{}
+			return
+		}
+		timeout := time.After(time.Second)
+		for askedMeanwhile.Load() < chats-1 {
+			select {
+			case <-others:
+				askedMeanwhile.Add(1)
+			case <-timeout:
+				return
+			}
+		}
+	}
+	rows.cp.Mu.Unlock()
+
+	w := archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "conversations", "key": keyBase64(key)}))
+	if w.Code != 200 {
+		t.Fatalf("export: HTTP %d %s", w.Code, w.Body.String())
+	}
+	files, _ := unzipped(t, w.Body.Bytes())
+	var conversations []struct {
+		UUID string `json:"uuid"`
+	}
+	json.Unmarshal(files["conversations.json"], &conversations)
+	written := []string{}
+	for _, c := range conversations {
+		written = append(written, c.UUID)
+	}
+	var manifest archives.ConversationsManifest
+	json.Unmarshal(files[archives.ManifestPath], &manifest)
+	if asked := askedMeanwhile.Load(); asked == 0 || asked == chats-1 {
+		t.Fatalf("%d other images were read while the first was", asked)
+	}
+	if !reflect.DeepEqual(written, want) || len(manifest.Attachments) != chats || len(manifest.Warnings) != 0 {
+		t.Fatalf("chats written in the order %v, with %+v", written, manifest)
+	}
+}
+
+// An export renews its storage grant from each page of chats it lists, so
+// one that outlives the grant it began with still reads every attachment.
+func TestExportsOutliveTheirFirstGrant(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	h.store.Rows = &pagedRows{memoryRows: rows, size: 1, lifetime: time.Second, pause: 1500 * time.Millisecond}
+	for _, chat := range []string{"chat-1", "chat-2"} {
+		id, blobKey := seedAttachment(rows, "alice", chat, pngFixture(t, 2, 2, 1))
+		storedThread(rows, "alice", chat, api.Object{"id": id, "kind": "image", "fileName": "photo.png", "encryptionKey": blobKey})
+	}
+	w := archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "native", "key": keyBase64(key)}))
+	if w.Code != 200 {
+		t.Fatalf("export: HTTP %d %s", w.Code, w.Body.String())
+	}
+	files, _ := unzipped(t, w.Body.Bytes())
+	var manifest archives.BackupManifest
+	json.Unmarshal(files[archives.ManifestPath], &manifest)
+	if manifest.Counts.CloudChats != 2 || manifest.Counts.Images != 2 || len(manifest.Omissions) != 0 {
+		t.Fatalf("manifest: %+v", manifest)
+	}
+}
+
+// A signed-out caller exports the chats its tab sends, and imports archives
+// into its tab, the web app's plain conversations.json among them; the
+// cloud stays out of its reach.
+func TestSignedOutCallersMoveTheirTabsChats(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	thread := api.Object{"id": "tab-chat", "title": "Tab chat", "messages": []any{api.Object{"id": "m", "role": "user", "content": "hello"}}}
+	w := archiveRoute(h, "/v1/export", "", optionsPart(api.Object{"format": "conversations"}), threadPart(thread))
+	if w.Code != 200 || w.Header().Get("Content-Type") != "application/zip" {
+		t.Fatalf("export: HTTP %d %s", w.Code, w.Body.String())
+	}
+	result := importOf(t, h, "", w.Body.Bytes(), "tinfoil-chats.zip", api.Object{"target": "device"})
+	if len(result.threads) != 1 || result.threads[0].Title != "Tab chat" || result.threads[0].Messages[0].Content != "hello" || result.done.JobID != nil {
+		t.Fatalf("the export imported back: %+v", result)
+	}
+	plain, _ := unzipped(t, fixture(t, "web-conversations-export.zip"))
+	old := importOf(t, h, "", plain["conversations.json"], "conversations.json", api.Object{"target": "device"})
+	titles := []string{}
+	for _, thread := range old.threads {
+		titles = append(titles, thread.Title)
+	}
+	if !slices.Contains(titles, "Quarterly chart") || !slices.Contains(titles, "Trip 🌅 plans (fork)") {
+		t.Fatalf("the web app's conversations.json imported %v", titles)
+	}
+	file := formPart{name: "file", filename: "conversations.json", data: plain["conversations.json"]}
+	for _, refused := range []struct {
+		path  string
+		parts []formPart
+	}{
+		{"/v1/export", []formPart{optionsPart(api.Object{"format": "native", "key": keyBase64(key)})}},
+		{"/v1/import", []formPart{optionsPart(api.Object{"target": "cloud"}), file}},
+		{"/v1/import", []formPart{optionsPart(api.Object{"target": "device", "key": keyBase64(key)}), file}},
+	} {
+		w := archiveRoute(h, refused.path, "", refused.parts...)
+		if e := api.Obj(api.Obj(api.Parsed(w.Body.Bytes()))["error"]); w.Code != 401 || e["code"] != "UNAUTHENTICATED" || e["action"] != api.ActionStop {
+			t.Fatalf("%s %s: HTTP %d %s", refused.path, refused.parts[0].data, w.Code, w.Body.String())
+		}
+	}
+	if rows.calls != 0 {
+		t.Fatalf("signed-out archives made %d store calls", rows.calls)
+	}
+}
+
+// A signed-out caller's archive is smaller than a signed-in caller's, one
+// runs per caller at a time, and only a few run at once, while signed-in
+// callers' archives still do.
+func TestSignedOutArchivesAreBounded(t *testing.T) {
+	h, _, _ := testChatHarness(t, nil)
+	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "OK") }))
+	t.Cleanup(cp.Close)
+	h.useAuth(testAuth(cp))
+	dir := t.TempDir()
+	h.archives.Scratch = archives.NewScratch(dir, 1<<30)
+	server := httptest.NewServer(h.routes())
+	t.Cleanup(server.Close)
+	as := func(key string) func(*http.Request) {
+		return func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+key) }
+	}
+
+	for _, path := range []string{"/v1/import", "/v1/export"} {
+		for _, tc := range []struct {
+			sign    func(*http.Request)
+			refused bool
+		}{{as("free_large-tab"), true}, {func(r *http.Request) { signIn(r, "alice") }, false}} {
+			r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(""))
+			r.ContentLength = 40 << 20
+			tc.sign(r)
+			w := httptest.NewRecorder()
+			h.routes().ServeHTTP(w, r)
+			if refused := w.Code == http.StatusRequestEntityTooLarge; refused != tc.refused {
+				t.Fatalf("a declared 40 MiB to %s: HTTP %d %s", path, w.Code, w.Body.String())
+			}
+		}
+	}
+
+	conversation := formPart{name: "file", filename: "conversations.json", data: api.Raw([]api.Object{{"uuid": "c", "name": "Hi", "chat_messages": []api.Object{{"sender": "human", "text": "hi"}}}})}
+	importAs := func(key string) *httptest.ResponseRecorder {
+		return archiveRequest(h, "/v1/import", as(key), optionsPart(api.Object{"target": "device"}), conversation)
+	}
+	// stall starts a caller's import, and sends its archive but not the end
+	// of the form.
+	stall := func(key string) net.Conn {
+		body, contentType := archiveForm(optionsPart(api.Object{"target": "device"}), conversation)
+		conn, err := net.Dial("tcp", server.Listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { conn.Close() })
+		fmt.Fprintf(conn, "POST /v1/import HTTP/1.1\r\nHost: harness\r\nAuthorization: Bearer %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n", key, contentType, len(body))
+		conn.Write(body[:bytes.LastIndex(body, []byte("\r\n--"))])
+		return conn
+	}
+	first := stall("free_tab-1")
+	waitForSpooled(t, dir, 1)
+	if w := importAs("free_tab-1"); w.Code != http.StatusTooManyRequests || !strings.Contains(w.Body.String(), "RATE_LIMITED") {
+		t.Fatalf("a second archive of the same caller: HTTP %d %s", w.Code, w.Body.String())
+	}
+	running := 1
+	for ; ; running++ {
+		if w := importAs("free_another-tab"); w.Code == http.StatusServiceUnavailable && strings.Contains(w.Body.String(), "TEMP_SPACE_BUSY") {
+			break
+		} else if w.Code != 200 || running > 16 {
+			t.Fatalf("with %d signed-out archives running: HTTP %d %s", running, w.Code, w.Body.String())
+		}
+		stall(fmt.Sprintf("free_tab-%d", running+1))
+		waitForSpooled(t, dir, running+1)
+	}
+	if w := archiveRoute(h, "/v1/import", "alice", optionsPart(api.Object{"target": "device"}), conversation); w.Code != 200 || running < 2 {
+		t.Fatalf("a signed-in import beside %d signed-out archives: HTTP %d %s", running, w.Code, w.Body.String())
+	}
+	first.Close()
+	for start := time.Now(); ; time.Sleep(time.Millisecond) {
+		w := importAs("free_tab-1")
+		if w.Code == 200 {
+			break
+		}
+		if time.Since(start) > 10*time.Second {
+			t.Fatalf("the caller's ended archive still holds its place: HTTP %d %s", w.Code, w.Body.String())
 		}
 	}
 }

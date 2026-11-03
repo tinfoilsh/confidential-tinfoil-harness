@@ -99,8 +99,7 @@ type watchedBody struct{ read atomic.Bool }
 func (b *watchedBody) Read([]byte) (int, error) { b.read.Store(true); return 0, io.EOF }
 
 // A turn or an archive may be tens of mebibytes; only a caller who signed in,
-// or holds a free key the control plane accepts, gets one read, and only a
-// caller who signed in gets an archive read.
+// or holds a free key the control plane accepts, gets one read.
 func TestLargeBodiesAreReadOnlyAfterAuthentication(t *testing.T) {
 	h, _, _ := testChatHarness(t, nil)
 	for _, tc := range []struct {
@@ -117,8 +116,9 @@ func TestLargeBodiesAreReadOnlyAfterAuthentication(t *testing.T) {
 		{"/v1/threads/follow", "free_refused-key", "", 401},
 		{"/v1/attachments/get-public", "free_refused-key", "", 401},
 		{"/v1/speech", "free_refused-key", "", 401},
-		{"/v1/import", "free_anonymous-key", "", 401},
-		{"/v1/export", "free_anonymous-key", "", 401},
+		{"/v1/import", "forged-session", "", 401},
+		{"/v1/import", "free_refused-key", "", 401},
+		{"/v1/export", "free_refused-key", "", 401},
 	} {
 		body := &watchedBody{}
 		r := httptest.NewRequest(http.MethodPost, tc.path, body)
