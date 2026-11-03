@@ -1242,7 +1242,7 @@ paths:
       operationId: export
       summary: Export chats as an archive
       tags: [archives]
-      description: Exports the account's stored chats and the device chats the client sends, as an archive.
+      description: Exports the account's stored chats and the device chats the client sends, as an archive. A stored attachment the storage services do not serve is left out, and the archive's manifest lists it, as it lists a stored chat that cannot be read.
       requestBody:
         required: true
         content:

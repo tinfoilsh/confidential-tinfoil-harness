@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -874,6 +875,61 @@ func TestArchivesNeedNoChatAccess(t *testing.T) {
 		if chat := chats["Stored"]; len(chats) != 1 || len(chat.Messages) != 1 || chat.Messages[0].Role != "user" || chat.Messages[0].Content != "hi" {
 			t.Fatalf("%s restored %+v: %+v", name, result.done, chats)
 		}
+	}
+}
+
+// A stored attachment the storage services fail to serve is read again, and
+// left out once they keep failing, as a chat this harness or the key cannot
+// read is: the export goes on, and lists what it left out.
+func TestExportsLeaveOutWhatStorageDoesNotServe(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	alice := &auth.Principal{ID: "alice"}
+	recovered := pngFixture(t, 2, 2, 10)
+	recoveredID, recoveredKey := seedAttachment(rows, "alice", "chat-1", recovered)
+	failingID, failingKey := seedAttachment(rows, "alice", "chat-1", pngFixture(t, 3, 3, 20))
+	storedThread(rows, "alice", "chat-1",
+		api.Object{"id": recoveredID, "kind": "image", "fileName": "recovered.png", "encryptionKey": recoveredKey},
+		api.Object{"id": failingID, "kind": "image", "fileName": "failing.png", "encryptionKey": failingKey})
+	sealed := rowMapKey(alice, "chat", "chat-sealed")
+	rows.rows[sealed] = domain.StoredRow{ID: "chat-sealed", ETag: "1", Data: api.Raw(api.Object{"title": "Sealed", "messages": []any{}})}
+	rows.sealed[sealed] = randomKey()
+	rows.rows[rowMapKey(alice, "chat", "chat-future")] = domain.StoredRow{ID: "chat-future", ETag: "1", Data: api.Raw(api.Object{"recordVersion": 99, "messages": []any{}})}
+	failReads := func() {
+		rows.cp.Mu.Lock()
+		defer rows.cp.Mu.Unlock()
+		rows.cp.AttachmentOwnerFailures[recoveredID] = []int{http.StatusServiceUnavailable}
+		rows.cp.AttachmentOwnerFailures[failingID] = []int{http.StatusServiceUnavailable, http.StatusBadGateway, http.StatusServiceUnavailable}
+	}
+
+	failReads()
+	w := archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "conversations", "key": keyBase64(key)}))
+	if w.Code != 200 {
+		t.Fatalf("export: HTTP %d %s", w.Code, w.Body.String())
+	}
+	files, _ := unzipped(t, w.Body.Bytes())
+	var manifest archives.ConversationsManifest
+	json.Unmarshal(files[archives.ManifestPath], &manifest)
+	slices.Sort(manifest.Warnings)
+	want := []string{"Could not fetch attachment " + failingID, "Could not read chat chat-future", "Could not read chat chat-sealed"}
+	if manifest.ChatCount != 1 || len(manifest.Attachments) != 1 || !bytes.Equal(files[manifest.Attachments[0].ExportPath], recovered) || !reflect.DeepEqual(manifest.Warnings, want) {
+		t.Fatalf("conversations manifest: %+v", manifest)
+	}
+
+	failReads()
+	w = archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "native", "key": keyBase64(key)}))
+	if w.Code != 200 {
+		t.Fatalf("backup: HTTP %d %s", w.Code, w.Body.String())
+	}
+	files, _ = unzipped(t, w.Body.Bytes())
+	var backup archives.BackupManifest
+	json.Unmarshal(files[archives.ManifestPath], &backup)
+	omitted := map[string]string{}
+	for _, o := range backup.Omissions {
+		omitted[o.Kind+" "+o.SourceID] = o.Reason
+	}
+	wantOmitted := map[string]string{"attachment chat-1/0/1": "attachment_unreadable", "cloud_chat chat-sealed": "row_unreadable", "cloud_chat chat-future": "row_unreadable"}
+	if backup.Counts.CloudChats != 1 || backup.Counts.Images != 1 || !bytes.Equal(files[archives.BackupImagePath("chat-1/0/0", ".bin")], recovered) || !reflect.DeepEqual(omitted, wantOmitted) {
+		t.Fatalf("backup manifest: %+v", backup)
 	}
 }
 
