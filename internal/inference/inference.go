@@ -26,9 +26,6 @@ type Models struct {
 	Offer        Offer
 	Services     map[string]*Service
 	Controlplane string
-	// Summarizer names chats and labels a reply's reasoning; nil when the
-	// harness has none.
-	Summarizer Summarizer
 }
 
 // A model the harness serves through the router, which verifies the replica

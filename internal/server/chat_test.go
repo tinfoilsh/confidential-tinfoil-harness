@@ -41,6 +41,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/pages"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/search"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/summarize"
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
@@ -248,11 +249,20 @@ func (s *memoryRows) IDs(_ context.Context, p *auth.Principal, scope, project st
 	return ids, nil
 }
 
-// summarizerFunc summarizes as a test says.
-type summarizerFunc func(style inference.SummaryStyle, text string) (string, error)
+// summarizerFunc summarizes as a test says, given the task's name and what
+// its model is sent to read.
+type summarizerFunc func(task, text string) (string, error)
 
-func (f summarizerFunc) Summarize(_ context.Context, style inference.SummaryStyle, text string) (string, error) {
-	return f(style, text)
+// Complete answers as a model on the harness's account.
+func (f summarizerFunc) Complete(_ context.Context, c inference.Completion) (inference.Completed, error) {
+	text, err := f(c.Task, c.User)
+	return inference.Completed{Text: text, FinishReason: "stop"}, err
+}
+
+// summarizeWith has f write the harness's summaries, as the chat model
+// writes every role's.
+func (h *harness) summarizeWith(f summarizerFunc) {
+	h.engine.Summaries = summarize.New(f, &h.models.Catalog, "kimi-k3", "kimi-k3")
 }
 
 // testPages reads the pages and favicons a test gives, and tells read of
@@ -535,6 +545,7 @@ type event struct {
 	Message    string              `json:"message,omitempty"`
 	Metadata   json.RawMessage     `json:"metadata,omitempty"`
 	Display    *domain.ToolDisplay `json:"display,omitempty"`
+	Outcome    string              `json:"outcome,omitempty"`
 }
 
 func eventsIn(t *testing.T, w *httptest.ResponseRecorder) []event {

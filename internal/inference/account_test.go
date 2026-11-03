@@ -1,0 +1,75 @@
+package inference
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
+	"testing"
+	"time"
+
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
+
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+)
+
+// testAccount is an account whose model answers with respond, and which
+// keeps each request it receives.
+func testAccount(t *testing.T, respond http.HandlerFunc) (Account, *[]map[string]any) {
+	t.Helper()
+	var requests []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		json.NewDecoder(r.Body).Decode(&body)
+		requests = append(requests, body)
+		respond(w, r)
+	}))
+	t.Cleanup(server.Close)
+	client := openai.NewClient(option.WithBaseURL(server.URL), option.WithAPIKey("k"), option.WithMaxRetries(0))
+	return &modelAccount{completions: &client.Chat.Completions}, &requests
+}
+
+// A completion sends the model, its prompt and bounds, the request members
+// the catalog gives the model, and its cache scope, and reads back the text,
+// why it ended and what it cost.
+func TestACompletionAsksTheModelAsItsCallerSays(t *testing.T) {
+	account, requests := testAccount(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"id":"c","object":"chat.completion","model":"m","choices":[{"index":0,"finish_reason":"length","message":{"role":"assistant","content":"cut"}}],"usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}}`)
+	})
+	done, err := account.Complete(context.Background(), Completion{Task: "test", Model: "long-model", System: "be brief", User: "the text", MaxTokens: 64, Temperature: new(0.2),
+		Params: api.Object{"chat_template_kwargs": api.Object{"enable_thinking": false}}, CacheScope: "scope"})
+	if err != nil || done.Text != "cut" || done.FinishReason != "length" || done.Usage != (api.Usage{Prompt: 12, Completion: 3, Total: 15}) {
+		t.Fatalf("the completion read %+v, %v", done, err)
+	}
+	sent := (*requests)[0]
+	prompt := []any{map[string]any{"role": "system", "content": "be brief"}, map[string]any{"role": "user", "content": "the text"}}
+	if sent["model"] != "long-model" || sent["max_completion_tokens"] != 64.0 || sent["temperature"] != 0.2 || sent["user_cache_secret"] != "scope" ||
+		!reflect.DeepEqual(sent["chat_template_kwargs"], map[string]any{"enable_thinking": false}) || !reflect.DeepEqual(sent["messages"], prompt) {
+		t.Fatalf("the request was %v", sent)
+	}
+	if _, err := account.Complete(context.Background(), Completion{Model: "m", User: "x", MaxTokens: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, set := (*requests)[1]["temperature"]; set {
+		t.Fatalf("a completion with no temperature of its own set one: %v", (*requests)[1])
+	}
+}
+
+// A refusal says its status and how long the model asked to wait.
+func TestARefusedCompletionSaysWhenToTryAgain(t *testing.T) {
+	account, _ := testAccount(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "7")
+		w.WriteHeader(http.StatusTooManyRequests)
+		io.WriteString(w, `{"error":{"message":"busy"}}`)
+	})
+	_, err := account.Complete(context.Background(), Completion{Model: "m", User: "x", MaxTokens: 1})
+	var refused *Refused
+	if !errors.As(err, &refused) || refused.Status != http.StatusTooManyRequests || refused.RetryAfter != 7*time.Second {
+		t.Fatalf("the refusal read as %v", err)
+	}
+}

@@ -21,6 +21,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/pages"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/search"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/summarize"
 )
 
 type harness struct {
@@ -33,6 +34,7 @@ type harness struct {
 	attachments  *attach.Service
 	archives     *archives.Service
 	engine       *engine.Engine
+	summaries    *summarize.Service
 }
 
 // listenAddr is the shim's upstream port in tinfoil-config.yml, which also
@@ -72,7 +74,7 @@ func Run() {
 	go h.store.RunAttachmentMaintenance(ctx)
 	h.attachments = &attach.Service{Auth: h.auth, Models: h.models, Store: h.store, Pages: h.pages}
 	h.store.Repair = h.attachments
-	h.engine = &engine.Engine{Safeguards: engine.NewSubmitter(os.Getenv("SAFEGUARDS_URL")), Store: h.store, Models: h.models, Attachments: h.attachments, Auth: h.auth}
+	h.engine = &engine.Engine{Safeguards: engine.NewSubmitter(os.Getenv("SAFEGUARDS_URL")), Store: h.store, Models: h.models, Attachments: h.attachments, Auth: h.auth, Summaries: h.summaries}
 	h.archives = &archives.Service{Scratch: scratch, CPClient: &http.Client{Transport: &auth.CallerTransport{Inner: http.DefaultTransport}}, Store: h.store, Attachments: h.attachments, Auth: h.auth, Controlplane: h.controlplane,
 		Imports: jobs.New[archives.ImportReport](archives.ImportBudget, archives.ImportRetention)}
 

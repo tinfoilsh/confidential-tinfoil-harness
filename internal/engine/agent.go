@@ -6,9 +6,11 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 
@@ -60,10 +62,13 @@ func (eng *Engine) loop(ctx context.Context, out *Stream, req *Request, m *infer
 	if err != nil {
 		return fmt.Errorf("tools: %w", err)
 	}
-	conversation, err := BudgetConversation(req, set.search != nil, defs)
+	searching := set.search != nil
+	conversation, err := fitted(ctx, req, searching, defs)
 	if err != nil {
 		return err
 	}
+	// The run's own exchange follows the history it starts from.
+	history := len(conversation)
 	refreshed := false
 	for turn := 1; ; turn++ {
 		// Past the cap the model answers from what it has, with no tools to call.
@@ -72,9 +77,25 @@ func (eng *Engine) loop(ctx context.Context, out *Stream, req *Request, m *infer
 			tools = nil
 			conversation = append(conversation, api.Raw(api.Object{"role": "system", "content": FinalAnswerInstruction}))
 		}
-		conversation, err = trimToolHistory(req, conversation, tools)
-		if err != nil {
-			return err
+		// An exchange that outgrows the window compacts the history before
+		// it, if the run has not yet.
+		if !fits(req, conversation, tools) {
+			exchange := slices.Clone(conversation[history:])
+			compact := req.compact
+			req.compact = nil
+			if compact == nil {
+				return errExchangeTooLarge()
+			}
+			if err := compact(ctx); errors.Is(err, errNothingToCompact) {
+				return errExchangeTooLarge()
+			} else if err != nil {
+				return err
+			}
+			conversation = append(promptOf(req, searching), exchange...)
+			history = len(conversation) - len(exchange)
+			if !fits(req, conversation, tools) {
+				return errExchangeTooLarge()
+			}
 		}
 		payload, err := body(req, conversation, tools)
 		if err != nil {
@@ -127,6 +148,10 @@ func (eng *Engine) loop(ctx context.Context, out *Stream, req *Request, m *infer
 		conversation = append(conversation, reply)
 		conversation = append(conversation, execute(ctx, out, set, calls)...)
 	}
+}
+
+func errExchangeTooLarge() error {
+	return api.Err(413, "CONTEXT_TOO_LARGE", "The current tool exchange exceeds the context window")
 }
 
 func body(req *Request, conversation []json.RawMessage, defs json.RawMessage) ([]byte, error) {

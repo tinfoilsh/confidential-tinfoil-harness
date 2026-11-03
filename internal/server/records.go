@@ -14,6 +14,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/summarize"
 )
 
 func (h *harness) apiRoutes() []routeSpec {
@@ -78,7 +79,7 @@ func (h *harness) session(ctx context.Context, p *auth.Principal, _ auth.Content
 		ProfileDefaults: domain.DefaultProfile(),
 		Composer:        attach.Composer(),
 		Presets:         presets,
-		Features:        map[string]bool{"webSearch": engine.WebSearchReady(), "transcription": h.models.ServiceReady("router"), "speech": h.models.ServiceReady("router"), "promptPresetEdits": true, "promptPresetUpdates": true},
+		Features:        map[string]bool{"webSearch": engine.WebSearchReady(), "transcription": h.models.ServiceReady("router"), "speech": h.models.ServiceReady("router"), "promptPresetEdits": true, "promptPresetUpdates": true, "compaction": h.engine.Summaries.Ready(summarize.Compaction)},
 	}, nil
 }
 

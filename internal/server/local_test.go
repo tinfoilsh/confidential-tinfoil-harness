@@ -135,7 +135,7 @@ func TestLocalTurnFieldsAreRefusedOutsideLocalThreads(t *testing.T) {
 
 func TestLocalTitleIsGeneratedWithoutStorage(t *testing.T) {
 	h, rows, _ := testChatHarness(t, nil)
-	h.models.Summarizer = summarizerFunc(func(inference.SummaryStyle, string) (string, error) { return "\"Local title\"", nil })
+	h.summarizeWith(func(string, string) (string, error) { return "\"Local title\"", nil })
 	events := eventsIn(t, postRoute(h, "/v1/threads/turn", localInput("", api.Object{"messages": []any{}}), "alice"))
 	if rows.calls != 0 {
 		t.Fatalf("local title used storage %d times", rows.calls)
@@ -251,7 +251,7 @@ func TestADeviceChatRunReturnsItsUpdatedThread(t *testing.T) {
 		}
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"an answer\"}}]}\n\ndata: [DONE]\n\n")
 	})
-	h.models.Summarizer = summarizerFunc(func(inference.SummaryStyle, string) (string, error) { return "Device title", nil })
+	h.summarizeWith(func(string, string) (string, error) { return "Device title", nil })
 	in := localInput("", api.Object{"messages": []any{}})
 	id := api.Str(in["threadId"])
 	in["content"] = "what is this?"
@@ -342,7 +342,7 @@ func TestOldDeviceChatsUpgradeIntoThreads(t *testing.T) {
 	m := func(index int) string { return id + "-message-" + strconv.Itoa(index) }
 	want := api.Object{
 		"id": id, "title": "Cats", "titleState": "generated", "model": "auto", "webSearchEnabled": false, "pinned": false,
-		"createdAt": "2026-03-01T10:00:00Z", "updatedAt": "2026-03-01T10:05:00Z", "projectId": nil, "presetId": nil, "activeRun": nil, "recordVersion": 1,
+		"createdAt": "2026-03-01T10:00:00Z", "updatedAt": "2026-03-01T10:05:00Z", "projectId": nil, "presetId": nil, "activeRun": nil, "recordVersion": domain.RecordVersion,
 		"messages": []any{
 			api.Object{"id": m(0), "role": "user", "content": "What is in this picture?", "createdAt": "2026-03-01T10:00:01Z", "attachments": []any{
 				api.Object{"id": "a1b2", "kind": "image", "fileName": "cat.png", "mimeType": "image/png", "thumbnail": "dGh1bWI=", "size": 8},

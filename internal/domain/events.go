@@ -112,6 +112,27 @@ type ActivityPatch struct {
 	Value any    `json:"value"`
 }
 
+// CompactionStart opens a compaction marker, placed before the question it
+// precedes, while its summary is written.
+type CompactionStart struct {
+	MessageID       string `json:"messageId"`
+	BeforeMessageID string `json:"beforeMessageId"`
+}
+
+// CompactionEnd closes a compaction marker: completed with the marker, or
+// failed, when it is not kept.
+type CompactionEnd struct {
+	MessageID string       `json:"messageId"`
+	Outcome   string       `json:"outcome"`
+	Marker    *MessageView `json:"marker,omitempty"`
+}
+
+// The outcomes a CompactionEnd closes its marker with.
+const (
+	CompactionCompleted = "completed"
+	CompactionFailed    = "failed"
+)
+
 type RunFinished struct {
 	ThreadID string      `json:"threadId"`
 	RunID    string      `json:"runId"`
@@ -144,6 +165,8 @@ func (ToolCallEnd) eventType() string        { return "TOOL_CALL_END" }
 func (ToolCallResult) eventType() string     { return "TOOL_CALL_RESULT" }
 func (ActivitySnapshot) eventType() string   { return "ACTIVITY_SNAPSHOT" }
 func (ActivityDelta) eventType() string      { return "ACTIVITY_DELTA" }
+func (CompactionStart) eventType() string    { return "COMPACTION_START" }
+func (CompactionEnd) eventType() string      { return "COMPACTION_END" }
 func (RunFinished) eventType() string        { return "RUN_FINISHED" }
 func (RunError) eventType() string           { return "RUN_ERROR" }
 

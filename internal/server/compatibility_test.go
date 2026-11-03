@@ -25,7 +25,6 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 )
 
 func TestImagePreprocessingBoundsAndTransparency(t *testing.T) {
@@ -176,7 +175,7 @@ func TestTitleRunsBeforeAnswerFinishes(t *testing.T) {
 		io.WriteString(w, "data: [DONE]\n\n")
 	})
 	titled := make(chan struct{})
-	h.models.Summarizer = summarizerFunc(func(inference.SummaryStyle, string) (string, error) {
+	h.summarizeWith(func(string, string) (string, error) {
 		close(titled)
 		return "A generated title", nil
 	})

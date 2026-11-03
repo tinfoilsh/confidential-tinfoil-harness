@@ -60,11 +60,22 @@ func (eng *Engine) finishRun(r *Run, runErr error) {
 			committed = append(committed, domain.CommittedReply{ID: m.ID, Model: m.Model, ModelDisplayName: m.ModelDisplayName, Usage: m.Usage, IsError: m.IsError, IsInterrupted: m.IsInterrupted, Annotations: m.Annotations})
 		}
 	}
+	compacted := r.compacted
+	// unreplaced is why a widget retry's call could not be replaced, which
+	// fails the run without undoing the rest of what it commits.
+	var unreplaced error
 	commit := func(t *domain.Thread) error {
-		if r.retryTarget != nil && r.replacement.Arguments != "" {
-			if err := domain.ReplaceWidget(t, r.retryTarget.parentID, r.input.ToolCallID, r.retryTarget.block.Arguments, r.replacement); err != nil {
-				return err
+		unreplaced = nil
+		// The run's compaction is kept before its question, even when the
+		// reply then failed, unless that question is gone.
+		if compacted != nil && t.MessageIndex(compacted.marker.ID) < 0 {
+			if at := t.MessageIndex(compacted.beforeID); at >= 0 {
+				t.Messages = slices.Insert(t.Messages, at, compacted.marker)
+				t.ContextUsage = compacted.usage
 			}
+		}
+		if r.retryTarget != nil && r.replacement.Arguments != "" {
+			unreplaced = domain.ReplaceWidget(t, r.retryTarget.parentID, r.input.ToolCallID, r.retryTarget.block.Arguments, r.replacement)
 		} else {
 			for _, m := range messages {
 				index := t.MessageIndex(m.ID)
@@ -83,17 +94,19 @@ func (eng *Engine) finishRun(r *Run, runErr error) {
 		return nil
 	}
 	if !deleted {
+		var err error
 		if s.local {
-			if err := commit(&r.row.Thread); err != nil {
-				runErr = err
-			}
+			err = commit(&r.row.Thread)
 		} else {
-			row, err := eng.Store.MutateThread(ctx, p, r.key, s.ID, commit)
-			if err != nil {
-				runErr = err
-			} else {
+			var row *domain.ThreadRow
+			if row, err = eng.Store.MutateThread(ctx, p, r.key, s.ID, commit); err == nil {
 				r.row = row
 			}
+		}
+		if err != nil {
+			runErr = err
+		} else if unreplaced != nil {
+			runErr = unreplaced
 		}
 	}
 	clear(r.key[:])

@@ -14,7 +14,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/summarize"
 )
 
 // modelReasoning is one chunk of reasoning a model streams.
@@ -44,8 +44,8 @@ func TestAThinkingReplysReasoningIsSummarized(t *testing.T) {
 		var mu sync.Mutex
 		var asked []string
 		summarized := make(chan struct{}, 1)
-		h.models.Summarizer = summarizerFunc(func(style inference.SummaryStyle, text string) (string, error) {
-			if style != inference.ThoughtsSummary {
+		h.summarizeWith(func(task, text string) (string, error) {
+			if task != summarize.Thoughts.Name {
 				return "Title", nil
 			}
 			mu.Lock()
