@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -930,6 +931,126 @@ func TestExportsLeaveOutWhatStorageDoesNotServe(t *testing.T) {
 	wantOmitted := map[string]string{"attachment chat-1/0/1": "attachment_unreadable", "cloud_chat chat-sealed": "row_unreadable", "cloud_chat chat-future": "row_unreadable"}
 	if backup.Counts.CloudChats != 1 || backup.Counts.Images != 1 || !bytes.Equal(files[archives.BackupImagePath("chat-1/0/0", ".bin")], recovered) || !reflect.DeepEqual(omitted, wantOmitted) {
 		t.Fatalf("backup manifest: %+v", backup)
+	}
+}
+
+// pagedRows lists a user's rows in pages of size, by id, and grants an
+// operation its rows for lifetime; listing each page after the first takes
+// pause.
+type pagedRows struct {
+	*memoryRows
+	size            int
+	lifetime, pause time.Duration
+}
+
+func (s *pagedRows) AuthorizeStorage(_ context.Context, _ *auth.Principal, _ auth.ContentKey, operation, project string) (*auth.StorageGrant, error) {
+	return &auth.StorageGrant{Operation: operation, ProjectID: project, ExpiresAt: api.Now().Add(s.lifetime)}, nil
+}
+
+func (s *pagedRows) List(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, cursor, project string, limit int) (store.Page, error) {
+	all, err := s.memoryRows.List(ctx, p, key, scope, "", project, limit)
+	if err != nil {
+		return all, err
+	}
+	slices.SortFunc(all.Rows, func(a, b domain.StoredRow) int { return strings.Compare(a.ID, b.ID) })
+	start, _ := strconv.Atoi(cursor)
+	page := store.Page{Rows: all.Rows[start:min(start+s.size, len(all.Rows))], Unreadable: map[string]error{}}
+	if start == 0 {
+		page.Unreadable = all.Unreadable
+	} else {
+		time.Sleep(s.pause)
+	}
+	if end := start + len(page.Rows); end < len(all.Rows) {
+		page.Next = strconv.Itoa(end)
+	}
+	return page, nil
+}
+
+// An export reads the attachments of a page of stored chats a few at a
+// time, ahead of the chat it writes, and writes the chats as the page lists
+// them, whichever read ends first.
+func TestExportsReadAttachmentsAheadOfTheChatTheyWrite(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	h.store.Rows = &pagedRows{memoryRows: rows, size: 100, lifetime: time.Hour}
+	const chats = 10
+	var first string
+	want := []string{}
+	for i := range chats {
+		chat := fmt.Sprintf("chat-%02d", i)
+		id, blobKey := seedAttachment(rows, "alice", chat, pngFixture(t, 2, 2, uint8(i)))
+		storedThread(rows, "alice", chat, api.Object{"id": id, "kind": "image", "fileName": "photo.png", "encryptionKey": blobKey})
+		if i == 0 {
+			first = id
+		}
+		want = append(want, chat)
+	}
+	// The first chat's image is served once every other has been asked for,
+	// or a second has passed.
+	others := make(chan struct{}, chats)
+	var askedMeanwhile atomic.Int32
+	rows.cp.Mu.Lock()
+	rows.cp.CaptureHeaders = func(r *http.Request) {
+		id, ok := strings.CutPrefix(r.URL.Path, "/api/sync/attachment-owner/")
+		if !ok {
+			return
+		}
+		if id != first {
+			others <- struct{}{}
+			return
+		}
+		timeout := time.After(time.Second)
+		for askedMeanwhile.Load() < chats-1 {
+			select {
+			case <-others:
+				askedMeanwhile.Add(1)
+			case <-timeout:
+				return
+			}
+		}
+	}
+	rows.cp.Mu.Unlock()
+
+	w := archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "conversations", "key": keyBase64(key)}))
+	if w.Code != 200 {
+		t.Fatalf("export: HTTP %d %s", w.Code, w.Body.String())
+	}
+	files, _ := unzipped(t, w.Body.Bytes())
+	var conversations []struct {
+		UUID string `json:"uuid"`
+	}
+	json.Unmarshal(files["conversations.json"], &conversations)
+	written := []string{}
+	for _, c := range conversations {
+		written = append(written, c.UUID)
+	}
+	var manifest archives.ConversationsManifest
+	json.Unmarshal(files[archives.ManifestPath], &manifest)
+	if asked := askedMeanwhile.Load(); asked == 0 || asked == chats-1 {
+		t.Fatalf("%d other images were read while the first was", asked)
+	}
+	if !reflect.DeepEqual(written, want) || len(manifest.Attachments) != chats || len(manifest.Warnings) != 0 {
+		t.Fatalf("chats written in the order %v, with %+v", written, manifest)
+	}
+}
+
+// An export renews its storage grant from each page of chats it lists, so
+// one that outlives the grant it began with still reads every attachment.
+func TestExportsOutliveTheirFirstGrant(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	h.store.Rows = &pagedRows{memoryRows: rows, size: 1, lifetime: time.Second, pause: 1500 * time.Millisecond}
+	for _, chat := range []string{"chat-1", "chat-2"} {
+		id, blobKey := seedAttachment(rows, "alice", chat, pngFixture(t, 2, 2, 1))
+		storedThread(rows, "alice", chat, api.Object{"id": id, "kind": "image", "fileName": "photo.png", "encryptionKey": blobKey})
+	}
+	w := archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "native", "key": keyBase64(key)}))
+	if w.Code != 200 {
+		t.Fatalf("export: HTTP %d %s", w.Code, w.Body.String())
+	}
+	files, _ := unzipped(t, w.Body.Bytes())
+	var manifest archives.BackupManifest
+	json.Unmarshal(files[archives.ManifestPath], &manifest)
+	if manifest.Counts.CloudChats != 2 || manifest.Counts.Images != 2 || len(manifest.Omissions) != 0 {
+		t.Fatalf("manifest: %+v", manifest)
 	}
 }
 

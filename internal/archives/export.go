@@ -502,6 +502,9 @@ func (ar *Service) writeBackup(ctx context.Context, p *auth.Principal, key *auth
 	rel := backupRelationships{ProjectChats: []projectChatLink{}, ProjectDocuments: []projectDocumentLink{}, ChatImages: []chatImageLink{}}
 	cloudChats := map[string]bool{}
 	if key != nil {
+		if err := ar.renewGrant(ctx, p, key); err != nil {
+			return err
+		}
 		projects := map[string]bool{}
 		err := ar.Store.EachRowOrUnreadable(ctx, p, *key, "project", "", func(row *domain.StoredRow) error {
 			project, err := domain.ReadProject(row)
@@ -536,13 +539,9 @@ func (ar *Service) writeBackup(ctx context.Context, p *auth.Principal, key *auth
 		if err != nil {
 			return err
 		}
-		err = ar.Store.EachRowOrUnreadable(ctx, p, *key, "chat", "", func(row *domain.StoredRow) error {
-			read, err := domain.ReadThreadRow(row)
-			if err != nil {
-				b.omit(BackupOmission{Kind: "cloud_chat", SourceID: row.ID, Category: "invalid", Reason: "row_unreadable"})
-				return nil
-			}
-			t := read.Thread
+		err = ar.eachStoredChat(ctx, p, key, func(id string) {
+			b.omit(BackupOmission{Kind: "cloud_chat", SourceID: id, Category: "invalid", Reason: "row_unreadable"})
+		}, nil, func(t *domain.Thread, image func(*domain.Attachment) ([]byte, error), document func(*domain.Attachment) error) error {
 			cloudChats[t.ID] = true
 			if project := domain.ValueOr(t.ProjectID, ""); project != "" {
 				if projects[project] {
@@ -552,9 +551,7 @@ func (ar *Service) writeBackup(ctx context.Context, p *auth.Principal, key *auth
 					b.omit(BackupOmission{Kind: "relationship", SourceID: t.ID, ParentSourceID: project, Category: "unavailable", Reason: "project_reference_unavailable"})
 				}
 			}
-			return backupChat(b, &rel, "cloud_chats", &t, ar.cloudImage(ctx, p), ar.cloudDocument(ctx, p))
-		}, func(id string) {
-			b.omit(BackupOmission{Kind: "cloud_chat", SourceID: id, Category: "invalid", Reason: "row_unreadable"})
+			return backupChat(b, &rel, "cloud_chats", t, image, document)
 		})
 		if err != nil {
 			return err
@@ -579,6 +576,50 @@ func (ar *Service) writeBackup(ctx context.Context, p *auth.Principal, key *auth
 	}
 	b.manifest.Counts.Relationships = rel.count()
 	return b.close(uuid.NewString(), api.Now())
+}
+
+// eachStoredChat hands write the stored chats page by page, with the reads
+// of each chat's attachments, leaving out those skip, when given, names. It
+// names each chat this harness or the key cannot read.
+func (ar *Service) eachStoredChat(ctx context.Context, p *auth.Principal, key *auth.ContentKey, unreadable func(id string), skip func(*domain.Thread) bool, write func(t *domain.Thread, image func(*domain.Attachment) ([]byte, error), document func(*domain.Attachment) error) error) error {
+	if err := ar.renewGrant(ctx, p, key); err != nil {
+		return err
+	}
+	return ar.Store.EachPage(ctx, p, *key, "chat", "", func(rows []domain.StoredRow, unopened []string) error {
+		for _, id := range unopened {
+			unreadable(id)
+		}
+		chats := make([]*domain.Thread, 0, len(rows))
+		for i := range rows {
+			read, err := domain.ReadThreadRow(&rows[i])
+			if err != nil {
+				unreadable(rows[i].ID)
+				continue
+			}
+			if skip == nil || !skip(&read.Thread) {
+				chats = append(chats, &read.Thread)
+			}
+		}
+		if err := ar.renewGrant(ctx, p, key); err != nil {
+			return err
+		}
+		reads := ar.readAhead(ctx, p, chats)
+		defer reads.close()
+		for k, t := range chats {
+			image, document := reads.chat(k)
+			if err := write(t, image, document); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// renewGrant has the export's grant last another while from now. An export
+// of many chats can outlive the grant it began with; the request it serves,
+// which ends with it, bounds it.
+func (ar *Service) renewGrant(ctx context.Context, p *auth.Principal, key *auth.ContentKey) error {
+	return ar.Store.AuthorizeArchive(ctx, p, key[:], "export")
 }
 
 // backupChat writes a chat with each of its images beside it. An image or
@@ -748,19 +789,11 @@ func (ar *Service) writeConversations(ctx context.Context, p *auth.Principal, ke
 	}
 	if key != nil {
 		// A chat this harness or the key cannot read is left out, and listed.
-		unreadable := func(id string) { e.manifest.Warnings = append(e.manifest.Warnings, "Could not read chat "+id) }
-		err := ar.Store.EachRowOrUnreadable(ctx, p, *key, "chat", "", func(row *domain.StoredRow) error {
-			read, err := domain.ReadThreadRow(row)
-			if err != nil {
-				unreadable(row.ID)
-				return nil
-			}
-			t := read.Thread
-			if device[t.ID] {
-				return nil
-			}
-			return e.chat(&t, domain.ValueOr(t.ProjectID, ""), ar.cloudImage(ctx, p), ar.cloudDocument(ctx, p))
-		}, unreadable)
+		err := ar.eachStoredChat(ctx, p, key, func(id string) {
+			e.manifest.Warnings = append(e.manifest.Warnings, "Could not read chat "+id)
+		}, func(t *domain.Thread) bool { return device[t.ID] }, func(t *domain.Thread, image func(*domain.Attachment) ([]byte, error), document func(*domain.Attachment) error) error {
+			return e.chat(t, domain.ValueOr(t.ProjectID, ""), image, document)
+		})
 		if err != nil {
 			return err
 		}
