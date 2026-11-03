@@ -27,17 +27,17 @@ func (h *rowsHarness) countChatReads() *atomic.Int32 {
 	return &reads
 }
 
-// listed is each chat of the first page as the list shows it: its title
-// and its project.
-func (h *rowsHarness) listed(t *testing.T, p *auth.Principal, key auth.ContentKey) map[string]string {
+// listed is the first page of chats in the order the list shows them,
+// each by its title and project.
+func (h *rowsHarness) listed(t *testing.T, p *auth.Principal, key auth.ContentKey) []string {
 	t.Helper()
 	summaries, _, err := h.store.ThreadSummaries(context.Background(), p, key, "", "", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := map[string]string{}
+	out := []string{}
 	for _, summary := range summaries {
-		out[summary.ID] = summary.Title + " in " + domain.ValueOr(summary.ProjectID, "no project")
+		out = append(out, summary.Title+" in "+domain.ValueOr(summary.ProjectID, "no project"))
 	}
 	return out
 }
@@ -55,7 +55,9 @@ func TestAListingOpensOnlyTheChatsChangedSinceItsLastRead(t *testing.T) {
 		}
 	}
 	reads := h.countChatReads()
-	want := map[string]string{"c1": "First c1 in p1", "c2": "First c2 in p1", "c3": "First c3 in p1"}
+	// The chats are equally recent, so the control plane lists them by id,
+	// last first.
+	want := []string{"First c3 in p1", "First c2 in p1", "First c1 in p1"}
 	if got := h.listed(t, h.p, h.key); !reflect.DeepEqual(got, want) || reads.Load() != 3 {
 		t.Fatalf("first listing = %v after %d reads, want %v after 3", got, reads.Load(), want)
 	}
@@ -71,7 +73,7 @@ func TestAListingOpensOnlyTheChatsChangedSinceItsLastRead(t *testing.T) {
 	h.cp.Mu.Lock()
 	h.cp.Blobs["chat/c1"].ProjectID = nil
 	h.cp.Mu.Unlock()
-	want["c1"], want["c2"] = "First c1 in no project", "Second c2 in p1"
+	want[1], want[2] = "Second c2 in p1", "First c1 in no project"
 	if got := h.listed(t, h.p, h.key); !reflect.DeepEqual(got, want) || reads.Load() != 4 {
 		t.Fatalf("listing after changes = %v after %d reads, want %v after reading c2 alone", got, reads.Load(), want)
 	}
@@ -81,7 +83,7 @@ func TestAListingOpensOnlyTheChatsChangedSinceItsLastRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	afterWrite := reads.Load()
-	want["c3"] = "Renamed c3 in p1"
+	want[0] = "Renamed c3 in p1"
 	if got := h.listed(t, h.p, h.key); !reflect.DeepEqual(got, want) || reads.Load() != afterWrite {
 		t.Fatalf("listing after a write = %v after %d more reads, want %v after none", got, reads.Load()-afterWrite, want)
 	}
