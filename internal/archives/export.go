@@ -287,9 +287,9 @@ func (ar *Service) HandleExport(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	switch form.options.Format {
 	case "native":
-		streamArchive(w, "tinfoil-backup.zip", func(out io.Writer) error { return ar.writeBackup(ctx, p, key, form, out, started) })
+		streamArchive(w, "tinfoil-backup.zip", func(out *archiveResponse) error { return ar.writeBackup(ctx, p, key, form, out, started) })
 	case "conversations":
-		streamArchive(w, "tinfoil-chats.zip", func(out io.Writer) error { return ar.writeConversations(ctx, p, key, form, lease, out, started) })
+		streamArchive(w, "tinfoil-chats.zip", func(out *archiveResponse) error { return ar.writeConversations(ctx, p, key, form, out, started) })
 	case "claude-projects":
 		if key == nil {
 			api.Respond(w, nil, api.Err(401, "KEY_REQUIRED", "A content key is required"))
@@ -479,7 +479,7 @@ func logFailedExport(ctx context.Context, format string, started time.Time, chat
 // streamArchive answers with an archive as it is written. A failure before
 // its first bytes is answered as an error; one after cuts the response,
 // so the client never keeps a partial archive.
-func streamArchive(w http.ResponseWriter, name string, write func(io.Writer) error) {
+func streamArchive(w http.ResponseWriter, name string, write func(*archiveResponse) error) {
 	out := &archiveResponse{w: w, name: name}
 	if err := write(out); err != nil {
 		if !out.started {
@@ -505,6 +505,14 @@ func (a *archiveResponse) Write(p []byte) (int, error) {
 		a.w.WriteHeader(http.StatusOK)
 	}
 	return a.w.Write(p)
+}
+
+// Flush sends the client what the archive has written so far.
+func (a *archiveResponse) Flush() error {
+	if !a.started {
+		return nil
+	}
+	return http.NewResponseController(a.w).Flush()
 }
 
 // writeBackup writes a native backup: the cloud's projects, documents and
@@ -775,22 +783,40 @@ type exportedFile struct {
 	FileSize   int    `json:"fileSize"`
 }
 
-// conversationsExport writes images as it meets them and collects the
-// conversations in scratch space, to write them once all are read.
+// conversationsExport sends conversations.json as it reads the chats, then
+// the images they show, then the manifest. Each image is read before its
+// chat is written, so a chat names only the images the archive holds, and
+// read again once every chat is written: kept meanwhile, an export's images
+// could take more scratch space than there is.
 type conversationsExport struct {
 	zip           *zip.Writer
-	conversations *scratchFile
+	out           *archiveResponse
+	conversations io.Writer
 	used          map[string]bool
 	manifest      ConversationsManifest
+	// images are those the chats written so far show, in the order they
+	// are written.
+	images []exportedImage
 }
 
-func (ar *Service) writeConversations(ctx context.Context, p *auth.Principal, key *auth.ContentKey, form *exportForm, lease *Lease, out io.Writer, started time.Time) (err error) {
-	text, err := lease.create()
-	if err != nil {
+// exportedImage is an image a chat names, to write once the chats are: the
+// path it names, the digest of the bytes it was read as, and what reading
+// it again takes.
+type exportedImage struct {
+	path, sha256 string
+	attachment   domain.Attachment
+}
+
+// imagesPerGrant bounds the stored images an export reads again under one
+// renewal of its grant, as a page bounds the chats it reads under one.
+const imagesPerGrant = 100
+
+func (ar *Service) writeConversations(ctx context.Context, p *auth.Principal, key *auth.ContentKey, form *exportForm, out *archiveResponse, started time.Time) (err error) {
+	e := &conversationsExport{zip: zip.NewWriter(out), out: out, used: map[string]bool{}, manifest: ConversationsManifest{Version: 1, Attachments: []exportedFile{}, Warnings: []string{}}}
+	defer func() { logFailedExport(ctx, "conversations", started, e.manifest.ChatCount, err) }()
+	if e.conversations, err = e.zip.CreateHeader(&zip.FileHeader{Name: "conversations.json", Method: zip.Deflate, Modified: api.Now()}); err != nil {
 		return err
 	}
-	e := &conversationsExport{zip: zip.NewWriter(out), conversations: text, used: map[string]bool{}, manifest: ConversationsManifest{Version: 1, Attachments: []exportedFile{}, Warnings: []string{}}}
-	defer func() { logFailedExport(ctx, "conversations", started, e.manifest.ChatCount, err) }()
 	device := map[string]bool{}
 	for i := range form.threads {
 		t, err := form.thread(i)
@@ -802,6 +828,8 @@ func (ar *Service) writeConversations(ctx context.Context, p *auth.Principal, ke
 			return err
 		}
 	}
+	deviceImages := e.images
+	e.images = nil
 	if key != nil {
 		// A chat this harness or the key cannot read is left out, and listed.
 		err := ar.eachStoredChat(ctx, p, key, func(id string) {
@@ -817,15 +845,19 @@ func (ar *Service) writeConversations(ctx context.Context, p *auth.Principal, ke
 	if e.manifest.ChatCount == 0 {
 		end = "[]"
 	}
-	if _, err := io.WriteString(text, end); err != nil {
+	if _, err := io.WriteString(e.conversations, end); err != nil {
 		return err
 	}
-	w, err := e.zip.CreateHeader(&zip.FileHeader{Name: "conversations.json", Method: zip.Deflate, Modified: api.Now()})
-	if err != nil {
-		return err
+	for _, image := range deviceImages {
+		data, err := form.deviceImage(&image.attachment)
+		if err := e.writeImage(image, data, err); err != nil {
+			return err
+		}
 	}
-	if _, err := io.Copy(w, text.section(0, text.Size())); err != nil {
-		return err
+	for start := 0; start < len(e.images); start += imagesPerGrant {
+		if err := ar.writeStoredImages(ctx, p, key, e, e.images[start:min(start+imagesPerGrant, len(e.images))]); err != nil {
+			return err
+		}
 	}
 	e.manifest.CreatedAt = archiveTime(api.Now())
 	e.manifest.AttachmentCount = len(e.manifest.Attachments)
@@ -837,6 +869,48 @@ func (ar *Service) writeConversations(ctx context.Context, p *auth.Principal, ke
 		return err
 	}
 	return e.zip.Close()
+}
+
+// writeStoredImages reads stored images again, a few at a time ahead of the
+// one it writes, under a renewal of the export's grant.
+func (ar *Service) writeStoredImages(ctx context.Context, p *auth.Principal, key *auth.ContentKey, e *conversationsExport, images []exportedImage) error {
+	if err := ar.renewGrant(ctx, p, key); err != nil {
+		return err
+	}
+	attachments := make([]domain.Attachment, len(images))
+	for k := range images {
+		attachments[k] = images[k].attachment
+	}
+	reads := ar.readImagesAhead(ctx, p, attachments)
+	defer reads.close()
+	for k := range images {
+		image, _ := reads.chat(k)
+		data, err := image(&attachments[k])
+		if err := e.writeImage(images[k], data, err); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeImage writes an image a chat names, read again. One that cannot be
+// read as it first was fails the export, whose chats already name it.
+func (e *conversationsExport) writeImage(image exportedImage, data []byte, err error) error {
+	if err != nil {
+		return err
+	}
+	if api.HashHex(data) != image.sha256 {
+		return errAttachmentUnavailable
+	}
+	return writeEntry(e.zip, image.path, data, false)
+}
+
+// flush sends the client what the archive holds so far.
+func (e *conversationsExport) flush() error {
+	if err := e.zip.Flush(); err != nil {
+		return err
+	}
+	return e.out.Flush()
 }
 
 // indentedJSON is a value as JSON.stringify(value, null, 2) writes it,
@@ -892,8 +966,10 @@ func (e *conversationsExport) chat(t *domain.Thread, projectID string, image fun
 	if _, err := io.WriteString(e.conversations, separator); err != nil {
 		return err
 	}
-	_, err = e.conversations.Write(encoded)
-	return err
+	if _, err := e.conversations.Write(encoded); err != nil {
+		return err
+	}
+	return e.flush()
 }
 
 func (e *conversationsExport) attachment(a domain.Attachment, image func(*domain.Attachment) ([]byte, error), document func(*domain.Attachment) error) (exportAttachment, error) {
@@ -919,11 +995,10 @@ func (e *conversationsExport) attachment(a domain.Attachment, image func(*domain
 	if err != nil {
 		return exportAttachment{}, err
 	}
-	if err := writeEntry(e.zip, exportPath, data, false); err != nil {
-		return exportAttachment{}, err
-	}
+	sum := api.HashHex(data)
+	e.images = append(e.images, exportedImage{path: exportPath, sha256: sum, attachment: domain.Attachment{ID: a.ID, Kind: a.Kind, Base64: a.Base64, EncryptionKey: a.EncryptionKey, Key: a.Key}})
 	exported.ExportPath, exported.FileSize = exportPath, new(int64(len(data)))
-	e.manifest.Attachments = append(e.manifest.Attachments, exportedFile{ExportPath: exportPath, SHA256: api.HashHex(data), FileSize: len(data)})
+	e.manifest.Attachments = append(e.manifest.Attachments, exportedFile{ExportPath: exportPath, SHA256: sum, FileSize: len(data)})
 	return exported, nil
 }
 

@@ -117,6 +117,17 @@ func (ar *Service) readAhead(ctx context.Context, p *auth.Principal, chats []*do
 	return r
 }
 
+// readImagesAhead starts reading stored images again, each as the only
+// attachment of the chat at its place in images.
+func (ar *Service) readImagesAhead(ctx context.Context, p *auth.Principal, images []domain.Attachment) *pageReads {
+	r := ar.newPageReads(ctx, p)
+	for k, a := range images {
+		r.add(k, a)
+	}
+	r.startBefore(readsAhead)
+	return r
+}
+
 func (ar *Service) newPageReads(ctx context.Context, p *auth.Principal) *pageReads {
 	ctx, cancel := context.WithCancel(ctx)
 	return &pageReads{cancel: cancel, image: ar.cloudImage(ctx, p), document: ar.cloudDocument(ctx, p), at: map[readKey]int{}}
