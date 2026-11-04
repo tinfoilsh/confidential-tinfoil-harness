@@ -102,22 +102,34 @@ type storedRead struct {
 // the cloud: each image, and each document whose content only its blob
 // holds.
 func (ar *Service) readAhead(ctx context.Context, p *auth.Principal, chats []*domain.Thread) *pageReads {
-	ctx, cancel := context.WithCancel(ctx)
-	r := &pageReads{cancel: cancel, image: ar.cloudImage(ctx, p), document: ar.cloudDocument(ctx, p), at: map[readKey]int{}}
+	r := ar.newPageReads(ctx, p)
 	for k, t := range chats {
 		for _, m := range t.Messages {
 			for _, a := range m.Attachments {
-				key := readKey{k, a.ID}
-				if _, ok := r.at[key]; ok || !a.IsImage() && (a.HasContent() || a.StorageKey() == "") {
+				if !a.IsImage() && (a.HasContent() || a.StorageKey() == "") {
 					continue
 				}
-				r.at[key] = len(r.reads)
-				r.reads = append(r.reads, &storedRead{attachment: a, done: make(chan struct{})})
+				r.add(k, a)
 			}
 		}
 	}
 	r.startBefore(readsAhead)
 	return r
+}
+
+func (ar *Service) newPageReads(ctx context.Context, p *auth.Principal) *pageReads {
+	ctx, cancel := context.WithCancel(ctx)
+	return &pageReads{cancel: cancel, image: ar.cloudImage(ctx, p), document: ar.cloudDocument(ctx, p), at: map[readKey]int{}}
+}
+
+// add queues the read of the kth chat's attachment a, once.
+func (r *pageReads) add(k int, a domain.Attachment) {
+	key := readKey{k, a.ID}
+	if _, ok := r.at[key]; ok {
+		return
+	}
+	r.at[key] = len(r.reads)
+	r.reads = append(r.reads, &storedRead{attachment: a, done: make(chan struct{})})
 }
 
 // startBefore starts every read before the nth.
