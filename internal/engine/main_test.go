@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http/httptest"
 	"slices"
 	"strconv"
@@ -31,7 +32,12 @@ func TestARunPastItsLogBudgetGoesOnFromACheckpoint(t *testing.T) {
 	out.emit(fittedSnapshot(shown, false))
 	out.emit(domain.StateSnapshotEvent{})
 	out.folding = true
+	// Two calls' arguments stream in turn, as parallel calls' do.
 	out.callStart("call", "search", "reply")
+	out.callStart("other", "search", "reply")
+	for _, piece := range [][2]string{{"call", `{"q":`}, {"other", `{"q":`}, {"call", `"cats"}`}, {"other", `"dogs"}`}} {
+		out.callArgs(piece[0], piece[1])
+	}
 	out.activity(ToolCall{ID: "call", Name: "search"})
 	// A tool's progress reports are folded into its activity, not kept.
 	for i := range 100 {
@@ -75,7 +81,7 @@ func TestARunPastItsLogBudgetGoesOnFromACheckpoint(t *testing.T) {
 		// The checkpoint's last frame has the cursor before the first frame
 		// after it, and its others none.
 		last := slices.IndexFunc(frames, func(f followedFrame) bool { return f.ID != nil })
-		types, reply, merged, chunks := []string{}, "", 0, 0
+		types, reply, merged, chunks, args := []string{}, "", 0, 0, map[string]string{}
 		for i, f := range frames {
 			types = append(types, f.Type)
 			if want := base - 1 + i - last; i < last && f.ID != nil || i >= last && (f.ID == nil || *f.ID != want) {
@@ -90,13 +96,22 @@ func TestARunPastItsLogBudgetGoesOnFromACheckpoint(t *testing.T) {
 			if f.Type == "MESSAGES_SNAPSHOT" && (len(f.Messages) != 2 || f.Messages[0].ID != "earlier" || f.Messages[1].ID != "question") {
 				t.Fatalf("after %q, the checkpoint's snapshot is %+v", after, f.Messages)
 			}
-			if f.Type == "TEXT_MESSAGE_CHUNK" && i <= last {
-				merged, chunks = merged+1, chunks+strings.Count(f.Delta, "[")
+			switch {
+			case f.Type == "TOOL_CALL_ARGS":
+				args[f.CallID] += f.Delta
+			case f.Type == "TEXT_MESSAGE_CHUNK":
+				reply += f.Delta
+				if i <= last {
+					merged, chunks = merged+1, chunks+strings.Count(f.Delta, "[")
+				}
 			}
-			reply += f.Delta
 		}
-		if !slices.Equal(types[:7], []string{"RUN_STARTED", "MESSAGES_SNAPSHOT", "STATE_SNAPSHOT", "TOOL_CALL_START", "ACTIVITY_SNAPSHOT", "TOOL_CALL_RESULT", "TEXT_MESSAGE_CHUNK"}) {
-			t.Fatalf("after %q, the checkpoint starts %v", after, types[:7])
+		if want := []string{"RUN_STARTED", "MESSAGES_SNAPSHOT", "STATE_SNAPSHOT", "TOOL_CALL_START", "TOOL_CALL_START", "TOOL_CALL_ARGS", "TOOL_CALL_ARGS", "TOOL_CALL_ARGS", "TOOL_CALL_ARGS",
+			"ACTIVITY_SNAPSHOT", "TOOL_CALL_RESULT", "TEXT_MESSAGE_CHUNK"}; !slices.Equal(types[:len(want)], want) {
+			t.Fatalf("after %q, the checkpoint starts %v", after, types[:len(want)])
+		}
+		if !maps.Equal(args, map[string]string{"call": `{"q":"cats"}`, "other": `{"q":"dogs"}`}) {
+			t.Fatalf("after %q, the calls' arguments are %v", after, args)
 		}
 		// The text the checkpoint holds is merged from the run's chunks.
 		if merged == 0 || merged*10 > chunks {
@@ -165,6 +180,7 @@ type followedFrame struct {
 	Size     int             // the bytes of its data
 	Type     string          `json:"type"`
 	Delta    string          `json:"delta"`
+	CallID   string          `json:"toolCallId"`
 	Content  json.RawMessage `json:"content"`
 	Messages []struct {
 		ID string `json:"id"`

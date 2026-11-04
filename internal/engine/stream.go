@@ -86,13 +86,10 @@ func (s *Stream) activityFrame(id string) []byte {
 	return encoded
 }
 
-// merged is one frame for a run of delta frames to the same target: the
-// first's event, at its time, with each frame's delta in turn.
+// merged is one frame for a run of frames of domain.TextDelta events to the
+// same target: the first's members, with each frame's delta in turn.
 func merged(deltas [][]byte) []byte {
-	var first struct {
-		Type      string `json:"type"`
-		Timestamp string `json:"timestamp"`
-	}
+	var first map[string]json.RawMessage
 	json.Unmarshal(deltas[0], &first)
 	var text strings.Builder
 	for _, frame := range deltas {
@@ -102,25 +99,8 @@ func merged(deltas [][]byte) []byte {
 		json.Unmarshal(frame, &d)
 		text.WriteString(d.Delta)
 	}
-	var e domain.Event
-	switch first.Type {
-	case "TEXT_MESSAGE_CHUNK":
-		var chunk domain.TextChunk
-		json.Unmarshal(deltas[0], &chunk)
-		chunk.Delta = text.String()
-		e = chunk
-	case "REASONING_MESSAGE_CHUNK":
-		var chunk domain.ReasoningChunk
-		json.Unmarshal(deltas[0], &chunk)
-		chunk.Delta = text.String()
-		e = chunk
-	case "TOOL_CALL_ARGS":
-		var args domain.ToolCallArgs
-		json.Unmarshal(deltas[0], &args)
-		args.Delta = text.String()
-		e = args
-	}
-	encoded, _ := domain.EncodeEvent(e, first.Timestamp)
+	first["delta"], _ = json.Marshal(text.String())
+	encoded, _ := json.Marshal(first)
 	return encoded
 }
 
@@ -213,17 +193,13 @@ func (s *Stream) frame(e domain.Event, at string) {
 }
 
 // kindOf is what a checkpoint does with an event, and what the event extends
-// or reports on. A checkpoint merges the deltas of reply content and keeps
-// each tool's activity as it stands; every other event, the run's snapshots
-// and the calls and their results among them, it sends as it was.
+// or reports on. A checkpoint merges text deltas and keeps each tool's
+// activity as it stands; every other event, the run's snapshots and the
+// calls and their results among them, it sends as it was.
 func kindOf(e domain.Event) (frameKind, string) {
 	switch e := e.(type) {
-	case domain.TextChunk:
-		return frameDelta, "text:" + e.MessageID
-	case domain.ReasoningChunk:
-		return frameDelta, "reasoning:" + e.MessageID
-	case domain.ToolCallArgs:
-		return frameDelta, "args:" + e.ToolCallID
+	case domain.TextDelta:
+		return frameDelta, fmt.Sprintf("%T:%s", e, e.Target())
 	case domain.ActivitySnapshot:
 		return frameActivity, e.MessageID
 	case domain.ActivityDelta:
