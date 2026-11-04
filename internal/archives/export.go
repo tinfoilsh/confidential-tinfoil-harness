@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"cmp"
+	"compress/flate"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -789,9 +790,11 @@ type exportedFile struct {
 // read again once every chat is written: kept meanwhile, an export's images
 // could take more scratch space than there is.
 type conversationsExport struct {
-	zip           *zip.Writer
-	out           *archiveResponse
+	zip *zip.Writer
+	out *archiveResponse
+	// conversations is conversations.json, which deflate compresses.
 	conversations io.Writer
+	deflate       *flate.Writer
 	used          map[string]bool
 	manifest      ConversationsManifest
 	// images are those the chats written so far show, in the order they
@@ -813,6 +816,11 @@ const imagesPerGrant = 100
 
 func (ar *Service) writeConversations(ctx context.Context, p *auth.Principal, key *auth.ContentKey, form *exportForm, out *archiveResponse, started time.Time) (err error) {
 	e := &conversationsExport{zip: zip.NewWriter(out), out: out, used: map[string]bool{}, manifest: ConversationsManifest{Version: 1, Attachments: []exportedFile{}, Warnings: []string{}}}
+	e.zip.RegisterCompressor(zip.Deflate, func(w io.Writer) (io.WriteCloser, error) {
+		fw, err := flate.NewWriter(w, flate.DefaultCompression)
+		e.deflate = fw
+		return fw, err
+	})
 	defer func() { logFailedExport(ctx, "conversations", started, e.manifest.ChatCount, err) }()
 	if e.conversations, err = e.zip.CreateHeader(&zip.FileHeader{Name: "conversations.json", Method: zip.Deflate, Modified: api.Now()}); err != nil {
 		return err
@@ -907,6 +915,9 @@ func (e *conversationsExport) writeImage(image exportedImage, data []byte, err e
 
 // flush sends the client what the archive holds so far.
 func (e *conversationsExport) flush() error {
+	if err := e.deflate.Flush(); err != nil {
+		return err
+	}
 	if err := e.zip.Flush(); err != nil {
 		return err
 	}

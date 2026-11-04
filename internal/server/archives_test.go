@@ -4,8 +4,10 @@ import (
 	"archive/zip"
 	"bufio"
 	"bytes"
+	"compress/flate"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -1063,8 +1065,8 @@ func TestExportsOutliveTheirFirstGrant(t *testing.T) {
 }
 
 // A conversations export sends its chats as it reads them, though none
-// shows an image: its client receives the archive's first bytes while the
-// store still lists the chats that follow.
+// shows an image: its client receives the first chat while the store still
+// lists the chats that follow.
 func TestConversationsExportsSendChatsAsTheyAreRead(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	received := make(chan struct{})
@@ -1088,19 +1090,33 @@ func TestConversationsExportsSendChatsAsTheyAreRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var archive bytes.Buffer
+	stream := io.TeeReader(r.Body, &archive)
 	// The archive opens with the conversations: an entry's fixed header,
-	// then its name.
-	const entryHeader = 30
-	opening := make([]byte, entryHeader+len("conversations.json"))
-	if _, err := io.ReadFull(r.Body, opening); err != nil || !bytes.HasSuffix(opening, []byte("conversations.json")) {
-		t.Fatalf("the archive opened with %q: %v", opening, err)
-	}
-	close(received)
-	rest, err := io.ReadAll(r.Body)
-	if err != nil {
+	// which ends with the lengths of its name and extra fields, then those,
+	// then its compressed bytes.
+	const entryHeader, nameLength, extraLength = 30, 26, 28
+	header := make([]byte, entryHeader)
+	if _, err := io.ReadFull(stream, header); err != nil {
 		t.Fatal(err)
 	}
-	files, _ := unzipped(t, append(opening, rest...))
+	name := make([]byte, binary.LittleEndian.Uint16(header[nameLength:])+binary.LittleEndian.Uint16(header[extraLength:]))
+	if _, err := io.ReadFull(stream, name); err != nil || !bytes.HasPrefix(name, []byte("conversations.json")) {
+		t.Fatalf("the archive opened with %q: %v", name, err)
+	}
+	conversation, text := flate.NewReader(stream), []byte{}
+	for !bytes.Contains(text, []byte(`"uuid": "chat-1"`)) {
+		chunk := make([]byte, 512)
+		n, err := conversation.Read(chunk)
+		if text = append(text, chunk[:n]...); err != nil {
+			t.Fatalf("the conversations ended at %q: %v", text, err)
+		}
+	}
+	close(received)
+	if _, err := io.Copy(&archive, r.Body); err != nil {
+		t.Fatal(err)
+	}
+	files, _ := unzipped(t, archive.Bytes())
 	var conversations []struct {
 		UUID string `json:"uuid"`
 	}
