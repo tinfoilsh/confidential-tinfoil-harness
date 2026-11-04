@@ -481,6 +481,37 @@ func TestAnotherCallerReachesNothingOfALiveRun(t *testing.T) {
 	}
 }
 
+// A reply whose client leaves before it finishes still finishes and is
+// saved, so the chat shows it whole when the client opens it again.
+func TestAReplyIsSavedAfterItsClientLeaves(t *testing.T) {
+	model, release := heldModel()
+	h, rows, key := testChatHarness(t, model)
+	p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
+	request, leave := context.WithCancel(context.Background())
+	run, err := h.engine.AcceptTurn(request, p, chatCredential("alice"), key, requestOf[engine.TurnRequest](sendInput(key)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitFrame(t, run.Log, "TEXT_MESSAGE_CHUNK")
+	// The connection drops: the turn's request ends and stops draining.
+	leave()
+	run.Log.Frames.Detach()
+	release()
+	select {
+	case <-run.Finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the reply did not finish once its client left")
+	}
+	row, err := rows.Load(context.Background(), p, key, "chat", run.Thread.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thread := mustRead(domain.ReadThreadRow(row))
+	if len(thread.Messages) != 2 || thread.Messages[1].Content != "partial done" || domain.ValueOr(thread.Messages[1].IsInterrupted, false) || thread.ActiveRun != nil {
+		t.Fatalf("the chat was saved with %d messages, reply %+v, run %+v", len(thread.Messages), thread.Messages[len(thread.Messages)-1], thread.ActiveRun)
+	}
+}
+
 // A finished run's log is wiped once nothing drains it, whether its last
 // reader leaves after the run ends or before. A follower attached as the run
 // ends is still sent every frame, and the frames are zeroed, not only
