@@ -4,8 +4,10 @@ import (
 	"archive/zip"
 	"bufio"
 	"bytes"
+	"compress/flate"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -805,7 +807,9 @@ func TestConversationsExportMatchesTheWebApp(t *testing.T) {
 	}
 	got, gotNames := unzipped(t, w.Body.Bytes())
 	want, wantNames := unzipped(t, fixture(t, "web-conversations-export.zip"))
-	if !reflect.DeepEqual(gotNames, wantNames) {
+	// Readers find entries by name; the harness writes the conversations
+	// first, as it reads them, and the web app wrote them after the images.
+	if !reflect.DeepEqual(slices.Sorted(slices.Values(gotNames)), slices.Sorted(slices.Values(wantNames))) {
 		t.Fatalf("entries %v, want %v", gotNames, wantNames)
 	}
 	for _, name := range wantNames {
@@ -936,11 +940,12 @@ func TestExportsLeaveOutWhatStorageDoesNotServe(t *testing.T) {
 
 // pagedRows lists a user's rows in pages of size, by id, and grants an
 // operation its rows for lifetime; listing each page after the first takes
-// pause.
+// pause, and waits for later, when set.
 type pagedRows struct {
 	*memoryRows
 	size            int
 	lifetime, pause time.Duration
+	later           func()
 }
 
 func (s *pagedRows) AuthorizeStorage(_ context.Context, _ *auth.Principal, _ auth.ContentKey, operation, project string) (*auth.StorageGrant, error) {
@@ -959,6 +964,9 @@ func (s *pagedRows) List(ctx context.Context, p *auth.Principal, key auth.Conten
 		page.Unreadable = all.Unreadable
 	} else {
 		time.Sleep(s.pause)
+		if s.later != nil {
+			s.later()
+		}
 	}
 	if end := start + len(page.Rows); end < len(all.Rows) {
 		page.Next = strconv.Itoa(end)
@@ -984,20 +992,22 @@ func TestExportsReadAttachmentsAheadOfTheChatTheyWrite(t *testing.T) {
 		}
 		want = append(want, chat)
 	}
-	// The first chat's image is served once every other has been asked for,
-	// or a second has passed.
+	// The first chat's image is first served once every other has been
+	// asked for, or a second has passed.
 	others := make(chan struct{}, chats)
 	var askedMeanwhile atomic.Int32
+	var served atomic.Bool
 	rows.cp.Mu.Lock()
 	rows.cp.CaptureHeaders = func(r *http.Request) {
 		id, ok := strings.CutPrefix(r.URL.Path, "/api/sync/attachment-owner/")
-		if !ok {
+		if !ok || served.Load() {
 			return
 		}
 		if id != first {
 			others <- struct{}{}
 			return
 		}
+		defer served.Store(true)
 		timeout := time.After(time.Second)
 		for askedMeanwhile.Load() < chats-1 {
 			select {
@@ -1050,6 +1060,103 @@ func TestExportsOutliveTheirFirstGrant(t *testing.T) {
 	var manifest archives.BackupManifest
 	json.Unmarshal(files[archives.ManifestPath], &manifest)
 	if manifest.Counts.CloudChats != 2 || manifest.Counts.Images != 2 || len(manifest.Omissions) != 0 {
+		t.Fatalf("manifest: %+v", manifest)
+	}
+}
+
+// A conversations export sends its chats as it reads them, though none
+// shows an image: its client receives the first chat while the store still
+// lists the chats that follow.
+func TestConversationsExportsSendChatsAsTheyAreRead(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	received := make(chan struct{})
+	h.store.Rows = &pagedRows{memoryRows: rows, size: 1, lifetime: time.Hour, later: func() {
+		select {
+		case <-received:
+		case <-time.After(5 * time.Second):
+			t.Error("the client received nothing while later chats were listed")
+		}
+	}}
+	for _, chat := range []string{"chat-1", "chat-2"} {
+		storedThread(rows, "alice", chat)
+	}
+	server := httptest.NewServer(h.routes())
+	t.Cleanup(server.Close)
+	body, contentType := archiveForm(optionsPart(api.Object{"format": "conversations", "key": keyBase64(key)}))
+	conn := postRaw(t, server, "/v1/export", contentType, len(body))
+	conn.Write(body)
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	r, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var archive bytes.Buffer
+	stream := io.TeeReader(r.Body, &archive)
+	// The archive opens with the conversations: an entry's fixed header,
+	// which ends with the lengths of its name and extra fields, then those,
+	// then its compressed bytes.
+	const entryHeader, nameLength, extraLength = 30, 26, 28
+	header := make([]byte, entryHeader)
+	if _, err := io.ReadFull(stream, header); err != nil {
+		t.Fatal(err)
+	}
+	name := make([]byte, binary.LittleEndian.Uint16(header[nameLength:])+binary.LittleEndian.Uint16(header[extraLength:]))
+	if _, err := io.ReadFull(stream, name); err != nil || !bytes.HasPrefix(name, []byte("conversations.json")) {
+		t.Fatalf("the archive opened with %q: %v", name, err)
+	}
+	conversation, text := flate.NewReader(stream), []byte{}
+	for !bytes.Contains(text, []byte(`"uuid": "chat-1"`)) {
+		chunk := make([]byte, 512)
+		n, err := conversation.Read(chunk)
+		if text = append(text, chunk[:n]...); err != nil {
+			t.Fatalf("the conversations ended at %q: %v", text, err)
+		}
+	}
+	close(received)
+	if _, err := io.Copy(&archive, r.Body); err != nil {
+		t.Fatal(err)
+	}
+	files, _ := unzipped(t, archive.Bytes())
+	var conversations []struct {
+		UUID string `json:"uuid"`
+	}
+	json.Unmarshal(files["conversations.json"], &conversations)
+	if len(conversations) != 2 || conversations[0].UUID != "chat-1" || conversations[1].UUID != "chat-2" {
+		t.Fatalf("conversations: %+v", conversations)
+	}
+}
+
+// A conversations export renews its grant before it reads its images again,
+// so one whose chats outlive the grant still writes every image: one
+// storage keeps, and one its chat holds, read from the chat again.
+func TestConversationsExportsReadImagesAgainUnderARenewedGrant(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	const lifetime = time.Second
+	h.store.Rows = &pagedRows{memoryRows: rows, size: 1, lifetime: lifetime}
+	image, held := pngFixture(t, 2, 2, 1), pngFixture(t, 3, 3, 2)
+	id, blobKey := seedAttachment(rows, "alice", "chat-1", image)
+	storedThread(rows, "alice", "chat-1", api.Object{"id": id, "kind": "image", "fileName": "photo.png", "encryptionKey": blobKey},
+		api.Object{"id": "held", "kind": "image", "fileName": "held.png", "base64": base64.StdEncoding.EncodeToString(held)})
+	// The image is first read for longer than a grant lasts.
+	var read atomic.Bool
+	rows.cp.Mu.Lock()
+	rows.cp.CaptureHeaders = func(r *http.Request) {
+		if r.URL.Path == "/api/sync/attachment-owner/"+id && read.CompareAndSwap(false, true) {
+			time.Sleep(lifetime + lifetime/2)
+		}
+	}
+	rows.cp.Mu.Unlock()
+	// An export that fails once it has begun cuts its response off.
+	server := httptest.NewServer(h.routes())
+	t.Cleanup(server.Close)
+	body, contentType := archiveForm(optionsPart(api.Object{"format": "conversations", "key": keyBase64(key)}))
+	conn := postRaw(t, server, "/v1/export", contentType, len(body))
+	conn.Write(body)
+	_, archive := rawResponse(t, conn)
+	files, _ := unzipped(t, []byte(archive))
+	var manifest archives.ConversationsManifest
+	json.Unmarshal(files[archives.ManifestPath], &manifest)
+	if len(manifest.Attachments) != 2 || !bytes.Equal(files[manifest.Attachments[0].ExportPath], image) || !bytes.Equal(files[manifest.Attachments[1].ExportPath], held) || len(manifest.Warnings) != 0 {
 		t.Fatalf("manifest: %+v", manifest)
 	}
 }
@@ -1185,10 +1292,14 @@ func TestArchivesWaitForScratchSpace(t *testing.T) {
 	if w := archiveRoute(h, "/v1/import", "alice", optionsPart(api.Object{"target": "device"}), formPart{name: "file", filename: "big.json", data: bytes.Repeat([]byte(" "), 40<<10)}); w.Code != 413 || !strings.Contains(w.Body.String(), "ARCHIVE_TOO_LARGE") {
 		t.Fatalf("an import that cannot fit: HTTP %d %s", w.Code, w.Body.String())
 	}
-	// The export fits the space, but not with the conversations it writes.
-	large := threadPart(api.Object{"id": "local-chat", "title": "Tab chat", "messages": []any{api.Object{"id": "m", "role": "user", "content": strings.Repeat("x", 40<<10)}}})
-	if w := archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "conversations"}), large); w.Code != 413 || !strings.Contains(w.Body.String(), "ARCHIVE_TOO_LARGE") {
-		t.Fatalf("an export that cannot fit: HTTP %d %s", w.Code, w.Body.String())
+	// An export takes the space its request does, and none for the
+	// conversations it writes, which it sends as it goes.
+	content := strings.Repeat("x", 40<<10)
+	large := threadPart(api.Object{"id": "local-chat", "title": "Tab chat", "messages": []any{api.Object{"id": "m", "role": "user", "content": content}}})
+	if w := archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": "conversations"}), large); w.Code != 200 {
+		t.Fatalf("an export whose request fits: HTTP %d %s", w.Code, w.Body.String())
+	} else if files, _ := unzipped(t, w.Body.Bytes()); !strings.Contains(string(files["conversations.json"]), content) {
+		t.Fatalf("the export left out its chat: %.200s", files["conversations.json"])
 	}
 	held := heldScratch(t, h, 60<<10)
 	done := make(chan *httptest.ResponseRecorder)

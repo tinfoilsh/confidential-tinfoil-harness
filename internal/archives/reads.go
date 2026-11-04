@@ -17,6 +17,8 @@ import (
 // services. A read they fail to answer is tried again a few times; one that
 // still fails leaves the attachment out, as one they no longer hold is, so a
 // passing fault costs an export an attachment rather than the whole export.
+// A conversations export reads its images again once its chats, which name
+// them, are written, so an image read then that still fails ends it.
 // Most chats keep one or two attachments, so an export reads those of a page
 // of chats a few at a time, ahead of the chat it writes, and writes the chats
 // in the order the page lists them.
@@ -102,22 +104,45 @@ type storedRead struct {
 // the cloud: each image, and each document whose content only its blob
 // holds.
 func (ar *Service) readAhead(ctx context.Context, p *auth.Principal, chats []*domain.Thread) *pageReads {
-	ctx, cancel := context.WithCancel(ctx)
-	r := &pageReads{cancel: cancel, image: ar.cloudImage(ctx, p), document: ar.cloudDocument(ctx, p), at: map[readKey]int{}}
+	r := ar.newPageReads(ctx, p)
 	for k, t := range chats {
 		for _, m := range t.Messages {
 			for _, a := range m.Attachments {
-				key := readKey{k, a.ID}
-				if _, ok := r.at[key]; ok || !a.IsImage() && (a.HasContent() || a.StorageKey() == "") {
+				if !a.IsImage() && (a.HasContent() || a.StorageKey() == "") {
 					continue
 				}
-				r.at[key] = len(r.reads)
-				r.reads = append(r.reads, &storedRead{attachment: a, done: make(chan struct{})})
+				r.add(k, a)
 			}
 		}
 	}
 	r.startBefore(readsAhead)
 	return r
+}
+
+// readImagesAhead starts reading stored images again, each as the only
+// attachment of the chat at its place in images.
+func (ar *Service) readImagesAhead(ctx context.Context, p *auth.Principal, images []domain.Attachment) *pageReads {
+	r := ar.newPageReads(ctx, p)
+	for k, a := range images {
+		r.add(k, a)
+	}
+	r.startBefore(readsAhead)
+	return r
+}
+
+func (ar *Service) newPageReads(ctx context.Context, p *auth.Principal) *pageReads {
+	ctx, cancel := context.WithCancel(ctx)
+	return &pageReads{cancel: cancel, image: ar.cloudImage(ctx, p), document: ar.cloudDocument(ctx, p), at: map[readKey]int{}}
+}
+
+// add queues the read of the kth chat's attachment a, once.
+func (r *pageReads) add(k int, a domain.Attachment) {
+	key := readKey{k, a.ID}
+	if _, ok := r.at[key]; ok {
+		return
+	}
+	r.at[key] = len(r.reads)
+	r.reads = append(r.reads, &storedRead{attachment: a, done: make(chan struct{})})
 }
 
 // startBefore starts every read before the nth.
