@@ -45,9 +45,10 @@ func (eng *Engine) HandleFollow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	eng.Live.mu.Lock()
+	// A run that ended since it was found may be held for its client.
 	if eng.Live.runs[liveKey(p, in.RunID)] != live {
 		eng.Live.mu.Unlock()
-		api.Respond(w, nil, errRunNotFound)
+		eng.followHeld(w, r, p, in.ThreadID, in.RunID)
 		return
 	}
 	live.Log.Frames.Attach()

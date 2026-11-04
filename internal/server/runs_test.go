@@ -547,6 +547,28 @@ func TestADeviceChatsEndedRunIsKeptUntilItsClientCollectsIt(t *testing.T) {
 	}
 }
 
+// A device chat deleted as its reply runs is not kept for its client.
+func TestADeviceChatDeletedAsItsReplyRunsIsNotKept(t *testing.T) {
+	model, _ := heldModel()
+	h, _, _ := testChatHarness(t, model)
+	alice := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
+	run, err := h.engine.AcceptTurn(context.Background(), alice, chatCredential("alice"), auth.ContentKey{}, requestOf[engine.TurnRequest](localInput("", api.Object{"messages": []any{}})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitFrame(t, run.Log, "TEXT_MESSAGE_CHUNK")
+	run.Log.Frames.Detach()
+	h.engine.StopThread(alice, run.Thread.ID)
+	select {
+	case <-run.Finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the deleted chat's reply did not end")
+	}
+	if w := postRoute(h, "/v1/threads/follow", api.Object{"threadId": run.Thread.ID, "runId": run.Log.ID}, "alice"); w.Code != 404 {
+		t.Fatalf("the deleted chat's run was kept: HTTP %d %s", w.Code, w.Body.String())
+	}
+}
+
 // A finished run's log is wiped once nothing drains it, whether its last
 // reader leaves after the run ends or before. A follower attached as the run
 // ends is still sent every frame, and the frames are zeroed, not only
