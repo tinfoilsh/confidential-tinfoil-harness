@@ -4,63 +4,135 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
-func TestOutgrowingTheLogStopsTheRun(t *testing.T) {
+func TestARunPastItsLogBudgetGoesOnFromACheckpoint(t *testing.T) {
 	rn := NewLog("00")
+	rn.Frames.budget = 4 << 10
 	// The request that started the run is draining it.
 	rn.Frames.Attach()
 	stopped := false
 	rn.stop = func() { stopped = true }
+	question := "Search, then write at length"
+	shown := domain.ThreadWindow{Messages: []domain.MessageView{{ID: "question", Role: "user", Content: &question}}}
+	assembler := domain.NewMessageAssembler()
 	out := &Stream{Run: rn}
-	for i := 0; !stopped && i <= maxRunLog; i += 1 << 16 {
-		out.text("msg", strings.Repeat("x", 1<<16))
+	out.emit(domain.RunStarted{ThreadID: "thread", RunID: rn.ID})
+	out.emit(fittedSnapshot(shown.Messages, false))
+	out.emit(domain.StateSnapshotEvent{})
+	out.Observe, out.checkpoint = assembler.Apply, checkpointOf(shown, assembler)
+	out.callStart("call", "search", "reply")
+	out.activity(ToolCall{ID: "call", Name: "search"})
+	// A tool's progress reports are folded into its activity, not kept.
+	for i := range 100 {
+		out.progress("call", "", float64(i)/100)
 	}
-	if !stopped {
-		t.Fatal("a run that outgrew its log was left producing into it")
+	out.progress("call", "Read 3 pages", 1)
+	out.emit(domain.ToolCallResult{MessageID: "result", ToolCallID: "call", Role: "tool", Content: json.RawMessage(`"pages"`)})
+	var text strings.Builder
+	for i := 0; text.Len() <= 3*rn.Frames.budget; i++ {
+		chunk := fmt.Sprintf("[%d]%s", i, strings.Repeat("x", 100))
+		text.WriteString(chunk)
+		out.text("reply", chunk)
+		if rn.Frames.bytes > rn.Frames.budget {
+			t.Fatalf("the log holds %d bytes of frames past its checkpoint", rn.Frames.bytes)
+		}
 	}
-	if rn.Frames.closed != ErrTooLong {
-		t.Fatalf("closed = %v, want errTooLong", rn.Frames.closed)
+	// As a finishing run does, the run stops checkpointing before its end.
+	out.Observe, out.checkpoint = nil, nil
+	out.emit(domain.RunFinished{ThreadID: "thread", RunID: rn.ID})
+	if stopped {
+		t.Fatal("a run past its log budget was stopped")
 	}
-	// A client following the run is told the same error a request is.
-	w := httptest.NewRecorder()
-	Follow(w, httptest.NewRequest("POST", "/v1/threads/follow", nil), rn, 0)
-	last := lastEventIn(t, w)
-	want := api.AsError(ErrTooLong)
-	if last.Type != "RUN_ERROR" || last.Code != "RUN_LOG_FULL" || last.Code != want.Code || last.Message != want.Message {
-		t.Fatalf("the run ended with %+v, not %+v", last, want)
-	}
-	// A client that applied that error and follows again is sent it alone,
-	// under the same cursor.
-	frames, _, _ := rn.Frames.Read(0)
-	if len(frames) == 0 {
-		t.Fatal("the log kept none of the frames a client is draining")
-	}
-	from, err := ResumeFrom(rn.Frames, strconv.Itoa(len(frames)))
-	if err != nil {
-		t.Fatalf("following after the error: %v", err)
-	}
-	again := httptest.NewRecorder()
-	Follow(again, httptest.NewRequest("POST", "/v1/threads/follow", nil), rn, from)
-	if body := again.Body.String(); !strings.HasPrefix(body, "id: "+strconv.Itoa(len(frames))+"\ndata: {\"type\":\"RUN_ERROR\"") || strings.Count(body, "data: ") != 1 {
-		t.Fatalf("following after the error sent %.200s", body)
-	}
-	// The run is still live, so a follower arriving once its client has left
-	// is sent the frames; they are wiped only once the run ends.
-	rn.Frames.Detach()
-	kept, _, _ := rn.Frames.Read(0)
-	if len(kept) == 0 {
-		t.Fatal("the frames were wiped while the run was live")
+	base := rn.Frames.base
+	if base == 0 {
+		t.Fatal("the log never folded its frames into a checkpoint")
 	}
 	rn.Frames.close(ErrDone)
-	if frames, _, closed := rn.Frames.Read(0); frames != nil || closed != ErrTooLong || bytes.ContainsFunc(kept[0], func(b rune) bool { return b != 0 }) {
-		t.Fatalf("the ended run kept %d frames, closed with %v; first frame %.40q", len(frames), closed, kept[0])
+
+	// A client following from the start, or from any cursor before the
+	// checkpoint, is sent it, then the frames after it, and ends with the
+	// whole reply once.
+	for _, after := range []string{"", "3", strconv.Itoa(base - 2)} {
+		from, err := ResumeFrom(rn.Frames, after)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := httptest.NewRecorder()
+		Follow(w, httptest.NewRequest("POST", "/v1/threads/follow", nil), rn, from)
+		frames := followed(t, w)
+		types, reply := []string{}, ""
+		for i, f := range frames {
+			types = append(types, f.Type)
+			// The checkpoint's last frame has the cursor before the first
+			// frame after it, and its others none.
+			want := base + i - 4
+			if i < 3 && f.ID != nil || i >= 3 && (f.ID == nil || *f.ID != want) {
+				t.Fatalf("after %q, frame %d (%s) has cursor %v, not %d", after, i, f.Type, f.ID, want)
+			}
+			if f.Type == "ACTIVITY_SNAPSHOT" && (f.Content.Progress != 1 || !slices.Equal(f.Content.Output, []string{"Read 3 pages"})) {
+				t.Fatalf("after %q, the checkpoint's activity is %+v", after, f.Content)
+			}
+			if f.Type == "MESSAGES_SNAPSHOT" {
+				if len(f.Messages) != 2 || f.Messages[0].ID != "question" || f.Messages[1].ID != "reply" || f.Messages[1].Timeline[0].ToolCallID != "call" || string(f.Messages[1].Timeline[0].Result) != `"pages"` {
+					t.Fatalf("after %q, the checkpoint's snapshot is %+v", after, f.Messages)
+				}
+				reply = f.Messages[1].Timeline[1].Content
+			}
+			reply += f.Delta
+		}
+		if !slices.Equal(types[:4], []string{"RUN_STARTED", "MESSAGES_SNAPSHOT", "ACTIVITY_SNAPSHOT", "STATE_SNAPSHOT"}) || types[4] != "TEXT_MESSAGE_CHUNK" {
+			t.Fatalf("after %q, the checkpoint and the frame after it are %v", after, types[:5])
+		}
+		if types[len(types)-1] != "RUN_FINISHED" || reply != text.String() {
+			t.Fatalf("after %q, a client ended with %d characters of %d, and %v", after, len(reply), text.Len(), types[len(types)-1])
+		}
+	}
+	// A client that applied the checkpoint resumes after it.
+	if from, err := ResumeFrom(rn.Frames, strconv.Itoa(base-1)); err != nil || from != base {
+		t.Fatalf("after the checkpoint, a client resumes at %d (%v), not %d", from, err, base)
+	}
+
+	// The log is wiped once its last client leaves.
+	checkpoint, _, _, _, _ := rn.Frames.Read(0)
+	rn.Frames.Detach()
+	if again, frames, _, _, _ := rn.Frames.Read(0); again != nil || frames != nil || bytes.ContainsFunc(checkpoint[0], func(b rune) bool { return b != 0 }) {
+		t.Fatalf("the ended log kept %d checkpoint frames and %d frames; first %.40q", len(again), len(frames), checkpoint[0])
+	}
+}
+
+// A snapshot too large for a client's event leaves out its oldest messages.
+func TestASnapshotFitsInAnEventAClientReads(t *testing.T) {
+	big := strings.Repeat("x", maxEventBytes/3)
+	messages := []domain.MessageView{{ID: "a", Role: "user", Content: &big}, {ID: "b", Role: "user", Content: &big}, {ID: "c", Role: "user", Content: &big}}
+	snapshot := fittedSnapshot(messages, false)
+	encoded, err := domain.EncodeEvent(snapshot, api.Timestamp())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) > maxEventBytes || len(snapshot.Messages) != 2 || snapshot.Messages[0].ID != "b" || !snapshot.HasOlder {
+		t.Fatalf("a snapshot of %d bytes holds %d messages, has older %v", len(encoded), len(snapshot.Messages), snapshot.HasOlder)
+	}
+	// A latest message carrying documents too large alone is sent with them,
+	// but not their text, and the chat's own message keeps it.
+	document := strings.Repeat("x", maxEventBytes)
+	question := "Summarize this"
+	messages = []domain.MessageView{{ID: "q", Role: "user", Content: &question, Attachments: []domain.Attachment{{ID: "doc", Kind: "document", FileName: "report.md", TextContent: document}}}}
+	snapshot = fittedSnapshot(messages, false)
+	if encoded, err = domain.EncodeEvent(snapshot, api.Timestamp()); err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) > maxEventBytes || len(snapshot.Messages) != 1 || snapshot.Messages[0].Attachments[0].ID != "doc" || snapshot.Messages[0].Attachments[0].TextContent != "" || messages[0].Attachments[0].TextContent != document {
+		t.Fatalf("a snapshot of %d bytes sent %+v of the document", len(encoded), snapshot.Messages[0].Attachments[0].FileName)
 	}
 }
 
@@ -79,18 +151,47 @@ func TestAPanickingToolCallDoesNotTakeTheRun(t *testing.T) {
 	}
 }
 
-// lastEventIn is the last event a streamed response holds.
-func lastEventIn(t *testing.T, w *httptest.ResponseRecorder) (last struct{ Type, Code, Message string }) {
+type followedFrame struct {
+	ID      *int
+	Type    string `json:"type"`
+	Delta   string `json:"delta"`
+	Content struct {
+		Progress float64  `json:"progress"`
+		Output   []string `json:"output"`
+	} `json:"content"`
+	Messages []struct {
+		ID       string `json:"id"`
+		Timeline []struct {
+			ToolCallID string          `json:"toolCallId"`
+			Result     json.RawMessage `json:"result"`
+			Content    string          `json:"content"`
+		} `json:"timeline"`
+	} `json:"messages"`
+}
+
+// followed is the frames a streamed response holds, with their cursors.
+func followed(t *testing.T, w *httptest.ResponseRecorder) []followedFrame {
 	t.Helper()
 	if w.Code != 200 {
 		t.Fatalf("HTTP %d: %s", w.Code, w.Body.String())
 	}
-	for _, line := range strings.Split(w.Body.String(), "\n") {
-		if data, ok := strings.CutPrefix(line, "data: "); ok {
-			if err := json.Unmarshal([]byte(data), &last); err != nil {
-				t.Fatal(err)
+	frames := []followedFrame{}
+	for _, event := range strings.Split(strings.TrimSuffix(w.Body.String(), "\n\n"), "\n\n") {
+		var frame followedFrame
+		for _, line := range strings.Split(event, "\n") {
+			if id, ok := strings.CutPrefix(line, "id: "); ok {
+				cursor, err := strconv.Atoi(id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				frame.ID = &cursor
+			} else if data, ok := strings.CutPrefix(line, "data: "); ok {
+				if err := json.Unmarshal([]byte(data), &frame); err != nil {
+					t.Fatal(err)
+				}
 			}
 		}
+		frames = append(frames, frame)
 	}
-	return last
+	return frames
 }
