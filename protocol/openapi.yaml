@@ -20,8 +20,8 @@ info:
     A run's events arrive as server-sent events. Each frame's `data` is one
     event, described by `x-item-schema` (OpenAPI 3.2's `itemSchema`), and its
     `id` is the event's cursor in the run, which a client following the run
-    again sends back as `Last-Event-ID`. No event is larger than 8 MiB: a
-    MESSAGES_SNAPSHOT that would be leaves out its oldest messages and sets
+    again sends back as `Last-Event-ID`. A MESSAGES_SNAPSHOT holds at most
+    8 MiB of messages: it leaves out the oldest that do not fit and sets
     `hasOlder`, and sends a latest message too large alone with its
     attachments' text left out, which the client reads as it reads a stored
     chat's.
@@ -43,6 +43,8 @@ info:
       removed, and does not change meaning, while a supported client uses it.
     - A client ignores members and events it does not know. It handles an
       error code it does not know by the error's action.
+    - A client reads an event whatever its size. How large the harness lets
+      an event grow is its own to change.
     - A list of values a response holds may gain values: such a list is an
       anyOf of the values it names and any string. The harness sends only
       the values named; a client treats one it does not know as the list's

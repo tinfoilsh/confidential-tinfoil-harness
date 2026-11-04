@@ -24,7 +24,7 @@ func TestARunPastItsLogBudgetGoesOnFromACheckpoint(t *testing.T) {
 	rn.stop = func() { stopped = true }
 	// The chat before the question fills half of a snapshot, and the reply
 	// outgrows a whole one.
-	earlier, question := strings.Repeat("e", maxEventBytes/2), "Search, then write at length"
+	earlier, question := strings.Repeat("e", maxSnapshotBytes/2), "Search, then write at length"
 	shown := []domain.MessageView{{ID: "earlier", Role: "user", Content: &earlier}, {ID: "question", Role: "user", Content: &question}}
 	out := &Stream{Run: rn}
 	out.emit(domain.RunStarted{ThreadID: "thread", RunID: rn.ID})
@@ -40,7 +40,7 @@ func TestARunPastItsLogBudgetGoesOnFromACheckpoint(t *testing.T) {
 	out.progress("call", "Read 3 pages", 1)
 	out.emit(domain.ToolCallResult{MessageID: "result", ToolCallID: "call", Role: "tool", Content: json.RawMessage(`"pages"`)})
 	var text strings.Builder
-	for i := 0; text.Len() <= maxEventBytes; i++ {
+	for i := 0; text.Len() <= maxSnapshotBytes; i++ {
 		chunk := fmt.Sprintf("[%d]%s", i, strings.Repeat("x", 64<<10))
 		text.WriteString(chunk)
 		out.text("reply", chunk)
@@ -81,7 +81,7 @@ func TestARunPastItsLogBudgetGoesOnFromACheckpoint(t *testing.T) {
 			if want := base - 1 + i - last; i < last && f.ID != nil || i >= last && (f.ID == nil || *f.ID != want) {
 				t.Fatalf("after %q, frame %d (%s) has cursor %v, not %d", after, i, f.Type, f.ID, want)
 			}
-			if f.Size > maxEventBytes {
+			if f.Size > maxSnapshotBytes {
 				t.Fatalf("after %q, frame %d (%s) holds %d bytes", after, i, f.Type, f.Size)
 			}
 			if a := f.activity(); f.Type == "ACTIVITY_SNAPSHOT" && (a.Progress != 1 || !slices.Equal(a.Output, []string{"Read 3 pages"})) {
@@ -119,28 +119,28 @@ func TestARunPastItsLogBudgetGoesOnFromACheckpoint(t *testing.T) {
 	}
 }
 
-// A snapshot too large for a client's event leaves out its oldest messages.
-func TestASnapshotFitsInAnEventAClientReads(t *testing.T) {
-	big := strings.Repeat("x", maxEventBytes/3)
+// A snapshot too large for its budget leaves out its oldest messages.
+func TestASnapshotFitsItsBudget(t *testing.T) {
+	big := strings.Repeat("x", maxSnapshotBytes/3)
 	messages := []domain.MessageView{{ID: "a", Role: "user", Content: &big}, {ID: "b", Role: "user", Content: &big}, {ID: "c", Role: "user", Content: &big}}
 	snapshot := fittedSnapshot(messages, false)
 	encoded, err := domain.EncodeEvent(snapshot, api.Timestamp())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(encoded) > maxEventBytes || len(snapshot.Messages) != 2 || snapshot.Messages[0].ID != "b" || !snapshot.HasOlder {
+	if len(encoded) > maxSnapshotBytes || len(snapshot.Messages) != 2 || snapshot.Messages[0].ID != "b" || !snapshot.HasOlder {
 		t.Fatalf("a snapshot of %d bytes holds %d messages, has older %v", len(encoded), len(snapshot.Messages), snapshot.HasOlder)
 	}
 	// A latest message carrying documents too large alone is sent with them,
 	// but not their text, and the chat's own message keeps it.
-	document := strings.Repeat("x", maxEventBytes)
+	document := strings.Repeat("x", maxSnapshotBytes)
 	question := "Summarize this"
 	messages = []domain.MessageView{{ID: "q", Role: "user", Content: &question, Attachments: []domain.Attachment{{ID: "doc", Kind: "document", FileName: "report.md", TextContent: document}}}}
 	snapshot = fittedSnapshot(messages, false)
 	if encoded, err = domain.EncodeEvent(snapshot, api.Timestamp()); err != nil {
 		t.Fatal(err)
 	}
-	if len(encoded) > maxEventBytes || len(snapshot.Messages) != 1 || snapshot.Messages[0].Attachments[0].ID != "doc" || snapshot.Messages[0].Attachments[0].TextContent != "" || messages[0].Attachments[0].TextContent != document {
+	if len(encoded) > maxSnapshotBytes || len(snapshot.Messages) != 1 || snapshot.Messages[0].Attachments[0].ID != "doc" || snapshot.Messages[0].Attachments[0].TextContent != "" || messages[0].Attachments[0].TextContent != document {
 		t.Fatalf("a snapshot of %d bytes sent %+v of the document", len(encoded), snapshot.Messages[0].Attachments[0].FileName)
 	}
 }

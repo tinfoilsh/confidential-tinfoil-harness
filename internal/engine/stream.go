@@ -233,14 +233,16 @@ func kindOf(e domain.Event) (frameKind, string) {
 }
 
 const (
-	// maxEventBytes is the largest event a client reads.
-	maxEventBytes = 8 << 20
+	// maxSnapshotBytes bounds a MESSAGES_SNAPSHOT, so a run starts by sending
+	// no more of a long chat than this; a client loads older messages as it
+	// shows them.
+	maxSnapshotBytes = 8 << 20
 	// snapshotEnvelope is room for what a snapshot's event holds besides
 	// its messages.
 	snapshotEnvelope = 4 << 10
 )
 
-// fittedSnapshot is a snapshot of messages that fits in an event a client reads:
+// fittedSnapshot is a snapshot of messages that fits in maxSnapshotBytes:
 // the oldest that do not fit are left out, as older messages, and the latest
 // is always sent. A latest message too large alone, as one carrying large
 // documents, is sent with its attachments but not their text, which clients
@@ -253,12 +255,12 @@ func fittedSnapshot(messages []domain.MessageView, hasOlder bool) domain.Message
 		total += sizes[i]
 	}
 	start := 0
-	for start < len(messages)-1 && total > maxEventBytes-snapshotEnvelope {
+	for start < len(messages)-1 && total > maxSnapshotBytes-snapshotEnvelope {
 		total -= sizes[start]
 		start++
 	}
 	fitted := messages[start:]
-	if len(fitted) == 1 && total > maxEventBytes-snapshotEnvelope {
+	if len(fitted) == 1 && total > maxSnapshotBytes-snapshotEnvelope {
 		latest := fitted[0]
 		latest.Attachments = slices.Clone(latest.Attachments)
 		for i := range latest.Attachments {
