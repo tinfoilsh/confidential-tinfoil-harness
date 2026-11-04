@@ -45,6 +45,14 @@ func TestARunPastItsLogBudgetGoesOnFromACheckpoint(t *testing.T) {
 	}
 	out.progress("call", "Read 3 pages", 1)
 	out.emit(domain.ToolCallResult{MessageID: "result", ToolCallID: "call", Role: "tool", Content: json.RawMessage(`"pages"`)})
+	// The reply reasons for ten seconds, which a client times by when its
+	// reasoning began and when it last grew.
+	thought, thinking := strings.Builder{}, func(second int) string { return fmt.Sprintf("2026-01-01T00:00:%02dZ", second) }
+	for second := range 11 {
+		piece := fmt.Sprintf("step %d. ", second)
+		thought.WriteString(piece)
+		out.frame(domain.ReasoningChunk{MessageID: "reply" + domain.ReasoningSuffix, Delta: piece}, thinking(second))
+	}
 	var text strings.Builder
 	for i := 0; text.Len() <= maxSnapshotBytes; i++ {
 		chunk := fmt.Sprintf("[%d]%s", i, strings.Repeat("x", 64<<10))
@@ -82,6 +90,7 @@ func TestARunPastItsLogBudgetGoesOnFromACheckpoint(t *testing.T) {
 		// after it, and its others none.
 		last := slices.IndexFunc(frames, func(f followedFrame) bool { return f.ID != nil })
 		types, reply, merged, chunks, args := []string{}, "", 0, 0, map[string]string{}
+		reasoning, times := "", []string{}
 		for i, f := range frames {
 			types = append(types, f.Type)
 			if want := base - 1 + i - last; i < last && f.ID != nil || i >= last && (f.ID == nil || *f.ID != want) {
@@ -96,10 +105,15 @@ func TestARunPastItsLogBudgetGoesOnFromACheckpoint(t *testing.T) {
 			if f.Type == "MESSAGES_SNAPSHOT" && (len(f.Messages) != 2 || f.Messages[0].ID != "earlier" || f.Messages[1].ID != "question") {
 				t.Fatalf("after %q, the checkpoint's snapshot is %+v", after, f.Messages)
 			}
-			switch {
-			case f.Type == "TOOL_CALL_ARGS":
+			if f.Delta != "" && i <= last && f.Size > mergedFrameBytes {
+				t.Fatalf("after %q, the checkpoint merged %d bytes of %s into one frame", after, f.Size, f.Type)
+			}
+			switch f.Type {
+			case "TOOL_CALL_ARGS":
 				args[f.CallID] += f.Delta
-			case f.Type == "TEXT_MESSAGE_CHUNK":
+			case "REASONING_MESSAGE_CHUNK":
+				reasoning, times = reasoning+f.Delta, append(times, f.Timestamp)
+			case "TEXT_MESSAGE_CHUNK":
 				reply += f.Delta
 				if i <= last {
 					merged, chunks = merged+1, chunks+strings.Count(f.Delta, "[")
@@ -107,14 +121,17 @@ func TestARunPastItsLogBudgetGoesOnFromACheckpoint(t *testing.T) {
 			}
 		}
 		if want := []string{"RUN_STARTED", "MESSAGES_SNAPSHOT", "STATE_SNAPSHOT", "TOOL_CALL_START", "TOOL_CALL_START", "TOOL_CALL_ARGS", "TOOL_CALL_ARGS", "TOOL_CALL_ARGS", "TOOL_CALL_ARGS",
-			"ACTIVITY_SNAPSHOT", "TOOL_CALL_RESULT", "TEXT_MESSAGE_CHUNK"}; !slices.Equal(types[:len(want)], want) {
+			"ACTIVITY_SNAPSHOT", "TOOL_CALL_RESULT", "REASONING_MESSAGE_CHUNK", "REASONING_MESSAGE_CHUNK", "TEXT_MESSAGE_CHUNK"}; !slices.Equal(types[:len(want)], want) {
 			t.Fatalf("after %q, the checkpoint starts %v", after, types[:len(want)])
 		}
 		if !maps.Equal(args, map[string]string{"call": `{"q":"cats"}`, "other": `{"q":"dogs"}`}) {
 			t.Fatalf("after %q, the calls' arguments are %v", after, args)
 		}
+		if reasoning != thought.String() || times[0] != thinking(0) || times[len(times)-1] != thinking(10) {
+			t.Fatalf("after %q, the reasoning is %q at %v", after, reasoning, times)
+		}
 		// The text the checkpoint holds is merged from the run's chunks.
-		if merged == 0 || merged*10 > chunks {
+		if merged == 0 || merged*4 > chunks {
 			t.Fatalf("after %q, the checkpoint holds %d chunks in %d frames", after, chunks, merged)
 		}
 		if types[len(types)-1] != "RUN_FINISHED" || reply != text.String() {
@@ -176,13 +193,14 @@ func TestAPanickingToolCallDoesNotTakeTheRun(t *testing.T) {
 }
 
 type followedFrame struct {
-	ID       *int
-	Size     int             // the bytes of its data
-	Type     string          `json:"type"`
-	Delta    string          `json:"delta"`
-	CallID   string          `json:"toolCallId"`
-	Content  json.RawMessage `json:"content"`
-	Messages []struct {
+	ID        *int
+	Size      int             // the bytes of its data
+	Type      string          `json:"type"`
+	Timestamp string          `json:"timestamp"`
+	Delta     string          `json:"delta"`
+	CallID    string          `json:"toolCallId"`
+	Content   json.RawMessage `json:"content"`
+	Messages  []struct {
 		ID string `json:"id"`
 	} `json:"messages"`
 }

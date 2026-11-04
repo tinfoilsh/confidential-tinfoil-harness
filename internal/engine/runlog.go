@@ -81,9 +81,9 @@ func (l *FrameLog) grow(frame []byte, kind frameKind, key string) bool {
 
 // fold replaces every frame the log holds with a checkpoint of the same
 // events: kept frames as they were, each run of deltas to the same target
-// merged by merge into one frame of at most mergedFrameBytes, and each
-// tool's activity as activity reports it, in the place of its first frame.
-// It wipes the frames it drops.
+// merged by merge into a frame of at most mergedFrameBytes followed by the
+// run's last delta, and each tool's activity as activity reports it, in the
+// place of its first frame. It wipes the frames it drops.
 func (l *FrameLog) fold(merge func(deltas [][]byte) []byte, activity func(key string) []byte) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -92,20 +92,24 @@ func (l *FrameLog) fold(merge func(deltas [][]byte) []byte, activity func(key st
 	}
 	var checkpoint, run []entry
 	size := 0
-	// flush puts the run of deltas so far in the checkpoint, merged.
+	// flush puts the run of deltas so far in the checkpoint: every one but
+	// the last merged at the time of the first, then the last as it was, so
+	// a client still sees when the run began and when it last grew, as it
+	// times reasoning by them.
 	flush := func() {
-		if len(run) == 1 {
-			checkpoint = append(checkpoint, run[0])
-		} else if len(run) > 1 {
-			deltas := make([][]byte, len(run))
-			for i, e := range run {
+		if len(run) > 2 {
+			merged := run[:len(run)-1]
+			deltas := make([][]byte, len(merged))
+			for i, e := range merged {
 				deltas[i] = e.data
 			}
 			checkpoint = append(checkpoint, entry{merge(deltas), frameDelta, run[0].key})
-			for _, e := range run {
+			for _, e := range merged {
 				clear(e.data)
 			}
+			run = run[len(run)-1:]
 		}
+		checkpoint = append(checkpoint, run...)
 		run, size = nil, 0
 	}
 	placed := map[string]bool{}

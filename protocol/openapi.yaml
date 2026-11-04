@@ -30,7 +30,8 @@ info:
     following it from before them is sent a checkpoint first: the run's
     events from its start, in order, with each run of TEXT_MESSAGE_CHUNK,
     REASONING_MESSAGE_CHUNK or TOOL_CALL_ARGS events that extend the same
-    message or call merged into fewer, and each tool's activity as one
+    message or call merged into fewer, which keep the times of the run's
+    first and last events, and each tool's activity as one
     ACTIVITY_SNAPSHOT of it as it stands, in the place of its first event.
     Only the checkpoint's last frame has an `id`, so a client that misses
     part of it is sent all of it again; the run's own MESSAGES_SNAPSHOT, which
