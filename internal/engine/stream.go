@@ -32,6 +32,56 @@ type Stream struct {
 	// log past its budget folds its frames into; nil before the reply starts
 	// and once it ends.
 	checkpoint func() []byte
+	// activities is each tool's activity as its events have left it, which
+	// a checkpoint sends in their place.
+	activities []*domain.ActivitySnapshot
+}
+
+// track keeps each tool's activity as its events leave it: the snapshot a
+// call opens with, then the progress and lines it reports.
+func (s *Stream) track(e domain.Event) {
+	switch e := e.(type) {
+	case domain.ActivitySnapshot:
+		e.Content.Output = slices.Clone(e.Content.Output)
+		if i := slices.IndexFunc(s.activities, func(a *domain.ActivitySnapshot) bool { return a.MessageID == e.MessageID }); i >= 0 {
+			s.activities[i] = &e
+		} else {
+			s.activities = append(s.activities, &e)
+		}
+	case domain.ActivityDelta:
+		i := slices.IndexFunc(s.activities, func(a *domain.ActivitySnapshot) bool { return a.MessageID == e.MessageID })
+		if i < 0 {
+			return
+		}
+		a := s.activities[i]
+		for _, op := range e.Patch {
+			switch value := op.Value.(type) {
+			case float64:
+				if op.Path == "/progress" {
+					a.Content.Progress = value
+				}
+			case string:
+				if op.Path == "/output/-" {
+					a.Content.Output = append(a.Content.Output, value)
+				}
+			}
+		}
+		if e.Display != nil {
+			a.Display = e.Display
+		}
+	}
+}
+
+// folded is a checkpoint's snapshots: the chat as the reply has left it,
+// then each tool's activity.
+func (s *Stream) folded(messages []byte) [][]byte {
+	snapshots := [][]byte{messages}
+	for _, a := range s.activities {
+		if encoded, err := domain.EncodeEvent(*a, api.Timestamp()); err == nil {
+			snapshots = append(snapshots, encoded)
+		}
+	}
+	return snapshots
 }
 
 func (s *Stream) cite(sources []citationSource) {
@@ -107,6 +157,7 @@ func (s *Stream) frame(e domain.Event, at string) {
 		return
 	}
 	full := s.Run.Frames.grow(encoded, kindOf(e))
+	s.track(e)
 	if s.Observe != nil {
 		s.Observe(e, at)
 		if s.thoughts != nil {
@@ -117,20 +168,20 @@ func (s *Stream) frame(e domain.Event, at string) {
 	// the lock that orders frames, so it stands for every frame folded.
 	if full && s.checkpoint != nil {
 		if snapshot := s.checkpoint(); snapshot != nil {
-			s.Run.Frames.fold(snapshot)
+			s.Run.Frames.fold(s.folded(snapshot))
 		}
 	}
 }
 
-// kindOf is what a checkpoint does with an event. Reply content is in the
-// checkpoint's snapshot; the run's state, its tools' activity, reasoning
-// summaries and compaction are small, and a client applies them in order
-// after the snapshot.
+// kindOf is what a checkpoint does with an event. Reply content and the
+// tools' activity are in the checkpoint's snapshots; the run's state,
+// reasoning summaries and compaction are few and small, and a client applies
+// them in order after the snapshots.
 func kindOf(e domain.Event) frameKind {
 	switch e.(type) {
 	case domain.MessagesSnapshot:
 		return frameSnapshot
-	case domain.TextChunk, domain.ReasoningChunk, domain.ToolCallStart, domain.ToolCallArgs, domain.ToolCallEnd, domain.ToolCallResult:
+	case domain.TextChunk, domain.ReasoningChunk, domain.ToolCallStart, domain.ToolCallArgs, domain.ToolCallEnd, domain.ToolCallResult, domain.ActivitySnapshot, domain.ActivityDelta:
 		return frameFolded
 	}
 	return frameKept
@@ -146,7 +197,9 @@ const (
 
 // fittedSnapshot is a snapshot of messages that fits in an event a client reads:
 // the oldest that do not fit are left out, as older messages, and the latest
-// is always sent.
+// is always sent. A latest message too large alone, as one carrying large
+// documents, is sent with its attachments but not their text, which clients
+// read on demand.
 func fittedSnapshot(messages []domain.MessageView, hasOlder bool) domain.MessagesSnapshot {
 	sizes, total := make([]int, len(messages)), 0
 	for i := range messages {
@@ -159,7 +212,16 @@ func fittedSnapshot(messages []domain.MessageView, hasOlder bool) domain.Message
 		total -= sizes[start]
 		start++
 	}
-	return domain.MessagesSnapshot{Messages: messages[start:], HasOlder: hasOlder || start > 0}
+	fitted := messages[start:]
+	if len(fitted) == 1 && total > maxEventBytes-snapshotEnvelope {
+		latest := fitted[0]
+		latest.Attachments = slices.Clone(latest.Attachments)
+		for i := range latest.Attachments {
+			latest.Attachments[i].TextContent = ""
+		}
+		fitted = []domain.MessageView{latest}
+	}
+	return domain.MessagesSnapshot{Messages: fitted, HasOlder: hasOlder || start > 0}
 }
 
 // checkpointOf encodes the chat a run started from with the reply the

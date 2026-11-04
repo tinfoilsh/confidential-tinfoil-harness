@@ -32,6 +32,10 @@ func TestARunPastItsLogBudgetGoesOnFromACheckpoint(t *testing.T) {
 	out.Observe, out.checkpoint = assembler.Apply, checkpointOf(shown, assembler)
 	out.callStart("call", "search", "reply")
 	out.activity(ToolCall{ID: "call", Name: "search"})
+	// A tool's progress reports are folded into its activity, not kept.
+	for i := range 100 {
+		out.progress("call", "", float64(i)/100)
+	}
 	out.progress("call", "Read 3 pages", 1)
 	out.emit(domain.ToolCallResult{MessageID: "result", ToolCallID: "call", Role: "tool", Content: json.RawMessage(`"pages"`)})
 	var text strings.Builder
@@ -71,9 +75,12 @@ func TestARunPastItsLogBudgetGoesOnFromACheckpoint(t *testing.T) {
 			types = append(types, f.Type)
 			// The checkpoint's last frame has the cursor before the first
 			// frame after it, and its others none.
-			want := base + i - 5
-			if i < 4 && f.ID != nil || i >= 4 && (f.ID == nil || *f.ID != want) {
+			want := base + i - 4
+			if i < 3 && f.ID != nil || i >= 3 && (f.ID == nil || *f.ID != want) {
 				t.Fatalf("after %q, frame %d (%s) has cursor %v, not %d", after, i, f.Type, f.ID, want)
+			}
+			if f.Type == "ACTIVITY_SNAPSHOT" && (f.Content.Progress != 1 || !slices.Equal(f.Content.Output, []string{"Read 3 pages"})) {
+				t.Fatalf("after %q, the checkpoint's activity is %+v", after, f.Content)
 			}
 			if f.Type == "MESSAGES_SNAPSHOT" {
 				if len(f.Messages) != 2 || f.Messages[0].ID != "question" || f.Messages[1].ID != "reply" || f.Messages[1].Timeline[0].ToolCallID != "call" || string(f.Messages[1].Timeline[0].Result) != `"pages"` {
@@ -83,8 +90,8 @@ func TestARunPastItsLogBudgetGoesOnFromACheckpoint(t *testing.T) {
 			}
 			reply += f.Delta
 		}
-		if !slices.Equal(types[:5], []string{"RUN_STARTED", "MESSAGES_SNAPSHOT", "STATE_SNAPSHOT", "ACTIVITY_SNAPSHOT", "ACTIVITY_DELTA"}) || types[5] != "TEXT_MESSAGE_CHUNK" {
-			t.Fatalf("after %q, the checkpoint and the frame after it are %v", after, types[:6])
+		if !slices.Equal(types[:4], []string{"RUN_STARTED", "MESSAGES_SNAPSHOT", "ACTIVITY_SNAPSHOT", "STATE_SNAPSHOT"}) || types[4] != "TEXT_MESSAGE_CHUNK" {
+			t.Fatalf("after %q, the checkpoint and the frame after it are %v", after, types[:5])
 		}
 		if types[len(types)-1] != "RUN_FINISHED" || reply != text.String() {
 			t.Fatalf("after %q, a client ended with %d characters of %d, and %v", after, len(reply), text.Len(), types[len(types)-1])
@@ -115,6 +122,18 @@ func TestASnapshotFitsInAnEventAClientReads(t *testing.T) {
 	if len(encoded) > maxEventBytes || len(snapshot.Messages) != 2 || snapshot.Messages[0].ID != "b" || !snapshot.HasOlder {
 		t.Fatalf("a snapshot of %d bytes holds %d messages, has older %v", len(encoded), len(snapshot.Messages), snapshot.HasOlder)
 	}
+	// A latest message carrying documents too large alone is sent with them,
+	// but not their text, and the chat's own message keeps it.
+	document := strings.Repeat("x", maxEventBytes)
+	question := "Summarize this"
+	messages = []domain.MessageView{{ID: "q", Role: "user", Content: &question, Attachments: []domain.Attachment{{ID: "doc", Kind: "document", FileName: "report.md", TextContent: document}}}}
+	snapshot = fittedSnapshot(messages, false)
+	if encoded, err = domain.EncodeEvent(snapshot, api.Timestamp()); err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) > maxEventBytes || len(snapshot.Messages) != 1 || snapshot.Messages[0].Attachments[0].ID != "doc" || snapshot.Messages[0].Attachments[0].TextContent != "" || messages[0].Attachments[0].TextContent != document {
+		t.Fatalf("a snapshot of %d bytes sent %+v of the document", len(encoded), snapshot.Messages[0].Attachments[0].FileName)
+	}
 }
 
 func TestAPanickingToolCallDoesNotTakeTheRun(t *testing.T) {
@@ -133,9 +152,13 @@ func TestAPanickingToolCallDoesNotTakeTheRun(t *testing.T) {
 }
 
 type followedFrame struct {
-	ID       *int
-	Type     string `json:"type"`
-	Delta    string `json:"delta"`
+	ID      *int
+	Type    string `json:"type"`
+	Delta   string `json:"delta"`
+	Content struct {
+		Progress float64  `json:"progress"`
+		Output   []string `json:"output"`
+	} `json:"content"`
 	Messages []struct {
 		ID       string `json:"id"`
 		Timeline []struct {

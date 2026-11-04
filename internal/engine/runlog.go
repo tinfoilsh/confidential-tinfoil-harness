@@ -25,7 +25,7 @@ const (
 	// frameKept is sent again as it was to a follower behind a checkpoint.
 	frameKept
 	// frameSnapshot is the chat's messages, which a checkpoint replaces
-	// with the chat as the reply has left it so far.
+	// with its snapshots of the chat and the tools' activity so far.
 	frameSnapshot
 )
 
@@ -74,27 +74,34 @@ func (l *FrameLog) grow(frame []byte, kind frameKind) bool {
 	return l.bytes > l.budget
 }
 
-// fold replaces every frame the log holds with a checkpoint that ends in
-// snapshot, and wipes the frames it drops.
-func (l *FrameLog) fold(snapshot []byte) {
+// fold replaces every frame the log holds with a checkpoint: the frames kept
+// as they were, with snapshots in the place of the chat's first, and wipes
+// the frames it drops.
+func (l *FrameLog) fold(snapshots [][]byte) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.closed != nil {
 		return
 	}
 	checkpoint, placed := []entry{}, false
+	place := func() {
+		for _, snapshot := range snapshots {
+			checkpoint = append(checkpoint, entry{snapshot, frameSnapshot})
+		}
+		placed = true
+	}
 	for _, e := range append(l.checkpoint, l.frames...) {
 		switch {
 		case e.kind == frameKept:
 			checkpoint = append(checkpoint, e)
 			continue
 		case e.kind == frameSnapshot && !placed:
-			checkpoint, placed = append(checkpoint, entry{snapshot, frameSnapshot}), true
+			place()
 		}
 		clear(e.data)
 	}
 	if !placed {
-		checkpoint = append(checkpoint, entry{snapshot, frameSnapshot})
+		place()
 	}
 	l.checkpoint, l.base, l.frames, l.bytes = checkpoint, l.base+len(l.frames), nil, 0
 }
