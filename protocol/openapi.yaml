@@ -2044,13 +2044,14 @@ components:
         beforeMessageId: {type: string}
 
     CompactionEndEvent:
-      description: Closes a compaction marker. A completed one carries the marker, which the chat keeps even if the reply then fails, and is followed by a STATE_SNAPSHOT with the context the turn's prompt now fills. A client removes a failed one, after which the run ends with COMPACTION_FAILED.
+      description: Closes a compaction marker, which sits before the message beforeMessageId names, as COMPACTION_START named it. A completed one carries the marker, which the chat keeps even if the reply then fails, and is followed by a STATE_SNAPSHOT with the context the turn's prompt now fills. A client removes a failed one, after which the run ends with COMPACTION_FAILED.
       type: object
-      required: [type, messageId, outcome]
+      required: [type, messageId, beforeMessageId, outcome]
       properties:
         type: {const: COMPACTION_END}
         timestamp: {$ref: "#/components/schemas/Timestamp"}
         messageId: {type: string}
+        beforeMessageId: {type: string}
         outcome:
           description: A client treats an outcome it does not know as failed.
           anyOf:

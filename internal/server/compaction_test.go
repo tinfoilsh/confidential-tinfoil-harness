@@ -247,7 +247,8 @@ func TestALongChatIsCompactedBeforeItsQuestion(t *testing.T) {
 		types = append(types, e.Type)
 	}
 	start, end := slices.Index(types, "COMPACTION_START"), slices.Index(types, "COMPACTION_END")
-	if start < 0 || end != start+1 || types[end+1] != "STATE_SNAPSHOT" || events[start].MessageID != marker.ID || slices.Index(types, "TEXT_MESSAGE_CHUNK") < end {
+	if start < 0 || end != start+1 || types[end+1] != "STATE_SNAPSHOT" || events[start].MessageID != marker.ID || slices.Index(types, "TEXT_MESSAGE_CHUNK") < end ||
+		events[start].Before != chat.Messages[6].ID || events[end].Before != chat.Messages[6].ID {
 		t.Fatalf("the run sent %v", types)
 	}
 	finishedRun(t, h, "/v1/threads/turn", continueInput(key, "chat-1"))

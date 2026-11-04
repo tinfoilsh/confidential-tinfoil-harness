@@ -96,6 +96,7 @@
         "type": "COMPACTION_END",
         "timestamp": "2026-01-01T00:00:04Z",
         "messageId": "msg_00000000000000000000000000000005",
+        "beforeMessageId": "00000000-0000-4000-8000-000000000004",
         "outcome": "completed",
         "marker": {
           "id": "msg_00000000000000000000000000000005",

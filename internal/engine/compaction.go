@@ -66,7 +66,7 @@ func (eng *Engine) compact(ctx context.Context, r *Run, req *Request) error {
 		}
 	}
 	if err != nil {
-		r.out.emit(domain.CompactionEnd{MessageID: marker.ID, Outcome: domain.CompactionFailed})
+		r.out.emit(domain.CompactionEnd{MessageID: marker.ID, BeforeMessageID: before, Outcome: domain.CompactionFailed})
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -84,7 +84,7 @@ func (eng *Engine) compact(ctx context.Context, r *Run, req *Request) error {
 	req.render()
 	r.compacted = &compaction{marker: marker, beforeID: before, usage: requestContextUsage(req)}
 	view := domain.ViewMessage(&marker)
-	r.out.emit(domain.CompactionEnd{MessageID: marker.ID, Outcome: domain.CompactionCompleted, Marker: &view})
+	r.out.emit(domain.CompactionEnd{MessageID: marker.ID, BeforeMessageID: before, Outcome: domain.CompactionCompleted, Marker: &view})
 	eng.Live.mu.Lock()
 	defer eng.Live.mu.Unlock()
 	summary := domain.Summarize(&r.row.Thread)
