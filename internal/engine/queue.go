@@ -95,15 +95,42 @@ func (eng *Engine) removeQueued(r *Run) bool {
 	return true
 }
 
-// StopThread stops a chat being deleted: its running reply is cancelled and
-// each queued turn ends.
+// StopThread stops a chat being deleted: its running reply is cancelled,
+// each queued turn ends, and the replies kept of it are dropped.
 func (eng *Engine) StopThread(p *auth.Principal, id string) {
 	eng.Live.mu.Lock()
 	defer eng.Live.mu.Unlock()
-	s := eng.Live.threads[liveKey(p, id)]
-	if s == nil {
-		return
+	if s := eng.Live.threads[liveKey(p, id)]; s != nil {
+		eng.stop(s)
 	}
+	eng.Live.dropHeld(func(h *heldRun) bool { return h.owner == p.Scope() && h.threadID == id })
+}
+
+// StopDeviceThreads stops every device chat of the caller, as StopThread
+// stops one, when the caller deletes them all. It returns how many chats it
+// held anything of.
+func (eng *Engine) StopDeviceThreads(p *auth.Principal) int {
+	eng.Live.mu.Lock()
+	defer eng.Live.mu.Unlock()
+	chats := map[string]bool{}
+	for _, s := range eng.Live.threads {
+		if s.owner == p.Scope() && s.local && s.keyless {
+			chats[s.ID] = true
+			eng.stop(s)
+		}
+	}
+	eng.Live.dropHeld(func(h *heldRun) bool {
+		if h.owner != p.Scope() {
+			return false
+		}
+		chats[h.threadID] = true
+		return true
+	})
+	return len(chats)
+}
+
+// stop ends what a chat being deleted runs; live.mu is held.
+func (eng *Engine) stop(s *threadSession) {
 	s.deleted = true
 	if s.Active != nil {
 		s.Active.cancelled = true

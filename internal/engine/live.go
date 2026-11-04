@@ -51,9 +51,9 @@ type liveRuns struct {
 const heldRunTTL = 10 * time.Minute
 
 type heldRun struct {
-	log      *Log
-	threadID string
-	expiry   *time.Timer
+	log             *Log
+	owner, threadID string
+	expiry          *time.Timer
 }
 
 // hold keeps the log of a device chat's run that is ending; live.mu is held.
@@ -64,21 +64,32 @@ func (l *liveRuns) hold(r *Run) {
 	}
 	log := r.Log
 	log.Frames.hold()
-	l.held[key] = &heldRun{log: log, threadID: r.Thread.ID, expiry: time.AfterFunc(heldRunTTL, func() { l.release(key, log) })}
+	l.held[key] = &heldRun{log: log, owner: r.Thread.owner, threadID: r.Thread.ID, expiry: time.AfterFunc(heldRunTTL, func() { l.release(key, log) })}
 }
 
 // release stops keeping a held log, which is wiped once nothing drains it.
 func (l *liveRuns) release(key string, log *Log) {
 	l.mu.Lock()
-	h := l.held[key]
-	if h == nil || h.log != log {
-		l.mu.Unlock()
-		return
+	defer l.mu.Unlock()
+	if h := l.held[key]; h != nil && h.log == log {
+		l.drop(key, h)
 	}
+}
+
+// dropHeld stops keeping the held logs that match; live.mu is held.
+func (l *liveRuns) dropHeld(match func(*heldRun) bool) {
+	for key, h := range l.held {
+		if match(h) {
+			l.drop(key, h)
+		}
+	}
+}
+
+// drop stops keeping one held log; live.mu is held.
+func (l *liveRuns) drop(key string, h *heldRun) {
 	delete(l.held, key)
-	l.mu.Unlock()
 	h.expiry.Stop()
-	log.Frames.release()
+	h.log.Frames.release()
 }
 
 // Counts is how many chats, runs and client requests the registry holds.
