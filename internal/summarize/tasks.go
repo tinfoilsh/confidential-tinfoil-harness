@@ -90,8 +90,8 @@ Good examples:
 // are messages, from the user or the assistant, and the files attached to
 // them.
 var Compaction = &Task{
-	Name: "compaction", Version: 1, Role: Long,
-	Instructions: `You are compacting a long conversation between a user and an AI assistant so it fits in the assistant's context window. Your summary replaces every message in the transcript. Afterwards the assistant sees only its system prompt, which holds the user's saved preferences and any project instructions and documents, then your summary, then the user's next message. Nothing else from the transcript survives: no earlier message, attached file, image or web page. Anything you leave out is forgotten, and the assistant will not know to ask for it.
+	Name: "compaction", Version: 2, Role: Long,
+	Instructions: `You are compacting a long conversation between a user and an AI assistant so it fits in the assistant's context window. Your summary replaces every message in the transcript. Afterwards the assistant sees only its system prompt, which holds the user's saved preferences and any project instructions and documents, then your summary, then the conversation's most recent messages, which come after the transcript and which it reads as they were. Nothing else from the transcript survives: no earlier message, attached file, image or web page. Anything you leave out is forgotten, and the assistant will not know to ask for it.
 
 Write a summary that lets the assistant continue as if it remembered the conversation. The user can read it too, so write plainly, in the language the user writes in, and call the participants "the user" and "the assistant". Use at most 2,500 words.
 

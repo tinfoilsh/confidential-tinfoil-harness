@@ -23,7 +23,7 @@ import (
 
 type Request struct {
 	refreshAuth                func(context.Context) (auth.Credential, error)
-	compact                    func(context.Context) error // compacts the chat, once, when its prompt would not fit
+	compact                    func(context.Context, int) error // compacts the chat, once, when its prompt would not fit
 	params                     api.Object
 	System, widgetHint, policy string
 	window                     int
@@ -522,7 +522,7 @@ func fitted(ctx context.Context, req *Request, searching bool, definitions json.
 	}
 	compact := req.compact
 	req.compact = nil
-	if err := compact(ctx); errors.Is(err, errNothingToCompact) {
+	if err := compact(ctx, fixedCost(req, searching, definitions)); errors.Is(err, errNothingToCompact) {
 		return nil, api.Err(413, "CONTEXT_TOO_LARGE", "The latest message exceeds the context window")
 	} else if err != nil {
 		return nil, err

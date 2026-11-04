@@ -98,6 +98,12 @@ const (
 	MaxMessageWindow = 200
 )
 
+// FirstShown is the index among the chat's messages of the first one a
+// window of its latest messages shows.
+func (t *Thread) FirstShown() int {
+	return max(min(len(t.Messages), t.HiddenCount), len(t.Messages)-MessageWindow)
+}
+
 // Window shows the messages before the one named, or the latest.
 func Window(row *ThreadRow, before string, limit int) ThreadWindow {
 	t := &row.Thread

@@ -76,7 +76,7 @@ func TestRunsShowTheChatTheHarnessKeeps(t *testing.T) {
 		{"refused", "A run the model refuses because the caller's quota is used up.", refused, false, false, false, false},
 		{"device-chat", "A turn of a chat kept on the device, whose earlier messages the run shows first.", streamed("data: {\"choices\":[{\"delta\":{\"content\":\"Second answer.\"}}]}\n\ndata: [DONE]\n\n"), false, true, false, false},
 		{"replayed", "A reply whose whole stream arrives twice.", streamed("data: {\"choices\":[{\"delta\":{\"content\":\"Said once.\"}}]}\n\ndata: [DONE]\n\n"), false, false, true, false},
-		{"compaction", "A turn of a device chat too long for the model's window, which first summarizes the messages before its question into a compaction marker.", streamed("data: {\"choices\":[{\"delta\":{\"content\":\"Second answer.\"}}]}\n\ndata: [DONE]\n\n"), false, true, false, true},
+		{"compaction", "A turn of a device chat too long for the model's window, which first summarizes the messages before its latest exchange into a compaction marker.", streamed("data: {\"choices\":[{\"delta\":{\"content\":\"Second answer.\"}}]}\n\ndata: [DONE]\n\n"), false, true, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.search {

@@ -2030,11 +2030,14 @@ components:
       description: |
         Opens a compaction marker while its summary is written. A turn whose
         prompt would not fit the share of the model's window a prompt may
-        fill summarizes every message before its question, from the chat's
-        latest marker on, into a new marker before that question. A run
+        fill summarizes the messages from the chat's latest marker on into a
+        new marker, except the latest exchanges before its question, which
+        the model goes on reading as they were. The marker sits before the
+        first question it keeps, or else before the turn's question. A run
         compacts at most once, before its first model turn or between two of
-        them. A client shows the marker before the message beforeMessageId
-        names, and the messages before it as ones the model no longer reads.
+        them. beforeMessageId names a message of the run's MESSAGES_SNAPSHOT.
+        A client shows the marker before that message, and the messages
+        before it as ones the model no longer reads.
       type: object
       required: [type, messageId, beforeMessageId]
       properties:

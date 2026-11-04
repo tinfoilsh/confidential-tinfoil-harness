@@ -14,12 +14,23 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/summarize"
 )
 
-// A turn whose prompt would not fit the window compacts its chat: every
-// message before the turn's question, from the chat's latest compaction
-// marker on, is summarized into a new marker before that question, which
-// the model reads in their place. A run compacts once, before its first
-// model turn or between two of them, and its marker is kept with the turn
-// even when the reply then fails.
+// A turn whose prompt would not fit the window compacts its chat: the
+// messages from the chat's latest compaction marker on, up to the latest
+// exchanges before the turn's question, are summarized into a new marker
+// before the first question it keeps. The model reads the summary in their
+// place, and the exchanges after it and the question as they were. A run
+// compacts once, before its first model turn or between two of them, and
+// its marker is kept with the turn even when the reply then fails.
+
+// recentTokens is how much of the chat before a compacted turn's question
+// the model goes on reading as it was, at most, so a follow-up on what was
+// just said does not rest on the summary.
+const recentTokens = 20000
+
+// recentShareTenths is the share of the room left beside the summary that
+// the kept exchanges may fill, so the turns after a compaction have room
+// before the next one, and a summary longer than its reserve still fits.
+const recentShareTenths = 5
 
 // compaction is what a run's compaction leaves: its marker, the question it
 // sits before, and the context the turn's prompt fills after it.
@@ -38,9 +49,11 @@ func errCompactionFailed() error {
 	return api.Err(502, "COMPACTION_FAILED", "The chat could not be compacted to fit the context window")
 }
 
-// compact summarizes the messages of req before its question into a marker,
-// and reads the chat into req from that marker on.
-func (eng *Engine) compact(ctx context.Context, r *Run, req *Request) error {
+// compact summarizes the messages of req before its latest exchanges into a
+// marker, and reads the chat into req from that marker on. reserved is what
+// the turn's prompt fills besides the chat: its system prompt, tools and
+// reminder, and the run's exchange so far.
+func (eng *Engine) compact(ctx context.Context, r *Run, req *Request, reserved int) error {
 	messages := req.messages
 	question := len(messages) - 1
 	for question >= 0 && messages[question].Role != "user" {
@@ -50,18 +63,26 @@ func (eng *Engine) compact(ctx context.Context, r *Run, req *Request) error {
 	if question <= latest+1 {
 		return errNothingToCompact
 	}
+	room := req.limit() - reserved - summaryReserve
+	for i := question; i < len(messages); i++ {
+		room -= messageCost(req, &messages[i])
+	}
+	eng.Live.mu.Lock()
+	shown := r.row.Thread.FirstShown()
+	eng.Live.mu.Unlock()
+	kept := keptFrom(req, latest, question, shown, min(recentTokens, room*recentShareTenths/10))
 	earlier := ""
 	if latest >= 0 {
 		earlier = messages[latest].Content
 	}
 	marker := domain.Message{ID: "msg_" + api.Token(), Role: domain.CompactionRole}
-	before := messages[question].ID
+	before := messages[kept].ID
 	r.out.emit(domain.CompactionStart{MessageID: marker.ID, BeforeMessageID: before})
 	started := api.Now()
 	var result summarize.Result
 	err := errCompactionFailed()
 	if eng.Summaries != nil {
-		if result, err = eng.Summaries.Summarize(ctx, summarize.Compaction, summarize.Input{Earlier: earlier, Documents: transcript(messages[latest+1:question], req.loc)}); err != nil {
+		if result, err = eng.Summaries.Summarize(ctx, summarize.Compaction, summarize.Input{Earlier: earlier, Documents: transcript(messages[latest+1:kept], req.loc)}); err != nil {
 			err = errCompactionFailed()
 		}
 	}
@@ -73,14 +94,14 @@ func (eng *Engine) compact(ctx context.Context, r *Run, req *Request) error {
 		return err
 	}
 	covered := 0
-	for _, m := range messages[:question] {
+	for _, m := range messages[:kept] {
 		if m.Role != domain.CompactionRole {
 			covered++
 		}
 	}
 	marker.CreatedAt, marker.Content = api.Timestamp(), result.Text
 	marker.Compaction = &domain.Compaction{Messages: covered, StartedAt: float64(started.UnixMilli()), EndedAt: float64(api.Now().UnixMilli()), Model: result.Model, Version: summarize.Compaction.Version}
-	req.messages = slices.Insert(slices.Clone(messages), question, marker)
+	req.messages = slices.Insert(slices.Clone(messages), kept, marker)
 	req.render()
 	r.compacted = &compaction{marker: marker, beforeID: before, usage: requestContextUsage(req)}
 	view := domain.ViewMessage(&marker)
@@ -91,6 +112,34 @@ func (eng *Engine) compact(ctx context.Context, r *Run, req *Request) error {
 	summary.ContextUsage = r.compacted.usage
 	r.out.emit(domain.StateSnapshotEvent{Snapshot: domain.StateSnapshot{Thread: summary, Queue: queueItems(r.Thread), RateLimit: r.credential.Limit}})
 	return nil
+}
+
+// keptFrom is the index of the first message of req a compaction keeps: the
+// question that opens the latest whole exchanges before the turn's question
+// that fill no more than budget, or else the turn's question. It leaves at
+// least one message after the chat's latest marker for the summary, and
+// keeps only messages from shown on, which the run's MESSAGES_SNAPSHOT
+// showed, so a client can place the marker.
+func keptFrom(req *Request, latest, question, shown, budget int) int {
+	kept, cost := question, 0
+	for i := question - 1; i >= max(latest+2, shown); i-- {
+		if cost += messageCost(req, &req.messages[i]); cost > budget {
+			break
+		}
+		if req.messages[i].Role == "user" {
+			kept = i
+		}
+	}
+	return kept
+}
+
+// messageCost is what a message of req fills of a prompt.
+func messageCost(req *Request, m *domain.Message) int {
+	cost := 0
+	for _, message := range RenderMessage(m, req.vision, req.policy, req.loc) {
+		cost += messageTokens(message)
+	}
+	return cost
 }
 
 // transcript is what a compaction reads of messages: each question and
