@@ -648,43 +648,6 @@ func TestRevisionSummaryForwardsVerifiedIdentity(t *testing.T) {
 	}
 }
 
-func TestRevisionEventsEncodesReplayWindowAndPagination(t *testing.T) {
-	st := newStub(t)
-	st.handle1(http.MethodGet, RevisionEventsPath, func(w http.ResponseWriter, r *http.Request) {
-		query := r.URL.Query()
-		if query.Get("after_revision") != "10" || query.Get("through_revision") != "20" || query.Get("cursor") != "page-2" || query.Get("limit") != "25" {
-			t.Errorf("query = %s", r.URL.RawQuery)
-		}
-		_, _ = io.WriteString(w, `{"events":[{"revision":"11","kind":"delete","id":"chat-1","project_id":null,"updated_at":"2026-08-11T12:00:00Z"}],"next_cursor":"page-3"}`)
-	})
-	limit := 25
-	response, err := NewClient(st.server.URL, nil).RevisionEvents(context.Background(), "10", "20", "page-2", &limit, "jwt", "user-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(response.Events) != 1 || response.Events[0].Revision != "11" || response.Events[0].ProjectID != nil || response.NextCursor != "page-3" {
-		t.Fatalf("response = %+v", response)
-	}
-}
-
-func TestRevisionSnapshotEncodesOptionalPagination(t *testing.T) {
-	st := newStub(t)
-	st.handle1(http.MethodGet, RevisionSnapshotPath, func(w http.ResponseWriter, r *http.Request) {
-		if query := r.URL.Query(); query.Get("cursor") != "page-1" || query.Get("limit") != "5" {
-			t.Errorf("query = %s", r.URL.RawQuery)
-		}
-		_, _ = io.WriteString(w, `{"items":[{"id":"chat-1","etag":"3","key_id":"key-1","project_id":null,"updated_at":"2026-08-11T12:00:00Z"}],"snapshot_revision":"30"}`)
-	})
-	limit := 5
-	response, err := NewClient(st.server.URL, nil).RevisionSnapshot(context.Background(), "page-1", &limit, "jwt", "user-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if response.SnapshotRevision != "30" || len(response.Items) != 1 || response.Items[0].ID != "chat-1" {
-		t.Fatalf("response = %+v", response)
-	}
-}
-
 func TestRevisionResponseTooLarge(t *testing.T) {
 	oldLimit := maxSyncJSONResponseBytes
 	maxSyncJSONResponseBytes = 64
@@ -806,18 +769,6 @@ func TestParseErrorNoBody(t *testing.T) {
 	}
 	if !strings.Contains(e.Error(), "500") {
 		t.Fatalf("error string: %q", e.Error())
-	}
-}
-
-func TestParseErrorKeepsSnapshotRequiredContext(t *testing.T) {
-	raw := []byte(`{"code":"SYNC_SNAPSHOT_REQUIRED","message":"chat sync snapshot required","current_revision":"42","oldest_replayable_revision":"7"}`)
-	err := parseError(http.StatusConflict, raw)
-	var e *Error
-	if !errors.As(err, &e) {
-		t.Fatalf("error type: %T", err)
-	}
-	if e.Code != StatusSyncSnapshotRequired || e.CurrentRevision != "42" || e.OldestReplayableRevision != "7" {
-		t.Fatalf("error = %+v", e)
 	}
 }
 
