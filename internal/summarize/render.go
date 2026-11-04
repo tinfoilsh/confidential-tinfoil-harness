@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"unicode/utf8"
 )
 
 // Document is one item a summary reads: text, in a tag named by Kind whose
@@ -111,6 +112,9 @@ func (t *Task) check(text, finishReason string) (string, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return "", fmt.Errorf("%w: it is empty", ErrInvalid)
+	}
+	if t.MaxLineChars > 0 && (strings.ContainsAny(text, "\r\n") || strings.Contains(text, "```") || utf8.RuneCountInString(text) > t.MaxLineChars) {
+		return "", fmt.Errorf("%w: it is not one line of at most %d characters without code", ErrInvalid, t.MaxLineChars)
 	}
 	if len(t.Sections) == 0 {
 		return text, nil
