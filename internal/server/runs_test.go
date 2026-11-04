@@ -508,7 +508,7 @@ func TestAReplyIsSavedAfterItsClientLeaves(t *testing.T) {
 	}
 	thread := mustRead(domain.ReadThreadRow(row))
 	if len(thread.Messages) != 2 || thread.Messages[1].Content != "partial done" || domain.ValueOr(thread.Messages[1].IsInterrupted, false) || thread.ActiveRun != nil {
-		t.Fatalf("the chat was saved with %d messages, reply %+v, run %+v", len(thread.Messages), thread.Messages[len(thread.Messages)-1], thread.ActiveRun)
+		t.Fatalf("the chat was saved with messages %+v, run %+v", thread.Messages, thread.ActiveRun)
 	}
 }
 
