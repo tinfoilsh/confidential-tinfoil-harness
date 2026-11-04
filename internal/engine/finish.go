@@ -128,6 +128,9 @@ func (eng *Engine) finishRun(r *Run, runErr error) {
 		s.row = r.row
 	}
 	next := eng.advance(r, !cancelled || r.yielded)
+	if metadata.Thread != nil {
+		eng.Live.hold(r)
+	}
 	queue := queueItems(s)
 	deleted = s.deleted
 	eng.Live.mu.Unlock()

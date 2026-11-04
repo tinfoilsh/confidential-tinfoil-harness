@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
@@ -36,8 +37,48 @@ type liveRuns struct {
 	threads  map[string]*threadSession
 	runs     map[string]*Run
 	requests map[string]*Run
+	// held is the logs of device chats' runs that ended, by run, kept for
+	// clients that lost their stream.
+	held map[string]*heldRun
 	// working counts the runs that have started until their last write.
 	working sync.WaitGroup
+}
+
+// heldRunTTL is how long the log of a device chat's ended run is kept. Its
+// client stores the chat the run returns, so one that lost its stream, as
+// an app sent to the background does, collects it when it follows the run
+// again.
+const heldRunTTL = 10 * time.Minute
+
+type heldRun struct {
+	log      *Log
+	threadID string
+	expiry   *time.Timer
+}
+
+// hold keeps the log of a device chat's run that is ending; live.mu is held.
+func (l *liveRuns) hold(r *Run) {
+	key := r.Thread.owner + "/" + r.Log.ID
+	if l.held == nil {
+		l.held = map[string]*heldRun{}
+	}
+	log := r.Log
+	log.Frames.hold()
+	l.held[key] = &heldRun{log: log, threadID: r.Thread.ID, expiry: time.AfterFunc(heldRunTTL, func() { l.release(key, log) })}
+}
+
+// release stops keeping a held log, which is wiped once nothing drains it.
+func (l *liveRuns) release(key string, log *Log) {
+	l.mu.Lock()
+	h := l.held[key]
+	if h == nil || h.log != log {
+		l.mu.Unlock()
+		return
+	}
+	delete(l.held, key)
+	l.mu.Unlock()
+	h.expiry.Stop()
+	log.Frames.release()
 }
 
 // Counts is how many chats, runs and client requests the registry holds.

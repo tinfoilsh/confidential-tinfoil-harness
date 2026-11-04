@@ -36,6 +36,10 @@ func (eng *Engine) HandleFollow(w http.ResponseWriter, r *http.Request) {
 	defer clear(key[:])
 	live, err := eng.authorizedRun(p, key, in.ThreadID, in.RunID)
 	clear(key[:])
+	if err == errRunNotFound {
+		eng.followHeld(w, r, p, in.ThreadID, in.RunID)
+		return
+	}
 	if err != nil {
 		api.Respond(w, nil, err)
 		return
@@ -58,7 +62,34 @@ func (eng *Engine) HandleFollow(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, err)
 		return
 	}
-	Follow(w, r, live.Log, from)
+	if Follow(w, r, live.Log, from) {
+		eng.Live.release(liveKey(p, in.RunID), live.Log)
+	}
+}
+
+// followHeld streams the log of a device chat's run that ended to its
+// client, which stores the chat the run returns. A client that has read it
+// to the end needs it no longer.
+func (eng *Engine) followHeld(w http.ResponseWriter, r *http.Request, p *auth.Principal, threadID, runID string) {
+	key := liveKey(p, runID)
+	eng.Live.mu.Lock()
+	held := eng.Live.held[key]
+	if held == nil || held.threadID != threadID {
+		eng.Live.mu.Unlock()
+		api.Respond(w, nil, errRunNotFound)
+		return
+	}
+	held.log.Frames.Attach()
+	eng.Live.mu.Unlock()
+	defer held.log.Frames.Detach()
+	from, err := ResumeFrom(held.log.Frames, r.Header.Get(lastEventIDHeader))
+	if err != nil {
+		api.Respond(w, nil, err)
+		return
+	}
+	if Follow(w, r, held.log, from) {
+		eng.Live.release(key, held.log)
+	}
 }
 
 // lastEventIDHeader names the last event of a run a client applied, as

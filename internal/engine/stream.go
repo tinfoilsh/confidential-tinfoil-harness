@@ -249,7 +249,8 @@ func checkpointOf(shown domain.ThreadWindow, a *domain.MessageAssembler) func() 
 // run ends. Only a checkpoint's last event names a cursor, the one before the
 // first frame after it, so a follower that misses part of a checkpoint is
 // sent all of it again.
-func Follow(w http.ResponseWriter, r *http.Request, rn *Log, from int) {
+// It reports whether it sent the run to its end.
+func Follow(w http.ResponseWriter, r *http.Request, rn *Log, from int) bool {
 	flush := http.NewResponseController(w)
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
@@ -274,37 +275,37 @@ func Follow(w http.ResponseWriter, r *http.Request, rn *Log, from int) {
 				_, err = fmt.Fprintf(w, "data: %s\n\n", frame)
 			}
 			if err != nil {
-				return
+				return false
 			}
 		}
 		for i, frame := range frames {
 			open()
 			if _, err := fmt.Fprintf(w, "id: %d\ndata: %s\n\n", first+i, frame); err != nil {
-				return
+				return false
 			}
 		}
 		from = first + len(frames)
 		if len(checkpoint)+len(frames) > 0 {
 			if err := flush.Flush(); err != nil {
-				return
+				return false
 			}
 		}
 		if closed != nil {
 			open()
-			return
+			return true
 		}
 		select {
 		case <-wake:
 		case <-heartbeat.C:
 			open()
 			if _, err := io.WriteString(w, ": keep-alive\n\n"); err != nil {
-				return
+				return false
 			}
 			if err := flush.Flush(); err != nil {
-				return
+				return false
 			}
 		case <-r.Context().Done():
-			return
+			return false
 		}
 	}
 }

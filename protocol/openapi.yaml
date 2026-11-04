@@ -190,7 +190,7 @@ paths:
       parameters:
         - {$ref: "#/components/parameters/HarnessInstance"}
         - {$ref: "#/components/parameters/LastEventId"}
-      description: Streams a live run again, for a client that lost its stream, from after the last event it applied.
+      description: Streams a live run again, for a client that lost its stream, from after the last event it applied. A device chat's run can still be followed for ten minutes after it ends, until a client following it again reads it to its end, so a client that lost its stream collects the chat the run returns.
       requestBody:
         required: true
         content:
