@@ -1127,14 +1127,16 @@ func TestConversationsExportsSendChatsAsTheyAreRead(t *testing.T) {
 }
 
 // A conversations export renews its grant before it reads its images again,
-// so one whose chats outlive the grant still writes every image.
+// so one whose chats outlive the grant still writes every image: one
+// storage keeps, and one its chat holds, read from the chat again.
 func TestConversationsExportsReadImagesAgainUnderARenewedGrant(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	const lifetime = time.Second
 	h.store.Rows = &pagedRows{memoryRows: rows, size: 1, lifetime: lifetime}
-	image := pngFixture(t, 2, 2, 1)
+	image, held := pngFixture(t, 2, 2, 1), pngFixture(t, 3, 3, 2)
 	id, blobKey := seedAttachment(rows, "alice", "chat-1", image)
-	storedThread(rows, "alice", "chat-1", api.Object{"id": id, "kind": "image", "fileName": "photo.png", "encryptionKey": blobKey})
+	storedThread(rows, "alice", "chat-1", api.Object{"id": id, "kind": "image", "fileName": "photo.png", "encryptionKey": blobKey},
+		api.Object{"id": "held", "kind": "image", "fileName": "held.png", "base64": base64.StdEncoding.EncodeToString(held)})
 	// The image is first read for longer than a grant lasts.
 	var read atomic.Bool
 	rows.cp.Mu.Lock()
@@ -1154,7 +1156,7 @@ func TestConversationsExportsReadImagesAgainUnderARenewedGrant(t *testing.T) {
 	files, _ := unzipped(t, []byte(archive))
 	var manifest archives.ConversationsManifest
 	json.Unmarshal(files[archives.ManifestPath], &manifest)
-	if len(manifest.Attachments) != 1 || !bytes.Equal(files[manifest.Attachments[0].ExportPath], image) || len(manifest.Warnings) != 0 {
+	if len(manifest.Attachments) != 2 || !bytes.Equal(files[manifest.Attachments[0].ExportPath], image) || !bytes.Equal(files[manifest.Attachments[1].ExportPath], held) || len(manifest.Warnings) != 0 {
 		t.Fatalf("manifest: %+v", manifest)
 	}
 }

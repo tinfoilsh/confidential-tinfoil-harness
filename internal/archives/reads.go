@@ -17,6 +17,8 @@ import (
 // services. A read they fail to answer is tried again a few times; one that
 // still fails leaves the attachment out, as one they no longer hold is, so a
 // passing fault costs an export an attachment rather than the whole export.
+// A conversations export reads its images again once its chats, which name
+// them, are written, so an image read then that still fails ends it.
 // Most chats keep one or two attachments, so an export reads those of a page
 // of chats a few at a time, ahead of the chat it writes, and writes the chats
 // in the order the page lists them.

@@ -800,14 +800,29 @@ type conversationsExport struct {
 	// images are those the chats written so far show, in the order they
 	// are written.
 	images []exportedImage
+	// again is the chat last read again for the images it holds.
+	again struct {
+		id   string
+		chat domain.Thread
+	}
 }
 
 // exportedImage is an image a chat names, to write once the chats are: the
 // path it names, the digest of the bytes it was read as, and what reading
-// it again takes.
+// it again takes. One whose bytes its chat holds is read from the chat,
+// read again, rather than kept meanwhile.
 type exportedImage struct {
 	path, sha256 string
 	attachment   domain.Attachment
+	held         *heldImage
+}
+
+// heldImage is an image in its chat: the chat, how to read it again, and
+// the image's place in it.
+type heldImage struct {
+	chatID      string
+	chat        func() (domain.Thread, error)
+	message, at int
 }
 
 // imagesPerGrant bounds the stored images an export reads again under one
@@ -832,7 +847,7 @@ func (ar *Service) writeConversations(ctx context.Context, p *auth.Principal, ke
 			return err
 		}
 		device[t.ID] = true
-		if err := e.chat(&t, "", form.deviceImage, noDocument); err != nil {
+		if err := e.chat(&t, "", form.deviceImage, noDocument, func() (domain.Thread, error) { return form.thread(i) }); err != nil {
 			return err
 		}
 	}
@@ -843,7 +858,14 @@ func (ar *Service) writeConversations(ctx context.Context, p *auth.Principal, ke
 		err := ar.eachStoredChat(ctx, p, key, func(id string) {
 			e.manifest.Warnings = append(e.manifest.Warnings, "Could not read chat "+id)
 		}, func(t *domain.Thread) bool { return device[t.ID] }, func(t *domain.Thread, image func(*domain.Attachment) ([]byte, error), document func(*domain.Attachment) error) error {
-			return e.chat(t, domain.ValueOr(t.ProjectID, ""), image, document)
+			id := t.ID
+			return e.chat(t, domain.ValueOr(t.ProjectID, ""), image, document, func() (domain.Thread, error) {
+				row, err := ar.Store.LoadThread(ctx, p, *key, id)
+				if err != nil {
+					return domain.Thread{}, err
+				}
+				return row.Thread, nil
+			})
 		})
 		if err != nil {
 			return err
@@ -857,7 +879,7 @@ func (ar *Service) writeConversations(ctx context.Context, p *auth.Principal, ke
 		return err
 	}
 	for _, image := range deviceImages {
-		data, err := form.deviceImage(&image.attachment)
+		data, err := e.readAgain(image, form.deviceImage)
 		if err := e.writeImage(image, data, err); err != nil {
 			return err
 		}
@@ -879,26 +901,55 @@ func (ar *Service) writeConversations(ctx context.Context, p *auth.Principal, ke
 	return e.zip.Close()
 }
 
-// writeStoredImages reads stored images again, a few at a time ahead of the
-// one it writes, under a renewal of the export's grant.
+// writeStoredImages reads stored images again under a renewal of the
+// export's grant: those storage keeps a few at a time ahead of the one it
+// writes.
 func (ar *Service) writeStoredImages(ctx context.Context, p *auth.Principal, key *auth.ContentKey, e *conversationsExport, images []exportedImage) error {
 	if err := ar.renewGrant(ctx, p, key); err != nil {
 		return err
 	}
-	attachments := make([]domain.Attachment, len(images))
-	for k := range images {
-		attachments[k] = images[k].attachment
+	var kept []domain.Attachment
+	for _, image := range images {
+		if image.held == nil {
+			kept = append(kept, image.attachment)
+		}
 	}
-	reads := ar.readImagesAhead(ctx, p, attachments)
+	reads := ar.readImagesAhead(ctx, p, kept)
 	defer reads.close()
-	for k := range images {
-		image, _ := reads.chat(k)
-		data, err := image(&attachments[k])
-		if err := e.writeImage(images[k], data, err); err != nil {
+	held, k := ar.cloudImage(ctx, p), 0
+	for _, image := range images {
+		read := held
+		if image.held == nil {
+			read, _ = reads.chat(k)
+			k++
+		}
+		data, err := e.readAgain(image, read)
+		if err := e.writeImage(image, data, err); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// readAgain reads an image again as read does: from its chat, read again,
+// when the chat holds its bytes.
+func (e *conversationsExport) readAgain(image exportedImage, read func(*domain.Attachment) ([]byte, error)) ([]byte, error) {
+	in := image.held
+	if in == nil {
+		return read(&image.attachment)
+	}
+	if e.again.id != in.chatID {
+		t, err := in.chat()
+		if err != nil {
+			return nil, err
+		}
+		e.again.id, e.again.chat = in.chatID, t
+	}
+	messages := e.again.chat.Messages
+	if in.message >= len(messages) || in.at >= len(messages[in.message].Attachments) {
+		return nil, errAttachmentUnavailable
+	}
+	return read(&messages[in.message].Attachments[in.at])
 }
 
 // writeImage writes an image a chat names, read again. One that cannot be
@@ -937,11 +988,12 @@ func indentedJSON(v any, prefix string) ([]byte, error) {
 	return bytes.TrimSuffix(b.Bytes(), []byte("\n")), nil
 }
 
-func (e *conversationsExport) chat(t *domain.Thread, projectID string, image func(*domain.Attachment) ([]byte, error), document func(*domain.Attachment) error) error {
+// chat writes a chat, which reread reads again.
+func (e *conversationsExport) chat(t *domain.Thread, projectID string, image func(*domain.Attachment) ([]byte, error), document func(*domain.Attachment) error, reread func() (domain.Thread, error)) error {
 	c := exportConversation{UUID: t.ID, Name: t.Title, CreatedAt: exportTime(t.CreatedAt, t.UpdatedAt), UpdatedAt: exportTime(t.UpdatedAt, t.CreatedAt), ProjectID: projectID, ChatMessages: []exportMessage{}}
 	// The summaries of compacted messages are not part of the conversation,
 	// nor counted in its messages' ids.
-	for _, m := range t.Messages {
+	for i, m := range t.Messages {
 		if m.Role == domain.CompactionRole {
 			continue
 		}
@@ -956,8 +1008,8 @@ func (e *conversationsExport) chat(t *domain.Thread, projectID string, image fun
 				message.Content = []exportThinking{{Type: "thinking", Thinking: thoughts}}
 			}
 		}
-		for _, a := range m.Attachments {
-			exported, err := e.attachment(a, image, document)
+		for j, a := range m.Attachments {
+			exported, err := e.attachment(a, image, document, heldImage{chatID: t.ID, chat: reread, message: i, at: j})
 			if err != nil {
 				return err
 			}
@@ -983,7 +1035,7 @@ func (e *conversationsExport) chat(t *domain.Thread, projectID string, image fun
 	return e.flush()
 }
 
-func (e *conversationsExport) attachment(a domain.Attachment, image func(*domain.Attachment) ([]byte, error), document func(*domain.Attachment) error) (exportAttachment, error) {
+func (e *conversationsExport) attachment(a domain.Attachment, image func(*domain.Attachment) ([]byte, error), document func(*domain.Attachment) error, place heldImage) (exportAttachment, error) {
 	if !a.IsImage() {
 		if !a.HasContent() {
 			if err := document(&a); missing(err) {
@@ -1007,7 +1059,11 @@ func (e *conversationsExport) attachment(a domain.Attachment, image func(*domain
 		return exportAttachment{}, err
 	}
 	sum := api.HashHex(data)
-	e.images = append(e.images, exportedImage{path: exportPath, sha256: sum, attachment: domain.Attachment{ID: a.ID, Kind: a.Kind, Base64: a.Base64, EncryptionKey: a.EncryptionKey, Key: a.Key}})
+	kept := exportedImage{path: exportPath, sha256: sum, attachment: domain.Attachment{ID: a.ID, Kind: a.Kind, EncryptionKey: a.EncryptionKey, Key: a.Key}}
+	if a.Base64 != "" {
+		kept.held = &place
+	}
+	e.images = append(e.images, kept)
 	exported.ExportPath, exported.FileSize = exportPath, new(int64(len(data)))
 	e.manifest.Attachments = append(e.manifest.Attachments, exportedFile{ExportPath: exportPath, SHA256: sum, FileSize: len(data)})
 	return exported, nil
