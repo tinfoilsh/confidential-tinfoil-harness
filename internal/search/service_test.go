@@ -146,6 +146,32 @@ func TestAChatWrittenAgainWhileTheIndexTakesItLeavesTheIndexComplete(t *testing.
 	}
 }
 
+// A removal of a row already gone, which says nothing of when the chat
+// went, does not take the place of a write of the chat waiting with it.
+func TestARemovalWithoutARevisionKeepsAWaitingWrite(t *testing.T) {
+	h := newSearchHarness(t)
+	ctx := context.Background()
+	blocker := newBlockingEmbedder(h.embedder)
+	h.service.Embedder = blocker
+	if _, err := h.rows.Push(ctx, h.p, h.key, "chat", &domain.StoredRow{ID: "chat_busy", Data: chatJSON(t, "chat_busy", "Pond", "a duck swam by")}, "nonce-busy"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-blocker.started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the index did not start taking the first write")
+	}
+	if _, err := h.rows.Push(ctx, h.p, h.key, "chat", &domain.StoredRow{ID: "chat_a", Data: chatJSON(t, "chat_a", "Lake", "a heron flew past")}, "nonce-a"); err != nil {
+		t.Fatal(err)
+	}
+	h.service.ChatRemoved(h.p, h.key, "chat_a", 0)
+	close(blocker.release)
+	h.settle(t)
+	if ids, rebuildNeeded := h.query(t, "heron"); rebuildNeeded || len(ids) == 0 || ids[0] != "chat_a" {
+		t.Fatalf("query = %v (rebuild %v), want the chat written first", ids, rebuildNeeded)
+	}
+}
+
 // A deletion that reaches the index after a chat was made again under its
 // id, by a write it never saw, leaves the newer entry; one from after that
 // write removes it.

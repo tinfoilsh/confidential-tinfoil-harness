@@ -59,9 +59,12 @@ func (s *Service) enqueue(c caller, u chatUpdate) {
 
 // add keeps one update per chat: the later revision's, or the later to
 // arrive when either has none, which stands for the other's writes too.
+// A removal without a revision, of a row already gone when it was read,
+// does not take the place of a write with one, which the index takes only
+// while it is the chat's latest.
 func (w *writer) add(u chatUpdate) {
 	if prev, ok := w.pending[u.id]; ok {
-		if prev.revision > u.revision && u.revision > 0 {
+		if prev.revision > u.revision && (u.revision > 0 || u.removed) {
 			prev, u = u, prev
 		}
 		u.replaced = append(u.replaced, prev.revisions()...)
