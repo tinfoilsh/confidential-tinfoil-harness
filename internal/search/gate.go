@@ -27,7 +27,7 @@ const (
 	// Background work that is over its rate asks again every
 	// limiterRetryInterval.
 	limiterRetryInterval = 100 * time.Millisecond
-	// A query or an inline index update waits foregroundEmbedTimeout for
+	// A query or a chat's index update waits foregroundEmbedTimeout for
 	// its vectors before going on without them; a rebuild waits
 	// backgroundEmbedTimeout.
 	foregroundEmbedTimeout = 3 * time.Second

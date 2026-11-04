@@ -7,15 +7,18 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane/cpstub"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/jobs"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/search"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
 
 const searchTestCreated = "2026-10-22T12:00:00Z"
@@ -56,8 +59,11 @@ func seedChat(rows *memoryRows, id, text string) (data []byte, revision int64) {
 func storeChat(t *testing.T, h *harness, rows *memoryRows, key auth.ContentKey, id, text string) {
 	t.Helper()
 	data, revision := seedChat(rows, id, text)
-	if err := h.search.ChatStored(context.Background(), &auth.Principal{ID: "alice"}, key, id, data, "1", api.Now(), revision); err != nil {
-		t.Fatalf("index %s: %v", id, err)
+	h.search.ChatStored(&auth.Principal{ID: "alice"}, key, id, data, "1", api.Now(), revision)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if !h.search.Flush(ctx) {
+		t.Fatalf("the index did not take %s", id)
 	}
 }
 
@@ -113,6 +119,48 @@ func TestSearchAnswersFromAHealthyIndex(t *testing.T) {
 	results, indexing, w := searchFor(t, h, key, "needle")
 	if w.Code != http.StatusOK || indexing || len(results) == 0 || !reflect.DeepEqual(results[0], searchTestSummary("indexed")) {
 		t.Fatalf("search answered HTTP %d %s, want the chat with the word first and no indexing", w.Code, w.Body.String())
+	}
+}
+
+// A reply ends without waiting for the search index to take its chat,
+// which a search then finds without rebuilding the index.
+func TestAReplyEndsBeforeTheSearchIndexTakesIt(t *testing.T) {
+	h, rows, key := searchHarness(t)
+	// The chat is stored through the store's own rows, which hand each
+	// write of it to the search index.
+	stored := &store.Rows{Controlplane: h.store.Controlplane, Buckets: h.store.Buckets, Index: h.search}
+	h.store.Rows, h.search.Rows = stored, stored
+	held := make(chan struct{})
+	release := sync.OnceFunc(func() { close(held) })
+	t.Cleanup(release)
+	rows.cp.Mu.Lock()
+	rows.cp.CaptureHeaders = func(r *http.Request) {
+		if r.Method == http.MethodPut && r.URL.Path == controlplane.SearchIndexStatePath {
+			<-held
+		}
+	}
+	rows.cp.Mu.Unlock()
+
+	in := sendInput(key)
+	replied := make(chan *httptest.ResponseRecorder, 1)
+	go func() { replied <- postRoute(h, "/v1/threads/turn", in, "alice") }()
+	var events []event
+	select {
+	case w := <-replied:
+		events = eventsIn(t, w)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the reply waited for the search index")
+	}
+	if last := events[len(events)-1]; last.Type != "RUN_FINISHED" {
+		t.Fatalf("the reply ended with %s while the search index was held", last.Type)
+	}
+	release()
+	results, indexing, w := searchFor(t, h, key, "hello")
+	if w.Code != http.StatusOK || indexing || len(results) != 1 || results[0].ID != in["threadId"] {
+		t.Fatalf("search after the reply answered HTTP %d %s, want the chat and no indexing", w.Code, w.Body.String())
+	}
+	if h.search.Rebuilds.Get("alice") != nil {
+		t.Fatal("the search rebuilt the index")
 	}
 }
 

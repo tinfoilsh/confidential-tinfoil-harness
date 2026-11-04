@@ -35,10 +35,11 @@ type Rows struct {
 }
 
 // ChatIndexer keeps a caller's search index in step with the chats stored:
-// each chat as it is stored, and each as it is removed.
+// each chat as it is stored, and each as it is removed, after the write
+// returns.
 type ChatIndexer interface {
-	ChatStored(ctx context.Context, p *auth.Principal, key auth.ContentKey, id string, plaintext []byte, etag string, at time.Time, revision int64) error
-	ChatRemoved(ctx context.Context, p *auth.Principal, key auth.ContentKey, id string, revision int64)
+	ChatStored(p *auth.Principal, key auth.ContentKey, id string, plaintext []byte, etag string, at time.Time, revision int64)
+	ChatRemoved(p *auth.Principal, key auth.ContentKey, id string, revision int64)
 }
 
 // RowStore is what the store reads and writes rows through: Rows, or a
@@ -230,9 +231,10 @@ func (r *Rows) Push(ctx context.Context, p *auth.Principal, key auth.ContentKey,
 	}
 	if scope == "chat" && r.Index != nil {
 		// The plaintext and key exist only for this request, so the index
-		// is updated now; a failure degrades search, which a rebuild
-		// repairs, rather than failing a stored write.
-		_ = r.Index.ChatStored(ctx, p, key, row.ID, row.Data, resp.ETag, api.Now(), resp.SourceRevision)
+		// reads the chat now, and takes it once the write has returned; a
+		// failure degrades search, which a rebuild repairs, rather than
+		// failing a stored write.
+		r.Index.ChatStored(p, key, row.ID, row.Data, resp.ETag, api.Now(), resp.SourceRevision)
 	}
 	return resp.ETag, nil
 }
@@ -529,7 +531,7 @@ func (r *Rows) Remove(ctx context.Context, p *auth.Principal, key auth.ContentKe
 				// The row may be gone while the search index still names
 				// it, after an earlier delete that got no further.
 				if scope == "chat" && r.Index != nil {
-					r.Index.ChatRemoved(ctx, p, key, id, 0)
+					r.Index.ChatRemoved(p, key, id, 0)
 				}
 				return nil
 			}
@@ -594,6 +596,6 @@ func (r *Rows) finishRemove(ctx context.Context, p *auth.Principal, key auth.Con
 	}
 	deleteBucketAttachments(ctx, r.Buckets, p.ID, resp.WipedV2Attachments)
 	if r.Index != nil {
-		r.Index.ChatRemoved(ctx, p, key, id, resp.SourceRevision)
+		r.Index.ChatRemoved(p, key, id, resp.SourceRevision)
 	}
 }
