@@ -266,8 +266,7 @@ func (eng *Engine) launch(ctx context.Context, r *Run) error {
 	r.out.emit(snapshot)
 	r.out.emit(domain.StateSnapshotEvent{Snapshot: domain.StateSnapshot{Thread: shown.ThreadSummary, Queue: queueItems(s), RateLimit: r.credential.Limit}})
 	r.out.mu.Lock()
-	r.out.Observe = r.assembler.Apply
-	r.out.checkpoint = checkpointOf(shown, r.assembler)
+	r.out.Observe, r.out.folding = r.assembler.Apply, true
 	r.out.mu.Unlock()
 	titlePrincipal := *r.Principal
 	eng.Live.working.Add(1)

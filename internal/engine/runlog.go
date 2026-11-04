@@ -9,9 +9,12 @@ import (
 const (
 	// A run holds its recent frames in memory for clients that follow it
 	// again. Past this budget they are folded into a checkpoint, so a run's
-	// share of the enclave is the reply it is writing and this budget.
+	// share of the enclave is the chat it showed, the reply it is writing
+	// and this budget.
 	runLogBudget = 32 << 20
-	RunTimeout   = 30 * time.Minute
+	// mergedFrameBytes bounds a frame a checkpoint merges deltas into.
+	mergedFrameBytes = 1 << 20
+	RunTimeout       = 30 * time.Minute
 )
 
 var ErrDone = errors.New("run finished")
@@ -20,25 +23,27 @@ var ErrDone = errors.New("run finished")
 type frameKind uint8
 
 const (
-	// frameFolded is reply content, which the checkpoint's snapshot holds.
-	frameFolded frameKind = iota
 	// frameKept is sent again as it was to a follower behind a checkpoint.
-	frameKept
-	// frameSnapshot is the chat's messages, which a checkpoint replaces
-	// with its snapshots of the chat and the tools' activity so far.
-	frameSnapshot
+	frameKept frameKind = iota
+	// frameDelta extends a message, its reasoning or a call's arguments. A
+	// checkpoint merges each run of deltas to the same one into one frame.
+	frameDelta
+	// frameActivity reports a tool's activity, which a checkpoint sends as
+	// it stands in the place of the activity's first frame.
+	frameActivity
 )
 
 type entry struct {
 	data []byte
 	kind frameKind
+	key  string // what a delta extends, or whose activity a frame reports
 }
 
 type FrameLog struct {
 	mu sync.Mutex
 	// base is the cursor of frames[0]. The frames before it are folded into
-	// checkpoint: the frames kept as they were sent, with the snapshot in
-	// place of the chat's messages.
+	// checkpoint: the same events, with deltas merged and each tool's
+	// activity as it stood.
 	base       int
 	checkpoint []entry
 	frames     []entry
@@ -64,45 +69,70 @@ func newRunlog() *FrameLog { return &FrameLog{wake: make(chan struct{}), budget:
 
 // grow appends one frame and reports whether the frames since the last
 // checkpoint outgrew the budget.
-func (l *FrameLog) grow(frame []byte, kind frameKind) bool {
+func (l *FrameLog) grow(frame []byte, kind frameKind, key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.closed == nil {
-		l.frames, l.bytes = append(l.frames, entry{frame, kind}), l.bytes+len(frame)
+		l.frames, l.bytes = append(l.frames, entry{frame, kind, key}), l.bytes+len(frame)
 		l.signal()
 	}
 	return l.bytes > l.budget
 }
 
-// fold replaces every frame the log holds with a checkpoint: the frames kept
-// as they were, with snapshots in the place of the chat's first, and wipes
-// the frames it drops.
-func (l *FrameLog) fold(snapshots [][]byte) {
+// fold replaces every frame the log holds with a checkpoint of the same
+// events: kept frames as they were, each run of deltas to the same target
+// merged by merge into one frame of at most mergedFrameBytes, and each
+// tool's activity as activity reports it, in the place of its first frame.
+// It wipes the frames it drops.
+func (l *FrameLog) fold(merge func(deltas [][]byte) []byte, activity func(key string) []byte) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.closed != nil {
 		return
 	}
-	checkpoint, placed := []entry{}, false
-	place := func() {
-		for _, snapshot := range snapshots {
-			checkpoint = append(checkpoint, entry{snapshot, frameSnapshot})
+	var checkpoint, run []entry
+	size := 0
+	// flush puts the run of deltas so far in the checkpoint, merged.
+	flush := func() {
+		if len(run) == 1 {
+			checkpoint = append(checkpoint, run[0])
+		} else if len(run) > 1 {
+			deltas := make([][]byte, len(run))
+			for i, e := range run {
+				deltas[i] = e.data
+			}
+			checkpoint = append(checkpoint, entry{merge(deltas), frameDelta, run[0].key})
+			for _, e := range run {
+				clear(e.data)
+			}
 		}
-		placed = true
+		run, size = nil, 0
 	}
+	placed := map[string]bool{}
 	for _, e := range append(l.checkpoint, l.frames...) {
-		switch {
-		case e.kind == frameKept:
+		if e.kind == frameDelta && len(run) > 0 && run[0].key == e.key && size+len(e.data) <= mergedFrameBytes {
+			run, size = append(run, e), size+len(e.data)
+			continue
+		}
+		flush()
+		switch e.kind {
+		case frameDelta:
+			run, size = []entry{e}, len(e.data)
+			continue
+		case frameKept:
 			checkpoint = append(checkpoint, e)
 			continue
-		case e.kind == frameSnapshot && !placed:
-			place()
+		case frameActivity:
+			if !placed[e.key] {
+				placed[e.key] = true
+				if now := activity(e.key); now != nil {
+					checkpoint = append(checkpoint, entry{now, frameActivity, e.key})
+				}
+			}
 		}
 		clear(e.data)
 	}
-	if !placed {
-		place()
-	}
+	flush()
 	l.checkpoint, l.base, l.frames, l.bytes = checkpoint, l.base+len(l.frames), nil, 0
 }
 
