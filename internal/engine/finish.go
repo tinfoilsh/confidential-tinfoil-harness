@@ -128,6 +128,10 @@ func (eng *Engine) finishRun(r *Run, runErr error) {
 		s.row = r.row
 	}
 	next := eng.advance(r, !cancelled || r.yielded)
+	// A chat deleted as its reply ran is not kept for its client.
+	if metadata.Thread != nil && !s.deleted {
+		eng.Live.hold(r)
+	}
 	queue := queueItems(s)
 	deleted = s.deleted
 	eng.Live.mu.Unlock()

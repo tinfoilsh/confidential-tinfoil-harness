@@ -512,6 +512,63 @@ func TestAReplyIsSavedAfterItsClientLeaves(t *testing.T) {
 	}
 }
 
+// A device chat's run that ends while its client is away is kept for that
+// client, which collects the chat the run returns by following the run
+// again. Once it has, the run is gone; no other account can follow it.
+func TestADeviceChatsEndedRunIsKeptUntilItsClientCollectsIt(t *testing.T) {
+	model, release := heldModel()
+	h, _, _ := testChatHarness(t, model)
+	alice := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
+	run, err := h.engine.AcceptTurn(context.Background(), alice, chatCredential("alice"), auth.ContentKey{}, requestOf[engine.TurnRequest](localInput("", api.Object{"messages": []any{}})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitFrame(t, run.Log, "TEXT_MESSAGE_CHUNK")
+	// The app goes to the background and its stream drops.
+	run.Log.Frames.Detach()
+	release()
+	select {
+	case <-run.Finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the reply did not finish once its client left")
+	}
+	follow := api.Object{"threadId": run.Thread.ID, "runId": run.Log.ID}
+	if w := postRoute(h, "/v1/threads/follow", follow, "bob"); w.Code != 404 {
+		t.Fatalf("another account followed the run: HTTP %d %s", w.Code, w.Body.String())
+	}
+	events := eventsIn(t, postRoute(h, "/v1/threads/follow", follow, "alice"))
+	last := events[len(events)-1]
+	messages := api.Arr(api.Obj(api.Obj(api.Parsed(last.Metadata))["thread"])["messages"])
+	if events[0].Type != "RUN_STARTED" || last.Type != "RUN_FINISHED" || len(messages) != 2 || api.Obj(messages[1])["content"] != "partial done" {
+		t.Fatalf("following the ended run sent %d events, ending %s with messages %v", len(events), last.Type, messages)
+	}
+	if w := postRoute(h, "/v1/threads/follow", follow, "alice"); w.Code != 404 || !strings.Contains(w.Body.String(), "RUN_NOT_FOUND") {
+		t.Fatalf("the collected run was followed again: HTTP %d %s", w.Code, w.Body.String())
+	}
+}
+
+// A device chat deleted as its reply runs is not kept for its client.
+func TestADeviceChatDeletedAsItsReplyRunsIsNotKept(t *testing.T) {
+	model, _ := heldModel()
+	h, _, _ := testChatHarness(t, model)
+	alice := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
+	run, err := h.engine.AcceptTurn(context.Background(), alice, chatCredential("alice"), auth.ContentKey{}, requestOf[engine.TurnRequest](localInput("", api.Object{"messages": []any{}})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitFrame(t, run.Log, "TEXT_MESSAGE_CHUNK")
+	run.Log.Frames.Detach()
+	h.engine.StopThread(alice, run.Thread.ID)
+	select {
+	case <-run.Finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the deleted chat's reply did not end")
+	}
+	if w := postRoute(h, "/v1/threads/follow", api.Object{"threadId": run.Thread.ID, "runId": run.Log.ID}, "alice"); w.Code != 404 {
+		t.Fatalf("the deleted chat's run was kept: HTTP %d %s", w.Code, w.Body.String())
+	}
+}
+
 // A finished run's log is wiped once nothing drains it, whether its last
 // reader leaves after the run ends or before. A follower attached as the run
 // ends is still sent every frame, and the frames are zeroed, not only

@@ -51,6 +51,9 @@ type FrameLog struct {
 	// is wiped.
 	ended    bool
 	draining int
+	// held keeps an ended log from being wiped while the client of its
+	// device chat may still collect it.
+	held bool
 }
 
 // Readers is how many streams are draining the log.
@@ -127,13 +130,27 @@ func (l *FrameLog) Detach() {
 // the run's plaintext leaves memory as its last stream ends rather than when
 // the collector reuses it. l.mu is held.
 func (l *FrameLog) wipe() {
-	if !l.ended || l.draining > 0 {
+	if !l.ended || l.draining > 0 || l.held {
 		return
 	}
 	for _, e := range append(l.checkpoint, l.frames...) {
 		clear(e.data)
 	}
 	l.checkpoint, l.frames = nil, nil
+}
+
+func (l *FrameLog) hold() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.held = true
+}
+
+// release ends a hold, wiping the log if its run ended and nothing drains it.
+func (l *FrameLog) release() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.held = false
+	l.wipe()
 }
 
 func (l *FrameLog) signal() {
