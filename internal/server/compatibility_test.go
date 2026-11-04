@@ -196,6 +196,43 @@ func TestTitleRunsBeforeAnswerFinishes(t *testing.T) {
 		t.Fatal("title did not commit")
 	}
 }
+
+// A title the model writes as more than a short line, as an answer in a code
+// block, does not name the chat. The chat keeps its placeholder, and a later
+// turn names it.
+func TestATitleThatIsNotAShortLineDoesNotNameTheChat(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	titles := []string{"```python\nprint(\"hello\")\n```", strings.Repeat("Printing hello in Python ", 5), "Printing hello in Python"}
+	var calls atomic.Int32
+	h.summarizeWith(func(task, _ string) (string, error) {
+		if task != "title" {
+			return "", io.EOF
+		}
+		return titles[min(int(calls.Add(1)), len(titles))-1], nil
+	})
+	alice := &auth.Principal{ID: "alice"}
+	first := sendInput(key)
+	turn := func(in api.Object) *domain.ThreadRow {
+		t.Helper()
+		if events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice")); events[len(events)-1].Type != "RUN_FINISHED" {
+			t.Fatalf("the turn ended with %+v", events[len(events)-1])
+		}
+		row, err := rows.Load(context.Background(), alice, key, "chat", first["threadId"].(string))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return mustRead(domain.ReadThreadRow(row))
+	}
+	if chat := turn(first); chat.Title != "New Chat" || chat.TitleState != "placeholder" || calls.Load() != 2 {
+		t.Fatalf("after %d titles, the chat is named %q (%s)", calls.Load(), chat.Title, chat.TitleState)
+	}
+	next := sendInput(key)
+	next["threadId"] = first["threadId"]
+	if chat := turn(next); chat.Title != titles[2] || chat.TitleState != "generated" {
+		t.Fatalf("a later turn named the chat %q (%s)", chat.Title, chat.TitleState)
+	}
+}
+
 func TestWidgetSchemaBounds(t *testing.T) {
 	clock, ok := catalogWidgets("render_clock")["render_clock"]
 	if !ok {

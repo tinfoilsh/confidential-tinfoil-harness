@@ -27,6 +27,9 @@ type Task struct {
 	Sections []Section
 	// MinWords and MaxWords, when set, are the length the prompt asks for.
 	MinWords, MaxWords int
+	// MaxLineChars, when set, is what the check holds a summary to: one
+	// line of at most this many characters, without a code block.
+	MaxLineChars int
 	// Frame is the tag the documents are read in. A task without one reads
 	// its document's text as it is.
 	Frame string
@@ -56,8 +59,8 @@ type Section struct {
 var Title = &Task{
 	Name: "title", Version: 1, Role: Fast,
 	Instructions: "Generate a concise, descriptive title for the following text. ONLY output plain text - never output markdown or code.",
-	MinWords:     2, MaxWords: 5,
-	MaxTokens: 1024, Timeout: 30 * time.Second, Attempts: 1,
+	MinWords:     2, MaxWords: 5, MaxLineChars: 100,
+	MaxTokens: 1024, Timeout: 30 * time.Second, Attempts: 2,
 }
 
 // Thoughts labels what a reply is reasoning about as it thinks.
