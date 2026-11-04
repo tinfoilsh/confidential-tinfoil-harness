@@ -7,6 +7,7 @@ memory: 65536
 
 shim:
   upstream-port: 8081
+  drain_connections: true
   # /v1/* validates Clerk sessions and anonymous chat keys inside Go.
   paths:
     - /healthz
