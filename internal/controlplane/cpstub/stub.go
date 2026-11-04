@@ -637,9 +637,10 @@ func searchIndexConflict(w http.ResponseWriter, state controlplane.SearchIndexSt
 
 // handlePublishSearchIndex publishes an index object at the generation and
 // fence the publisher expects, covering a source revision no earlier than
-// the published one and no later than the source; a publication under
-// another key than the registered one, or at another generation, is a
-// conflict that answers with the current state.
+// the published one and no later than the source, and incomplete when it
+// covers less than the source; a publication under another key than the
+// registered one, or at another generation, is a conflict that answers
+// with the current state.
 func (s *Store) handlePublishSearchIndex(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ExpectedGeneration    int64  `json:"expected_generation"`
@@ -696,7 +697,7 @@ func (s *Store) handlePublishSearchIndex(w http.ResponseWriter, r *http.Request)
 		ObjectKey:               req.ObjectKey,
 		KeyID:                   req.KeyID,
 		Model:                   req.Model,
-		PublicationIncomplete:   req.Incomplete,
+		PublicationIncomplete:   req.Incomplete || req.CoveredSourceRevision < state.SourceRevision,
 	}
 	writeJSON(w, http.StatusOK, s.searchState())
 }

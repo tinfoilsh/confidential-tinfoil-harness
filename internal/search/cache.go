@@ -27,6 +27,11 @@ const cacheBudgetBytes = 4 << 30
 // An entry is bound to a digest of the object key the publication names
 // and the key it is sealed with, so another replica's publication or a
 // key change misses and reloads from storage.
+//
+// An entry this process published as complete keeps the generation it
+// was published at: the control plane marks a publication incomplete
+// when another write lands while it is made, and the update that brings
+// that write from here then knows the index was complete before it.
 type indexCache struct {
 	mu      sync.Mutex
 	budget  int
@@ -40,6 +45,9 @@ type cacheEntry struct {
 	ix    *searchindex.Index
 	key   [sha256.Size]byte
 	size  int
+	// completeAt is the generation this process published the object at
+	// as complete, or 0.
+	completeAt int64
 }
 
 func newIndexCache(budget int) *indexCache {
@@ -92,6 +100,25 @@ func (c *indexCache) put(owner string, key [sha256.Size]byte, ix *searchindex.In
 	for c.total > c.budget {
 		c.removeLocked(c.lru.Back())
 	}
+}
+
+// publishedComplete records that this process published the owner's
+// cached object, bound to key, as complete at generation.
+func (c *indexCache) publishedComplete(owner string, key [sha256.Size]byte, generation int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if el, ok := c.byOwner[owner]; ok && el.Value.(*cacheEntry).key == key {
+		el.Value.(*cacheEntry).completeAt = generation
+	}
+}
+
+// completeAt is whether this process published the owner's cached object,
+// bound to key, as complete at generation.
+func (c *indexCache) completeAt(owner string, key [sha256.Size]byte, generation int64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	el, ok := c.byOwner[owner]
+	return ok && generation > 0 && el.Value.(*cacheEntry).key == key && el.Value.(*cacheEntry).completeAt == generation
 }
 
 func (c *indexCache) drop(owner string) {

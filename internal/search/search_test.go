@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
@@ -200,7 +201,7 @@ func chatJSON(t *testing.T, id, title string, contents ...string) []byte {
 	return out
 }
 
-// push stores a chat, which indexes it inline, and is its revision.
+// push stores a chat, waits for the index to take it, and is its revision.
 func (h *searchHarness) push(t *testing.T, id, title, content string) string {
 	t.Helper()
 	return h.pushRow(t, &domain.StoredRow{ID: id, Data: chatJSON(t, id, title, content)})
@@ -212,6 +213,7 @@ func (h *searchHarness) pushRow(t *testing.T, row *domain.StoredRow) string {
 	if err != nil {
 		t.Fatalf("push %s: %v", row.ID, err)
 	}
+	h.settle(t)
 	return etag
 }
 
@@ -219,6 +221,60 @@ func (h *searchHarness) remove(t *testing.T, id string) {
 	t.Helper()
 	if err := h.rows.Remove(context.Background(), h.p, h.key, "chat", id); err != nil {
 		t.Fatalf("remove %s: %v", id, err)
+	}
+	h.settle(t)
+}
+
+// settle waits for the index to take every write made so far.
+func (h *searchHarness) settle(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if !h.service.Flush(ctx) {
+		t.Fatal("the index did not take the writes")
+	}
+}
+
+// put writes a chat's entry straight into the caller's index, without a
+// source revision, as a write the index took before the control plane
+// counted them left it, whether or not the control plane still holds the
+// chat; the index is then incomplete.
+func (h *searchHarness) put(t *testing.T, id string, plaintext []byte, etag string, at time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	c := h.caller(t)
+	defer c.zero()
+	unlock := h.service.lock(h.p.ID)
+	defer unlock()
+	publication, objectKey, err := h.service.publication(ctx, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ix, _, err := h.service.load(ctx, h.p.ID, objectKey, c.indexKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := storedUpdate(id, plaintext, etag, at, 0)
+	vectors, err := h.service.embedChunks(ctx, h.p.ID, docPrefix, u.chunks, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ix.Upsert(id, searchindex.Entry{ETag: etag, UpdatedAt: at.UTC().Format(time.RFC3339Nano), Vectors: quantizeAll(vectors)}, u.tokens); err != nil {
+		t.Fatal(err)
+	}
+	ix.Incomplete = true
+	if _, err := h.service.publish(ctx, c, publication, publication.PublishedSourceRevision, true, ix); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// apply merges updates into the caller's index as their writer does.
+func (h *searchHarness) apply(t *testing.T, updates ...chatUpdate) {
+	t.Helper()
+	c := h.caller(t)
+	defer c.zero()
+	if _, err := h.service.apply(context.Background(), c, updates); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -213,8 +213,19 @@ func (s *Service) publish(ctx context.Context, c caller, state *controlplane.Sea
 		}
 		return nil, store.FromControlplane(err)
 	}
+	if !incomplete {
+		s.cache.publishedComplete(owner, cacheKey(c.indexKey, objectKey), published.PublicationGeneration)
+	}
 	s.deleteObject(ctx, owner, state.ObjectKey)
 	return published, nil
+}
+
+// completeThrough is whether the published index covers every write up to
+// the revision it was published at: the control plane says so, or this
+// process published it as complete and only a write that landed meanwhile
+// made the control plane say otherwise.
+func (s *Service) completeThrough(c caller, publication *controlplane.SearchIndexState, objectKey string) bool {
+	return !publication.PublicationIncomplete || s.cache.completeAt(c.owner(), cacheKey(c.indexKey, objectKey), publication.PublicationGeneration)
 }
 
 // isConflict is whether a publication lost to another replica's, which

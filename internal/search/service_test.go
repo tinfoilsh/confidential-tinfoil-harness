@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -26,7 +27,6 @@ import (
 
 func TestAStoredChatIsFoundUntilItIsRemoved(t *testing.T) {
 	h := newSearchHarness(t)
-	ctx := context.Background()
 	h.push(t, "chat_duck", "Pond visit", "I saw a duck at the pond today")
 	h.push(t, "chat_tax", "Paperwork", "filing my tax return before the deadline")
 
@@ -49,22 +49,126 @@ func TestAStoredChatIsFoundUntilItIsRemoved(t *testing.T) {
 	// under its id leaves the new chat indexed.
 	first := h.push(t, "chat_same", "Old", "a goose honked")
 	h.pushRow(t, &domain.StoredRow{ID: "chat_same", ETag: first, Data: chatJSON(t, "chat_same", "New", "a heron flew past")})
-	c := h.caller(t)
-	defer c.zero()
-	if err := h.service.removeChat(ctx, c, "chat_same", 0); err != nil {
-		t.Fatal(err)
-	}
+	h.apply(t, chatUpdate{id: "chat_same", removed: true})
 	if ids, _ := h.query(t, "heron"); len(ids) == 0 || ids[0] != "chat_same" {
 		t.Fatalf("query after a late removal of a remade chat = %v, want the chat first", ids)
 	}
 	// A removal of a chat already gone still drops its entry, as after
 	// a delete that got no further than the row.
-	if err := h.service.indexChat(ctx, c, "chat_ghost", chatJSON(t, "chat_ghost", "", "a left over ghost"), "ghost", time.Now(), 0, nil); err != nil {
-		t.Fatal(err)
-	}
+	h.put(t, "chat_ghost", chatJSON(t, "chat_ghost", "", "a left over ghost"), "ghost", time.Now())
 	h.remove(t, "chat_ghost")
 	if _, ok := h.index(t).Chats["chat_ghost"]; ok {
 		t.Fatal("the entry of a chat already gone survived its removal")
+	}
+}
+
+// Writes made while the index takes an earlier one do not wait for it, and
+// are taken together in one publication that covers them all.
+func TestWritesMadeWhileTheIndexIsBusyArePublishedTogether(t *testing.T) {
+	h := newSearchHarness(t)
+	held, released := make(chan struct{}), make(chan struct{})
+	release := sync.OnceFunc(func() { close(released) })
+	t.Cleanup(release)
+	var publications atomic.Int32
+	h.cp.Mu.Lock()
+	h.cp.CaptureHeaders = func(r *http.Request) {
+		if r.Method == http.MethodPut && r.URL.Path == controlplane.SearchIndexStatePath && publications.Add(1) == 1 {
+			close(held)
+			<-released
+		}
+	}
+	h.cp.Mu.Unlock()
+	ids := []string{"chat_a", "chat_b", "chat_c", "chat_d"}
+	rows := make([]*domain.StoredRow, len(ids))
+	for i, id := range ids {
+		rows[i] = &domain.StoredRow{ID: id, Data: chatJSON(t, id, "Pond", "a duck swam by")}
+	}
+	stored := make(chan error, 1)
+	go func() {
+		for i, row := range rows {
+			if _, err := h.rows.Push(context.Background(), h.p, h.key, "chat", row, "nonce-"+row.ID); err != nil {
+				stored <- err
+				return
+			}
+			if i == 0 {
+				<-held
+			}
+		}
+		stored <- nil
+	}()
+	select {
+	case err := <-stored:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the writes waited for the index")
+	}
+	release()
+	h.settle(t)
+	if n := publications.Load(); n != 2 {
+		t.Fatalf("the writes were published %d times, want the first alone and the rest together", n)
+	}
+	if state := h.publication(); state.Incomplete || state.PublishedSourceRevision != int64(len(ids)) {
+		t.Fatalf("publication = %+v, want it complete through every write", state)
+	}
+	if found, rebuildNeeded := h.query(t, "duck"); rebuildNeeded || len(found) != len(ids) {
+		t.Fatalf("query = %v (rebuild %v), want every chat", found, rebuildNeeded)
+	}
+}
+
+// A chat written again while the index takes its earlier write leaves the
+// index complete: the later write's update stands for the earlier one.
+func TestAChatWrittenAgainWhileTheIndexTakesItLeavesTheIndexComplete(t *testing.T) {
+	h := newSearchHarness(t)
+	ctx := context.Background()
+	blocker := newBlockingEmbedder(h.embedder)
+	h.service.Embedder = blocker
+	first, err := h.rows.Push(ctx, h.p, h.key, "chat", &domain.StoredRow{ID: "chat_a", Data: chatJSON(t, "chat_a", "Pond", "a duck swam by")}, "nonce-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-blocker.started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the index did not start taking the first write")
+	}
+	if _, err := h.rows.Push(ctx, h.p, h.key, "chat", &domain.StoredRow{ID: "chat_a", ETag: first, Data: chatJSON(t, "chat_a", "Pond", "a heron flew past")}, "nonce-2"); err != nil {
+		t.Fatal(err)
+	}
+	close(blocker.release)
+	h.settle(t)
+	if state := h.publication(); state.Incomplete || state.PublishedSourceRevision != 2 {
+		t.Fatalf("publication = %+v, want it complete through both writes", state)
+	}
+	if ids, rebuildNeeded := h.query(t, "heron"); rebuildNeeded || !slices.Equal(ids, []string{"chat_a"}) {
+		t.Fatalf("query = %v (rebuild %v), want the chat as last written", ids, rebuildNeeded)
+	}
+}
+
+// A removal of a row already gone, which says nothing of when the chat
+// went, does not take the place of a write of the chat waiting with it.
+func TestARemovalWithoutARevisionKeepsAWaitingWrite(t *testing.T) {
+	h := newSearchHarness(t)
+	ctx := context.Background()
+	blocker := newBlockingEmbedder(h.embedder)
+	h.service.Embedder = blocker
+	if _, err := h.rows.Push(ctx, h.p, h.key, "chat", &domain.StoredRow{ID: "chat_busy", Data: chatJSON(t, "chat_busy", "Pond", "a duck swam by")}, "nonce-busy"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-blocker.started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the index did not start taking the first write")
+	}
+	if _, err := h.rows.Push(ctx, h.p, h.key, "chat", &domain.StoredRow{ID: "chat_a", Data: chatJSON(t, "chat_a", "Lake", "a heron flew past")}, "nonce-a"); err != nil {
+		t.Fatal(err)
+	}
+	h.service.ChatRemoved(h.p, h.key, "chat_a", 0)
+	close(blocker.release)
+	h.settle(t)
+	if ids, rebuildNeeded := h.query(t, "heron"); rebuildNeeded || len(ids) == 0 || ids[0] != "chat_a" {
+		t.Fatalf("query = %v (rebuild %v), want the chat written first", ids, rebuildNeeded)
 	}
 }
 
@@ -73,7 +177,6 @@ func TestAStoredChatIsFoundUntilItIsRemoved(t *testing.T) {
 // write removes it.
 func TestADeletionOlderThanTheEntryKeepsIt(t *testing.T) {
 	h := newSearchHarness(t)
-	ctx := context.Background()
 	h.push(t, "chat_other", "Elsewhere", "a duck swam by")
 	h.push(t, "chat_same", "Remade", "a heron flew past")
 	entry := h.index(t).Chats["chat_same"]
@@ -86,17 +189,11 @@ func TestADeletionOlderThanTheEntryKeepsIt(t *testing.T) {
 	delete(h.cp.Blobs, "chat/chat_same")
 	h.cp.SourceRevision++
 	h.cp.Mu.Unlock()
-	c := h.caller(t)
-	defer c.zero()
-	if err := h.service.removeChat(ctx, c, "chat_same", entry.SourceRevision-1); err != nil {
-		t.Fatal(err)
-	}
+	h.apply(t, chatUpdate{id: "chat_same", removed: true, revision: entry.SourceRevision - 1})
 	if _, ok := h.index(t).Chats["chat_same"]; !ok {
 		t.Fatal("a deletion older than the entry removed it")
 	}
-	if err := h.service.removeChat(ctx, c, "chat_same", entry.SourceRevision+1); err != nil {
-		t.Fatal(err)
-	}
+	h.apply(t, chatUpdate{id: "chat_same", removed: true, revision: entry.SourceRevision + 1})
 	if _, ok := h.index(t).Chats["chat_same"]; ok {
 		t.Fatal("a deletion newer than the entry left it")
 	}
@@ -104,18 +201,16 @@ func TestADeletionOlderThanTheEntryKeepsIt(t *testing.T) {
 
 func TestAStaleWriteDoesNotReplaceANewerEntry(t *testing.T) {
 	h := newSearchHarness(t)
-	ctx := context.Background()
-	c := h.caller(t)
-	defer c.zero()
-	index := func(content, etag string, at time.Time) {
+	// Each write is the revision the control plane holds the chat at as
+	// the index takes it.
+	index := func(content string, etag int64, at time.Time) {
 		t.Helper()
-		if err := h.service.indexChat(ctx, c, "chat_a", chatJSON(t, "chat_a", "", content), etag, at, 0, nil); err != nil {
-			t.Fatal(err)
-		}
+		h.cp.SetBlob("chat", "chat_a", cpstub.Blob{ETag: etag})
+		h.apply(t, storedUpdate("chat_a", chatJSON(t, "chat_a", "", content), cpstub.FormatETag(etag), at, 0))
 	}
-	index("a goose on the lake", "5", time.Now())
+	index("a goose on the lake", 5, time.Now())
 	// An older revision with a later write time is a straggler.
-	index("a duck on the pond", "3", time.Now().Add(time.Hour))
+	index("a duck on the pond", 3, time.Now().Add(time.Hour))
 	ix := h.index(t)
 	if found := ix.Search(nil, []string{"goose"}, 5); len(found) != 1 {
 		t.Fatalf("the newer entry was replaced by an older revision: %+v", found)
@@ -124,13 +219,13 @@ func TestAStaleWriteDoesNotReplaceANewerEntry(t *testing.T) {
 		t.Fatalf("the older revision was indexed: %+v", found)
 	}
 	// A newer revision with an earlier write time is applied.
-	index("a heron flew past", "7", time.Now().Add(-time.Hour))
+	index("a heron flew past", 7, time.Now().Add(-time.Hour))
 	if found := h.index(t).Search(nil, []string{"heron"}, 5); len(found) != 1 {
 		t.Fatalf("the newer revision was not indexed: %+v", found)
 	}
 	// Without revisions to compare, the write time orders entries.
-	index("an owl at dusk", "later", time.Now().Add(time.Hour))
-	index("a swan at dawn", "latest", time.Now())
+	h.put(t, "chat_a", chatJSON(t, "chat_a", "", "an owl at dusk"), "later", time.Now().Add(time.Hour))
+	index("a swan at dawn", 8, time.Now())
 	if found := h.index(t).Search(nil, []string{"owl"}, 5); len(found) != 1 {
 		t.Fatalf("an entry written later was replaced by an earlier write: %+v", found)
 	}
@@ -189,19 +284,13 @@ func TestARebuildDropsDeletedChatsAndKeepsEntriesWrittenMeanwhile(t *testing.T) 
 	defer c.zero()
 	h.push(t, "chat_old", "Pond", "a duck swam by")
 	// In the index alone, its chat gone from the control plane.
-	if err := h.service.indexChat(ctx, c, "chat_deleted", chatJSON(t, "chat_deleted", "", "left over ghost"), "g1", time.Now(), 0, nil); err != nil {
-		t.Fatal(err)
-	}
+	h.put(t, "chat_deleted", chatJSON(t, "chat_deleted", "", "left over ghost"), "g1", time.Now())
 	startedAt := time.Now().UTC()
 	// Written after the rebuild began, by a chat its listing does not see.
-	if err := h.service.indexChat(ctx, c, "chat_racer", chatJSON(t, "chat_racer", "", "zebra crossing photos"), "g2", time.Now(), 0, nil); err != nil {
-		t.Fatal(err)
-	}
-	// Updated inline during the rebuild: the index has the newer text,
-	// the listing the older.
-	if err := h.service.indexChat(ctx, c, "chat_old", chatJSON(t, "chat_old", "", "actually a heron flew past"), "g3", time.Now(), 0, nil); err != nil {
-		t.Fatal(err)
-	}
+	h.put(t, "chat_racer", chatJSON(t, "chat_racer", "", "zebra crossing photos"), "g2", time.Now())
+	// Updated during the rebuild: the index has the newer text, the
+	// listing the older.
+	h.put(t, "chat_old", chatJSON(t, "chat_old", "", "actually a heron flew past"), "g3", time.Now())
 
 	c = c.detached(h.key)
 	defer c.zero()
@@ -396,9 +485,7 @@ func TestAPublicationConflictIsRetriedFromTheWinner(t *testing.T) {
 	}
 	h.cp.Mu.Unlock()
 
-	if err := h.service.indexChat(ctx, c, "chat_c", chatJSON(t, "chat_c", "", "charlie term"), "1", time.Now(), 3, nil); err != nil {
-		t.Fatal(err)
-	}
+	h.apply(t, storedUpdate("chat_c", chatJSON(t, "chat_c", "", "charlie term"), "1", time.Now(), 3))
 	ix := h.index(t)
 	for _, id := range []string{"chat_a", "chat_b", "chat_c"} {
 		if _, ok := ix.Chats[id]; !ok {
@@ -447,6 +534,7 @@ func TestAChangeWhoseSaveFailedIsNotServedFromTheCache(t *testing.T) {
 	if err != nil || etag == "" {
 		t.Fatalf("a push whose index save failed = (%q, %v), want the chat stored", etag, err)
 	}
+	h.settle(t)
 	failing.Store(false)
 
 	ids, rebuildNeeded := h.query(t, "goose")
@@ -487,9 +575,7 @@ func TestAPanicWhileIndexingDoesNotFailTheStore(t *testing.T) {
 	if err != nil || etag != "1" {
 		t.Fatalf("push = (%q, %v), want the chat stored with search degraded", etag, err)
 	}
-	if err := h.service.ChatStored(ctx, h.p, h.key, "chat_1", chatJSON(t, "chat_1", "T", "hello"), etag, time.Now(), 1); !errors.Is(err, errIndexPanicked) {
-		t.Fatalf("indexing = %v, want the panic reported as a failure", err)
-	}
+	h.settle(t)
 	h.cp.Mu.Lock()
 	_, stored := h.cp.Blobs["chat/chat_1"]
 	h.cp.Mu.Unlock()
@@ -501,11 +587,18 @@ func TestAPanicWhileIndexingDoesNotFailTheStore(t *testing.T) {
 	if err := h.rows.RemoveRevision(ctx, h.p, h.key, "chat_1", etag); err != nil {
 		t.Fatalf("remove = %v, want the chat deleted with search degraded", err)
 	}
+	h.settle(t)
 	h.cp.Mu.Lock()
 	_, stored = h.cp.Blobs["chat/chat_1"]
 	h.cp.Mu.Unlock()
 	if stored {
 		t.Fatal("the chat was not deleted")
+	}
+	// The caller's index still takes their next write.
+	h.service.Embedder = h.embedder
+	h.push(t, "chat_2", "Pond", "a duck swam by")
+	if ids, _ := h.query(t, "duck"); !slices.Equal(ids, []string{"chat_2"}) {
+		t.Fatalf("query after the panics = %v, want the chat written since", ids)
 	}
 }
 
@@ -649,6 +742,28 @@ func TestAnEmbeddingOutageLeavesEntriesPendingUntilAQueryRepairsThem(t *testing.
 	}
 	if h.lastJob() != repair {
 		t.Fatal("a query after the repair started another")
+	}
+}
+
+// An embedding outage costs a batch of writes one failed call rather than
+// one for each chat, which leaves every chat found by keyword.
+func TestABatchOfWritesStopsEmbeddingAfterAFailure(t *testing.T) {
+	h := newSearchHarness(t)
+	h.embedder.setFail(errors.New("embedding backend down"))
+	ids := []string{"chat_a", "chat_b", "chat_c"}
+	h.cp.Mu.Lock()
+	h.cp.SourceRevision = int64(len(ids))
+	h.cp.Mu.Unlock()
+	updates := make([]chatUpdate, len(ids))
+	for i, id := range ids {
+		updates[i] = storedUpdate(id, chatJSON(t, id, "Pond", "a duck swam by"), "1", time.Now(), int64(i+1))
+	}
+	h.apply(t, updates...)
+	if calls := h.embedder.callCount(); calls != 1 {
+		t.Fatalf("the batch called the embedder %d times during the outage, want once", calls)
+	}
+	if found := h.index(t).Search(nil, []string{"duck"}, 5); len(found) != len(ids) {
+		t.Fatalf("the batch indexed %+v, want every chat by keyword", found)
 	}
 }
 

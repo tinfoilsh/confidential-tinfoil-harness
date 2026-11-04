@@ -20,7 +20,8 @@ const (
 // whether the index must be rebuilt before it answers for every chat.
 // The query is embedded outside the caller's lock, since it is a round
 // trip that must not hold up their chat writes; one that cannot be
-// embedded is answered by keyword alone.
+// embedded is answered by keyword alone. It answers once the index has
+// taken the caller's writes this process still holds.
 func (s *Service) Query(ctx context.Context, p *auth.Principal, key auth.ContentKey, query string, limit int) (ids []string, rebuildNeeded bool, err error) {
 	defer clear(key[:])
 	if !s.configured() {
@@ -43,6 +44,7 @@ func (s *Service) Query(ctx context.Context, p *auth.Principal, key auth.Content
 	defer c.zero()
 	owner := c.owner()
 
+	s.settled(ctx, c)
 	publication, objectKey, err := s.publication(ctx, c)
 	if err != nil {
 		return nil, false, err

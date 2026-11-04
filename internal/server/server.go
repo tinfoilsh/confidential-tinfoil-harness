@@ -90,6 +90,7 @@ func Run() {
 		defer cancel()
 		srv.Shutdown(ctx)
 		h.engine.Wait(ctx)
+		h.search.Flush(ctx)
 	}()
 
 	slog.Info("listening", "addr", listenAddr, "models", inference.Served(h.models.Offer.Get()), "safeguards", h.engine.Safeguards != nil)

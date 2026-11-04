@@ -14,145 +14,13 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
 
-// errIndexPanicked is an index update that panicked: the chat's write
-// has already landed, so the caller sees an ordinary failure, which only
-// degrades search until the next rebuild.
-var errIndexPanicked = errors.New("search: the index update panicked")
-
-// ChatStored indexes a chat just written, at the revision its write
-// returned and the source revision it left. The write has landed, so
-// nothing here may fail it: an error degrades search until a rebuild,
-// and a panic is contained the same way.
-//
-// The push's revision is trusted as the live one while the control plane
-// has seen no later chat write, which the publication's source revision
-// tells; only a gap costs a read of the chat's metadata, which says
-// whether the chat was overwritten or deleted since.
-func (s *Service) ChatStored(ctx context.Context, p *auth.Principal, key auth.ContentKey, id string, plaintext []byte, etag string, at time.Time, revision int64) (err error) {
-	defer clear(key[:])
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			err = errIndexPanicked
-		}
-	}()
-	if !s.configured() {
-		return nil
-	}
-	c, err := s.callerOf(p, key)
-	if err != nil {
-		return err
-	}
-	defer c.zero()
-	hook := func(ctx context.Context, ix *searchindex.Index, publication *controlplane.SearchIndexState) (bool, bool, error) {
-		if revision > 0 && publication.SourceRevision == revision {
-			return true, false, nil
-		}
-		switch state, err := s.snapshotState(ctx, c, id, etag); {
-		case err != nil:
-			return false, false, err
-		case state == snapshotCurrent:
-			return true, false, nil
-		case state == snapshotDeleted:
-			if _, ok := ix.Chats[id]; ok {
-				ix.Remove(id)
-				return false, true, nil
-			}
-			return false, false, nil
-		default:
-			return false, false, nil
-		}
-	}
-	return s.indexChat(ctx, c, id, plaintext, etag, at, revision, hook)
-}
-
-// writeHook decides, under the owner's lock with the index loaded,
-// whether a chat is still to be indexed: cont to go on, mutated when the
-// hook changed the index instead, which is then published as it is.
-type writeHook func(ctx context.Context, ix *searchindex.Index, publication *controlplane.SearchIndexState) (cont, mutated bool, err error)
-
-// indexChat embeds one chat and merges it into the caller's index. at is
-// when the chat's write landed, which orders this entry against other
-// writes of the same chat well before the embedding round trip can
-// reorder their completion.
-func (s *Service) indexChat(ctx context.Context, c caller, id string, plaintext []byte, etag string, at time.Time, revision int64, hook writeHook) error {
-	owner := c.owner()
-	chunks := chatChunks(plaintext)
-	entry := searchindex.Entry{ETag: etag, SourceRevision: revision, UpdatedAt: at.UTC().Format(time.RFC3339Nano)}
-	tokens := searchindex.Tokenize(strings.Join(chunks, "\n"))
-	if len(chunks) > 0 {
-		// Without vectors the chat is still found by keyword, and a
-		// later query repairs the embedding.
-		entry.EmbeddingPending, entry.EmbeddingKeyID = true, c.kid
-		if vectors, err := s.embedChunks(ctx, owner, docPrefix, chunks, false); err == nil {
-			entry.Vectors, entry.EmbeddingPending, entry.EmbeddingKeyID = quantizeAll(vectors), false, ""
-		}
-	}
-
-	unlock := s.lock(owner)
-	defer unlock()
-	for attempt := 0; attempt < publishAttempts; attempt++ {
-		publication, objectKey, err := s.publication(ctx, c)
-		if err != nil {
-			return err
-		}
-		ix, state, err := s.load(ctx, owner, objectKey, c.indexKey)
-		if err != nil {
-			return err
-		}
-		if publication.ObjectKey != "" && objectKey == "" {
-			state = loadUnreadable
-		}
-		if hook != nil {
-			cont, mutated, err := hook(ctx, ix, publication)
-			if err != nil {
-				return err
-			}
-			if !cont && !mutated {
-				return nil
-			}
-			if !cont {
-				ix.Incomplete = true
-				if _, err := s.publish(ctx, c, publication, publication.PublishedSourceRevision, true, ix); err != nil {
-					if isConflict(err) {
-						continue
-					}
-					return err
-				}
-				return nil
-			}
-		}
-		// A slower write must not replace the entry a newer write, or a
-		// rebuild, already made for this chat.
-		if existing, ok := ix.Chats[id]; ok && (entrySupersedes(existing, etag, revision, at) || existing.SourceRevision == revision && existing.ETag == etag) {
-			return nil
-		}
-		if err := ix.Upsert(id, entry, tokens); err != nil {
-			return err
-		}
-		// The publication advances to this write's revision only when it
-		// is the very next one over a complete, readable index; any gap
-		// leaves the index incomplete, for a rebuild to close.
-		publicationReadable := publication.ObjectKey == "" || state == loadOK
-		covered, incomplete := publication.PublishedSourceRevision, true
-		if revision == publication.PublishedSourceRevision+1 && !publication.PublicationIncomplete && publicationReadable {
-			covered, incomplete = revision, false
-		}
-		ix.Incomplete = incomplete
-		if _, err := s.publish(ctx, c, publication, covered, incomplete, ix); err != nil {
-			if isConflict(err) {
-				continue
-			}
-			return err
-		}
-		return nil
-	}
-	return errIndexContended
-}
-
-// ChatRemoved drops a deleted chat from the caller's index. A stale entry
-// only means a deleted chat can still come up until the next rebuild, so
-// a failure is let go, as is a panic.
-func (s *Service) ChatRemoved(ctx context.Context, p *auth.Principal, key auth.ContentKey, id string, revision int64) {
+// ChatStored takes a chat just written into the caller's index, at the
+// revision its write returned and the source revision it left. The write
+// has landed and does not wait for the index: the chat's text is read
+// now, while the harness holds it, and the caller's writer applies it
+// after. Nothing here may fail the write: a failure degrades search until
+// a rebuild, and a panic is contained the same way.
+func (s *Service) ChatStored(p *auth.Principal, key auth.ContentKey, id string, plaintext []byte, etag string, at time.Time, revision int64) {
 	defer clear(key[:])
 	defer func() { _ = recover() }()
 	if !s.configured() {
@@ -163,54 +31,226 @@ func (s *Service) ChatRemoved(ctx context.Context, p *auth.Principal, key auth.C
 		return
 	}
 	defer c.zero()
-	_ = s.removeChat(ctx, c, id, revision)
+	s.enqueue(c, storedUpdate(id, plaintext, etag, at, revision))
 }
 
-// removeChat drops a deleted chat from the index, unless a newer chat was
-// made under the same id while this was waiting to run.
-func (s *Service) removeChat(ctx context.Context, c caller, id string, revision int64) error {
+// ChatRemoved drops a deleted chat from the caller's index, through the
+// caller's writer as ChatStored does. A stale entry only means a deleted
+// chat can still come up until the next rebuild, so a failure is let go,
+// as is a panic.
+func (s *Service) ChatRemoved(p *auth.Principal, key auth.ContentKey, id string, revision int64) {
+	defer clear(key[:])
+	defer func() { _ = recover() }()
+	if !s.configured() {
+		return
+	}
+	c, err := s.callerOf(p, key)
+	if err != nil {
+		return
+	}
+	defer c.zero()
+	s.enqueue(c, chatUpdate{id: id, removed: true, revision: revision})
+}
+
+// chatUpdate is what one chat's write changes in the index: the chat as
+// the write left it, its text cut into chunks and tokens, or its removal.
+// at is when the write landed, which orders the entry against other
+// writes of the chat well before the embedding round trip can reorder
+// their completion. replaced are the source revisions of the chat's
+// earlier writes whose updates this one took the place of while waiting.
+type chatUpdate struct {
+	id       string
+	removed  bool
+	etag     string
+	at       time.Time
+	revision int64
+	replaced []int64
+	chunks   []string
+	tokens   []string
+}
+
+// storedUpdate is the update a chat's write leaves for its index.
+func storedUpdate(id string, plaintext []byte, etag string, at time.Time, revision int64) chatUpdate {
+	chunks := chatChunks(plaintext)
+	return chatUpdate{id: id, etag: etag, at: at, revision: revision, chunks: chunks, tokens: searchindex.Tokenize(strings.Join(chunks, "\n"))}
+}
+
+// revisions are the source revisions of the writes an update stands for.
+func (u *chatUpdate) revisions() []int64 {
+	if u.revision <= 0 {
+		return u.replaced
+	}
+	return append([]int64{u.revision}, u.replaced...)
+}
+
+// outcome is what became of an update in a publication: taken when the
+// index reflects its writes, superseded when a later write of the chat
+// replaced them before the index took them, and missed otherwise.
+type outcome int
+
+const (
+	missed outcome = iota
+	taken
+	superseded
+)
+
+// apply merges a caller's updates into their index in one publication,
+// and is the revisions of the updates a later write of their chat
+// superseded, by chat, which that write's update then stands for. The
+// publication covers the writes it took up to the first gap, as complete
+// when the index it changed was complete and readable.
+func (s *Service) apply(ctx context.Context, c caller, updates []chatUpdate) (map[string][]int64, error) {
 	owner := c.owner()
+	inHand, embed := map[int64]bool{}, true
+	entries := make([]searchindex.Entry, len(updates))
+	for i := range updates {
+		u := &updates[i]
+		for _, revision := range u.revisions() {
+			inHand[revision] = true
+		}
+		if u.removed {
+			continue
+		}
+		entries[i] = searchindex.Entry{ETag: u.etag, SourceRevision: u.revision, UpdatedAt: u.at.UTC().Format(time.RFC3339Nano)}
+		if len(u.chunks) > 0 {
+			// Without vectors the chat is still found by keyword, and a
+			// later query repairs the embedding. One embedding refused
+			// or failed, the rest of the batch goes without.
+			entries[i].EmbeddingPending, entries[i].EmbeddingKeyID = true, c.kid
+			if embed {
+				vectors, err := s.embedChunks(ctx, owner, docPrefix, u.chunks, false)
+				if embed = err == nil; embed {
+					entries[i].Vectors, entries[i].EmbeddingPending, entries[i].EmbeddingKeyID = quantizeAll(vectors), false, ""
+				}
+			}
+		}
+	}
+
 	unlock := s.lock(owner)
 	defer unlock()
-	if _, err := s.Controlplane.GetBlob(ctx, "chat", id, string(c.p.JWT), owner); err == nil {
-		return nil
-	} else if !controlplaneStatus(err, http.StatusNotFound) {
-		return store.FromControlplane(err)
+	// A removal leaves the entry of a chat that may have been made again
+	// under its id since.
+	remade := map[string]bool{}
+	for _, u := range updates {
+		if u.removed {
+			_, err := s.Controlplane.GetBlob(ctx, "chat", u.id, string(c.p.JWT), owner)
+			remade[u.id] = !controlplaneStatus(err, http.StatusNotFound)
+		}
 	}
 	for attempt := 0; attempt < publishAttempts; attempt++ {
 		publication, objectKey, err := s.publication(ctx, c)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		ix, state, err := s.load(ctx, owner, objectKey, c.indexKey)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		existing, exists := ix.Chats[id]
-		if !exists && state == loadOK {
-			return nil
+		if publication.ObjectKey != "" && objectKey == "" {
+			state = loadUnreadable
 		}
-		if exists && revision > 0 && existing.SourceRevision > revision {
-			// The entry is from a write after this deletion: a chat made
-			// again under the id, which stays.
-			return nil
+		changed, took, behind := false, map[int64]bool{}, map[string][]int64{}
+		for i := range updates {
+			u := &updates[i]
+			var mutated bool
+			var result outcome
+			if u.removed {
+				mutated, result = removeEntry(ix, state, u, remade[u.id])
+			} else {
+				mutated, result = s.storeEntry(ctx, c, ix, publication, inHand, u, entries[i])
+			}
+			changed = changed || mutated
+			switch revisions := u.revisions(); {
+			case result == taken:
+				for _, revision := range revisions {
+					took[revision] = true
+				}
+			case result == superseded && len(revisions) > 0:
+				behind[u.id] = revisions
+			}
 		}
-		ix.Remove(id)
-		publicationReadable := publication.ObjectKey == "" || state == loadOK
-		covered, incomplete := publication.PublishedSourceRevision, true
-		if revision == publication.PublishedSourceRevision+1 && !publication.PublicationIncomplete && publicationReadable {
-			covered, incomplete = revision, false
+		covered := publication.PublishedSourceRevision
+		for took[covered+1] {
+			covered++
 		}
+		if !changed && covered == publication.PublishedSourceRevision {
+			return behind, nil
+		}
+		readable := publication.ObjectKey == "" || state == loadOK
+		incomplete := !readable || !s.completeThrough(c, publication, objectKey)
 		ix.Incomplete = incomplete
 		if _, err := s.publish(ctx, c, publication, covered, incomplete, ix); err != nil {
 			if isConflict(err) {
 				continue
 			}
-			return err
+			return nil, err
 		}
-		return nil
+		return behind, nil
 	}
-	return errIndexContended
+	return nil, errIndexContended
+}
+
+// storeEntry applies a chat's write to the index, and is whether it
+// changed the index and what became of the write. The write is trusted
+// as the chat's live revision while every chat write the control plane
+// has counted since is another update in hand; only a gap costs a read
+// of the chat's metadata, which says whether the chat was overwritten or
+// deleted since.
+func (s *Service) storeEntry(ctx context.Context, c caller, ix *searchindex.Index, publication *controlplane.SearchIndexState, inHand map[int64]bool, u *chatUpdate, entry searchindex.Entry) (bool, outcome) {
+	if !liveSince(u.revision, publication.SourceRevision, inHand) {
+		switch state, err := s.snapshotState(ctx, c, u.id, u.etag); {
+		case err != nil:
+			return false, missed
+		case state == snapshotStale:
+			return false, superseded
+		case state == snapshotDeleted:
+			_, indexed := ix.Chats[u.id]
+			ix.Remove(u.id)
+			return indexed, superseded
+		}
+	}
+	// A slower write must not replace the entry a newer write, or a
+	// rebuild, already made for this chat.
+	if existing, ok := ix.Chats[u.id]; ok && (entrySupersedes(existing, u.etag, u.revision, u.at) || existing.SourceRevision == u.revision && existing.ETag == u.etag) {
+		return false, taken
+	}
+	if err := ix.Upsert(u.id, entry, u.tokens); err != nil {
+		return false, missed
+	}
+	return true, taken
+}
+
+// liveSince is whether every chat write after revision, up to source, is
+// one in hand, none of which is another write of the same chat.
+func liveSince(revision, source int64, inHand map[int64]bool) bool {
+	if revision <= 0 {
+		return false
+	}
+	for later := revision + 1; later <= source; later++ {
+		if !inHand[later] {
+			return false
+		}
+	}
+	return true
+}
+
+// removeEntry applies a chat's removal to the index, and is whether it
+// dropped the chat's entry and what became of the removal.
+func removeEntry(ix *searchindex.Index, state loadState, u *chatUpdate, remade bool) (bool, outcome) {
+	if remade {
+		return false, superseded
+	}
+	existing, exists := ix.Chats[u.id]
+	switch {
+	case !exists && state == loadOK:
+		return false, taken
+	case exists && u.revision > 0 && existing.SourceRevision > u.revision:
+		// The entry is from a write after this deletion: a chat made
+		// again under the id, which stays.
+		return false, taken
+	}
+	ix.Remove(u.id)
+	return true, taken
 }
 
 // snapshotState is whether a chat is still at the revision an index entry

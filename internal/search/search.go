@@ -2,9 +2,10 @@
 // their stored chats and answers queries from it. The index is one sealed
 // object per caller in the search bucket, under a key derived from the
 // caller's content key, and the control plane's publication record names
-// the object every replica reads. Chats are indexed as they are stored,
-// while the harness holds their plaintext and key; a query is embedded
-// the same way and ranked here, so no chat text leaves the enclave.
+// the object every replica reads. Chats are read for the index as they
+// are stored, while the harness holds their plaintext and key, and taken
+// into it just after; a query is embedded the same way and ranked here,
+// so no chat text leaves the enclave.
 package search
 
 import (
@@ -32,9 +33,9 @@ type Embedder interface {
 // Service keeps each caller's search index: one sealed object per caller
 // in the search bucket, under a key derived from the caller's content key,
 // named by the control plane's publication record so every replica reads
-// the same one. Chats are indexed as they are stored, while the harness
-// holds their plaintext and key; queries are embedded the same way and
-// ranked in the enclave.
+// the same one. Chats are read for the index as they are stored, while
+// the harness holds their plaintext and key, and taken into it just
+// after; queries are embedded the same way and ranked in the enclave.
 type Service struct {
 	Controlplane *controlplane.Client
 	Buckets      *buckets.Client // the search index bucket
@@ -55,6 +56,9 @@ type Service struct {
 	// for another kind of rebuild replaces it rather than joins it.
 	mu      sync.Mutex
 	started map[string]startedRebuild
+	// writers hold each caller's chat writes until their index takes them.
+	writersMu sync.Mutex
+	writers   map[writerKey]*writer
 }
 
 func New(cp *controlplane.Client, bk *buckets.Client, embedder Embedder, rows store.RowStore) *Service {
@@ -68,6 +72,7 @@ func New(cp *controlplane.Client, bk *buckets.Client, embedder Embedder, rows st
 		gate:         newInferenceGate(defaultInferenceLimits),
 		timeouts:     defaultInferenceTimeouts,
 		started:      map[string]startedRebuild{},
+		writers:      map[writerKey]*writer{},
 	}
 }
 

@@ -649,7 +649,7 @@ func (s *Service) applyRepairs(ctx context.Context, c caller, repairs []embeddin
 		if !mutated {
 			return 0, len(ix.Chats), nil
 		}
-		incomplete := publication.PublicationIncomplete || ix.Incomplete
+		incomplete := !s.completeThrough(c, publication, objectKey) || ix.Incomplete
 		if _, err := s.publish(ctx, c, publication, publication.PublishedSourceRevision, incomplete, ix); err != nil {
 			if isConflict(err) {
 				continue
