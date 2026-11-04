@@ -86,7 +86,11 @@ func (eng *Engine) loop(ctx context.Context, out *Stream, req *Request, m *infer
 			if compact == nil {
 				return errExchangeTooLarge()
 			}
-			if err := compact(ctx); errors.Is(err, errNothingToCompact) {
+			reserved := fixedCost(req, searching, tools)
+			for _, message := range exchange {
+				reserved += messageTokens(message)
+			}
+			if err := compact(ctx, reserved); errors.Is(err, errNothingToCompact) {
 				return errExchangeTooLarge()
 			} else if err != nil {
 				return err

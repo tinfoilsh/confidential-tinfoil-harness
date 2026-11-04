@@ -76,13 +76,30 @@ func compactionOf(goal string) string {
 func filler(repeats int) string { return strings.Repeat("0 1 2 3 4 5 6 7 8 9 ", repeats) }
 
 // longThread is a device chat whose first answer alone fills the test
-// model's share of its window.
+// model's share of its window, followed by a short exchange.
 func longThread() api.Object {
 	answer := filler(350)
 	return api.Object{"title": "Kept title", "createdAt": "2026-01-01T00:00:00Z", "messages": []any{
 		api.Object{"id": "m1", "role": "user", "content": "first question"},
 		api.Object{"id": "m2", "role": "assistant", "content": answer, "timeline": []any{api.Object{"id": "b1", "type": "content", "content": answer}}},
+		api.Object{"id": "m3", "role": "user", "content": "recent question"},
+		api.Object{"id": "m4", "role": "assistant", "content": "recent answer", "timeline": []any{api.Object{"id": "b4", "type": "content", "content": "recent answer"}}},
 	}}
+}
+
+// storeExchanges stores for alice a chat whose messages say texts, a question
+// and its reply by turns, with ids m1, m2 and on.
+func storeExchanges(rows *memoryRows, id string, texts ...string) {
+	messages := []any{}
+	for i, text := range texts {
+		message := api.Object{"id": fmt.Sprintf("m%d", i+1), "role": "user", "createdAt": "2026-01-01T00:00:00Z", "content": text}
+		if i%2 == 1 {
+			message["role"], message["timeline"] = "assistant", []any{api.Object{"id": fmt.Sprintf("b%d", i+1), "type": "content", "content": text}}
+		}
+		messages = append(messages, message)
+	}
+	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", id)] = domain.StoredRow{ID: id, ETag: "1", Data: api.Raw(api.Object{"id": id, "title": "Long chat", "titleState": "generated",
+		"model": "kimi-k3", "presetId": nil, "pinned": false, "webSearchEnabled": false, "recordVersion": 2, "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-02T00:00:00Z", "messages": messages})}
 }
 
 // promptOf records the messages each model turn is sent, as role and text.
@@ -247,12 +264,93 @@ func TestALongChatIsCompactedBeforeItsQuestion(t *testing.T) {
 		types = append(types, e.Type)
 	}
 	start, end := slices.Index(types, "COMPACTION_START"), slices.Index(types, "COMPACTION_END")
-	if start < 0 || end != start+1 || types[end+1] != "STATE_SNAPSHOT" || events[start].MessageID != marker.ID || slices.Index(types, "TEXT_MESSAGE_CHUNK") < end {
+	if start < 0 || end != start+1 || types[end+1] != "STATE_SNAPSHOT" || events[start].MessageID != marker.ID || slices.Index(types, "TEXT_MESSAGE_CHUNK") < end ||
+		events[start].Before != chat.Messages[6].ID || events[end].Before != chat.Messages[6].ID {
 		t.Fatalf("the run sent %v", types)
 	}
 	finishedRun(t, h, "/v1/threads/turn", continueInput(key, "chat-1"))
 	if prompt := <-prompts; len(asked) != 1 || len(prompt) != 5 || !strings.Contains(prompt[1], "lighthouse tour of Maine") {
 		t.Fatalf("the next turn compacted again (%d) or was sent %q", len(asked), prompt)
+	}
+}
+
+// A compaction keeps the latest exchanges before the question as they were:
+// it summarizes only the messages before them, and its marker sits before
+// the first question it keeps.
+func TestACompactionKeepsTheLatestExchanges(t *testing.T) {
+	prompts := make(chan []string, 1)
+	h, rows, key := testChatHarness(t, promptOf(prompts))
+	var asked []string
+	h.compactWith(func(task, text string) (string, error) {
+		if task == summarize.Compaction.Name {
+			asked = append(asked, text)
+		}
+		return compactionOf("The user plans a lighthouse tour of Maine."), nil
+	})
+	storeExchanges(rows, "chat-1", "old question", filler(350), "recent question", "recent answer")
+	events := finishedRun(t, h, "/v1/threads/turn", continueInput(key, "chat-1"))
+	if len(asked) != 1 || !strings.Contains(asked[0], "old question") || strings.Contains(asked[0], "recent question") || strings.Contains(asked[0], "recent answer") {
+		t.Fatalf("the summarizer was asked %q", asked)
+	}
+	prompt := <-prompts
+	if len(prompt) != 5 || !strings.Contains(prompt[1], "lighthouse tour of Maine") || !strings.HasSuffix(prompt[1], "recent question") ||
+		prompt[2] != "assistant: recent answer" || prompt[3] != "user: test message" {
+		t.Fatalf("the model was sent %q", prompt)
+	}
+	if start, end := eventOfType(events, "COMPACTION_START"), eventOfType(events, "COMPACTION_END"); start == nil || end == nil || start.Before != "m3" || end.Before != "m3" {
+		t.Fatalf("the marker was opened with %+v and closed with %+v", start, end)
+	}
+	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
+	chat := mustRead(domain.ReadThreadRow(row))
+	if ids := messageIDs(api.Parsed(api.Raw(chat.Messages))); len(ids) != 7 || !reflect.DeepEqual(ids[:2], []string{"m1", "m2"}) || !reflect.DeepEqual(ids[3:5], []string{"m3", "m4"}) ||
+		chat.Messages[2].Compaction == nil || chat.Messages[2].Compaction.Messages != 2 {
+		t.Fatalf("the turn stored %s", row.Data)
+	}
+}
+
+// A tool exchange that outgrows the window keeps no earlier exchange that
+// would leave it too little room beside the summary.
+func TestAToolExchangeKeepsOnlyTheExchangesItHasRoomFor(t *testing.T) {
+	serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
+		return nil, api.Object{"results": []api.Object{{"title": "Tides", "url": "https://tides.test", "content": filler(400)}}}
+	})
+	sent := make(chan []any, 1)
+	h, rows, key := testChatHarness(t, toolTurns(toolCallChunk(0, "s", "web_search", `{"query":"tides"}`), sent))
+	h.models.Catalog.Get().Models[0]["budgetWindow"] = 16384
+	h.compactWith(func(string, string) (string, error) { return compactionOf(filler(150)), nil })
+	storeExchanges(rows, "chat-1", "old question", filler(350), "recent question", filler(100))
+	in := searchInput(key)
+	in["threadId"] = "chat-1"
+	events := finishedRun(t, h, "/v1/threads/turn", in)
+	if result, start := slices.IndexFunc(events, func(e event) bool { return e.Type == "TOOL_CALL_RESULT" }), slices.IndexFunc(events, func(e event) bool { return e.Type == "COMPACTION_START" }); result < 0 || start < result {
+		t.Fatal("the chat was not compacted once the search had outgrown the window")
+	}
+	if messages := <-sent; strings.Contains(fmt.Sprint(messages), "recent question") || toolMessage(messages, "s") == "" {
+		t.Fatalf("after the search the model was sent %v", messages)
+	}
+	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
+	if chat := mustRead(domain.ReadThreadRow(row)); domain.LatestCompaction(chat.Messages) != 4 || chat.Messages[5].Content != "test message" {
+		t.Fatalf("the run stored %s", row.Data)
+	}
+}
+
+// A compaction keeps no message the run's snapshot left out, so a client
+// holds the message its marker sits before.
+func TestACompactionKeepsOnlyMessagesTheRunShows(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	h.models.Catalog.Get().Models[0]["budgetWindow"] = 16384
+	h.compactWith(func(string, string) (string, error) { return compactionOf("The user chatted."), nil })
+	texts := []string{"old question", filler(700)}
+	for i := range domain.MessageWindow / 2 {
+		texts = append(texts, fmt.Sprintf("question %d", i), fmt.Sprintf("answer %d", i))
+	}
+	storeExchanges(rows, "chat-1", texts...)
+	events := finishedRun(t, h, "/v1/threads/turn", continueInput(key, "chat-1"))
+	shown := messageIDs(eventOfType(events, "MESSAGES_SNAPSHOT").Messages)
+	// The snapshot starts at the first reply, so the question after it is
+	// the earliest a compaction can keep.
+	if start := eventOfType(events, "COMPACTION_START"); start == nil || shown[0] != "m4" || start.Before != "m5" {
+		t.Fatalf("the marker was opened with %+v after a snapshot of %q", start, shown)
 	}
 }
 

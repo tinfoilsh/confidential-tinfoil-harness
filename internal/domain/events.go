@@ -119,12 +119,14 @@ type CompactionStart struct {
 	BeforeMessageID string `json:"beforeMessageId"`
 }
 
-// CompactionEnd closes a compaction marker: completed with the marker, or
-// failed, when it is not kept.
+// CompactionEnd closes a compaction marker, before the question its
+// CompactionStart named: completed with the marker, or failed, when it is
+// not kept.
 type CompactionEnd struct {
-	MessageID string       `json:"messageId"`
-	Outcome   string       `json:"outcome"`
-	Marker    *MessageView `json:"marker,omitempty"`
+	MessageID       string       `json:"messageId"`
+	BeforeMessageID string       `json:"beforeMessageId"`
+	Outcome         string       `json:"outcome"`
+	Marker          *MessageView `json:"marker,omitempty"`
 }
 
 // The outcomes a CompactionEnd closes its marker with.
