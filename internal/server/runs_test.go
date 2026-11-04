@@ -306,7 +306,7 @@ func TestFollowResumesALiveRunAfterTheClientsCursor(t *testing.T) {
 		}
 		return req
 	}
-	frames, _, _ := run.Log.Frames.Read(0)
+	_, frames, _, _, _ := run.Log.Frames.Read(0)
 	for _, tc := range []struct {
 		lastEventID string
 		first       int
@@ -357,7 +357,7 @@ func TestARetriedRequestFollowsItsRunOrIsAlreadyApplied(t *testing.T) {
 	}
 	w := replayOf(h, retry(h))
 	events := eventsIn(t, w)
-	if frames, _, _ := run.Log.Frames.Read(0); events[0].Type != "RUN_STARTED" || events[0].RunID != run.Log.ID || len(events) != len(frames) {
+	if _, frames, _, _, _ := run.Log.Frames.Read(0); events[0].Type != "RUN_STARTED" || events[0].RunID != run.Log.ID || len(events) != len(frames) {
 		t.Fatalf("a retry during the run was not its replay: %s", w.Body.String())
 	}
 	release()
@@ -500,7 +500,7 @@ func TestAFinishedRunsLogIsWipedOnceNothingDrainsIt(t *testing.T) {
 			}
 			readers := run.Log.Frames.Readers
 			awaitFrame(t, run.Log, "RUN_STARTED")
-			first, _, _ := run.Log.Frames.Read(0)
+			_, first, _, _, _ := run.Log.Frames.Read(0)
 			kept := first[0]
 			if tc.leavesBefore {
 				run.Log.Frames.Detach()
@@ -520,13 +520,13 @@ func TestAFinishedRunsLogIsWipedOnceNothingDrainsIt(t *testing.T) {
 				release()
 				<-run.Finished
 				events := eventsIn(t, <-followed)
-				frames, _, closed := run.Log.Frames.Read(0)
+				_, frames, _, _, closed := run.Log.Frames.Read(0)
 				if closed != engine.ErrDone || len(frames) == 0 || len(events) != len(frames) || events[len(events)-1].Type != "RUN_FINISHED" {
 					t.Fatalf("the follower got %d of %d frames, ending in %v", len(events), len(frames), closed)
 				}
 				run.Log.Frames.Detach()
 			}
-			if frames, _, _ := run.Log.Frames.Read(0); frames != nil || readers() != 0 || bytes.ContainsFunc(kept, func(b rune) bool { return b != 0 }) {
+			if _, frames, _, _, _ := run.Log.Frames.Read(0); frames != nil || readers() != 0 || bytes.ContainsFunc(kept, func(b rune) bool { return b != 0 }) {
 				t.Fatalf("the log kept %d frames for %d readers; first frame %q", len(frames), readers(), kept)
 			}
 		})

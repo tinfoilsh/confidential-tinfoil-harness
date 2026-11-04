@@ -33,7 +33,7 @@ func (eng *Engine) finishRun(r *Run, runErr error) {
 	r.out.mu.Lock()
 	messages := r.assembler.Messages()
 	spend, sources, reply := r.out.spend, r.out.sources, r.out.replyID
-	r.out.Observe, r.out.sources = nil, nil
+	r.out.Observe, r.out.checkpoint, r.out.sources = nil, nil, nil
 	if r.out.thoughts != nil {
 		r.out.thoughts.close()
 		r.out.thoughts = nil

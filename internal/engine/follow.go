@@ -73,17 +73,11 @@ func ResumeFrom(log *FrameLog, lastEventID string) (int, error) {
 		return 0, nil
 	}
 	after, err := strconv.Atoi(lastEventID)
-	sent, _, closed := log.Read(0)
 	switch {
 	case err != nil || after < 0:
 		return 0, api.Err(400, "BAD_REQUEST", "Last-Event-ID must be an event's cursor")
-	case after < len(sent):
+	case after < log.sent():
 		return after + 1, nil
-	// A log that failed ends its streams with the error, under the cursor
-	// after its last frame. A client that applied that error is sent it
-	// again, which ends this stream too.
-	case after == len(sent) && closed != nil && closed != ErrDone:
-		return after, nil
 	}
 	return 0, api.Err(400, "BAD_REQUEST", "Last-Event-ID names an event this run never sent")
 }

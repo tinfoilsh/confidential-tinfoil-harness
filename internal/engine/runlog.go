@@ -4,31 +4,51 @@ import (
 	"errors"
 	"sync"
 	"time"
-
-	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 )
 
 const (
-	// A run holds its whole log in memory, so this is its share of the enclave.
-	maxRunLog  = 8 << 20
-	RunTimeout = 30 * time.Minute
+	// A run holds its recent frames in memory for clients that follow it
+	// again. Past this budget they are folded into a checkpoint, so a run's
+	// share of the enclave is the reply it is writing and this budget.
+	runLogBudget = 32 << 20
+	RunTimeout   = 30 * time.Minute
 )
 
-var (
-	ErrDone = errors.New("run finished")
-	// ErrTooLong ends a run that outgrew the log this harness can hold for it.
-	ErrTooLong = api.Err(413, "RUN_LOG_FULL", "The run log is full")
+var ErrDone = errors.New("run finished")
+
+// frameKind is what a checkpoint does with a frame.
+type frameKind uint8
+
+const (
+	// frameFolded is reply content, which the checkpoint's snapshot holds.
+	frameFolded frameKind = iota
+	// frameKept is sent again as it was to a follower behind a checkpoint.
+	frameKept
+	// frameSnapshot is the chat's messages, which a checkpoint replaces
+	// with the chat as the reply has left it so far.
+	frameSnapshot
 )
+
+type entry struct {
+	data []byte
+	kind frameKind
+}
 
 type FrameLog struct {
-	mu     sync.Mutex
-	frames [][]byte
-	bytes  int
-	closed error
-	wake   chan struct{}
+	mu sync.Mutex
+	// base is the cursor of frames[0]. The frames before it are folded into
+	// checkpoint: the frames kept as they were sent, with the snapshot in
+	// place of the chat's messages.
+	base       int
+	checkpoint []entry
+	frames     []entry
+	bytes      int // the size of frames
+	budget     int // the size of frames past which they are folded
+	closed     error
+	wake       chan struct{}
 	// ended marks the run as ended and no longer registered, so nothing
 	// more attaches; a log that is ended and that its last reader has left
-	// is wiped. A log a run outgrew is closed before the run ends.
+	// is wiped.
 	ended    bool
 	draining int
 }
@@ -40,26 +60,48 @@ func (l *FrameLog) Readers() int {
 	return l.draining
 }
 
-func newRunlog() *FrameLog { return &FrameLog{wake: make(chan struct{})} }
+func newRunlog() *FrameLog { return &FrameLog{wake: make(chan struct{}), budget: runLogBudget} }
 
-// grow appends one frame and reports the error the log has closed with.
-func (l *FrameLog) grow(frame []byte) error {
+// grow appends one frame and reports whether the frames since the last
+// checkpoint outgrew the budget.
+func (l *FrameLog) grow(frame []byte, kind frameKind) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.closed == nil {
-		if l.bytes+len(frame) > maxRunLog {
-			l.closed = ErrTooLong
-		} else {
-			l.frames, l.bytes = append(l.frames, frame), l.bytes+len(frame)
-		}
+		l.frames, l.bytes = append(l.frames, entry{frame, kind}), l.bytes+len(frame)
 		l.signal()
 	}
-	return l.closed
+	return l.bytes > l.budget
+}
+
+// fold replaces every frame the log holds with a checkpoint that ends in
+// snapshot, and wipes the frames it drops.
+func (l *FrameLog) fold(snapshot []byte) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed != nil {
+		return
+	}
+	checkpoint, placed := []entry{}, false
+	for _, e := range append(l.checkpoint, l.frames...) {
+		switch {
+		case e.kind == frameKept:
+			checkpoint = append(checkpoint, e)
+			continue
+		case e.kind == frameSnapshot && !placed:
+			checkpoint, placed = append(checkpoint, entry{snapshot, frameSnapshot}), true
+		}
+		clear(e.data)
+	}
+	if !placed {
+		checkpoint = append(checkpoint, entry{snapshot, frameSnapshot})
+	}
+	l.checkpoint, l.base, l.frames, l.bytes = checkpoint, l.base+len(l.frames), nil, 0
 }
 
 // Attach counts a stream about to drain the log. It is called while the run
 // is registered, which a run is until just before its log is ended, so the
-// log still holds every frame.
+// log still holds every frame or their checkpoint.
 func (l *FrameLog) Attach() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -81,10 +123,10 @@ func (l *FrameLog) wipe() {
 	if !l.ended || l.draining > 0 {
 		return
 	}
-	for _, frame := range l.frames {
-		clear(frame)
+	for _, e := range append(l.checkpoint, l.frames...) {
+		clear(e.data)
 	}
-	l.frames = nil
+	l.checkpoint, l.frames = nil, nil
 }
 
 func (l *FrameLog) signal() {
@@ -92,8 +134,7 @@ func (l *FrameLog) signal() {
 	l.wake = make(chan struct{})
 }
 
-// close ends the log with err, once its run has left the registry. A log
-// already closed, because the run outgrew it, keeps that error.
+// close ends the log with err, once its run has left the registry.
 func (l *FrameLog) close(err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -105,13 +146,29 @@ func (l *FrameLog) close(err error) {
 	l.wipe()
 }
 
-func (l *FrameLog) Read(from int) ([][]byte, <-chan struct{}, error) {
+// Read is what a follower at cursor from is sent next: the frames from it,
+// and the cursor of the first of them. A follower behind the frames the log
+// holds is sent their checkpoint first.
+func (l *FrameLog) Read(from int) (checkpoint, frames [][]byte, first int, wake <-chan struct{}, closed error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if from < len(l.frames) {
-		return l.frames[from:], l.wake, l.closed
+	if from < l.base {
+		for _, e := range l.checkpoint {
+			checkpoint = append(checkpoint, e.data)
+		}
+		from = l.base
 	}
-	return nil, l.wake, l.closed
+	for _, e := range l.frames[min(from-l.base, len(l.frames)):] {
+		frames = append(frames, e.data)
+	}
+	return checkpoint, frames, from, l.wake, l.closed
+}
+
+// sent is the cursor after the last frame the log appended.
+func (l *FrameLog) sent() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.base + len(l.frames)
 }
 
 type Log struct {
