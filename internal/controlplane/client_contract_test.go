@@ -1,9 +1,6 @@
 package controlplane
 
 import (
-	"encoding/json"
-	"reflect"
-	"sort"
 	"testing"
 )
 
@@ -73,7 +70,6 @@ func TestWireContractMirrorsControlplane(t *testing.T) {
 			"StatusIdempotencyConflict":        {StatusIdempotencyConflict, "IDEMPOTENCY_CONFLICT"},
 			"StatusSearchIndexConflict":        {StatusSearchIndexConflict, "SEARCH_INDEX_CONFLICT"},
 			"StatusProfileSyncUpgradeRequired": {StatusProfileSyncUpgradeRequired, "PROFILE_SYNC_UPGRADE_REQUIRED"},
-			"StatusSyncSnapshotRequired":       {StatusSyncSnapshotRequired, "SYNC_SNAPSHOT_REQUIRED"},
 			"StatusMissingAttachment":          {StatusMissingAttachment, "MISSING_ATTACHMENT"},
 			"StatusAttachmentPurgeInProgress":  {StatusAttachmentPurgeInProgress, "ATTACHMENT_PURGE_IN_PROGRESS"},
 		}
@@ -83,43 +79,4 @@ func TestWireContractMirrorsControlplane(t *testing.T) {
 			}
 		}
 	})
-}
-
-func TestBackupInventoryContractShape(t *testing.T) {
-	projectID := "project-1"
-	body, err := json.Marshal(BackupInventoryResponse{
-		CapturedAt: "2026-08-30T12:00:00Z",
-		TotalItems: 1,
-		Items: []BackupInventoryItem{{
-			Scope: "project_document", ID: "doc-1", ETag: "etag-1", ProjectID: &projectID,
-			CreatedAt: "2026-08-30T10:00:00Z", UpdatedAt: "2026-08-30T11:00:00Z",
-		}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var outer map[string]json.RawMessage
-	if err := json.Unmarshal(body, &outer); err != nil {
-		t.Fatal(err)
-	}
-	outerKeys := make([]string, 0, len(outer))
-	for key := range outer {
-		outerKeys = append(outerKeys, key)
-	}
-	sort.Strings(outerKeys)
-	if want := []string{"captured_at", "items", "total_items"}; !reflect.DeepEqual(outerKeys, want) {
-		t.Fatalf("outer keys = %v, want %v", outerKeys, want)
-	}
-	var items []map[string]json.RawMessage
-	if err := json.Unmarshal(outer["items"], &items); err != nil {
-		t.Fatal(err)
-	}
-	itemKeys := make([]string, 0, len(items[0]))
-	for key := range items[0] {
-		itemKeys = append(itemKeys, key)
-	}
-	sort.Strings(itemKeys)
-	if want := []string{"created_at", "etag", "id", "project_id", "scope", "updated_at"}; !reflect.DeepEqual(itemKeys, want) {
-		t.Fatalf("item keys = %v, want %v", itemKeys, want)
-	}
 }

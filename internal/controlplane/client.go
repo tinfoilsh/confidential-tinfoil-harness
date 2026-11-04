@@ -113,7 +113,6 @@ const (
 	StatusIdempotencyConflict        = "IDEMPOTENCY_CONFLICT"
 	StatusSearchIndexConflict        = "SEARCH_INDEX_CONFLICT"
 	StatusProfileSyncUpgradeRequired = "PROFILE_SYNC_UPGRADE_REQUIRED"
-	StatusSyncSnapshotRequired       = "SYNC_SNAPSHOT_REQUIRED"
 	StatusLegacyBlobNotMigrated      = "LEGACY_BLOB_NOT_MIGRATED"
 )
 
@@ -137,11 +136,6 @@ type Error struct {
 	Message      string `json:"message,omitempty"`
 	CurrentKeyID string `json:"current_key_id,omitempty"`
 	CurrentETag  string `json:"current_etag,omitempty"`
-	// CurrentRevision and OldestReplayableRevision accompany
-	// SYNC_SNAPSHOT_REQUIRED so a client that fell behind the replay
-	// window can bootstrap a snapshot without an extra summary call.
-	CurrentRevision          string `json:"current_revision,omitempty"`
-	OldestReplayableRevision string `json:"oldest_replayable_revision,omitempty"`
 	// MinimumProtocol accompanies upgrade-required errors (e.g.
 	// PROFILE_SYNC_UPGRADE_REQUIRED) and names the lowest protocol
 	// version the controlplane still accepts.
@@ -197,46 +191,12 @@ type ListStatusResponse struct {
 
 const (
 	RevisionSummaryPath   = "/api/sync/revision-summary"
-	RevisionEventsPath    = "/api/sync/revision-events"
-	RevisionSnapshotPath  = "/api/sync/revision-snapshot"
 	DeleteAllProjectsPath = "/api/sync/blob/projects"
 )
 
 type RevisionSummaryResponse struct {
 	CurrentRevision          string `json:"current_revision"`
 	OldestReplayableRevision string `json:"oldest_replayable_revision"`
-}
-
-type RevisionEvent struct {
-	Revision  string  `json:"revision"`
-	Kind      string  `json:"kind"`
-	ID        string  `json:"id"`
-	ETag      string  `json:"etag,omitempty"`
-	KeyID     string  `json:"key_id,omitempty"`
-	ProjectID *string `json:"project_id"`
-	UpdatedAt string  `json:"updated_at"`
-}
-
-type RevisionEventsResponse struct {
-	Events     []RevisionEvent `json:"events"`
-	NextCursor string          `json:"next_cursor,omitempty"`
-}
-
-type RevisionSnapshotItem struct {
-	ID        string  `json:"id"`
-	ETag      string  `json:"etag"`
-	KeyID     string  `json:"key_id"`
-	ProjectID *string `json:"project_id"`
-	UpdatedAt string  `json:"updated_at"`
-	// ActivityAt is the chat's list-ordering time: its last
-	// conversation activity, or UpdatedAt when none was recorded.
-	ActivityAt string `json:"activity_at,omitempty"`
-}
-
-type RevisionSnapshotResponse struct {
-	Items            []RevisionSnapshotItem `json:"items"`
-	SnapshotRevision string                 `json:"snapshot_revision"`
-	NextCursor       string                 `json:"next_cursor,omitempty"`
 }
 
 type PutBlobRequest struct {
@@ -809,38 +769,6 @@ func (c *Client) ListStatus(ctx context.Context, scope, cursor string, limit int
 func (c *Client) RevisionSummary(ctx context.Context, jwt, clerkUserID string) (*RevisionSummaryResponse, error) {
 	var out RevisionSummaryResponse
 	if err := c.getSyncJSON(ctx, RevisionSummaryPath, nil, jwt, clerkUserID, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
-func (c *Client) RevisionEvents(ctx context.Context, afterRevision, throughRevision, cursor string, limit *int, jwt, clerkUserID string) (*RevisionEventsResponse, error) {
-	query := url.Values{}
-	query.Set("after_revision", afterRevision)
-	query.Set("through_revision", throughRevision)
-	if cursor != "" {
-		query.Set("cursor", cursor)
-	}
-	if limit != nil {
-		query.Set("limit", strconv.Itoa(*limit))
-	}
-	var out RevisionEventsResponse
-	if err := c.getSyncJSON(ctx, RevisionEventsPath, query, jwt, clerkUserID, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
-func (c *Client) RevisionSnapshot(ctx context.Context, cursor string, limit *int, jwt, clerkUserID string) (*RevisionSnapshotResponse, error) {
-	query := url.Values{}
-	if cursor != "" {
-		query.Set("cursor", cursor)
-	}
-	if limit != nil {
-		query.Set("limit", strconv.Itoa(*limit))
-	}
-	var out RevisionSnapshotResponse
-	if err := c.getSyncJSON(ctx, RevisionSnapshotPath, query, jwt, clerkUserID, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
