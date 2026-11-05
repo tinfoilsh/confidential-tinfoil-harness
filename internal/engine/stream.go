@@ -35,6 +35,30 @@ type Stream struct {
 	// activities is each tool's activity as its events have left it, which
 	// a checkpoint sends in their place.
 	activities []*domain.ActivitySnapshot
+	// pending is the deltas held back to leave as one frame; lastDelta is
+	// what the log's last frame extends, when it is a delta, and lastAt
+	// when it was framed.
+	pending   *pendingDelta
+	lastDelta string
+	lastAt    time.Time
+}
+
+// A delta that continues the frame before it within deltaWindow is held
+// back until the window ends, and the deltas to its target that follow join
+// it, so a fast model's reply grows by a frame a window rather than a frame
+// a token, which a slow client falls behind on. A delta after anything else
+// leaves at once, and anything else sends the held deltas before it.
+const deltaWindow = 50 * time.Millisecond
+
+// pendingDelta is deltas to one target held back until their window ends.
+type pendingDelta struct {
+	first domain.TextDelta
+	key   string
+	text  strings.Builder
+	// at is when the last of them was emitted, which their frame keeps, as
+	// a client times reasoning by when it last grew.
+	at    string
+	timer *time.Timer
 }
 
 // track keeps each tool's activity as its events leave it: the snapshot a
@@ -171,13 +195,58 @@ func (s *Stream) Meter(raw json.RawMessage) {
 	s.spend.Total += turn.Total
 }
 
+// frame frames e, unless it is a delta held back to join others.
 func (s *Stream) frame(e domain.Event, at string) {
+	kind, key := kindOf(e)
+	if kind != frameDelta {
+		s.framePending()
+		s.write(e, kind, key, at)
+		return
+	}
+	d := e.(domain.TextDelta)
+	if p := s.pending; p != nil && p.key == key && p.text.Len()+len(d.Text()) <= mergedFrameBytes {
+		p.text.WriteString(d.Text())
+		p.at = at
+		return
+	}
+	s.framePending()
+	if wait := deltaWindow - time.Since(s.lastAt); key == s.lastDelta && wait > 0 {
+		p := &pendingDelta{first: d, key: key, at: at}
+		p.text.WriteString(d.Text())
+		p.timer = time.AfterFunc(wait, func() {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if s.pending == p {
+				s.framePending()
+			}
+		})
+		s.pending = p
+		return
+	}
+	s.write(e, kind, key, at)
+}
+
+// framePending frames the deltas held back as one, if there are any.
+func (s *Stream) framePending() {
+	p := s.pending
+	if p == nil {
+		return
+	}
+	s.pending = nil
+	p.timer.Stop()
+	s.write(p.first.WithText(p.text.String()), frameDelta, p.key, p.at)
+}
+
+func (s *Stream) write(e domain.Event, kind frameKind, key, at string) {
 	encoded, err := domain.EncodeEvent(e, at)
 	if err != nil {
 		return
 	}
-	kind, key := kindOf(e)
 	full := s.Run.Frames.grow(encoded, kind, key)
+	s.lastDelta = ""
+	if kind == frameDelta {
+		s.lastDelta, s.lastAt = key, time.Now()
+	}
 	s.track(e)
 	if s.Observe != nil {
 		s.Observe(e, at)

@@ -338,6 +338,147 @@ func TestFollowResumesALiveRunAfterTheClientsCursor(t *testing.T) {
 	}
 }
 
+// The deltas a fast model streams leave in fewer frames: each run of them to
+// one message, reasoning or call joins into a frame or two, which leave
+// before whatever follows them. A client and the chat the run keeps hold the
+// reply as the model wrote it, its last deltas included.
+func TestDeltasThatFollowEachOtherLeaveTogether(t *testing.T) {
+	delta := func(field, text string) string {
+		return "data: " + string(api.Raw(api.Object{"choices": []api.Object{{"delta": api.Object{field: text}}}})) + "\n\n"
+	}
+	var first, answer strings.Builder
+	for _, piece := range []string{"Let", " me", " look"} {
+		first.WriteString(delta("reasoning_content", piece))
+	}
+	words := strings.Fields(strings.Repeat("cats are great ", 40))
+	for _, word := range words {
+		first.WriteString(delta("content", word+" "))
+		answer.WriteString(word + " ")
+	}
+	first.WriteString(toolCallChunk(0, "lookup", "lookup_order", `{"id":`) + toolCallChunk(0, "", "", "1") + toolCallChunk(0, "", "", "}"))
+	var turns atomic.Int32
+	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if turns.Add(1) == 1 {
+			io.WriteString(w, first.String()+"data: [DONE]\n\n")
+			return
+		}
+		io.WriteString(w, delta("content", "Order")+delta("content", " 1")+delta("content", " shipped")+"data: [DONE]\n\n")
+	})
+	in := sendInput(key)
+	events := finishedRun(t, h, "/v1/threads/turn", in)
+	var steps []string
+	texts := 0
+	for _, e := range events {
+		if !strings.HasPrefix(e.Type, "TEXT_") && !strings.HasPrefix(e.Type, "REASONING_") && !strings.HasPrefix(e.Type, "TOOL_CALL_") {
+			continue
+		}
+		if e.Type == "TEXT_MESSAGE_CHUNK" {
+			texts++
+		}
+		if len(steps) == 0 || steps[len(steps)-1] != e.Type {
+			steps = append(steps, e.Type)
+		}
+	}
+	if want := []string{"REASONING_MESSAGE_CHUNK", "TEXT_MESSAGE_CHUNK", "TOOL_CALL_START", "TOOL_CALL_ARGS", "TOOL_CALL_END", "TEXT_MESSAGE_CHUNK"}; !slices.Equal(steps, want) {
+		t.Fatalf("the reply's frames came as %v, not %v", steps, want)
+	}
+	if texts*4 > len(words) {
+		t.Fatalf("the reply's %d text deltas left in %d frames", len(words)+3, texts)
+	}
+	row, err := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kept [][2]string
+	for _, block := range mustRead(domain.ReadThreadRow(row)).Messages[1].Timeline {
+		kept = append(kept, [2]string{block.Type, block.Content + block.Arguments})
+	}
+	if want := [][2]string{{"thinking", "Let me look"}, {"content", answer.String()}, {"tool_call", `{"id":1}`}, {"content", "Order 1 shipped"}}; !slices.Equal(kept, want) {
+		t.Fatalf("the chat kept the reply as %q", kept)
+	}
+}
+
+// A delta held back to join the ones after it leaves within a moment though
+// the model sends nothing more, the reply's first delta leaves alone, and a
+// client that rejoins after that first delta ends with the reply once.
+func TestARejoiningClientGetsEveryHeldDeltaOnce(t *testing.T) {
+	release := make(chan struct{})
+	resume := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(resume)
+	h, _, _ := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		for _, piece := range []string{"Hel", "lo"} {
+			io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\""+piece+"\"}}]}\n\n")
+			w.(http.Flusher).Flush()
+		}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\", world\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	alice := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
+	run, err := h.engine.AcceptTurn(context.Background(), alice, chatCredential("alice"), auth.ContentKey{}, requestOf[engine.TurnRequest](localInput("", api.Object{"messages": []any{}})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The client applies the run's frames as they come, noting the cursor
+	// after which it showed each text, until it shows all the model sent
+	// before it paused.
+	shown, cursors := "", map[string]int{}
+	for from := 0; shown != "Hello"; {
+		_, frames, first, wake, _ := run.Log.Frames.Read(from)
+		for i, frame := range frames {
+			var e event
+			if err := json.Unmarshal(frame, &e); err != nil {
+				t.Fatal(err)
+			}
+			if e.Type == "TEXT_MESSAGE_CHUNK" {
+				shown += api.Str(e.Delta)
+				cursors[shown] = first + i
+			}
+		}
+		from = first + len(frames)
+		if shown == "Hello" {
+			break
+		}
+		select {
+		case <-wake:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("the client shows %q while the model waits", shown)
+		}
+	}
+	after, ok := cursors["Hel"]
+	if !ok {
+		t.Fatalf("the reply's first delta was held back: the client showed %v", cursors)
+	}
+	// The app goes to the background, and the reply ends while it is away.
+	run.Log.Frames.Detach()
+	resume()
+	select {
+	case <-run.Finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the reply did not finish")
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/threads/follow", bytes.NewReader(api.Raw(api.Object{"threadId": run.Thread.ID, "runId": run.Log.ID})))
+	signIn(req, "alice")
+	req.Header.Set("Last-Event-ID", strconv.Itoa(after))
+	w := httptest.NewRecorder()
+	h.routes().ServeHTTP(w, req)
+	events := eventsIn(t, w)
+	rejoined := "Hel"
+	for _, e := range events {
+		if e.Type == "TEXT_MESSAGE_CHUNK" {
+			rejoined += api.Str(e.Delta)
+		}
+	}
+	last := events[len(events)-1]
+	messages := api.Arr(api.Obj(api.Obj(api.Parsed(last.Metadata))["thread"])["messages"])
+	if rejoined != "Hello, world" || last.Type != "RUN_FINISHED" || len(messages) != 2 || api.Obj(messages[1])["content"] != "Hello, world" {
+		t.Fatalf("the rejoined client shows %q, and the run ended %s with %v", rejoined, last.Type, messages)
+	}
+}
+
 // A retried request is told apart through the chat itself: while its run is
 // live it follows that run, and afterwards it is refused as already applied,
 // by any instance, without adding its message twice.

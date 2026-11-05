@@ -31,6 +31,7 @@ func (eng *Engine) finishRun(r *Run, runErr error) {
 	ctx = auth.WithUsage(ctx, usageForRun(r))
 	ctx = inference.WithUsageSink(ctx, r.out)
 	r.out.mu.Lock()
+	r.out.framePending()
 	messages := r.assembler.Messages()
 	spend, sources, reply := r.out.spend, r.out.sources, r.out.replyID
 	r.out.Observe, r.out.folding, r.out.activities, r.out.sources = nil, false, nil, nil

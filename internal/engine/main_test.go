@@ -51,19 +51,26 @@ func TestARunPastItsLogBudgetGoesOnFromACheckpoint(t *testing.T) {
 	for second := range 11 {
 		piece := fmt.Sprintf("step %d. ", second)
 		thought.WriteString(piece)
+		out.mu.Lock()
 		out.frame(domain.ReasoningChunk{MessageID: "reply" + domain.ReasoningSuffix, Delta: piece}, thinking(second))
+		out.mu.Unlock()
 	}
 	var text strings.Builder
 	for i := 0; text.Len() <= maxSnapshotBytes; i++ {
 		chunk := fmt.Sprintf("[%d]%s", i, strings.Repeat("x", 64<<10))
 		text.WriteString(chunk)
 		out.text("reply", chunk)
-		if rn.Frames.bytes > rn.Frames.budget {
-			t.Fatalf("the log holds %d bytes of frames past its checkpoint", rn.Frames.bytes)
+		rn.Frames.mu.Lock()
+		logged := rn.Frames.bytes
+		rn.Frames.mu.Unlock()
+		if logged > rn.Frames.budget {
+			t.Fatalf("the log holds %d bytes of frames past its checkpoint", logged)
 		}
 	}
 	// As a finishing run does, the run stops checkpointing before its end.
+	out.mu.Lock()
 	out.folding = false
+	out.mu.Unlock()
 	out.emit(domain.RunFinished{ThreadID: "thread", RunID: rn.ID})
 	if stopped {
 		t.Fatal("a run past its log budget was stopped")
