@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
@@ -398,7 +400,8 @@ func importedImage(chatID, blobPath string, index int) string {
 }
 
 // chat is a prepared thread as the import stores it: its images stored
-// as attachments of the chat, under keys the chat embeds, and documents
+// as attachments of the chat, under keys the chat embeds, each with the
+// thumbnail an upload makes unless it came with one, and documents
 // without any content left out. It names the attachments stored.
 func (j *cloudImport) chat(ctx context.Context, id, projectID string, origin *domain.ImportOrigin, chat *cloudChat) (*domain.Thread, []string) {
 	t := chat.Thread
@@ -433,6 +436,13 @@ func (j *cloudImport) chat(ctx context.Context, id, projectID string, origin *do
 				}
 				stored = append(stored, attID)
 				a.ID, a.EncryptionKey, a.MimeType, a.Base64 = attID, attKey, kind, ""
+				if a.Thumbnail == "" {
+					if _, thumb, err := attach.ResizeImage(data); err == nil {
+						a.Thumbnail = base64.StdEncoding.EncodeToString(thumb)
+					} else {
+						j.warn("image attachment stored without a thumbnail")
+					}
+				}
 			} else if !documentHasContent(&a) {
 				j.warn("document attachment without content skipped")
 				continue
