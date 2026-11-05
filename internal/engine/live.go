@@ -49,9 +49,14 @@ type liveRuns struct {
 
 // heldRunTTL is how long the log of a device chat's ended run is kept. Its
 // client stores the chat the run returns, so one that lost its stream, as
-// an app sent to the background does, collects it when it follows the run
-// again.
-const heldRunTTL = 10 * time.Minute
+// an app sent to the background does, or a page too slow to keep up with
+// the reply, collects it when it follows the run again. Every device chat's
+// run is held until a client following it again reads it to its end, and a
+// held log is no more than its running reply's was, mostly the chat it
+// showed and returned, so the enclave holds half an hour of device chats'
+// replies. The memory new turns leave free counts them, so a busy enclave
+// refuses new turns before held replies run it short.
+const heldRunTTL = 30 * time.Minute
 
 type heldRun struct {
 	log             *Log
