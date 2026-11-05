@@ -774,6 +774,51 @@ func TestClaudeProjectsRequireTheCloud(t *testing.T) {
 	}
 }
 
+// Chats a cloud import stored, and their user then deleted, are stored
+// again when the same export is imported again, though the control plane
+// answers a write under an idempotency key it has seen with that write's
+// outcome instead of making it again.
+func TestDeletedChatsAreImportedAgain(t *testing.T) {
+	h, _, key := cloudImportHarness(t)
+	// The rows are stored at the control plane, as the harness stores
+	// them, rather than in memory.
+	stored := &store.Rows{Controlplane: h.store.Controlplane, Buckets: h.store.Buckets, Index: h.search}
+	h.store.Rows, h.search.Rows = stored, stored
+	listed := func() []string {
+		t.Helper()
+		var page struct {
+			Threads []domain.ThreadSummary `json:"threads"`
+		}
+		w := postRoute(h, "/v1/threads/list", api.Object{"key": keyBase64(key)}, "alice")
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil {
+			t.Fatalf("list: HTTP %d %s", w.Code, w.Body.String())
+		}
+		titles := []string{}
+		for _, thread := range page.Threads {
+			titles = append(titles, thread.Title)
+		}
+		slices.Sort(titles)
+		return titles
+	}
+	export, want := fixture(t, "tinfoil-export.zip"), []string{"Sketches", "Trip plans"}
+	imported := func(run string) {
+		t.Helper()
+		result := importOf(t, h, "alice", export, "tinfoil-export.zip", api.Object{"target": "cloud", "key": keyBase64(key)})
+		if status := importEnded(t, h, "alice", result.done); status.Imported != len(want) || status.Counts["chat"] != (archives.ImportKindCounts{Imported: len(want)}) {
+			t.Fatalf("the %s import: %+v", run, status)
+		}
+		if titles := listed(); !slices.Equal(titles, want) {
+			t.Fatalf("after the %s import the chats listed are %v, want %v", run, titles, want)
+		}
+	}
+	imported("first")
+	w := postRoute(h, "/v1/threads/delete-all", api.Object{"key": keyBase64(key)}, "alice")
+	if titles := listed(); w.Code != 200 || api.Obj(api.Parsed(w.Body.Bytes()))["deleted"] != float64(len(want)) || len(titles) != 0 {
+		t.Fatalf("delete all chats: HTTP %d %s, leaving %v", w.Code, w.Body.String(), titles)
+	}
+	imported("second")
+}
+
 // The conversations export is the one the web app wrote for the same chats.
 func TestConversationsExportMatchesTheWebApp(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)

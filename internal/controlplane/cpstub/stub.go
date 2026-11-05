@@ -4,9 +4,10 @@
 // attachments and the attachment index with the purges, pending writes
 // and orphans its maintenance reclaims, chat activity, the rows left to
 // reseal with their cooldowns, the search index's publication with the
-// objects retired from it, and the imports reported ended. Tests seed its
-// state, read it back after a call, and inject the failures the control
-// plane can answer with.
+// objects retired from it, the imports reported ended, and the answers
+// to changes made under an idempotency key, which a retry gets again.
+// Tests seed its state, read it back after a call, and inject the
+// failures the control plane can answer with.
 package cpstub
 
 import (
@@ -18,6 +19,7 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"slices"
 	"sort"
@@ -99,6 +101,10 @@ type Store struct {
 	searchClaims         map[string]string // deletion id to the token that claimed it
 	// ImportOutcomes are the imports the enclave reported ended, in order.
 	ImportOutcomes []controlplane.ImportOutcome
+	// answered are the changes made under an idempotency key, by the
+	// caller and the key. The control plane keeps them for a day, the
+	// stub for its life.
+	answered map[string]idempotentAnswer
 	// MinimumProfileSyncProtocol refuses profile overwrites by older
 	// writers when set.
 	MinimumProfileSyncProtocol int
@@ -148,12 +154,13 @@ func New() *Store {
 		ReserveAttachmentPurges:         map[string]int{},
 		purgeClaims:                     map[string]string{},
 		searchClaims:                    map[string]string{},
+		answered:                        map[string]idempotentAnswer{},
 		mux:                             http.NewServeMux(),
 	}
-	s.mux.HandleFunc("PUT /api/sync/blob/chat/{id}", s.handlePutBlob("chat"))
-	s.mux.HandleFunc("PUT /api/sync/blob/profile", s.handlePutBlob("profile"))
-	s.mux.HandleFunc("PUT /api/sync/blob/project/{id}", s.handlePutBlob("project"))
-	s.mux.HandleFunc("PUT /api/sync/blob/project_document/{pid}/{did}", s.handlePutBlob("project_document"))
+	s.mux.HandleFunc("PUT /api/sync/blob/chat/{id}", s.idempotent(s.handlePutBlob("chat")))
+	s.mux.HandleFunc("PUT /api/sync/blob/profile", s.idempotent(s.handlePutBlob("profile")))
+	s.mux.HandleFunc("PUT /api/sync/blob/project/{id}", s.idempotent(s.handlePutBlob("project")))
+	s.mux.HandleFunc("PUT /api/sync/blob/project_document/{pid}/{did}", s.idempotent(s.handlePutBlob("project_document")))
 	s.mux.HandleFunc("GET /api/sync/blob/chat/{id}", s.handleGetBlob("chat"))
 	s.mux.HandleFunc("GET /api/sync/blob/profile", s.handleGetBlob("profile"))
 	s.mux.HandleFunc("GET /api/sync/blob/project/{id}", s.handleGetBlob("project"))
@@ -162,12 +169,12 @@ func New() *Store {
 	s.mux.HandleFunc("HEAD /api/sync/blob/profile", s.handleHeadBlob("profile"))
 	s.mux.HandleFunc("HEAD /api/sync/blob/project/{id}", s.handleHeadBlob("project"))
 	s.mux.HandleFunc("HEAD /api/sync/blob/project_document/{pid}/{did}", s.handleHeadBlob("project_document"))
-	s.mux.HandleFunc("DELETE /api/sync/blob/chat/{id}", s.handleDeleteBlob("chat"))
-	s.mux.HandleFunc("DELETE /api/sync/blob/profile", s.handleDeleteBlob("profile"))
-	s.mux.HandleFunc("DELETE /api/sync/blob/project/{id}", s.handleDeleteBlob("project"))
-	s.mux.HandleFunc("DELETE /api/sync/blob/project_document/{pid}/{did}", s.handleDeleteBlob("project_document"))
-	s.mux.HandleFunc("DELETE "+controlplane.DeleteAllProjectsPath, s.handleDeleteAllProjects)
-	s.mux.HandleFunc("POST "+controlplane.RewrapPath, s.handleRewrap)
+	s.mux.HandleFunc("DELETE /api/sync/blob/chat/{id}", s.idempotent(s.handleDeleteBlob("chat")))
+	s.mux.HandleFunc("DELETE /api/sync/blob/profile", s.idempotent(s.handleDeleteBlob("profile")))
+	s.mux.HandleFunc("DELETE /api/sync/blob/project/{id}", s.idempotent(s.handleDeleteBlob("project")))
+	s.mux.HandleFunc("DELETE /api/sync/blob/project_document/{pid}/{did}", s.idempotent(s.handleDeleteBlob("project_document")))
+	s.mux.HandleFunc("DELETE "+controlplane.DeleteAllProjectsPath, s.idempotent(s.handleDeleteAllProjects))
+	s.mux.HandleFunc("POST "+controlplane.RewrapPath, s.idempotent(s.handleRewrap))
 	s.mux.HandleFunc("POST "+controlplane.ChatActivityPath, s.handleBackfillChatActivity)
 	s.mux.HandleFunc("GET /api/sync/list-status", s.handleListStatus)
 	s.mux.HandleFunc("GET "+controlplane.RevisionSummaryPath, s.handleRevisionSummary)
@@ -178,9 +185,9 @@ func New() *Store {
 	s.mux.HandleFunc("POST "+controlplane.ClaimSearchIndexDeletionsPath, s.handleClaimSearchIndexDeletions)
 	s.mux.HandleFunc("POST "+controlplane.AckSearchIndexDeletionsPath, s.handleAckSearchIndexDeletions)
 	s.mux.HandleFunc("GET /api/sync/keys/current", s.handleCurrentKey)
-	s.mux.HandleFunc("POST "+controlplane.RegisterKeyPath, s.handleRegisterKey)
-	s.mux.HandleFunc("POST /api/sync/keys/{kid}/bundles", s.handleAddBundle)
-	s.mux.HandleFunc("DELETE /api/sync/keys/{kid}/bundles/{cid}", s.handleRemoveBundle)
+	s.mux.HandleFunc("POST "+controlplane.RegisterKeyPath, s.idempotent(s.handleRegisterKey))
+	s.mux.HandleFunc("POST /api/sync/keys/{kid}/bundles", s.idempotent(s.handleAddBundle))
+	s.mux.HandleFunc("DELETE /api/sync/keys/{kid}/bundles/{cid}", s.idempotent(s.handleRemoveBundle))
 	s.mux.HandleFunc("GET /api/storage/attachment/{aid}", s.handleLegacyAttachment)
 	s.mux.HandleFunc("POST /api/sync/attachment-index/{aid}", s.handleRegisterAttachmentIndex)
 	s.mux.HandleFunc("DELETE /api/sync/attachment-index/{aid}", s.handleDeleteAttachmentIndex)
@@ -247,6 +254,68 @@ func staleBlob(w http.ResponseWriter, currentETag string) {
 // plane requires.
 func preconditionRequired(w http.ResponseWriter) {
 	writeJSON(w, http.StatusPreconditionRequired, map[string]string{"code": controlplane.StatusPreconditionRequired, "message": "If-Match is required"})
+}
+
+// idempotentAnswer is a change made under an idempotency key: the request
+// a retry must repeat, and what the control plane answered.
+type idempotentAnswer struct {
+	method, path, operationHash string
+	status                      int
+	etag                        string
+	body                        []byte
+}
+
+// idempotent serves a change as the control plane does under an
+// idempotency key: a change without an operation hash is refused, a retry
+// of a change made under the caller's key is answered as the change was
+// and not made again, another request under the key is refused, and a new
+// change is made and, once it succeeds, its answer kept.
+func (s *Store) idempotent(change http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		key := r.Header.Get(controlplane.HeaderIdempotency)
+		if key == "" {
+			change(w, r)
+			return
+		}
+		if r.Header.Get(controlplane.HeaderOperationHash) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "BAD_REQUEST", "error": "X-Operation-Hash is required"})
+			return
+		}
+		key = r.Header.Get(controlplane.HeaderClerkUserID) + "\x00" + key
+		request := idempotentAnswer{method: r.Method, path: r.URL.Path, operationHash: r.Header.Get(controlplane.HeaderOperationHash)}
+		if answer, ok := s.answered[key]; ok {
+			for _, compared := range []struct{ field, expected, got string }{
+				{"method", answer.method, request.method}, {"path", answer.path, request.path}, {"operation_hash", answer.operationHash, request.operationHash},
+			} {
+				if compared.expected != compared.got {
+					writeJSON(w, http.StatusConflict, map[string]string{"code": controlplane.StatusIdempotencyConflict, "error": "idempotency conflict", "field": compared.field, "expected": compared.expected, "got": compared.got})
+					return
+				}
+			}
+			if answer.etag != "" {
+				w.Header().Set(controlplane.HeaderETag, answer.etag)
+			}
+			var cached struct {
+				KeyID string `json:"key_id"`
+			}
+			if json.Unmarshal(answer.body, &cached) == nil && cached.KeyID != "" {
+				w.Header().Set(controlplane.HeaderKeyID, cached.KeyID)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(answer.status)
+			_, _ = w.Write(answer.body)
+			return
+		}
+		served := httptest.NewRecorder()
+		change(served, r)
+		if served.Code/100 == 2 {
+			request.status, request.etag, request.body = served.Code, served.Header().Get(controlplane.HeaderETag), served.Body.Bytes()
+			s.answered[key] = request
+		}
+		maps.Copy(w.Header(), served.Header())
+		w.WriteHeader(served.Code)
+		_, _ = w.Write(served.Body.Bytes())
+	}
 }
 
 func (s *Store) handlePutBlob(scope string) http.HandlerFunc {
