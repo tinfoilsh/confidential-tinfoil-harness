@@ -24,6 +24,9 @@ type Engine struct {
 	// Summaries title chats, label reasoning and compact chats; nil when
 	// the harness has none.
 	Summaries *summarize.Service
+	// Memory reads the enclave's memory, which new turns leave a reserve
+	// of; nil admits every turn.
+	Memory Memory
 }
 
 // liveRuns holds what this instance is executing: each chat's running reply

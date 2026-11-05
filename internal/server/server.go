@@ -74,7 +74,13 @@ func Run() {
 	go h.store.RunAttachmentMaintenance(ctx)
 	h.attachments = &attach.Service{Auth: h.auth, Models: h.models, Store: h.store, Pages: h.pages}
 	h.store.Repair = h.attachments
-	h.engine = &engine.Engine{Safeguards: engine.NewSubmitter(os.Getenv("SAFEGUARDS_URL")), Store: h.store, Models: h.models, Attachments: h.attachments, Auth: h.auth, Summaries: h.summaries}
+	h.engine = &engine.Engine{Safeguards: engine.NewSubmitter(os.Getenv("SAFEGUARDS_URL")), Store: h.store, Models: h.models, Attachments: h.attachments, Auth: h.auth, Summaries: h.summaries, Memory: engine.SystemMemory}
+	if available, total, err := engine.SystemMemory(); err != nil {
+		slog.Error("read the enclave's memory; turns are admitted without a memory reserve", "error", err)
+		h.engine.Memory = nil
+	} else {
+		slog.Info("enclave memory", "available", available, "total", total)
+	}
 	h.archives = &archives.Service{Scratch: scratch, CPClient: &http.Client{Transport: &auth.CallerTransport{Inner: http.DefaultTransport}}, Store: h.store, Attachments: h.attachments, Auth: h.auth, Controlplane: h.controlplane,
 		Imports: jobs.New[archives.ImportReport](archives.ImportBudget, archives.ImportRetention)}
 

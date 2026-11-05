@@ -68,6 +68,7 @@ var Actions = map[string]string{
 	"RUN_LOG_FULL":            ActionStop,
 	"RUN_NOT_FOUND":           ActionReload,
 	"SEARCH_INDEX_FAILED":     ActionRetry,
+	"SERVICE_BUSY":            ActionRetry,
 	"SYNC_OUTCOME_UNKNOWN":    ActionRetry,
 	"TEMP_SPACE_BUSY":         ActionRetry,
 	"THREAD_EXISTS":           ActionStop,
