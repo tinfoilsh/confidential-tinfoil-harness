@@ -94,7 +94,6 @@ type Catalog struct {
 	Prompt, Rules, WidgetHeader string
 	EnabledWidgets              []string
 	Presets                     []Preset
-	Fallback                    int // smallest configured window, for Auto while no model is offered
 }
 
 func (c *Catalog) Definition(name string) api.Object {

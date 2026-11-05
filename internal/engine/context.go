@@ -209,9 +209,6 @@ func (eng *Engine) BuildRequest(thread *domain.Thread, profile *domain.Profile, 
 				policy = p
 			}
 		}
-		if window == 0 {
-			window = c.Fallback
-		}
 		level, err := domain.Intelligence(cmp.Or(options.AutoIntelligence, domain.ValueOr(profile.AutoIntelligence, ""), "high"))
 		if err != nil {
 			return nil, nil, err
@@ -221,7 +218,7 @@ func (eng *Engine) BuildRequest(thread *domain.Thread, profile *domain.Profile, 
 		if def == nil {
 			return nil, nil, api.Err(404, "MODEL_UNAVAILABLE", "The selected model is unavailable")
 		}
-		display, window = inference.PinnedName(name), api.Int(def["budgetWindow"])
+		display, window = cmp.Or(c.DisplayName(name), name), api.Int(def["budgetWindow"])
 		reason := api.Obj(api.Obj(def["chatConfig"])["reasoningConfig"])
 		policy = api.FirstString(reason["reasoningHistoryPolicy"], "none")
 		effort := cmp.Or(options.ReasoningEffort, domain.ValueOr(profile.ReasoningEffort, ""), "medium")
