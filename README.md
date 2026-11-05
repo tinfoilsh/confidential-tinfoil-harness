@@ -31,7 +31,7 @@ Anonymous chat works only from a deployed harness, because Tinfoil validates `fr
 - `CONTEXT_DEV_API_KEY`: required secret for reading link previews through [context.dev](https://docs.context.dev), which needs zero data retention enabled for its organization; site favicons come from DuckDuckGo by host
 - `SAFEGUARDS_URL`: the [safeguards](https://github.com/tinfoilsh/confidential-safeguards) sidecar that classifies completed first-party chats
 
-A chat model is offered only when Tinfoil's model catalog lists it, its repository is pinned in [internal/inference/inference.go](internal/inference/inference.go), and a replica serving it is available.
+A chat model is offered when Tinfoil's model catalog lists it with a context window, and the system prompt names it as the catalog does. Turns reach it through the router, which verifies the replica serving it.
 
 ## Reporting Vulnerabilities
 

@@ -47,39 +47,32 @@ func (inf *Models) RefreshCatalog(ctx context.Context) error {
 	c, models := buildCatalog(config, inf.Services["router"])
 	// The first catalog may offer only Auto; a later one without models keeps the last.
 	if len(c.Models) == 0 && inf.Catalog.Get() != nil {
-		return errors.New("no configured chat model is pinned")
+		return errors.New("the catalog lists no chat model with a context window")
 	}
 	inf.Offer.Set(models)
 	inf.Catalog.Set(c)
 	return nil
 }
 
-// buildCatalog lists the configured chat models this harness pins, each
-// served through the router.
+// buildCatalog lists the chat models the controlplane configures, each served
+// through the router.
 func buildCatalog(config []api.Object, router *Service) (*domain.Catalog, []*Model) {
 	prompt := domain.BuiltInPrompt()
 	c := &domain.Catalog{Prompt: prompt.SystemPrompt, Rules: prompt.Rules, WidgetHeader: prompt.GenUI.Header, EnabledWidgets: slices.Clone(prompt.GenUI.EnabledWidgets), Models: []api.Object{}, Presets: domain.BuiltInPresets()}
-	var unpinned, unsized []string
+	var unsized []string
 	var models []*Model
 	for _, definition := range config {
 		if !api.Bool(definition["chat"], false) || api.Str(definition["type"]) != "chat" {
 			continue
 		}
-		name, repo := api.Str(definition["modelName"]), api.Str(definition["repo"])
+		name := api.Str(definition["modelName"])
 		c.Listed = append(c.Listed, name)
 		if api.Bool(definition["deprecated"], false) {
 			c.Deprecated = append(c.Deprecated, definition)
 			continue
 		}
-		configured := api.Int(api.Obj(definition["chatConfig"])["contextWindowTokens"])
-		if configured > 0 && (c.Fallback == 0 || configured < c.Fallback) {
-			c.Fallback = configured
-		}
-		if !slices.ContainsFunc(pinned, func(p pin) bool { return p.name == name && p.repo == repo }) {
-			unpinned = append(unpinned, name)
-			continue
-		}
 		// The configured window is the only prompt budget a model has.
+		configured := api.Int(api.Obj(definition["chatConfig"])["contextWindowTokens"])
 		if configured <= 0 {
 			unsized = append(unsized, name)
 			continue
@@ -88,9 +81,6 @@ func buildCatalog(config []api.Object, router *Service) (*domain.Catalog, []*Mod
 		def["budgetWindow"] = configured
 		c.Models = append(c.Models, def)
 		models = append(models, &Model{Name: name, Vision: api.Bool(definition["multimodal"], false), Endpoint: router.URL + chatCompletionsPath, Client: router.Client})
-	}
-	if len(unpinned) > 0 {
-		slog.Warn("skipping controlplane chat models without a pinned repository", "models", strings.Join(unpinned, ", "))
 	}
 	if len(unsized) > 0 {
 		slog.Warn("skipping controlplane chat models without a context window", "models", strings.Join(unsized, ", "))

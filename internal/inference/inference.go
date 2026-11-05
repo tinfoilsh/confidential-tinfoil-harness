@@ -41,32 +41,6 @@ type Model struct {
 // chatCompletionsPath is where the router takes model turns.
 const chatCompletionsPath = "/v1/chat/completions"
 
-// pin is a model the harness serves: its repository, and the name the
-// system prompt gives it.
-type pin struct{ name, repo, display string }
-
-var pinned = []pin{
-	{"kimi-k3", "tinfoilsh/confidential-kimi-k3", "Kimi K3"},
-	{"deepseek-v4-flash", "tinfoilsh/confidential-deepseek-v4-flash", "DeepSeek V4 Flash"},
-	{"deepseek-v4-1-flash", "tinfoilsh/confidential-deepseek-v4-1-flash", "DeepSeek V4.1 Flash"},
-	{"glm-5-3", "tinfoilsh/confidential-glm5-3-nvfp4", "GLM-5.3"},
-	{"glm-5-3-flash", "tinfoilsh/confidential-glm5-3-flash", "GLM-5.3 Flash"},
-	{"gemma4-31b", "tinfoilsh/confidential-gemma4-31b", "Gemma 4 31B"},
-	{"gpt-oss-120b", "tinfoilsh/confidential-gpt-oss-120b", "GPT-OSS 120B"},
-	{"llama3-3-70b", "tinfoilsh/confidential-llama3-3-70b", "Llama 3.3 70B"},
-}
-
-// PinnedName is what the system prompt calls a model. The catalog's name is
-// not used there, since the catalog comes from outside the enclave.
-func PinnedName(model string) string {
-	for _, p := range pinned {
-		if p.name == model {
-			return p.display
-		}
-	}
-	return model
-}
-
 // Requests without a caller's own cache secret fall back to this one, so the
 // SDK never tries to persist a secret under the read-only home directory.
 var cacheFallback = tinfoil.WithUserCacheSecret(api.Token())
