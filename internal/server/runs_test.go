@@ -605,7 +605,8 @@ func TestATurnIsRefusedWhileTheEnclaveIsLowOnMemory(t *testing.T) {
 			RetryAfter   int
 		}
 	}
-	if w.Code != 503 || json.Unmarshal(w.Body.Bytes(), &refused) != nil || refused.Error.Code != "SERVICE_BUSY" || refused.Error.Action != "retry" || refused.Error.RetryAfter <= 0 {
+	// The wait is in seconds, as every error's retryAfter is.
+	if w.Code != 503 || json.Unmarshal(w.Body.Bytes(), &refused) != nil || refused.Error.Code != "SERVICE_BUSY" || refused.Error.Action != "retry" || refused.Error.RetryAfter != 15 {
 		t.Fatalf("a turn while memory was low answered HTTP %d %s", w.Code, w.Body.String())
 	}
 	if again, err := h.engine.AcceptTurn(context.Background(), alice, chatCredential("alice"), key, requestOf[engine.TurnRequest](first)); err != nil || again != run {
