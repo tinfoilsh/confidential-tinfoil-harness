@@ -76,7 +76,7 @@ func TestAThinkingReplysReasoningIsSummarized(t *testing.T) {
 		}
 		close(release)
 		<-run.Finished
-		_, frames, _, _, _ := run.Log.Frames.Read(0)
+		_, frames, _, _, _, _ := run.Log.Frames.Read(0)
 		var summaries []event
 		var last event
 		for _, frame := range frames {

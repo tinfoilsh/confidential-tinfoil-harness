@@ -335,8 +335,7 @@ func Follow(w http.ResponseWriter, r *http.Request, rn *Log, from int) bool {
 		w.Header().Set("X-Accel-Buffering", "no")
 		opened = true
 	}
-	for {
-		checkpoint, frames, first, wake, closed := rn.Frames.Read(from)
+	send := func(checkpoint, frames [][]byte, first int) error {
 		for i, frame := range checkpoint {
 			open()
 			var err error
@@ -346,14 +345,23 @@ func Follow(w http.ResponseWriter, r *http.Request, rn *Log, from int) bool {
 				_, err = fmt.Fprintf(w, "data: %s\n\n", frame)
 			}
 			if err != nil {
-				return false
+				return err
 			}
 		}
 		for i, frame := range frames {
 			open()
 			if _, err := fmt.Fprintf(w, "id: %d\ndata: %s\n\n", first+i, frame); err != nil {
-				return false
+				return err
 			}
+		}
+		return nil
+	}
+	for {
+		checkpoint, frames, first, wake, closed, done := rn.Frames.Read(from)
+		err := send(checkpoint, frames, first)
+		done()
+		if err != nil {
+			return false
 		}
 		from = first + len(frames)
 		if len(checkpoint)+len(frames) > 0 {

@@ -467,7 +467,7 @@ func heldModel() (http.HandlerFunc, func()) {
 func awaitFrame(t *testing.T, log *engine.Log, kind string) {
 	t.Helper()
 	for from := 0; ; {
-		_, frames, _, wake, closed := log.Frames.Read(from)
+		_, frames, _, wake, closed, _ := log.Frames.Read(from)
 		for _, frame := range frames {
 			var e event
 			if err := json.Unmarshal(frame, &e); err != nil {
@@ -1312,7 +1312,7 @@ func TestStoppingAQueuedTurnRemovesIt(t *testing.T) {
 // eventsOf is every event a run's log holds.
 func eventsOf(t *testing.T, log *engine.Log) []event {
 	t.Helper()
-	_, frames, _, _, _ := log.Frames.Read(0)
+	_, frames, _, _, _, _ := log.Frames.Read(0)
 	events := []event{}
 	for _, frame := range frames {
 		var e event
