@@ -32,6 +32,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/archives"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane/cpstub"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
@@ -851,21 +852,29 @@ func TestDeletedChatsAreImportedAgain(t *testing.T) {
 
 // An account's own backup or export imported back into it stores only what
 // the account no longer holds and skips what it still does, which a copy
-// would duplicate, however often it is imported.
+// would duplicate, however often it is imported. A document is matched
+// within its project, since another project's may share its id.
 func TestAnAccountsOwnArchiveStoresOnlyWhatItLacks(t *testing.T) {
 	// A backup holds the account's projects with their documents, and files
 	// a chat it restores under the project it held; the conversations
 	// export holds only the chats.
 	for format, want := range map[string]struct {
-		projects archives.ImportKindCounts
-		project  string
-	}{"native": {archives.ImportKindCounts{Skipped: 1}, "project-1"}, "conversations": {}} {
+		projects  archives.ImportKindCounts
+		documents [2]archives.ImportKindCounts
+		held      int
+		project   string
+	}{
+		"native":        {archives.ImportKindCounts{Skipped: 2}, [2]archives.ImportKindCounts{{Imported: 1, Skipped: 1}, {Skipped: 2}}, 2, "project-1"},
+		"conversations": {held: 1},
+	} {
 		t.Run(format, func(t *testing.T) {
 			h, rows, key := cloudImportHarness(t)
 			alice := &auth.Principal{ID: "alice"}
+			for _, project := range []string{"project-1", "project-2"} {
+				rows.rows[rowMapKey(alice, "project", project)] = domain.StoredRow{ID: project, ETag: "1", Data: api.Raw(api.Object{"name": project, "createdAt": "2026-01-01T00:00:00Z"})}
+				rows.rows[rowMapKey(alice, "project_document", project+"/doc-1")] = domain.StoredRow{ID: project + "/doc-1", ETag: "1", Data: api.Raw(api.Object{"filename": "paper.md", "contentType": "text/markdown", "sizeBytes": 10, "content": "Paper text"}), Project: &project, ProjectSet: true}
+			}
 			project := "project-1"
-			rows.rows[rowMapKey(alice, "project", project)] = domain.StoredRow{ID: project, ETag: "1", Data: api.Raw(api.Object{"name": "Research", "createdAt": "2026-01-01T00:00:00Z"})}
-			rows.rows[rowMapKey(alice, "project_document", project+"/doc-1")] = domain.StoredRow{ID: project + "/doc-1", ETag: "1", Data: api.Raw(api.Object{"filename": "paper.md", "contentType": "text/markdown", "sizeBytes": 10, "content": "Paper text"}), Project: &project, ProjectSet: true}
 			chat := func(id, title string) json.RawMessage {
 				return api.Raw(api.Object{"title": title, "createdAt": "2026-01-02T00:00:00Z", "updatedAt": "2026-01-02T00:01:00Z", "messages": []any{
 					api.Object{"id": id + "-question", "role": "user", "createdAt": "2026-01-02T00:00:00Z", "content": "What changed?"},
@@ -879,31 +888,67 @@ func TestAnAccountsOwnArchiveStoresOnlyWhatItLacks(t *testing.T) {
 				t.Fatalf("export: HTTP %d: %s", w.Code, w.Body.String())
 			}
 			archive := w.Body.Bytes()
-			// The account has lost one of its chats since.
+			// The account has lost one of its chats since, and the second
+			// project's document.
 			delete(rows.rows, rowMapKey(alice, "chat", "chat-2"))
+			delete(rows.rows, rowMapKey(alice, "project_document", "project-2/doc-1"))
 
-			for _, run := range []struct {
+			for i, run := range []struct {
 				name  string
 				chats archives.ImportKindCounts
 			}{{"first", archives.ImportKindCounts{Imported: 1, Skipped: 1}}, {"second", archives.ImportKindCounts{Skipped: 2}}} {
 				result := importOf(t, h, "alice", archive, "tinfoil-"+format+".zip", api.Object{"target": "cloud", "key": keyBase64(key)})
 				status := importEnded(t, h, "alice", result.done)
-				counts := map[string]archives.ImportKindCounts{"project": want.projects, "document": want.projects, "chat": run.chats}
+				counts := map[string]archives.ImportKindCounts{"project": want.projects, "document": want.documents[i], "chat": run.chats}
 				if status.Failed != 0 || !reflect.DeepEqual(status.Counts, counts) {
 					t.Fatalf("the %s import: %+v", run.name, status)
 				}
 				chats, _ := rows.List(context.Background(), alice, key, "chat", "", "", 0)
 				projects, _ := rows.List(context.Background(), alice, key, "project", "", "", 0)
-				documents, _ := rows.List(context.Background(), alice, key, "project_document", "", "", 0)
+				documents, _ := rows.IDs(context.Background(), alice, "project_document", "")
 				byTitle := storedChats(rows, "alice")
 				evidence, notes := byTitle["Evidence"], byTitle["Notes"]
-				if len(chats.Rows) != 2 || len(projects.Rows) != 1 || len(documents.Rows) != 1 ||
+				if len(chats.Rows) != 2 || len(projects.Rows) != 2 || len(documents) != want.held || !slices.Contains(documents, "project-1/doc-1") ||
 					evidence.ID != "chat-1" || evidence.ImportedFrom != nil || notes.ID == "chat-2" || notes.ImportedFrom == nil || notes.ImportedFrom.SourceID != "chat-2" ||
 					domain.ValueOr(notes.ProjectID, "") != want.project {
-					t.Fatalf("after the %s import the account holds %d chats (%+v, %+v), %d projects and %d documents", run.name, len(chats.Rows), evidence, notes, len(projects.Rows), len(documents.Rows))
+					t.Fatalf("after the %s import the account holds %d chats (%+v, %+v), %d projects and documents %v", run.name, len(chats.Rows), evidence, notes, len(projects.Rows), documents)
+				}
+				for _, document := range documents {
+					if document != "project-1/doc-1" && !strings.HasPrefix(document, "project-2/") {
+						t.Fatalf("a document was restored outside its project: %v", documents)
+					}
 				}
 			}
 		})
+	}
+}
+
+// An import that cannot list the chats the account holds fails without
+// storing any, since any of them might copy one it holds.
+func TestAnImportThatCannotListTheAccountsChatsStoresNone(t *testing.T) {
+	h, rows, key := cloudImportHarness(t)
+	stored := &store.Rows{Controlplane: h.store.Controlplane, Buckets: h.store.Buckets, Index: h.search}
+	h.store.Rows, h.search.Rows = stored, stored
+	rows.cp.Mu.Lock()
+	rows.cp.ListStatusFailures["chat"] = 1
+	rows.cp.Mu.Unlock()
+
+	result := importOf(t, h, "alice", fixture(t, "tinfoil-export.zip"), "tinfoil-export.zip", api.Object{"target": "cloud", "key": keyBase64(key)})
+	if result.done == nil || result.done.JobID == nil {
+		t.Fatalf("the import started no cloud job: %+v", result.done)
+	}
+	<-h.archives.Imports.Get("alice").Done()
+	status, w := importStatusOf(t, h, "alice", *result.done.JobID)
+	rows.cp.Mu.Lock()
+	chats := 0
+	for key := range rows.cp.Blobs {
+		if strings.HasPrefix(key, cpstub.Key("chat", "")) {
+			chats++
+		}
+	}
+	rows.cp.Mu.Unlock()
+	if w.Code != 200 || status.Status != "failed" || status.FailureReason != "internal" || status.Imported != 0 || chats != 0 {
+		t.Fatalf("the import ended %s (%s) with %d chats stored: HTTP %d %s", status.Status, status.FailureReason, chats, w.Code, w.Body.String())
 	}
 }
 

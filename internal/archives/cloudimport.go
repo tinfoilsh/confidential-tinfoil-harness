@@ -158,8 +158,8 @@ type cloudImport struct {
 	entries map[string]*zip.File
 	report  ImportReport
 	publish func(ImportReport)
-	// held is the ids of each scope's rows the account held when the import
-	// first asked.
+	// held is the ids of each scope's rows the account held as the import
+	// began storing that scope.
 	held map[string]map[string]bool
 }
 
@@ -202,6 +202,9 @@ func (j *cloudImport) store(ctx context.Context, entities []cloudEntity) error {
 	j.report.Counts = map[string]ImportKindCounts{"project": {}, "document": {}, "chat": {}}
 	projects, failedProjects := map[string]string{}, map[string]bool{}
 	j.phase("projects")
+	if err := j.hold(ctx, entities, "project"); err != nil {
+		return err
+	}
 	for _, entity := range entities {
 		if entity.Kind != "project" {
 			continue
@@ -226,6 +229,9 @@ func (j *cloudImport) store(ctx context.Context, entities []cloudEntity) error {
 		}
 	}
 	j.phase("documents")
+	if err := j.hold(ctx, entities, "document"); err != nil {
+		return err
+	}
 	for _, entity := range entities {
 		if entity.Kind != "document" {
 			continue
@@ -250,6 +256,9 @@ func (j *cloudImport) store(ctx context.Context, entities []cloudEntity) error {
 		}
 	}
 	j.phase("chats")
+	if err := j.hold(ctx, entities, "chat"); err != nil {
+		return err
+	}
 	for _, entity := range entities {
 		if entity.Kind != "chat" {
 			continue
@@ -310,18 +319,13 @@ const (
 // stored after all. A write whose answer was lost is settled by reading the
 // row back.
 func (j *cloudImport) restore(ctx context.Context, entity cloudEntity, projectID string, build func(id string, origin *domain.ImportOrigin) (*domain.StoredRow, []string, error)) (string, restored, error) {
-	scope := entity.Kind
-	if entity.Kind == "document" {
-		scope = "project_document"
-	}
+	scope := rowScope(entity.Kind)
 	// A document's id in an archive names its project's, so the account
 	// holds it only where it holds its project, which is then its project.
-	switch held, err := j.holds(ctx, scope, entity.SourceID); {
-	case err != nil:
-		return "", 0, err
-	case held && entity.Kind == "document":
-		return strings.TrimPrefix(entity.SourceID, projectID+"/"), storedBefore, nil
-	case held:
+	if j.held[scope][entity.SourceID] {
+		if entity.Kind == "document" {
+			return strings.TrimPrefix(entity.SourceID, projectID+"/"), storedBefore, nil
+		}
 		return entity.SourceID, storedBefore, nil
 	}
 	for generation := 0; generation < maxImportGenerations; generation++ {
@@ -386,23 +390,38 @@ func (j *cloudImport) inspect(ctx context.Context, scope, id string, origin *dom
 	return anotherRow, nil
 }
 
-// holds is whether the account held a row of a scope under id when the
-// import first asked about the scope. One that cannot be asked is not
-// known either way, so no row is stored that might copy it.
-func (j *cloudImport) holds(ctx context.Context, scope, id string) (bool, error) {
-	ids, ok := j.held[scope]
-	if !ok {
-		listed, err := j.ar.Store.Rows.IDs(ctx, j.p, scope, "")
-		if err != nil {
-			return false, err
-		}
-		ids = make(map[string]bool, len(listed))
-		for _, listedID := range listed {
-			ids[listedID] = true
-		}
-		j.held[scope] = ids
+// hold lists the ids of the rows the account holds where an archive's
+// entities of a kind are stored, when it has any. An import that cannot
+// learn them ends, rather than store rows that might copy them.
+func (j *cloudImport) hold(ctx context.Context, entities []cloudEntity, kind string) error {
+	if !slices.ContainsFunc(entities, func(entity cloudEntity) bool { return entity.Kind == kind }) {
+		return nil
 	}
-	return ids[id], nil
+	scope := rowScope(kind)
+	listed, err := j.ar.Store.Rows.IDs(ctx, j.p, scope, "")
+	switch {
+	case err == nil:
+	case ctx.Err() != nil:
+		return j.fail(importFailureTimeout, ctx.Err())
+	case api.AsError(err).HTTP == http.StatusUnauthorized:
+		return j.fail(importFailureAuthorization, err)
+	default:
+		return j.fail(importFailureInternal, err)
+	}
+	ids := make(map[string]bool, len(listed))
+	for _, id := range listed {
+		ids[id] = true
+	}
+	j.held[scope] = ids
+	return nil
+}
+
+// rowScope is the scope an entity of a kind is stored in.
+func rowScope(kind string) string {
+	if kind == "document" {
+		return "project_document"
+	}
+	return kind
 }
 
 // conflicted is whether a create met a row already at its id.
