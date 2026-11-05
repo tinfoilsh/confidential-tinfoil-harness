@@ -472,7 +472,7 @@ paths:
   /v1/threads/delete:
     post:
       operationId: delete
-      summary: Delete a stored chat
+      summary: Delete a chat
       tags: [threads]
       requestBody:
         required: true
@@ -485,6 +485,7 @@ paths:
                 key: {type: string, description: "The account's content key, base64. Absent for device chats and signed-out callers."}
                 id: {$ref: "#/components/schemas/Identifier"}
                 revision: {type: string, description: "Set when a chat moved to the device is deleted from the cloud; the delete then needs the revision the move read."}
+                local: {type: boolean, description: "The chat is a device chat its client deleted. Its running reply stops and the harness drops the replies it keeps of it; nothing stored changes."}
       responses:
         "200": {$ref: "#/components/responses/Empty"}
         default: {$ref: "#/components/responses/Error"}
@@ -492,7 +493,7 @@ paths:
   /v1/threads/delete-all:
     post:
       operationId: deleteAll
-      summary: Delete every stored chat
+      summary: Delete every chat
       tags: [threads]
       requestBody:
         required: true
@@ -503,6 +504,7 @@ paths:
               properties:
                 key: {type: string, description: "The account's content key, base64. Absent for device chats and signed-out callers."}
                 projectId: {type: [string, "null"]}
+                local: {type: boolean, description: "The client deleted every device chat. Their running replies stop and the harness drops the replies it keeps of them; nothing stored changes. The count is of the chats it held anything of."}
       responses:
         "200": {$ref: "#/components/responses/Deleted"}
         default: {$ref: "#/components/responses/Error"}

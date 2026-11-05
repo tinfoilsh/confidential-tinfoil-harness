@@ -23,7 +23,6 @@ func (h *harness) apiRoutes() []routeSpec {
 		{"/v1/session", true, false, h.session},
 		{"/v1/changes", false, false, h.changes},
 		{"/v1/threads/list", false, true, decoded(h.listThreads)}, {"/v1/threads/get", false, true, decoded(h.getThread)},
-		{"/v1/threads/delete", false, true, decoded(h.deleteThread)},
 		{"/v1/threads/search", false, true, decoded(h.searchThreads)}, {"/v1/threads/share", false, false, decoded(h.archives.ShareThread)},
 		{"/v1/threads/share/revoke", false, false, decoded(h.archives.RevokeShare)}, {"/v1/threads/share/status", false, false, decoded(h.archives.ShareStatus)},
 		{"/v1/threads/transcript", false, true, decoded(h.engine.ThreadTranscript)},
@@ -34,7 +33,6 @@ func (h *harness) apiRoutes() []routeSpec {
 		{"/v1/projects/delete", false, true, decoded(h.deleteProject)}, {"/v1/projects/documents/delete", false, true, decoded(h.deleteDocument)},
 		{"/v1/shares/open", true, false, decoded(h.archives.OpenShare)},
 		{"/v1/import/status", false, false, decoded(h.archives.ImportStatus)},
-		{"/v1/threads/delete-all", false, true, decoded(h.deleteAllThreads)},
 		{"/v1/projects/delete-all", false, true, h.deleteAllProjects},
 		{"/v1/metadata/favicon", true, false, decoded(h.attachments.Favicon)}, {"/v1/metadata/link", true, false, decoded(h.attachments.LinkPreview)},
 	}
@@ -49,7 +47,8 @@ func (h *harness) changes(ctx context.Context, p *auth.Principal, _ auth.Content
 func (h *harness) threadOperations() map[string]jsonEndpoint {
 	return map[string]jsonEndpoint{"/v1/threads/update": decoded(h.updateThread), "/v1/threads/fork": decoded(h.forkThread),
 		"/v1/threads/messages/delete": decoded(h.deleteMessage), "/v1/threads/messages/update": decoded(h.updateMessage),
-		"/v1/threads/messages/answer": decoded(h.answerQuestions)}
+		"/v1/threads/messages/answer": decoded(h.answerQuestions),
+		"/v1/threads/delete":          decoded(h.deleteThread), "/v1/threads/delete-all": decoded(h.deleteAllThreads)}
 }
 
 // runOperations act on a live run or a turn queued behind one.
@@ -255,6 +254,12 @@ func deviceReply(row *domain.ThreadRow) any {
 }
 
 func (h *harness) deleteThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *api.DeleteRequest) (any, error) {
+	// A device chat is deleted by its client; the harness drops what it
+	// runs and keeps of it.
+	if in.Local {
+		h.engine.StopDeviceThread(p, in.ID)
+		return struct{}{}, nil
+	}
 	var err error
 	if in.Revision != "" {
 		err = h.engine.FinishTransfer(ctx, p, key, in)
@@ -394,6 +399,13 @@ func (h *harness) changeMessages(ctx context.Context, p *auth.Principal, key aut
 	return domain.Window(row, "", domain.MessageWindow), nil
 }
 func (h *harness) deleteAllThreads(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *deleteAllRequest) (any, error) {
+	if in.Local {
+		// Device chats are in no project.
+		if in.ProjectID != nil {
+			return nil, api.Err(400, "BAD_REQUEST", "Device chats are in no project")
+		}
+		return deletedCount{h.engine.StopDeviceThreads(p)}, nil
+	}
 	// Every id is listed before any is deleted, so a shrinking list cannot
 	// skip a page, and rows this key cannot open are deleted too.
 	ids, err := h.store.ChatIDs(ctx, p, domain.ValueOr(in.ProjectID, ""))
