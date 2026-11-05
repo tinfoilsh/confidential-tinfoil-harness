@@ -107,15 +107,25 @@ func (s *Store) EachRowOrUnreadable(ctx context.Context, p *auth.Principal, key 
 }
 
 // EachPage visits every page of a scope's rows, or of a project's chats,
-// with the ids of the rows on it the key cannot open.
+// with the ids of the rows on it the key cannot open. Each row is visited
+// once: reading a chat written before the control plane kept its activity
+// records it, which files the chat behind the pages already listed, and
+// the next pages list it again.
 func (s *Store) EachPage(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, project string, visit func(rows []domain.StoredRow, unreadable []string) error) error {
-	cursor := ""
+	cursor, seen := "", map[string]bool{}
+	again := func(id string) bool {
+		listed := seen[id]
+		seen[id] = true
+		return listed
+	}
 	for {
 		page, err := s.Rows.List(ctx, p, key, scope, cursor, project, 100)
 		if err != nil {
 			return err
 		}
-		if err := visit(page.Rows, slices.Sorted(maps.Keys(page.Unreadable))); err != nil {
+		rows := slices.DeleteFunc(page.Rows, func(row domain.StoredRow) bool { return again(row.ID) })
+		unreadable := slices.DeleteFunc(slices.Sorted(maps.Keys(page.Unreadable)), again)
+		if err := visit(rows, unreadable); err != nil {
 			return err
 		}
 		if page.Next == "" {

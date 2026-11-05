@@ -34,6 +34,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane/cpstub"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/seal"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
 
@@ -392,7 +393,8 @@ func TestNativeBackupRoundTrips(t *testing.T) {
 }
 
 // A backup holds the largest image uploads take, and its writer refuses
-// what no restore would take, an image or a whole backup that is larger.
+// what no restore would take: an image or a whole backup that is larger,
+// or an entry it already holds.
 func TestBackupsHoldWhatRestoresTake(t *testing.T) {
 	h, _, _ := testChatHarness(t, nil)
 	largest := append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, attach.ImageUploads.MaxBytes-8)...)
@@ -418,6 +420,13 @@ func TestBackupsHoldWhatRestoresTake(t *testing.T) {
 	}
 	if err := b.Add("images", archives.BackupImagePath("past", ".bin"), largest); !tooLarge(err) {
 		t.Fatalf("a backup expanded past what a restore takes: %v", err)
+	}
+	twice, entry := archives.NewBackupWriter(io.Discard), archives.BackupEntityPath("cloud_chats", "chat-1")
+	if err := twice.Add("cloud_chats", entry, []byte("{}")); err != nil {
+		t.Fatal(err)
+	}
+	if err := twice.Add("cloud_chats", entry, []byte("{}")); err == nil {
+		t.Fatal("a backup held an entry twice")
 	}
 }
 
@@ -918,6 +927,59 @@ func TestAnAccountsOwnArchiveStoresOnlyWhatItLacks(t *testing.T) {
 						t.Fatalf("a document was restored outside its project: %v", documents)
 					}
 				}
+			}
+		})
+	}
+}
+
+// An export of more chats than a page holds each once, though reading a
+// chat written before the control plane kept its activity files it behind
+// the pages already listed, which the next pages list again. Its backup
+// restores.
+func TestAnExportOfManyChatsHoldsEachOnce(t *testing.T) {
+	// One more than the chats a page of an export holds.
+	const chats = 101
+	for _, format := range []string{"native", "conversations"} {
+		t.Run(format, func(t *testing.T) {
+			h, rows, key := cloudImportHarness(t)
+			stored := &store.Rows{Controlplane: h.store.Controlplane, Buckets: h.store.Buckets, Index: h.search}
+			h.store.Rows, h.search.Rows = stored, stored
+			kid, written := keyIDOf(key), time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+			for i := range chats {
+				id := fmt.Sprintf("chat-%03d", i)
+				envelope, err := seal.Encrypt(key[:], api.Raw(searchTestThread(id, "hello")), seal.AAD{KeyIDHex: kid, Scope: "chat", ID: id, ClerkUserID: "alice"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				rows.cp.SetBlob("chat", id, cpstub.Blob{ETag: 1, KeyID: kid, Body: envelope, UpdatedAt: written.Add(time.Duration(i) * time.Second)})
+			}
+			w := archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": format, "key": keyBase64(key)}))
+			if w.Code != 200 {
+				t.Fatalf("export: HTTP %d: %s", w.Code, w.Body.String())
+			}
+			entries, _ := unzipped(t, w.Body.Bytes())
+			if format == "conversations" {
+				var conversations []struct {
+					UUID string `json:"uuid"`
+				}
+				json.Unmarshal(entries["conversations.json"], &conversations)
+				ids := map[string]bool{}
+				for _, c := range conversations {
+					ids[c.UUID] = true
+				}
+				if len(conversations) != chats || len(ids) != chats {
+					t.Fatalf("the export holds %d conversations of %d chats", len(conversations), len(ids))
+				}
+				return
+			}
+			var manifest archives.BackupManifest
+			json.Unmarshal(entries[archives.ManifestPath], &manifest)
+			if manifest.Counts.CloudChats != chats {
+				t.Fatalf("the backup holds %d chats", manifest.Counts.CloudChats)
+			}
+			restored := importOf(t, h, "alice", w.Body.Bytes(), "tinfoil-backup.zip", api.Object{"target": "cloud", "key": keyBase64(key)})
+			if status := importEnded(t, h, "alice", restored.done); status.Failed != 0 || status.Counts["chat"] != (archives.ImportKindCounts{Skipped: chats}) {
+				t.Fatalf("the backup restored as %+v", status)
 			}
 		})
 	}

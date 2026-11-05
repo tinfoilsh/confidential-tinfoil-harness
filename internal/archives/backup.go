@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"path"
 	"regexp"
@@ -234,19 +235,26 @@ type BackupWriter struct {
 	zip      *zip.Writer
 	manifest BackupManifest
 	expanded uint64
+	written  map[string]bool
 }
 
 func NewBackupWriter(w io.Writer) *BackupWriter {
-	return &BackupWriter{zip: zip.NewWriter(w), manifest: BackupManifest{Format: NativeBackupFormat, Version: nativeBackupVersion, Notices: backupNotices{true, true}, Files: []backupFile{}, Omissions: []BackupOmission{}}}
+	return &BackupWriter{zip: zip.NewWriter(w), manifest: BackupManifest{Format: NativeBackupFormat, Version: nativeBackupVersion, Notices: backupNotices{true, true}, Files: []backupFile{}, Omissions: []BackupOmission{}}, written: map[string]bool{}}
 }
 
+// Add writes an entry, refusing one the backup already holds, as a restore
+// refuses a backup that holds an entry twice.
 func (b *BackupWriter) Add(kind, name string, data []byte) error {
 	if len(b.manifest.Files)+1 >= maxArchiveEntries {
 		return api.Err(413, "ARCHIVE_TOO_LARGE", "The backup holds too many items")
 	}
+	if b.written[name] {
+		return errors.New("the backup already holds an entry it was given again")
+	}
 	if err := b.write(name, data, backupEntryLimit(name), kind != "images" || path.Ext(name) == ".json"); err != nil {
 		return err
 	}
+	b.written[name] = true
 	b.manifest.Files = append(b.manifest.Files, backupFile{Path: name, Kind: kind, SHA256: api.HashHex(data), SizeBytes: int64(len(data))})
 	return nil
 }
