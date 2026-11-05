@@ -849,6 +849,64 @@ func TestDeletedChatsAreImportedAgain(t *testing.T) {
 	imported("second")
 }
 
+// An account's own backup or export imported back into it stores only what
+// the account no longer holds and skips what it still does, which a copy
+// would duplicate, however often it is imported.
+func TestAnAccountsOwnArchiveStoresOnlyWhatItLacks(t *testing.T) {
+	// A backup holds the account's projects with their documents, and files
+	// a chat it restores under the project it held; the conversations
+	// export holds only the chats.
+	for format, want := range map[string]struct {
+		projects archives.ImportKindCounts
+		project  string
+	}{"native": {archives.ImportKindCounts{Skipped: 1}, "project-1"}, "conversations": {}} {
+		t.Run(format, func(t *testing.T) {
+			h, rows, key := cloudImportHarness(t)
+			alice := &auth.Principal{ID: "alice"}
+			project := "project-1"
+			rows.rows[rowMapKey(alice, "project", project)] = domain.StoredRow{ID: project, ETag: "1", Data: api.Raw(api.Object{"name": "Research", "createdAt": "2026-01-01T00:00:00Z"})}
+			rows.rows[rowMapKey(alice, "project_document", project+"/doc-1")] = domain.StoredRow{ID: project + "/doc-1", ETag: "1", Data: api.Raw(api.Object{"filename": "paper.md", "contentType": "text/markdown", "sizeBytes": 10, "content": "Paper text"}), Project: &project, ProjectSet: true}
+			chat := func(id, title string) json.RawMessage {
+				return api.Raw(api.Object{"title": title, "createdAt": "2026-01-02T00:00:00Z", "updatedAt": "2026-01-02T00:01:00Z", "messages": []any{
+					api.Object{"id": id + "-question", "role": "user", "createdAt": "2026-01-02T00:00:00Z", "content": "What changed?"},
+					api.Object{"id": id + "-answer", "role": "assistant", "createdAt": "2026-01-02T00:01:00Z", "content": "Nothing yet."},
+				}})
+			}
+			rows.rows[rowMapKey(alice, "chat", "chat-1")] = domain.StoredRow{ID: "chat-1", ETag: "1", Data: chat("chat-1", "Evidence"), Project: &project, ProjectSet: true}
+			rows.rows[rowMapKey(alice, "chat", "chat-2")] = domain.StoredRow{ID: "chat-2", ETag: "1", Data: chat("chat-2", "Notes"), Project: &project, ProjectSet: true}
+			w := archiveRoute(h, "/v1/export", "alice", optionsPart(api.Object{"format": format, "key": keyBase64(key)}))
+			if w.Code != 200 {
+				t.Fatalf("export: HTTP %d: %s", w.Code, w.Body.String())
+			}
+			archive := w.Body.Bytes()
+			// The account has lost one of its chats since.
+			delete(rows.rows, rowMapKey(alice, "chat", "chat-2"))
+
+			for _, run := range []struct {
+				name  string
+				chats archives.ImportKindCounts
+			}{{"first", archives.ImportKindCounts{Imported: 1, Skipped: 1}}, {"second", archives.ImportKindCounts{Skipped: 2}}} {
+				result := importOf(t, h, "alice", archive, "tinfoil-"+format+".zip", api.Object{"target": "cloud", "key": keyBase64(key)})
+				status := importEnded(t, h, "alice", result.done)
+				counts := map[string]archives.ImportKindCounts{"project": want.projects, "document": want.projects, "chat": run.chats}
+				if status.Failed != 0 || !reflect.DeepEqual(status.Counts, counts) {
+					t.Fatalf("the %s import: %+v", run.name, status)
+				}
+				chats, _ := rows.List(context.Background(), alice, key, "chat", "", "", 0)
+				projects, _ := rows.List(context.Background(), alice, key, "project", "", "", 0)
+				documents, _ := rows.List(context.Background(), alice, key, "project_document", "", "", 0)
+				byTitle := storedChats(rows, "alice")
+				evidence, notes := byTitle["Evidence"], byTitle["Notes"]
+				if len(chats.Rows) != 2 || len(projects.Rows) != 1 || len(documents.Rows) != 1 ||
+					evidence.ID != "chat-1" || evidence.ImportedFrom != nil || notes.ID == "chat-2" || notes.ImportedFrom == nil || notes.ImportedFrom.SourceID != "chat-2" ||
+					domain.ValueOr(notes.ProjectID, "") != want.project {
+					t.Fatalf("after the %s import the account holds %d chats (%+v, %+v), %d projects and %d documents", run.name, len(chats.Rows), evidence, notes, len(projects.Rows), len(documents.Rows))
+				}
+			}
+		})
+	}
+}
+
 // The conversations export is the one the web app wrote for the same chats.
 func TestConversationsExportMatchesTheWebApp(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
