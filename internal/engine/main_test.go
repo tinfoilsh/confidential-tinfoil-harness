@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http/httptest"
 	"slices"
 	"strconv"
@@ -17,20 +18,26 @@ import (
 
 func TestARunPastItsLogBudgetGoesOnFromACheckpoint(t *testing.T) {
 	rn := NewLog("00")
-	rn.Frames.budget = 4 << 10
+	rn.Frames.budget = 512 << 10
 	// The request that started the run is draining it.
 	rn.Frames.Attach()
 	stopped := false
 	rn.stop = func() { stopped = true }
-	question := "Search, then write at length"
-	shown := domain.ThreadWindow{Messages: []domain.MessageView{{ID: "question", Role: "user", Content: &question}}}
-	assembler := domain.NewMessageAssembler()
+	// The chat before the question fills half of a snapshot, and the reply
+	// outgrows a whole one.
+	earlier, question := strings.Repeat("e", maxSnapshotBytes/2), "Search, then write at length"
+	shown := []domain.MessageView{{ID: "earlier", Role: "user", Content: &earlier}, {ID: "question", Role: "user", Content: &question}}
 	out := &Stream{Run: rn}
 	out.emit(domain.RunStarted{ThreadID: "thread", RunID: rn.ID})
-	out.emit(fittedSnapshot(shown.Messages, false))
+	out.emit(fittedSnapshot(shown, false))
 	out.emit(domain.StateSnapshotEvent{})
-	out.Observe, out.checkpoint = assembler.Apply, checkpointOf(shown, assembler)
+	out.folding = true
+	// Two calls' arguments stream in turn, as parallel calls' do.
 	out.callStart("call", "search", "reply")
+	out.callStart("other", "search", "reply")
+	for _, piece := range [][2]string{{"call", `{"q":`}, {"other", `{"q":`}, {"call", `"cats"}`}, {"other", `"dogs"}`}} {
+		out.callArgs(piece[0], piece[1])
+	}
 	out.activity(ToolCall{ID: "call", Name: "search"})
 	// A tool's progress reports are folded into its activity, not kept.
 	for i := range 100 {
@@ -38,9 +45,17 @@ func TestARunPastItsLogBudgetGoesOnFromACheckpoint(t *testing.T) {
 	}
 	out.progress("call", "Read 3 pages", 1)
 	out.emit(domain.ToolCallResult{MessageID: "result", ToolCallID: "call", Role: "tool", Content: json.RawMessage(`"pages"`)})
+	// The reply reasons for ten seconds, which a client times by when its
+	// reasoning began and when it last grew.
+	thought, thinking := strings.Builder{}, func(second int) string { return fmt.Sprintf("2026-01-01T00:00:%02dZ", second) }
+	for second := range 11 {
+		piece := fmt.Sprintf("step %d. ", second)
+		thought.WriteString(piece)
+		out.frame(domain.ReasoningChunk{MessageID: "reply" + domain.ReasoningSuffix, Delta: piece}, thinking(second))
+	}
 	var text strings.Builder
-	for i := 0; text.Len() <= 3*rn.Frames.budget; i++ {
-		chunk := fmt.Sprintf("[%d]%s", i, strings.Repeat("x", 100))
+	for i := 0; text.Len() <= maxSnapshotBytes; i++ {
+		chunk := fmt.Sprintf("[%d]%s", i, strings.Repeat("x", 64<<10))
 		text.WriteString(chunk)
 		out.text("reply", chunk)
 		if rn.Frames.bytes > rn.Frames.budget {
@@ -48,7 +63,7 @@ func TestARunPastItsLogBudgetGoesOnFromACheckpoint(t *testing.T) {
 		}
 	}
 	// As a finishing run does, the run stops checkpointing before its end.
-	out.Observe, out.checkpoint = nil, nil
+	out.folding = false
 	out.emit(domain.RunFinished{ThreadID: "thread", RunID: rn.ID})
 	if stopped {
 		t.Fatal("a run past its log budget was stopped")
@@ -61,7 +76,8 @@ func TestARunPastItsLogBudgetGoesOnFromACheckpoint(t *testing.T) {
 
 	// A client following from the start, or from any cursor before the
 	// checkpoint, is sent it, then the frames after it, and ends with the
-	// whole reply once.
+	// chat the run showed and the whole reply once, in frames no larger
+	// than a snapshot.
 	for _, after := range []string{"", "3", strconv.Itoa(base - 2)} {
 		from, err := ResumeFrom(rn.Frames, after)
 		if err != nil {
@@ -70,28 +86,53 @@ func TestARunPastItsLogBudgetGoesOnFromACheckpoint(t *testing.T) {
 		w := httptest.NewRecorder()
 		Follow(w, httptest.NewRequest("POST", "/v1/threads/follow", nil), rn, from)
 		frames := followed(t, w)
-		types, reply := []string{}, ""
+		// The checkpoint's last frame has the cursor before the first frame
+		// after it, and its others none.
+		last := slices.IndexFunc(frames, func(f followedFrame) bool { return f.ID != nil })
+		types, reply, merged, chunks, args := []string{}, "", 0, 0, map[string]string{}
+		reasoning, times := "", []string{}
 		for i, f := range frames {
 			types = append(types, f.Type)
-			// The checkpoint's last frame has the cursor before the first
-			// frame after it, and its others none.
-			want := base + i - 4
-			if i < 3 && f.ID != nil || i >= 3 && (f.ID == nil || *f.ID != want) {
+			if want := base - 1 + i - last; i < last && f.ID != nil || i >= last && (f.ID == nil || *f.ID != want) {
 				t.Fatalf("after %q, frame %d (%s) has cursor %v, not %d", after, i, f.Type, f.ID, want)
 			}
-			if f.Type == "ACTIVITY_SNAPSHOT" && (f.Content.Progress != 1 || !slices.Equal(f.Content.Output, []string{"Read 3 pages"})) {
-				t.Fatalf("after %q, the checkpoint's activity is %+v", after, f.Content)
+			if f.Size > maxSnapshotBytes {
+				t.Fatalf("after %q, frame %d (%s) holds %d bytes", after, i, f.Type, f.Size)
 			}
-			if f.Type == "MESSAGES_SNAPSHOT" {
-				if len(f.Messages) != 2 || f.Messages[0].ID != "question" || f.Messages[1].ID != "reply" || f.Messages[1].Timeline[0].ToolCallID != "call" || string(f.Messages[1].Timeline[0].Result) != `"pages"` {
-					t.Fatalf("after %q, the checkpoint's snapshot is %+v", after, f.Messages)
+			if a := f.activity(); f.Type == "ACTIVITY_SNAPSHOT" && (a.Progress != 1 || !slices.Equal(a.Output, []string{"Read 3 pages"})) {
+				t.Fatalf("after %q, the checkpoint's activity is %+v", after, a)
+			}
+			if f.Type == "MESSAGES_SNAPSHOT" && (len(f.Messages) != 2 || f.Messages[0].ID != "earlier" || f.Messages[1].ID != "question") {
+				t.Fatalf("after %q, the checkpoint's snapshot is %+v", after, f.Messages)
+			}
+			if f.Delta != "" && i <= last && f.Size > mergedFrameBytes {
+				t.Fatalf("after %q, the checkpoint merged %d bytes of %s into one frame", after, f.Size, f.Type)
+			}
+			switch f.Type {
+			case "TOOL_CALL_ARGS":
+				args[f.CallID] += f.Delta
+			case "REASONING_MESSAGE_CHUNK":
+				reasoning, times = reasoning+f.Delta, append(times, f.Timestamp)
+			case "TEXT_MESSAGE_CHUNK":
+				reply += f.Delta
+				if i <= last {
+					merged, chunks = merged+1, chunks+strings.Count(f.Delta, "[")
 				}
-				reply = f.Messages[1].Timeline[1].Content
 			}
-			reply += f.Delta
 		}
-		if !slices.Equal(types[:4], []string{"RUN_STARTED", "MESSAGES_SNAPSHOT", "ACTIVITY_SNAPSHOT", "STATE_SNAPSHOT"}) || types[4] != "TEXT_MESSAGE_CHUNK" {
-			t.Fatalf("after %q, the checkpoint and the frame after it are %v", after, types[:5])
+		if want := []string{"RUN_STARTED", "MESSAGES_SNAPSHOT", "STATE_SNAPSHOT", "TOOL_CALL_START", "TOOL_CALL_START", "TOOL_CALL_ARGS", "TOOL_CALL_ARGS", "TOOL_CALL_ARGS", "TOOL_CALL_ARGS",
+			"ACTIVITY_SNAPSHOT", "TOOL_CALL_RESULT", "REASONING_MESSAGE_CHUNK", "REASONING_MESSAGE_CHUNK", "TEXT_MESSAGE_CHUNK"}; !slices.Equal(types[:len(want)], want) {
+			t.Fatalf("after %q, the checkpoint starts %v", after, types[:len(want)])
+		}
+		if !maps.Equal(args, map[string]string{"call": `{"q":"cats"}`, "other": `{"q":"dogs"}`}) {
+			t.Fatalf("after %q, the calls' arguments are %v", after, args)
+		}
+		if reasoning != thought.String() || times[0] != thinking(0) || times[len(times)-1] != thinking(10) {
+			t.Fatalf("after %q, the reasoning is %q at %v", after, reasoning, times)
+		}
+		// The text the checkpoint holds is merged from the run's chunks.
+		if merged == 0 || merged*4 > chunks {
+			t.Fatalf("after %q, the checkpoint holds %d chunks in %d frames", after, chunks, merged)
 		}
 		if types[len(types)-1] != "RUN_FINISHED" || reply != text.String() {
 			t.Fatalf("after %q, a client ended with %d characters of %d, and %v", after, len(reply), text.Len(), types[len(types)-1])
@@ -110,28 +151,28 @@ func TestARunPastItsLogBudgetGoesOnFromACheckpoint(t *testing.T) {
 	}
 }
 
-// A snapshot too large for a client's event leaves out its oldest messages.
-func TestASnapshotFitsInAnEventAClientReads(t *testing.T) {
-	big := strings.Repeat("x", maxEventBytes/3)
+// A snapshot too large for its budget leaves out its oldest messages.
+func TestASnapshotFitsItsBudget(t *testing.T) {
+	big := strings.Repeat("x", maxSnapshotBytes/3)
 	messages := []domain.MessageView{{ID: "a", Role: "user", Content: &big}, {ID: "b", Role: "user", Content: &big}, {ID: "c", Role: "user", Content: &big}}
 	snapshot := fittedSnapshot(messages, false)
 	encoded, err := domain.EncodeEvent(snapshot, api.Timestamp())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(encoded) > maxEventBytes || len(snapshot.Messages) != 2 || snapshot.Messages[0].ID != "b" || !snapshot.HasOlder {
+	if len(encoded) > maxSnapshotBytes || len(snapshot.Messages) != 2 || snapshot.Messages[0].ID != "b" || !snapshot.HasOlder {
 		t.Fatalf("a snapshot of %d bytes holds %d messages, has older %v", len(encoded), len(snapshot.Messages), snapshot.HasOlder)
 	}
 	// A latest message carrying documents too large alone is sent with them,
 	// but not their text, and the chat's own message keeps it.
-	document := strings.Repeat("x", maxEventBytes)
+	document := strings.Repeat("x", maxSnapshotBytes)
 	question := "Summarize this"
 	messages = []domain.MessageView{{ID: "q", Role: "user", Content: &question, Attachments: []domain.Attachment{{ID: "doc", Kind: "document", FileName: "report.md", TextContent: document}}}}
 	snapshot = fittedSnapshot(messages, false)
 	if encoded, err = domain.EncodeEvent(snapshot, api.Timestamp()); err != nil {
 		t.Fatal(err)
 	}
-	if len(encoded) > maxEventBytes || len(snapshot.Messages) != 1 || snapshot.Messages[0].Attachments[0].ID != "doc" || snapshot.Messages[0].Attachments[0].TextContent != "" || messages[0].Attachments[0].TextContent != document {
+	if len(encoded) > maxSnapshotBytes || len(snapshot.Messages) != 1 || snapshot.Messages[0].Attachments[0].ID != "doc" || snapshot.Messages[0].Attachments[0].TextContent != "" || messages[0].Attachments[0].TextContent != document {
 		t.Fatalf("a snapshot of %d bytes sent %+v of the document", len(encoded), snapshot.Messages[0].Attachments[0].FileName)
 	}
 }
@@ -152,21 +193,25 @@ func TestAPanickingToolCallDoesNotTakeTheRun(t *testing.T) {
 }
 
 type followedFrame struct {
-	ID      *int
-	Type    string `json:"type"`
-	Delta   string `json:"delta"`
-	Content struct {
-		Progress float64  `json:"progress"`
-		Output   []string `json:"output"`
-	} `json:"content"`
-	Messages []struct {
-		ID       string `json:"id"`
-		Timeline []struct {
-			ToolCallID string          `json:"toolCallId"`
-			Result     json.RawMessage `json:"result"`
-			Content    string          `json:"content"`
-		} `json:"timeline"`
+	ID        *int
+	Size      int             // the bytes of its data
+	Type      string          `json:"type"`
+	Timestamp string          `json:"timestamp"`
+	Delta     string          `json:"delta"`
+	CallID    string          `json:"toolCallId"`
+	Content   json.RawMessage `json:"content"`
+	Messages  []struct {
+		ID string `json:"id"`
 	} `json:"messages"`
+}
+
+// activity is the tool activity an ACTIVITY_SNAPSHOT frame holds.
+func (f followedFrame) activity() (a struct {
+	Progress float64  `json:"progress"`
+	Output   []string `json:"output"`
+}) {
+	json.Unmarshal(f.Content, &a)
+	return a
 }
 
 // followed is the frames a streamed response holds, with their cursors.
@@ -189,6 +234,7 @@ func followed(t *testing.T, w *httptest.ResponseRecorder) []followedFrame {
 				if err := json.Unmarshal([]byte(data), &frame); err != nil {
 					t.Fatal(err)
 				}
+				frame.Size = len(data)
 			}
 		}
 		frames = append(frames, frame)

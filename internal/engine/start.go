@@ -256,14 +256,17 @@ func (eng *Engine) launch(ctx context.Context, r *Run) error {
 		eng.Live.mu.Unlock()
 		return errShutdown
 	}
+	snapshot := fittedSnapshot(shown.Messages, shown.HasOlder)
 	r.row, r.running = row, true
+	if len(snapshot.Messages) > 0 {
+		r.firstShown = snapshot.Messages[0].ID
+	}
 	// Framed under the lock, so no queue change reaches the run before them.
 	r.out.emit(domain.RunStarted{ThreadID: s.ID, RunID: r.Log.ID, Instance: InstanceID(), MessageID: r.out.replyID})
-	r.out.emit(fittedSnapshot(shown.Messages, shown.HasOlder))
+	r.out.emit(snapshot)
 	r.out.emit(domain.StateSnapshotEvent{Snapshot: domain.StateSnapshot{Thread: shown.ThreadSummary, Queue: queueItems(s), RateLimit: r.credential.Limit}})
 	r.out.mu.Lock()
-	r.out.Observe = r.assembler.Apply
-	r.out.checkpoint = checkpointOf(shown, r.assembler)
+	r.out.Observe, r.out.folding = r.assembler.Apply, true
 	r.out.mu.Unlock()
 	titlePrincipal := *r.Principal
 	eng.Live.working.Add(1)

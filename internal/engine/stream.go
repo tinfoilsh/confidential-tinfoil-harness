@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,10 +29,9 @@ type Stream struct {
 	thoughts *thoughtSummaries // nil unless a summarizer summarizes the run's reasoning
 	sources  []citationSource  // pages the run's tools showed the model
 
-	// checkpoint encodes the chat as the reply has left it so far, which a
-	// log past its budget folds its frames into; nil before the reply starts
-	// and once it ends.
-	checkpoint func() []byte
+	// folding is set while the reply streams, when a log past its budget is
+	// folded into a checkpoint; not before the reply starts or once it ends.
+	folding bool
 	// activities is each tool's activity as its events have left it, which
 	// a checkpoint sends in their place.
 	activities []*domain.ActivitySnapshot
@@ -72,16 +72,36 @@ func (s *Stream) track(e domain.Event) {
 	}
 }
 
-// folded is a checkpoint's snapshots: the chat as the reply has left it,
-// then each tool's activity.
-func (s *Stream) folded(messages []byte) [][]byte {
-	snapshots := [][]byte{messages}
-	for _, a := range s.activities {
-		if encoded, err := domain.EncodeEvent(*a, api.Timestamp()); err == nil {
-			snapshots = append(snapshots, encoded)
-		}
+// activityFrame is the frame of a tool's activity as its events have left
+// it, or nil for one the stream does not follow.
+func (s *Stream) activityFrame(id string) []byte {
+	i := slices.IndexFunc(s.activities, func(a *domain.ActivitySnapshot) bool { return a.MessageID == id })
+	if i < 0 {
+		return nil
 	}
-	return snapshots
+	encoded, err := domain.EncodeEvent(*s.activities[i], api.Timestamp())
+	if err != nil {
+		return nil
+	}
+	return encoded
+}
+
+// merged is one frame for a run of frames of domain.TextDelta events to the
+// same target: the first's members, with each frame's delta in turn.
+func merged(deltas [][]byte) []byte {
+	var first map[string]json.RawMessage
+	json.Unmarshal(deltas[0], &first)
+	var text strings.Builder
+	for _, frame := range deltas {
+		var d struct {
+			Delta string `json:"delta"`
+		}
+		json.Unmarshal(frame, &d)
+		text.WriteString(d.Delta)
+	}
+	first["delta"], _ = json.Marshal(text.String())
+	encoded, _ := json.Marshal(first)
+	return encoded
 }
 
 func (s *Stream) cite(sources []citationSource) {
@@ -156,7 +176,8 @@ func (s *Stream) frame(e domain.Event, at string) {
 	if err != nil {
 		return
 	}
-	full := s.Run.Frames.grow(encoded, kindOf(e))
+	kind, key := kindOf(e)
+	full := s.Run.Frames.grow(encoded, kind, key)
 	s.track(e)
 	if s.Observe != nil {
 		s.Observe(e, at)
@@ -164,38 +185,40 @@ func (s *Stream) frame(e domain.Event, at string) {
 			s.thoughts.follow(e)
 		}
 	}
-	// The snapshot is taken after the assembler applied this frame, under
-	// the lock that orders frames, so it stands for every frame folded.
-	if full && s.checkpoint != nil {
-		if snapshot := s.checkpoint(); snapshot != nil {
-			s.Run.Frames.fold(s.folded(snapshot))
-		}
+	// The activities are tracked up to this frame, under the lock that
+	// orders frames, so they stand for every frame folded.
+	if full && s.folding {
+		s.Run.Frames.fold(merged, s.activityFrame)
 	}
 }
 
-// kindOf is what a checkpoint does with an event. Reply content and the
-// tools' activity are in the checkpoint's snapshots; the run's state,
-// reasoning summaries and compaction are few and small, and a client applies
-// them in order after the snapshots.
-func kindOf(e domain.Event) frameKind {
-	switch e.(type) {
-	case domain.MessagesSnapshot:
-		return frameSnapshot
-	case domain.TextChunk, domain.ReasoningChunk, domain.ToolCallStart, domain.ToolCallArgs, domain.ToolCallEnd, domain.ToolCallResult, domain.ActivitySnapshot, domain.ActivityDelta:
-		return frameFolded
+// kindOf is what a checkpoint does with an event, and what the event extends
+// or reports on. A checkpoint merges text deltas and keeps each tool's
+// activity as it stands; every other event, the run's snapshots and the
+// calls and their results among them, it sends as it was.
+func kindOf(e domain.Event) (frameKind, string) {
+	switch e := e.(type) {
+	case domain.TextDelta:
+		return frameDelta, fmt.Sprintf("%T:%s", e, e.Target())
+	case domain.ActivitySnapshot:
+		return frameActivity, e.MessageID
+	case domain.ActivityDelta:
+		return frameActivity, e.MessageID
 	}
-	return frameKept
+	return frameKept, ""
 }
 
 const (
-	// maxEventBytes is the largest event a client reads.
-	maxEventBytes = 8 << 20
+	// maxSnapshotBytes bounds a MESSAGES_SNAPSHOT, so a run starts by sending
+	// no more of a long chat than this; a client loads older messages as it
+	// shows them.
+	maxSnapshotBytes = 8 << 20
 	// snapshotEnvelope is room for what a snapshot's event holds besides
 	// its messages.
 	snapshotEnvelope = 4 << 10
 )
 
-// fittedSnapshot is a snapshot of messages that fits in an event a client reads:
+// fittedSnapshot is a snapshot of messages that fits in maxSnapshotBytes:
 // the oldest that do not fit are left out, as older messages, and the latest
 // is always sent. A latest message too large alone, as one carrying large
 // documents, is sent with its attachments but not their text, which clients
@@ -208,12 +231,12 @@ func fittedSnapshot(messages []domain.MessageView, hasOlder bool) domain.Message
 		total += sizes[i]
 	}
 	start := 0
-	for start < len(messages)-1 && total > maxEventBytes-snapshotEnvelope {
+	for start < len(messages)-1 && total > maxSnapshotBytes-snapshotEnvelope {
 		total -= sizes[start]
 		start++
 	}
 	fitted := messages[start:]
-	if len(fitted) == 1 && total > maxEventBytes-snapshotEnvelope {
+	if len(fitted) == 1 && total > maxSnapshotBytes-snapshotEnvelope {
 		latest := fitted[0]
 		latest.Attachments = slices.Clone(latest.Attachments)
 		for i := range latest.Attachments {
@@ -222,27 +245,6 @@ func fittedSnapshot(messages []domain.MessageView, hasOlder bool) domain.Message
 		fitted = []domain.MessageView{latest}
 	}
 	return domain.MessagesSnapshot{Messages: fitted, HasOlder: hasOlder || start > 0}
-}
-
-// checkpointOf encodes the chat a run started from with the reply the
-// assembler has built so far, replacing the reply a continuation extends.
-func checkpointOf(shown domain.ThreadWindow, a *domain.MessageAssembler) func() []byte {
-	return func() []byte {
-		messages := slices.Clone(shown.Messages)
-		for _, m := range a.Messages() {
-			view := domain.ViewMessage(&m)
-			if i := slices.IndexFunc(messages, func(v domain.MessageView) bool { return v.ID == m.ID }); i >= 0 {
-				messages[i] = view
-			} else {
-				messages = append(messages, view)
-			}
-		}
-		encoded, err := domain.EncodeEvent(fittedSnapshot(messages, shown.HasOlder), api.Timestamp())
-		if err != nil {
-			return nil
-		}
-		return encoded
-	}
 }
 
 // Follow streams a run's log from the frame from, and tails it until the

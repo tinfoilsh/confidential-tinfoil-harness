@@ -172,6 +172,20 @@ func (CompactionEnd) eventType() string      { return "COMPACTION_END" }
 func (RunFinished) eventType() string        { return "RUN_FINISHED" }
 func (RunError) eventType() string           { return "RUN_ERROR" }
 
+// TextDelta is an event that extends the text that earlier events of its
+// type with the same target began: a message's content or reasoning, or a
+// call's arguments. A client appends its delta, so two in turn apply as one
+// whose delta is both, which is how a run's checkpoint sends them; the
+// protocol's description of checkpoints names each such event.
+type TextDelta interface {
+	Event
+	Target() string
+}
+
+func (c TextChunk) Target() string      { return c.MessageID }
+func (c ReasoningChunk) Target() string { return c.MessageID }
+func (a ToolCallArgs) Target() string   { return a.ToolCallID }
+
 // EncodeEvent is an event's frame: its type, the time it was emitted unless
 // none is given, then its own members.
 func EncodeEvent(e Event, at string) ([]byte, error) {

@@ -142,6 +142,7 @@ type Run struct {
 	Finished                 chan struct{}
 	titleDone                chan struct{}
 	row                      *domain.ThreadRow // the thread as the run started and committed it
+	firstShown               string            // the first message of the run's MESSAGES_SNAPSHOT
 	assembler                *domain.MessageAssembler
 	retryTarget              *retryTarget
 	replacement              domain.ReplacedWidget

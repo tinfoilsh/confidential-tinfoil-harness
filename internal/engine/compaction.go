@@ -67,9 +67,10 @@ func (eng *Engine) compact(ctx context.Context, r *Run, req *Request, reserved i
 	for i := question; i < len(messages); i++ {
 		room -= messageCost(req, &messages[i])
 	}
-	eng.Live.mu.Lock()
-	shown := r.row.Thread.FirstShown()
-	eng.Live.mu.Unlock()
+	shown := slices.IndexFunc(messages, func(m domain.Message) bool { return m.ID == r.firstShown })
+	if shown < 0 {
+		shown = question
+	}
 	kept := keptFrom(req, latest, question, shown, min(recentTokens, room*recentShareTenths/10))
 	earlier := ""
 	if latest >= 0 {
