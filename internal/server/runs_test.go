@@ -427,10 +427,11 @@ func TestARejoiningClientGetsEveryHeldDeltaOnce(t *testing.T) {
 	// before it paused.
 	shown, cursors := "", map[string]int{}
 	for from := 0; shown != "Hello"; {
-		_, frames, first, wake, _, _ := run.Log.Frames.Read(from)
+		_, frames, first, wake, _, done := run.Log.Frames.Read(from)
 		for i, frame := range frames {
 			var e event
 			if err := json.Unmarshal(frame, &e); err != nil {
+				done()
 				t.Fatal(err)
 			}
 			if e.Type == "TEXT_MESSAGE_CHUNK" {
@@ -438,6 +439,7 @@ func TestARejoiningClientGetsEveryHeldDeltaOnce(t *testing.T) {
 				cursors[shown] = first + i
 			}
 		}
+		done()
 		from = first + len(frames)
 		if shown == "Hello" {
 			break

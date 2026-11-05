@@ -602,7 +602,7 @@ func (s *Store) handleListStatus(w http.ResponseWriter, r *http.Request) {
 		if !at.Equal(other) {
 			return at.After(other) != ascending
 		}
-		return id > otherID != ascending
+		return id != otherID && id > otherID != ascending
 	}
 	sort.Slice(all, func(i, j int) bool {
 		return first(listedAt(all[i].blob), all[i].id, listedAt(all[j].blob), all[j].id)

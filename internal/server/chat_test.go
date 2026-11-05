@@ -467,15 +467,22 @@ func heldModel() (http.HandlerFunc, func()) {
 func awaitFrame(t *testing.T, log *engine.Log, kind string) {
 	t.Helper()
 	for from := 0; ; {
-		_, frames, _, wake, closed, _ := log.Frames.Read(from)
+		_, frames, _, wake, closed, done := log.Frames.Read(from)
+		found := false
 		for _, frame := range frames {
 			var e event
 			if err := json.Unmarshal(frame, &e); err != nil {
+				done()
 				t.Fatal("unreadable run log frame", err)
 			}
 			if from++; e.Type == kind {
-				return
+				found = true
+				break
 			}
+		}
+		done()
+		if found {
+			return
 		}
 		if closed != nil {
 			t.Fatalf("the run ended without a %s frame", kind)
@@ -1312,7 +1319,8 @@ func TestStoppingAQueuedTurnRemovesIt(t *testing.T) {
 // eventsOf is every event a run's log holds.
 func eventsOf(t *testing.T, log *engine.Log) []event {
 	t.Helper()
-	_, frames, _, _, _, _ := log.Frames.Read(0)
+	_, frames, _, _, _, done := log.Frames.Read(0)
+	defer done()
 	events := []event{}
 	for _, frame := range frames {
 		var e event
