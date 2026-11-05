@@ -175,16 +175,29 @@ func (RunError) eventType() string           { return "RUN_ERROR" }
 // TextDelta is an event that extends the text that earlier events of its
 // type with the same target began: a message's content or reasoning, or a
 // call's arguments. A client appends its delta, so two in turn apply as one
-// whose delta is both, which is how a run's checkpoint sends them; the
-// protocol's description of checkpoints names each such event.
+// whose delta is both, which is how a run sends deltas that follow each
+// other closely and how its checkpoint sends them; the protocol's
+// description of checkpoints names each such event.
 type TextDelta interface {
 	Event
 	Target() string
+	// Text is the text the event appends.
+	Text() string
+	// WithText is the event appending text instead.
+	WithText(text string) TextDelta
 }
 
 func (c TextChunk) Target() string      { return c.MessageID }
 func (c ReasoningChunk) Target() string { return c.MessageID }
 func (a ToolCallArgs) Target() string   { return a.ToolCallID }
+
+func (c TextChunk) Text() string      { return c.Delta }
+func (c ReasoningChunk) Text() string { return c.Delta }
+func (a ToolCallArgs) Text() string   { return a.Delta }
+
+func (c TextChunk) WithText(text string) TextDelta      { c.Delta = text; return c }
+func (c ReasoningChunk) WithText(text string) TextDelta { c.Delta = text; return c }
+func (a ToolCallArgs) WithText(text string) TextDelta   { a.Delta = text; return a }
 
 // EncodeEvent is an event's frame: its type, the time it was emitted unless
 // none is given, then its own members.
