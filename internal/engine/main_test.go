@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
@@ -151,11 +152,76 @@ func TestARunPastItsLogBudgetGoesOnFromACheckpoint(t *testing.T) {
 	}
 
 	// The log is wiped once its last client leaves.
-	checkpoint, _, _, _, _ := rn.Frames.Read(0)
+	checkpoint, _, _, _, _, _ := rn.Frames.Read(0)
 	rn.Frames.Detach()
-	if again, frames, _, _, _ := rn.Frames.Read(0); again != nil || frames != nil || bytes.ContainsFunc(checkpoint[0], func(b rune) bool { return b != 0 }) {
+	if again, frames, _, _, _, _ := rn.Frames.Read(0); again != nil || frames != nil || bytes.ContainsFunc(checkpoint[0], func(b rune) bool { return b != 0 }) {
 		t.Fatalf("the ended log kept %d checkpoint frames and %d frames; first %.40q", len(again), len(frames), checkpoint[0])
 	}
+}
+
+// blockedWriter holds its first write until resume closes, as a slow
+// client's connection does.
+type blockedWriter struct {
+	*httptest.ResponseRecorder
+	started, resume chan struct{}
+	once            sync.Once
+}
+
+func (w *blockedWriter) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.started); <-w.resume })
+	return w.ResponseRecorder.Write(p)
+}
+
+// A checkpoint folded while a slow follower is still sending frames it read
+// leaves those frames intact until it has sent them, then wipes the ones it
+// dropped before the follower leaves.
+func TestACheckpointSparesTheFramesASlowFollowerIsSending(t *testing.T) {
+	rn := NewLog("00")
+	rn.Frames.Attach()
+	out := &Stream{Run: rn}
+	out.emit(domain.RunStarted{ThreadID: "thread", RunID: rn.ID})
+	words := []string{"one ", "two ", "three ", "four"}
+	for _, word := range words {
+		e := domain.TextChunk{MessageID: "reply", Role: "assistant", Delta: word}
+		kind, key := kindOf(e)
+		out.write(e, kind, key, api.Timestamp())
+	}
+	_, logged, _, _, _, done := rn.Frames.Read(0)
+	done()
+	w := &blockedWriter{ResponseRecorder: httptest.NewRecorder(), started: make(chan struct{}), resume: make(chan struct{})}
+	finished := make(chan bool, 1)
+	go func() { finished <- Follow(w, httptest.NewRequest("POST", "/v1/threads/follow", nil), rn, 0) }()
+	<-w.started
+	// The follower has read the reply's deltas and is stuck sending the
+	// first frame as the log outgrows its budget.
+	rn.Frames.budget = 1
+	out.folding = true
+	out.emit(domain.StateSnapshotEvent{})
+	out.folding = false
+	if rn.Frames.base == 0 {
+		t.Fatal("the log never folded its frames into a checkpoint")
+	}
+	out.emit(domain.RunFinished{ThreadID: "thread", RunID: rn.ID})
+	rn.Frames.close(ErrDone)
+	close(w.resume)
+	if !<-finished {
+		t.Fatal("the follower did not follow the run to its end")
+	}
+	frames, reply := followed(t, w.ResponseRecorder), ""
+	for _, f := range frames[1 : 1+len(words)] {
+		reply += f.Delta
+	}
+	if reply != strings.Join(words, "") {
+		t.Fatalf("the follower sent the reply's deltas as %q", reply)
+	}
+	// The merged deltas are wiped once the follower that held them sent
+	// them, not when it leaves.
+	for _, merged := range logged[1:len(words)] {
+		if bytes.ContainsFunc(merged, func(b rune) bool { return b != 0 }) {
+			t.Fatalf("a frame the checkpoint merged was kept: %q", merged)
+		}
+	}
+	rn.Frames.Detach()
 }
 
 // A snapshot too large for its budget leaves out its oldest messages.

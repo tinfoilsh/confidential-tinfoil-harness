@@ -59,6 +59,19 @@ type FrameLog struct {
 	// held keeps an ended log from being wiped while the client of its
 	// device chat may still collect it.
 	held bool
+	// A stream sends the frames it read after the lock is released, so the
+	// frames a fold drops are kept in retired until every stream that read
+	// before the fold has sent them. folds counts the folds, and lent the
+	// streams holding frames by the folds made before they read them.
+	folds   int
+	lent    map[int]int
+	retired []retiredFrames
+}
+
+// retiredFrames are the frames a fold dropped, and the folds made with it.
+type retiredFrames struct {
+	folds  int
+	frames [][]byte
 }
 
 // Readers is how many streams are draining the log.
@@ -68,7 +81,9 @@ func (l *FrameLog) Readers() int {
 	return l.draining
 }
 
-func newRunlog() *FrameLog { return &FrameLog{wake: make(chan struct{}), budget: runLogBudget} }
+func newRunlog() *FrameLog {
+	return &FrameLog{wake: make(chan struct{}), budget: runLogBudget, lent: map[int]int{}}
+}
 
 // grow appends one frame and reports whether the frames since the last
 // checkpoint outgrew the budget.
@@ -86,7 +101,8 @@ func (l *FrameLog) grow(frame []byte, kind frameKind, key string) bool {
 // events: kept frames as they were, each run of deltas to the same target
 // merged by merge into a frame of at most mergedFrameBytes followed by the
 // run's last delta, and each tool's activity as activity reports it, in the
-// place of its first frame. It wipes the frames it drops.
+// place of its first frame. It wipes the frames it drops once no stream
+// holds them.
 func (l *FrameLog) fold(merge func(deltas [][]byte) []byte, activity func(key string) []byte) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -94,6 +110,7 @@ func (l *FrameLog) fold(merge func(deltas [][]byte) []byte, activity func(key st
 		return
 	}
 	var checkpoint, run []entry
+	var dropped [][]byte
 	size := 0
 	// flush puts the run of deltas so far in the checkpoint: every one but
 	// the last merged at the time of the first, then the last as it was, so
@@ -107,9 +124,7 @@ func (l *FrameLog) fold(merge func(deltas [][]byte) []byte, activity func(key st
 				deltas[i] = e.data
 			}
 			checkpoint = append(checkpoint, entry{merge(deltas), frameDelta, run[0].key})
-			for _, e := range merged {
-				clear(e.data)
-			}
+			dropped = append(dropped, deltas...)
 			run = run[len(run)-1:]
 		}
 		checkpoint = append(checkpoint, run...)
@@ -137,10 +152,34 @@ func (l *FrameLog) fold(merge func(deltas [][]byte) []byte, activity func(key st
 				}
 			}
 		}
-		clear(e.data)
+		dropped = append(dropped, e.data)
 	}
 	flush()
 	l.checkpoint, l.base, l.frames, l.bytes = checkpoint, l.base+len(l.frames), nil, 0
+	l.folds++
+	l.retired = append(l.retired, retiredFrames{l.folds, dropped})
+	l.reclaim()
+}
+
+// reclaim wipes the retired frames no stream holds, those every stream
+// holding frames read after their fold. l.mu is held.
+func (l *FrameLog) reclaim() {
+	oldest := l.folds
+	for folds := range l.lent {
+		oldest = min(oldest, folds)
+	}
+	kept := l.retired[:0]
+	for _, r := range l.retired {
+		if r.folds > oldest {
+			kept = append(kept, r)
+			continue
+		}
+		for _, frame := range r.frames {
+			clear(frame)
+		}
+	}
+	clear(l.retired[len(kept):])
+	l.retired = kept
 }
 
 // Attach counts a stream about to drain the log. It is called while the run
@@ -170,7 +209,12 @@ func (l *FrameLog) wipe() {
 	for _, e := range append(l.checkpoint, l.frames...) {
 		clear(e.data)
 	}
-	l.checkpoint, l.frames = nil, nil
+	for _, r := range l.retired {
+		for _, frame := range r.frames {
+			clear(frame)
+		}
+	}
+	l.checkpoint, l.frames, l.retired = nil, nil, nil
 }
 
 func (l *FrameLog) hold() {
@@ -206,8 +250,9 @@ func (l *FrameLog) close(err error) {
 
 // Read is what a follower at cursor from is sent next: the frames from it,
 // and the cursor of the first of them. A follower behind the frames the log
-// holds is sent their checkpoint first.
-func (l *FrameLog) Read(from int) (checkpoint, frames [][]byte, first int, wake <-chan struct{}, closed error) {
+// holds is sent their checkpoint first. The frames stay intact until the
+// follower calls done, as it does once it has sent them.
+func (l *FrameLog) Read(from int) (checkpoint, frames [][]byte, first int, wake <-chan struct{}, closed error, done func()) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if from < l.base {
@@ -219,7 +264,17 @@ func (l *FrameLog) Read(from int) (checkpoint, frames [][]byte, first int, wake 
 	for _, e := range l.frames[min(from-l.base, len(l.frames)):] {
 		frames = append(frames, e.data)
 	}
-	return checkpoint, frames, from, l.wake, l.closed
+	folds := l.folds
+	l.lent[folds]++
+	done = func() {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		if l.lent[folds]--; l.lent[folds] == 0 {
+			delete(l.lent, folds)
+		}
+		l.reclaim()
+	}
+	return checkpoint, frames, from, l.wake, l.closed, done
 }
 
 // sent is the cursor after the last frame the log appended.

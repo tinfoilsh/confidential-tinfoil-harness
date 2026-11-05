@@ -342,6 +342,39 @@ func TestACloudImportRunAgainSkipsWhatItStoredAndPassesOverRowsInTheWay(t *testi
 	}
 }
 
+// An entity the account holds under the id the archive gives it is skipped
+// when the key reads that row. One sealed under another key, of which the
+// archive may hold the only copy the key reads, is stored under the import's
+// own id, as is a document whose project was, though the key reads it where
+// it was filed.
+func TestACloudImportRecoversWhatTheAccountHoldsUnderAnotherKey(t *testing.T) {
+	h := newImportHarness(t)
+	old := randomKey()
+	h.sealed(t, old, "project", "p1", `{"name":"Research"}`)
+	h.sealed(t, h.key, "project_document", "p1/d1", `{"filename":"paper.md","content":"Paper text"}`)
+	h.sealed(t, old, "chat", "c1", `{"title":"Plan","messages":[]}`)
+	h.sealed(t, h.key, "chat", "c2", `{"title":"Aside","messages":[]}`)
+	status, _ := h.imported(t, h.archive(t, research(t)))
+	want := map[string]ImportKindCounts{"project": {Imported: 1}, "document": {Imported: 1}, "chat": {Imported: 1, Skipped: 1}}
+	if status.State != jobs.Complete || !reflect.DeepEqual(status.Report.Counts, want) {
+		t.Fatalf("the import ended %s with %+v, want %+v", status.State, status.Report.Counts, want)
+	}
+	projectID := importedID(h.p.ID, testSource, "project", "p1", 0)
+	if project, err := domain.ReadProject(h.opened(t, "project", projectID)); err != nil || project.Name != "Research" {
+		t.Fatalf("the recovered project = %+v, %v", project, err)
+	}
+	if doc, err := domain.ReadProjectDocument(h.opened(t, "project_document", projectID+"/"+importedID(h.p.ID, testSource, "document", "p1/d1", 0)), projectID); err != nil || doc.Content != "Paper text" {
+		t.Fatalf("the document is not filed under the recovered project: %+v, %v", doc, err)
+	}
+	plan, err := domain.ReadThreadRow(h.opened(t, "chat", importedID(h.p.ID, testSource, "chat", "c1", 0)))
+	if err != nil || plan.Title != "Plan" || domain.ValueOr(plan.ProjectID, "") != projectID {
+		t.Fatalf("the recovered chat = %+v, %v", plan, err)
+	}
+	if chats := h.rowIDs("chat"); len(chats) != 3 || h.opened(t, "chat", "c2").ETag != "1" {
+		t.Fatalf("the account holds chats %v, want the readable one left as it was", chats)
+	}
+}
+
 func TestACloudImportBlocksWhatDependsOnAProjectItCouldNotStore(t *testing.T) {
 	h := newImportHarness(t)
 	h.cp.Mu.Lock()
