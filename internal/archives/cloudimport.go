@@ -29,8 +29,8 @@ import (
 // came from, under an id derived from the source, so the same import run
 // again skips what it stored and takes the next id for an entity when
 // another row holds the one it maps to. An entity the account holds already
-// under the id the archive gives it, as an archive this service wrote from
-// the same account does, is skipped too.
+// under the id the archive gives it, in a row the key reads, as an archive
+// this service wrote from the same account does, is skipped too.
 
 const (
 	// ImportBudget bounds one import. Each entity costs a few round trips
@@ -301,32 +301,40 @@ const (
 )
 
 // occupant is what holds the row an entity maps to: nothing, the entity
-// itself as an earlier run of the import stored it, or another row.
+// itself as an earlier run of the import stored it, another row the key
+// reads, or a row sealed under another key.
 type occupant int
 
 const (
 	vacant occupant = iota
 	sameImport
 	anotherRow
+	otherKey
 )
 
 // restore stores one entity under the first of its ids whose row is
 // vacant, and is that id without the project a document's row is filed
-// under. A row the account holds under the entity's own id, or the same
-// import stored before, is found rather than stored again; one another row
-// holds is passed over. build makes the row for an id, and names the
-// attachments it stored for it, which are retired when the row is not
-// stored after all. A write whose answer was lost is settled by reading the
-// row back.
+// under. A row the account holds under the entity's own id and the key
+// reads, or the same import stored before, is found rather than stored
+// again; one another row holds is passed over. build makes the row for an
+// id, and names the attachments it stored for it, which are retired when
+// the row is not stored after all. A write whose answer was lost is
+// settled by reading the row back.
 func (j *cloudImport) restore(ctx context.Context, entity cloudEntity, projectID string, build func(id string, origin *domain.ImportOrigin) (*domain.StoredRow, []string, error)) (string, restored, error) {
 	scope := rowScope(entity.Kind)
 	// A document's id in an archive names its project's, so the account
-	// holds it only where it holds its project, which is then its project.
-	if j.held[scope][entity.SourceID] {
-		if entity.Kind == "document" {
+	// holds it only where its project kept that id. A row sealed under
+	// another key holds nothing the import can stand on, and the archive
+	// may hold the only copy the key reads.
+	if j.held[scope][entity.SourceID] && (entity.Kind != "document" || projectID == entity.ProjectSourceID) {
+		switch holder, err := j.inspect(ctx, scope, entity.SourceID, nil); {
+		case err != nil:
+			return "", 0, err
+		case holder == anotherRow && entity.Kind == "document":
 			return strings.TrimPrefix(entity.SourceID, projectID+"/"), storedBefore, nil
+		case holder == anotherRow:
+			return entity.SourceID, storedBefore, nil
 		}
-		return entity.SourceID, storedBefore, nil
 	}
 	for generation := 0; generation < maxImportGenerations; generation++ {
 		id := importedID(j.p.ID, j.source, entity.Kind, entity.SourceID, generation)
@@ -340,7 +348,7 @@ func (j *cloudImport) restore(ctx context.Context, entity cloudEntity, projectID
 			return "", 0, err
 		case holder == sameImport:
 			return id, storedBefore, nil
-		case holder == anotherRow:
+		case holder != vacant:
 			continue
 		}
 		row, attachments, err := build(id, origin)
@@ -371,8 +379,9 @@ func (j *cloudImport) restore(ctx context.Context, entity cloudEntity, projectID
 	return "", 0, errors.New("every id for the entity is taken")
 }
 
-// inspect is what holds a row: a row sealed under another key is another
-// row, and one that cannot be read in time is not known either way.
+// inspect is what holds a row, which is the entity of origin, when given,
+// as an earlier run stored it. One that cannot be read in time is not
+// known either way.
 func (j *cloudImport) inspect(ctx context.Context, scope, id string, origin *domain.ImportOrigin) (occupant, error) {
 	row, err := j.ar.Store.Rows.Load(ctx, j.p, j.key, scope, id)
 	if err != nil {
@@ -380,11 +389,11 @@ func (j *cloudImport) inspect(ctx context.Context, scope, id string, origin *dom
 		case e.HTTP == http.StatusNotFound:
 			return vacant, nil
 		case e.Code == "KEY_MISMATCH":
-			return anotherRow, nil
+			return otherKey, nil
 		}
 		return 0, err
 	}
-	if found := domain.ReadImportOrigin(row); found != nil && *found == *origin {
+	if found := domain.ReadImportOrigin(row); found != nil && origin != nil && *found == *origin {
 		return sameImport, nil
 	}
 	return anotherRow, nil
