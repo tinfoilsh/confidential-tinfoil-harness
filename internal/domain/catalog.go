@@ -23,7 +23,8 @@ var presetJSON []byte
 var promptJSON []byte
 
 // chatPrompt is the system prompt every chat is built from. It is part of the
-// measured image, so no service outside the enclave can instruct the model.
+// measured image; the only text the control plane adds to it is the model's
+// name from the catalog.
 type chatPrompt struct {
 	SystemPrompt string `json:"systemPrompt"`
 	Rules        string `json:"rules"`
