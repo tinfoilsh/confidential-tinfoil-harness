@@ -95,26 +95,37 @@ func (eng *Engine) removeQueued(r *Run) bool {
 	return true
 }
 
-// StopThread stops a chat being deleted: its running reply is cancelled,
-// each queued turn ends, and the replies kept of it are dropped.
+// StopThread stops a chat being deleted: its running reply is cancelled and
+// each queued turn ends.
 func (eng *Engine) StopThread(p *auth.Principal, id string) {
 	eng.Live.mu.Lock()
 	defer eng.Live.mu.Unlock()
 	if s := eng.Live.threads[liveKey(p, id)]; s != nil {
 		eng.stop(s)
 	}
+}
+
+// StopDeviceThread stops a device chat its client deleted, as StopThread
+// stops a chat, and drops the replies kept of it. A request that names a
+// device chat carries no content key, so it stops nothing else.
+func (eng *Engine) StopDeviceThread(p *auth.Principal, id string) {
+	eng.Live.mu.Lock()
+	defer eng.Live.mu.Unlock()
+	if s := eng.Live.threads[liveKey(p, id)]; s != nil && isDevice(s) {
+		eng.stop(s)
+	}
 	eng.Live.dropHeld(func(h *heldRun) bool { return h.owner == p.Scope() && h.threadID == id })
 }
 
-// StopDeviceThreads stops every device chat of the caller, as StopThread
-// stops one, when the caller deletes them all. It returns how many chats it
-// held anything of.
+// StopDeviceThreads stops every device chat of the caller, as
+// StopDeviceThread stops one, when the caller deletes them all. It returns
+// how many chats it held anything of.
 func (eng *Engine) StopDeviceThreads(p *auth.Principal) int {
 	eng.Live.mu.Lock()
 	defer eng.Live.mu.Unlock()
 	chats := map[string]bool{}
 	for _, s := range eng.Live.threads {
-		if s.owner == p.Scope() && s.local && s.keyless {
+		if s.owner == p.Scope() && isDevice(s) {
 			chats[s.ID] = true
 			eng.stop(s)
 		}
@@ -128,6 +139,10 @@ func (eng *Engine) StopDeviceThreads(p *auth.Principal) int {
 	})
 	return len(chats)
 }
+
+// isDevice reports whether a chat is kept by its client's device, which
+// sends it with each turn and needs no content key.
+func isDevice(s *threadSession) bool { return s.local && s.keyless }
 
 // stop ends what a chat being deleted runs; live.mu is held.
 func (eng *Engine) stop(s *threadSession) {

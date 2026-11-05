@@ -598,6 +598,10 @@ func TestDeletingADeviceChatDropsTheReplyKeptOfIt(t *testing.T) {
 	if code := followed(second); code != 404 {
 		t.Fatalf("the deleted chat's reply was still kept: HTTP %d", code)
 	}
+	// Device chats are in no project.
+	if w := postRoute(h, "/v1/threads/delete-all", api.Object{"local": true, "projectId": "p"}, "alice"); w.Code != 400 {
+		t.Fatalf("deleting a project's device chats answered HTTP %d %s", w.Code, w.Body.String())
+	}
 	w := postRoute(h, "/v1/threads/delete-all", api.Object{"local": true}, "alice")
 	var deleted struct{ Deleted int }
 	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &deleted) != nil || deleted.Deleted != 2 {
@@ -608,6 +612,35 @@ func TestDeletingADeviceChatDropsTheReplyKeptOfIt(t *testing.T) {
 	}
 	if rows.calls != 0 {
 		t.Fatalf("deleting device chats used storage %d times", rows.calls)
+	}
+}
+
+// A device chat's delete carries no content key, so naming a stored chat
+// stops none of its reply.
+func TestADeviceChatsDeleteLeavesAStoredChatsReply(t *testing.T) {
+	model, release := heldModel()
+	h, rows, key := testChatHarness(t, model)
+	alice := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
+	run, err := h.engine.AcceptTurn(context.Background(), alice, chatCredential("alice"), key, requestOf[engine.TurnRequest](sendInput(key)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitFrame(t, run.Log, "TEXT_MESSAGE_CHUNK")
+	if w := postRoute(h, "/v1/threads/delete", api.Object{"id": run.Thread.ID, "local": true}, "alice"); w.Code != 200 {
+		t.Fatalf("the delete answered HTTP %d %s", w.Code, w.Body.String())
+	}
+	release()
+	select {
+	case <-run.Finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stored chat's reply did not finish")
+	}
+	row, err := rows.Load(context.Background(), alice, key, "chat", run.Thread.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if messages := mustRead(domain.ReadThreadRow(row)).Messages; len(messages) != 2 || messages[1].Content != "partial done" || domain.ValueOr(messages[1].IsInterrupted, false) {
+		t.Fatalf("the stored chat was saved with %+v", messages)
 	}
 }
 

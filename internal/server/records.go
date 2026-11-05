@@ -257,7 +257,7 @@ func (h *harness) deleteThread(ctx context.Context, p *auth.Principal, key auth.
 	// A device chat is deleted by its client; the harness drops what it
 	// runs and keeps of it.
 	if in.Local {
-		h.engine.StopThread(p, in.ID)
+		h.engine.StopDeviceThread(p, in.ID)
 		return struct{}{}, nil
 	}
 	var err error
@@ -400,6 +400,10 @@ func (h *harness) changeMessages(ctx context.Context, p *auth.Principal, key aut
 }
 func (h *harness) deleteAllThreads(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *deleteAllRequest) (any, error) {
 	if in.Local {
+		// Device chats are in no project.
+		if in.ProjectID != nil {
+			return nil, api.Err(400, "BAD_REQUEST", "Device chats are in no project")
+		}
 		return deletedCount{h.engine.StopDeviceThreads(p)}, nil
 	}
 	// Every id is listed before any is deleted, so a shrinking list cannot
