@@ -45,9 +45,10 @@ const (
 	// importNotifyTimeout bounds telling the control plane how an import
 	// ended, which outlives the job.
 	importNotifyTimeout = 30 * time.Second
-	// The derivations of an imported row's id, of its write's nonce and of
-	// its images' identities are a stored format: the rows an earlier
-	// import stored, and the attachments under them, are named by them.
+	// The derivations of an imported row's id and of its images'
+	// identities are a stored format: the rows an earlier import stored,
+	// and the attachments under them, are named by them. A write's nonce
+	// is not stored, and is its job's own.
 	importIDInfo    = "tinfoil-restore-id-v1"
 	importWriteInfo = "tinfoil-restore-write-v1"
 	importImageInfo = "import-att"
@@ -325,7 +326,7 @@ func (j *cloudImport) restore(ctx context.Context, entity cloudEntity, projectID
 			return "", 0, err
 		}
 		row.ID = rowID
-		_, err = j.ar.Store.Rows.Push(ctx, j.p, j.key, scope, row, importedNonce(j.p.ID, j.source, entity.Kind, entity.SourceID, generation))
+		_, err = j.ar.Store.Rows.Push(ctx, j.p, j.key, scope, row, importedNonce(j.id, entity.Kind, entity.SourceID, generation))
 		if err == nil {
 			return id, storedNow, nil
 		}
@@ -378,10 +379,13 @@ func importedID(user, source, kind, sourceID string, generation int) string {
 	return fmt.Sprintf("%s-%s-%s-%s-%s", h[:8], h[8:12], h[12:16], h[16:20], h[20:])
 }
 
-// importedNonce is the nonce the entity's write carries, the same each
-// time the import runs, so a write whose answer was lost is matched.
-func importedNonce(user, source, kind, sourceID string, generation int) string {
-	sum := sha256.Sum256(fmt.Appendf(nil, "%s\x00%s\x00%s\x00%s\x00%s\x00%d", importWriteInfo, user, source, kind, sourceID, generation))
+// importedNonce is the nonce an entity's write carries, which is its
+// job's own. The control plane answers a nonce it has seen with the
+// outcome it first gave, so a retry of the write within the job is
+// settled, and a later job's write of a row deleted since is made rather
+// than answered with the deleted row's outcome.
+func importedNonce(jobID, kind, sourceID string, generation int) string {
+	sum := sha256.Sum256(fmt.Appendf(nil, "%s\x00%s\x00%s\x00%s\x00%d", importWriteInfo, jobID, kind, sourceID, generation))
 	return hex.EncodeToString(sum[:importNonceBytes])
 }
 
