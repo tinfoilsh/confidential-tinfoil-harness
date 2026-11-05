@@ -172,7 +172,7 @@ paths:
       operationId: turn
       summary: Run a turn
       tags: [runs]
-      description: Starts a run that carries out one user action on a chat, and streams it.
+      description: Starts a run that carries out one user action on a chat, and streams it. While the enclave is low on memory, a new turn is refused with SERVICE_BUSY and a retryAfter, so the replies already running can finish; a request sent again for a turn already started still follows its run.
       requestBody:
         required: true
         content:
@@ -1563,6 +1563,7 @@ components:
             - RUN_LOG_FULL
             - RUN_NOT_FOUND
             - SEARCH_INDEX_FAILED
+            - SERVICE_BUSY
             - SYNC_OUTCOME_UNKNOWN
             - TEMP_SPACE_BUSY
             - THREAD_EXISTS

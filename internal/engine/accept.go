@@ -23,6 +23,7 @@ func (eng *Engine) AcceptTurn(ctx context.Context, p *auth.Principal, credential
 	defer clear(key[:])
 	in.ClearKey()
 	nonce, digest := in.ClientRequestID, in.digest()
+	low := eng.lowOnMemory()
 	var r *Run
 	for r == nil {
 		eng.Live.mu.Lock()
@@ -37,6 +38,11 @@ func (eng *Engine) AcceptTurn(ctx context.Context, p *auth.Principal, credential
 			}
 		}
 		previous := eng.Live.requests[liveKey(p, nonce)]
+		// A retried request still follows the run it started.
+		if previous == nil && low {
+			eng.Live.mu.Unlock()
+			return nil, errBusy
+		}
 		if previous == nil {
 			r = &Run{nonce: nonce, digest: digest, accepted: make(chan struct{}), Finished: make(chan struct{})}
 			eng.Live.requests[liveKey(p, nonce)] = r

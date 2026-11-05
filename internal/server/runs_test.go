@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -566,6 +568,58 @@ func TestADeviceChatDeletedAsItsReplyRunsIsNotKept(t *testing.T) {
 	}
 	if w := postRoute(h, "/v1/threads/follow", api.Object{"threadId": run.Thread.ID, "runId": run.Log.ID}, "alice"); w.Code != 404 {
 		t.Fatalf("the deleted chat's run was kept: HTTP %d %s", w.Code, w.Body.String())
+	}
+}
+
+// While the enclave is low on memory a new turn is refused, to be sent
+// again, before it reaches the model; a request for a turn already running
+// still follows its run, and turns go through again once memory is free.
+func TestATurnIsRefusedWhileTheEnclaveIsLowOnMemory(t *testing.T) {
+	model, release := heldModel()
+	var calls atomic.Int32
+	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		// Only the first turn is held; one that got through answers at once.
+		if calls.Add(1) == 1 {
+			model(w, r)
+			return
+		}
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"an answer\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	const total = 64 << 30
+	var available atomic.Uint64
+	available.Store(total / 2)
+	h.engine.Memory = func() (uint64, uint64, error) { return available.Load(), total, nil }
+	alice := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
+	first := sendInput(key)
+	run, err := h.engine.AcceptTurn(context.Background(), alice, chatCredential("alice"), key, requestOf[engine.TurnRequest](first))
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitFrame(t, run.Log, "TEXT_MESSAGE_CHUNK")
+
+	available.Store(total / 16)
+	w := postRoute(h, "/v1/threads/turn", sendInput(key), "alice")
+	var refused struct {
+		Error struct {
+			Code, Action string
+			RetryAfter   int
+		}
+	}
+	if w.Code != 503 || json.Unmarshal(w.Body.Bytes(), &refused) != nil || refused.Error.Code != "SERVICE_BUSY" || refused.Error.Action != "retry" || refused.Error.RetryAfter <= 0 {
+		t.Fatalf("a turn while memory was low answered HTTP %d %s", w.Code, w.Body.String())
+	}
+	if again, err := h.engine.AcceptTurn(context.Background(), alice, chatCredential("alice"), key, requestOf[engine.TurnRequest](first)); err != nil || again != run {
+		t.Fatalf("the running turn sent again was not followed: %v", err)
+	}
+	if again := calls.Load(); again != 1 {
+		t.Fatalf("the model was called %d times", again)
+	}
+
+	release()
+	<-run.Finished
+	available.Store(total / 4)
+	if events := eventsIn(t, postRoute(h, "/v1/threads/turn", sendInput(key), "alice")); events[len(events)-1].Type != "RUN_FINISHED" {
+		t.Fatalf("a turn once memory was free ended with %+v", events[len(events)-1])
 	}
 }
 
