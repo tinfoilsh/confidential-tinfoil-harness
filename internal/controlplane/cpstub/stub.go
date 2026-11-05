@@ -123,6 +123,9 @@ type Store struct {
 	BeforeDeleteBlob func(scope, id string)
 	PutBlobFailures  map[string]int
 	GetBlobFailures  map[string][]int
+	// ListStatusFailures is how many listings of each scope are answered
+	// with a server error before the stub lists the scope again.
+	ListStatusFailures map[string]int
 	// NeedsMigrationFailures is the status a listing of rows to reseal
 	// answers with, by the listing's number since the stub was made.
 	NeedsMigrationFailures          map[int]int
@@ -146,6 +149,7 @@ func New() *Store {
 		AttachmentOwners:                map[string]string{},
 		MigrationFailures:               map[string]int{},
 		PutBlobFailures:                 map[string]int{},
+		ListStatusFailures:              map[string]int{},
 		GetBlobFailures:                 map[string][]int{},
 		NeedsMigrationFailures:          map[int]int{},
 		DeleteAttachmentIndexFailures:   map[string]int{},
@@ -545,6 +549,11 @@ func (s *Store) handleBackfillChatActivity(w http.ResponseWriter, r *http.Reques
 func (s *Store) handleListStatus(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	scope, project := query.Get("scope"), query.Get("project_id")
+	if s.ListStatusFailures[scope] > 0 {
+		s.ListStatusFailures[scope]--
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 	limit, _ := strconv.Atoi(query.Get("limit"))
 	offset, _ := strconv.Atoi(query.Get("cursor"))
 	type listed struct {
