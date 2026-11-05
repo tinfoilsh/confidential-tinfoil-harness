@@ -106,6 +106,7 @@ type searchRequest struct {
 
 type deleteAllRequest struct {
 	ProjectID *string `json:"projectId"`
+	Local     bool    `json:"local"`
 }
 
 type profileUpdateRequest struct {

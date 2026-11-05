@@ -334,23 +334,52 @@ func TestAToolExchangeKeepsOnlyTheExchangesItHasRoomFor(t *testing.T) {
 	}
 }
 
-// A compaction keeps no message the run's snapshot left out, so a client
-// holds the message its marker sits before.
+// A compaction keeps no message the run's snapshot left out, whether the
+// snapshot left it out as one of too many or for the size of the messages
+// after it, so a client holds the message its marker sits before.
 func TestACompactionKeepsOnlyMessagesTheRunShows(t *testing.T) {
-	h, rows, key := testChatHarness(t, nil)
-	h.models.Catalog.Get().Models[0]["budgetWindow"] = 16384
-	h.compactWith(func(string, string) (string, error) { return compactionOf("The user chatted."), nil })
-	texts := []string{"old question", filler(700)}
+	many := []string{"old question", filler(700)}
 	for i := range domain.MessageWindow / 2 {
-		texts = append(texts, fmt.Sprintf("question %d", i), fmt.Sprintf("answer %d", i))
+		many = append(many, fmt.Sprintf("question %d", i), fmt.Sprintf("answer %d", i))
 	}
-	storeExchanges(rows, "chat-1", texts...)
-	events := finishedRun(t, h, "/v1/threads/turn", continueInput(key, "chat-1"))
-	shown := messageIDs(eventOfType(events, "MESSAGES_SNAPSHOT").Messages)
-	// The snapshot starts at the first reply, so the question after it is
-	// the earliest a compaction can keep.
-	if start := eventOfType(events, "COMPACTION_START"); start == nil || shown[0] != "m4" || start.Before != "m5" {
-		t.Fatalf("the marker was opened with %+v after a snapshot of %q", start, shown)
+	// Each reply after the first exchange reasoned at length, which a
+	// snapshot shows but the model does not read again.
+	large := func(messages []any) {
+		thought := strings.Repeat("x", 3<<20)
+		for _, m := range messages[2:] {
+			if message := api.Obj(m); message["role"] == "assistant" {
+				message["timeline"] = append([]any{api.Object{"id": "t" + api.Str(message["id"]), "type": "thinking", "content": thought}}, api.Arr(message["timeline"])...)
+			}
+		}
+	}
+	// The earliest question a compaction can keep is the first the snapshot
+	// shows from its first message on.
+	for _, tc := range []struct {
+		name        string
+		texts       []string
+		edit        func([]any)
+		first, kept string
+	}{
+		{"many messages", many, nil, "m4", "m5"},
+		{"large messages", []string{"old question", filler(700), "question 0", "answer 0", "question 1", "answer 1", "question 2", "answer 2"}, large, "m5", "m5"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, rows, key := testChatHarness(t, nil)
+			h.models.Catalog.Get().Models[0]["budgetWindow"] = 16384
+			h.compactWith(func(string, string) (string, error) { return compactionOf("The user chatted."), nil })
+			storeExchanges(rows, "chat-1", tc.texts...)
+			if tc.edit != nil {
+				name := rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat-1")
+				row := rows.rows[name]
+				editRow(&row, func(data api.Object) { tc.edit(api.Arr(data["messages"])) })
+				rows.rows[name] = row
+			}
+			events := finishedRun(t, h, "/v1/threads/turn", continueInput(key, "chat-1"))
+			shown := messageIDs(eventOfType(events, "MESSAGES_SNAPSHOT").Messages)
+			if start := eventOfType(events, "COMPACTION_START"); start == nil || shown[0] != tc.first || start.Before != tc.kept {
+				t.Fatalf("the marker was opened with %+v after a snapshot of %q", start, shown)
+			}
+		})
 	}
 }
 

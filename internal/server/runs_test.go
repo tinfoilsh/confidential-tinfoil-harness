@@ -571,6 +571,80 @@ func TestADeviceChatDeletedAsItsReplyRunsIsNotKept(t *testing.T) {
 	}
 }
 
+// A device chat its client deletes after its reply ended is dropped from
+// what the harness keeps, as every device chat is when the client deletes
+// them all. Neither touches storage, and another account's delete drops
+// nothing.
+func TestDeletingADeviceChatDropsTheReplyKeptOfIt(t *testing.T) {
+	h, rows, _ := testChatHarness(t, nil)
+	ended := func() api.Object {
+		t.Helper()
+		in := localInput("", api.Object{"messages": []any{}})
+		events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice"))
+		return api.Object{"threadId": in["threadId"], "runId": events[0].RunID}
+	}
+	followed := func(run api.Object) int {
+		t.Helper()
+		return postRoute(h, "/v1/threads/follow", run, "alice").Code
+	}
+	first, second, third := ended(), ended(), ended()
+	for _, deletion := range []struct {
+		account string
+		run     api.Object
+	}{{"bob", first}, {"alice", second}} {
+		if w := postRoute(h, "/v1/threads/delete", api.Object{"id": deletion.run["threadId"], "local": true}, deletion.account); w.Code != 200 {
+			t.Fatalf("%s's delete answered HTTP %d %s", deletion.account, w.Code, w.Body.String())
+		}
+	}
+	if code := followed(second); code != 404 {
+		t.Fatalf("the deleted chat's reply was still kept: HTTP %d", code)
+	}
+	// Device chats are in no project.
+	if w := postRoute(h, "/v1/threads/delete-all", api.Object{"local": true, "projectId": "p"}, "alice"); w.Code != 400 {
+		t.Fatalf("deleting a project's device chats answered HTTP %d %s", w.Code, w.Body.String())
+	}
+	w := postRoute(h, "/v1/threads/delete-all", api.Object{"local": true}, "alice")
+	var deleted struct{ Deleted int }
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &deleted) != nil || deleted.Deleted != 2 {
+		t.Fatalf("deleting every device chat answered HTTP %d %s, not the two still kept", w.Code, w.Body.String())
+	}
+	if first, third := followed(first), followed(third); first != 404 || third != 404 {
+		t.Fatalf("after every device chat was deleted, their replies answered HTTP %d and %d", first, third)
+	}
+	if rows.calls != 0 {
+		t.Fatalf("deleting device chats used storage %d times", rows.calls)
+	}
+}
+
+// A device chat's delete carries no content key, so naming a stored chat
+// stops none of its reply.
+func TestADeviceChatsDeleteLeavesAStoredChatsReply(t *testing.T) {
+	model, release := heldModel()
+	h, rows, key := testChatHarness(t, model)
+	alice := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
+	run, err := h.engine.AcceptTurn(context.Background(), alice, chatCredential("alice"), key, requestOf[engine.TurnRequest](sendInput(key)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitFrame(t, run.Log, "TEXT_MESSAGE_CHUNK")
+	if w := postRoute(h, "/v1/threads/delete", api.Object{"id": run.Thread.ID, "local": true}, "alice"); w.Code != 200 {
+		t.Fatalf("the delete answered HTTP %d %s", w.Code, w.Body.String())
+	}
+	release()
+	select {
+	case <-run.Finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stored chat's reply did not finish")
+	}
+	row, err := rows.Load(context.Background(), alice, key, "chat", run.Thread.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if messages := mustRead(domain.ReadThreadRow(row)).Messages; len(messages) != 2 || messages[1].Content != "partial done" || domain.ValueOr(messages[1].IsInterrupted, false) {
+		t.Fatalf("the stored chat was saved with %+v", messages)
+	}
+}
+
 // While the enclave is low on memory a new turn is refused, to be sent
 // again, before it reaches the model; a request for a turn already running
 // still follows its run, and turns go through again once memory is free.
