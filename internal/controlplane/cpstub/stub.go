@@ -537,15 +537,28 @@ func (s *Store) handleBackfillChatActivity(w http.ResponseWriter, r *http.Reques
 	updated := false
 	activityAt, err := time.Parse(time.RFC3339Nano, req.ActivityAt)
 	if blob := s.Blobs[Key("chat", req.ID)]; err == nil && blob != nil && blob.ActivityAt == nil && FormatETag(blob.ETag) == req.ETag {
+		// As the control plane does, it records no time after the write.
+		if activityAt.After(blob.UpdatedAt) {
+			activityAt = blob.UpdatedAt
+		}
 		blob.ActivityAt = &activityAt
 		updated = true
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"updated": updated})
 }
 
+// listCursor is the last row a page listed, by the time it was listed by
+// and its id.
+type listCursor struct {
+	At time.Time `json:"at"`
+	ID string    `json:"id"`
+}
+
 // handleListStatus lists a scope's rows, the last written first unless
-// asked for the oldest, in pages of limit from an offset cursor; chats can
-// be narrowed to a project.
+// asked for the oldest, in pages of limit; chats can be narrowed to a
+// project. As the control plane does, a page that fills names a cursor at
+// its last row, and the next page lists the rows that sort after it as
+// they sort then.
 func (s *Store) handleListStatus(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	scope, project := query.Get("scope"), query.Get("project_id")
@@ -555,7 +568,15 @@ func (s *Store) handleListStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, _ := strconv.Atoi(query.Get("limit"))
-	offset, _ := strconv.Atoi(query.Get("cursor"))
+	var after *listCursor
+	if raw := query.Get("cursor"); raw != "" {
+		after = &listCursor{}
+		decoded, err := base64.RawURLEncoding.DecodeString(raw)
+		if err != nil || json.Unmarshal(decoded, after) != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+	}
 	type listed struct {
 		id   string
 		blob *Blob
@@ -576,23 +597,25 @@ func (s *Store) handleListStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		return b.UpdatedAt
 	}
-	sort.Slice(all, func(i, j int) bool {
-		if at, bt := listedAt(all[i].blob), listedAt(all[j].blob); !at.Equal(bt) {
-			return at.After(bt)
+	ascending := query.Get("direction") == "asc"
+	first := func(at time.Time, id string, other time.Time, otherID string) bool {
+		if !at.Equal(other) {
+			return at.After(other) != ascending
 		}
-		return all[i].id > all[j].id
+		return id > otherID != ascending
+	}
+	sort.Slice(all, func(i, j int) bool {
+		return first(listedAt(all[i].blob), all[i].id, listedAt(all[j].blob), all[j].id)
 	})
-	if query.Get("direction") == "asc" {
-		slices.Reverse(all)
+	if after != nil {
+		all = slices.DeleteFunc(all, func(item listed) bool { return !first(after.At, after.ID, listedAt(item.blob), item.id) })
 	}
-	if offset > len(all) {
-		offset = len(all)
-	}
-	page := all[offset:]
-	next := ""
-	if limit > 0 && len(page) > limit {
+	page, next := all, ""
+	if limit > 0 && len(page) >= limit {
 		page = page[:limit]
-		next = strconv.Itoa(offset + limit)
+		last := page[len(page)-1]
+		raw, _ := json.Marshal(listCursor{listedAt(last.blob), last.id})
+		next = base64.RawURLEncoding.EncodeToString(raw)
 	}
 	updates := []controlplane.BlobMeta{}
 	for _, item := range page {
