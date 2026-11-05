@@ -266,15 +266,19 @@ type idempotentAnswer struct {
 }
 
 // idempotent serves a change as the control plane does under an
-// idempotency key: a retry of a change made under the caller's key is
-// answered as the change was and not made again, another request under
-// the key is refused, and a new change is made and, once it succeeds, its
-// answer kept.
+// idempotency key: a change without an operation hash is refused, a retry
+// of a change made under the caller's key is answered as the change was
+// and not made again, another request under the key is refused, and a new
+// change is made and, once it succeeds, its answer kept.
 func (s *Store) idempotent(change http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key := r.Header.Get(controlplane.HeaderIdempotency)
 		if key == "" {
 			change(w, r)
+			return
+		}
+		if r.Header.Get(controlplane.HeaderOperationHash) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "BAD_REQUEST", "error": "X-Operation-Hash is required"})
 			return
 		}
 		key = r.Header.Get(controlplane.HeaderClerkUserID) + "\x00" + key
