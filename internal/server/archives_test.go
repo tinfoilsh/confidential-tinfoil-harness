@@ -607,13 +607,13 @@ func TestExportsImportAlikeToCloudAndDevice(t *testing.T) {
 	documentLeftOut := []string{"1 documents were left out: the archive holds no text for them."}
 	large, broken := pngFixture(t, 2048, 1024, 120), []byte("\x89PNG\r\n\x1a\nnot an image")
 	for _, tc := range []struct {
-		fixture           string
-		images            map[string][]byte
-		chats             int
-		onDevice, inCloud []string
-		check             func(t *testing.T, threads map[string]domain.Thread, originals map[string][]byte)
+		fixture                  string
+		images                   map[string][]byte
+		chats                    int
+		onDevice, inCloud, inJob []string
+		check                    func(t *testing.T, threads map[string]domain.Thread, originals map[string][]byte)
 	}{
-		{"chatgpt-export.zip", map[string][]byte{"file_00000000abc-cat.png": large}, 2, documentLeftOut, documentLeftOut, func(t *testing.T, threads map[string]domain.Thread, originals map[string][]byte) {
+		{"chatgpt-export.zip", map[string][]byte{"file_00000000abc-cat.png": large}, 2, documentLeftOut, documentLeftOut, nil, func(t *testing.T, threads map[string]domain.Thread, originals map[string][]byte) {
 			branch := threads["Branching"]
 			if len(branch.Messages) != 2 || branch.Messages[1].Content != "The second one." || branch.Messages[1].Timeline[0].Content != "Compare the two sizes" {
 				t.Fatalf("not the current branch: %s", api.Raw(branch.Messages))
@@ -626,19 +626,19 @@ func TestExportsImportAlikeToCloudAndDevice(t *testing.T) {
 				t.Fatalf("the photo came as %s, its original as %d bytes", decodedImage(cat.Base64), len(originals[cat.ID]))
 			}
 		}},
-		{"claude-export.zip", nil, 1, []string{"1 projects were not imported: projects are kept in the cloud."}, []string{}, func(t *testing.T, threads map[string]domain.Thread, _ map[string][]byte) {
+		{"claude-export.zip", nil, 1, []string{"1 projects were not imported: projects are kept in the cloud."}, []string{}, nil, func(t *testing.T, threads map[string]domain.Thread, _ map[string][]byte) {
 			messages := threads["Reading a spec"].Messages
 			if len(messages) != 2 || messages[0].Attachments[0].TextContent != "The contents" || messages[0].Attachments[1].FileName != "diagram.png" || messages[1].Timeline[0].Content != "Reading carefully" {
 				t.Fatalf("claude chat: %s", api.Raw(messages))
 			}
 		}},
-		{"tinfoil-export.zip", map[string][]byte{"attachments/tf-sketch/sketch.png": broken}, 2, []string{}, []string{}, func(t *testing.T, threads map[string]domain.Thread, originals map[string][]byte) {
+		{"tinfoil-export.zip", map[string][]byte{"attachments/tf-sketch/sketch.png": broken}, 2, []string{}, []string{}, []string{"image attachment stored without a thumbnail"}, func(t *testing.T, threads map[string]domain.Thread, originals map[string][]byte) {
 			trip := threads["Trip plans"].Messages
 			if len(trip) != 2 || trip[0].Attachments[0].ID != "tf-photo" || trip[0].Attachments[1].TextContent != "# Packing list" || trip[1].Timeline[0].Content != "It is sunny" || trip[0].CreatedAt != "2026-04-01T08:00:00Z" {
 				t.Fatalf("tinfoil chat: %s", api.Raw(trip))
 			}
 			// An image that does not decode has no copy for models, and
-			// keeps its original.
+			// keeps its original; the cloud keeps it without a thumbnail.
 			if sketches := threads["Sketches"].Messages[0].Attachments; len(sketches) != 1 || sketches[0].Base64 != "" || !bytes.Equal(originals[sketches[0].ID], broken) {
 				t.Fatalf("the sketch was lost: %+v", sketches)
 			}
@@ -652,7 +652,7 @@ func TestExportsImportAlikeToCloudAndDevice(t *testing.T) {
 			if len(onDevice.threads) != tc.chats || inCloud.threads != nil || onDevice.done.JobID != nil || inCloud.done.JobID == nil || !reflect.DeepEqual(onDevice.done.Warnings, tc.onDevice) || !reflect.DeepEqual(inCloud.done.Warnings, tc.inCloud) {
 				t.Fatalf("device %d chats %+v, cloud %+v", len(onDevice.threads), onDevice.done, inCloud.done)
 			}
-			if status := importEnded(t, h, "alice", inCloud.done); status.Counts["chat"].Imported != tc.chats || len(status.Warnings) != 0 {
+			if status := importEnded(t, h, "alice", inCloud.done); status.Counts["chat"].Imported != tc.chats || !slices.Equal(status.Warnings, tc.inJob) {
 				t.Fatalf("job status: %+v", status)
 			}
 			cloud := storedChats(rows, "alice")
@@ -669,6 +669,36 @@ func TestExportsImportAlikeToCloudAndDevice(t *testing.T) {
 			}
 			tc.check(t, byTitle, onDevice.originals)
 		})
+	}
+}
+
+// An image a cloud import stores is shown by the thumbnail an upload
+// makes, and reads back whole.
+func TestCloudImportedImagesAreShownByThumbnails(t *testing.T) {
+	h, rows, key := cloudImportHarness(t)
+	large := pngFixture(t, 2048, 1024, 120)
+	archive := withEntries(t, fixture(t, "chatgpt-export.zip"), map[string][]byte{"file_00000000abc-cat.png": large})
+	importEnded(t, h, "alice", importOf(t, h, "alice", archive, "chatgpt-export.zip", api.Object{"target": "cloud", "key": keyBase64(key)}).done)
+	chat, ok := storedChats(rows, "alice")["Photo question"]
+	if !ok {
+		t.Fatal("the chat with the photo was not stored")
+	}
+	var window struct {
+		Messages []struct {
+			Attachments []domain.Attachment `json:"attachments"`
+		} `json:"messages"`
+	}
+	w := postRoute(h, "/v1/threads/get", api.Object{"key": keyBase64(key), "id": chat.ID}, "alice")
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &window) != nil || len(window.Messages) == 0 || len(window.Messages[0].Attachments) != 1 {
+		t.Fatalf("the chat's view: HTTP %d %s", w.Code, w.Body.String())
+	}
+	photo := window.Messages[0].Attachments[0]
+	if thumbnail := decodedImage(photo.Thumbnail); thumbnail != "jpeg 256x128 <nil>" {
+		t.Fatalf("the photo is shown by a thumbnail of %s", thumbnail)
+	}
+	whole := postRoute(h, "/v1/attachments/get", api.Object{"key": keyBase64(key), "id": photo.ID, "threadId": chat.ID}, "alice")
+	if whole.Code != 200 || !bytes.Equal(whole.Body.Bytes(), large) {
+		t.Fatalf("the photo reads back as HTTP %d with %d bytes, want the %d imported", whole.Code, whole.Body.Len(), len(large))
 	}
 }
 
