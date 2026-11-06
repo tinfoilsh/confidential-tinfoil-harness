@@ -76,7 +76,7 @@ type turnOptions struct {
 var cacheSecretPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 var (
-	turnKinds = []string{"send", "edit", "regenerate", "continue", "retryToolCall", "ask", "retry"}
+	turnKinds = []string{"send", "edit", "regenerate", "continue", "retryToolCall", "ask", "retry", "compact"}
 )
 
 // Validate refuses a turn its run could not carry out. Who may send it is

@@ -9,7 +9,8 @@ import (
 
 // applyTurn makes the change a turn's kind makes to a transcript before its
 // reply: a new or edited question, or the cut a regeneration or
-// continuation starts from. An answer to the last question changes nothing.
+// continuation starts from. An answer to the last question, or a compaction,
+// changes nothing.
 func applyTurn(t *domain.Thread, in *TurnRequest, messageID string, attachments []domain.Attachment) error {
 	if t.MessageIndex(messageID) >= 0 {
 		return nil
@@ -55,7 +56,7 @@ func applyTurn(t *domain.Thread, in *TurnRequest, messageID string, attachments 
 	if in.Kind == "ask" {
 		content, quote = domain.ValueOr(in.Quote, ""), ""
 	}
-	if in.Kind != "regenerate" && in.Kind != "retryToolCall" && in.Kind != "continue" && in.Kind != "answer" {
+	if in.Kind != "regenerate" && in.Kind != "retryToolCall" && in.Kind != "continue" && in.Kind != "answer" && in.Kind != "compact" {
 		message := domain.Message{ID: messageID, Role: "user", Content: content, Quote: quote, Attachments: attachments, CreatedAt: api.Timestamp()}
 		// A question sends the answers the user gave since the last one, so
 		// later changes leave what earlier replies read as it was.
@@ -72,14 +73,17 @@ func applyTurn(t *domain.Thread, in *TurnRequest, messageID string, attachments 
 }
 
 // retried is the turn a retry carries out, which the chat decides: a failed
-// or stopped continuation continues again, any other last reply is
-// regenerated, and a last question without a reply is answered.
+// compaction compacts again, a failed or stopped continuation continues
+// again, any other last reply is regenerated, and a last question without a
+// reply is answered.
 func retried(t *domain.Thread, in *TurnRequest) (*TurnRequest, error) {
 	if len(t.Messages) == 0 {
 		return nil, api.Err(400, "BAD_REQUEST", "The chat has nothing to retry")
 	}
 	turn, last := *in, t.Messages[len(t.Messages)-1]
 	switch {
+	case t.LastRequestKind == "compact":
+		turn.Kind, turn.MessageID = "compact", ""
 	case last.Role == "user":
 		turn.Kind, turn.MessageID = "answer", ""
 	case t.LastRequestKind == "continue" && (domain.ValueOr(last.IsError, false) || domain.ValueOr(last.IsInterrupted, false)):

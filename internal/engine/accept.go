@@ -227,6 +227,10 @@ func (eng *Engine) admit(ctx context.Context, p *auth.Principal, credential auth
 	if s != nil && (s.deleted || s.local != held || !s.keyless && s.keyHash != key.Fingerprint()) {
 		return api.Err(404, "THREAD_NOT_FOUND", "The thread is unavailable")
 	}
+	// A compaction is not a message to queue: it reads the chat as it is.
+	if s != nil && s.Active != nil && in.Kind == "compact" {
+		return api.Err(409, "RUN_IN_FLIGHT", "Wait for the reply to finish before compacting this chat").WithAction(api.ActionRetry)
+	}
 	if s != nil && s.Active != nil && len(s.Queue) >= MaxQueuedTurns {
 		return errQueueFull
 	}

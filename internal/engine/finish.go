@@ -92,6 +92,14 @@ func (eng *Engine) finishRun(r *Run, runErr error) {
 		if t.ActiveRun != nil && t.ActiveRun.RunID == r.Log.ID {
 			t.ActiveRun = nil
 		}
+		// A retry compacts again only after a compaction failed.
+		if r.turn.Kind == "compact" {
+			if runErr != nil && !cancelled {
+				t.LastRequestKind = "compact"
+			} else if t.LastRequestKind == "compact" {
+				t.LastRequestKind = ""
+			}
+		}
 		return nil
 	}
 	if !deleted {

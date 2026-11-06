@@ -1559,6 +1559,7 @@ components:
             - MAX_TURNS
             - MISSING_ATTACHMENT
             - MODEL_UNAVAILABLE
+            - NOTHING_TO_COMPACT
             - PAYLOAD_TOO_LARGE
             - PROJECTS_REQUIRE_CLOUD
             - QUEUE_FULL
@@ -1624,7 +1625,7 @@ components:
         composer: {$ref: "#/components/schemas/Composer"}
         presets: {type: array, items: {$ref: "#/components/schemas/Preset"}}
         features:
-          description: Optional behaviors this harness offers. A client acts on a feature only when it is true here. compaction is true while a chat whose prompt would outgrow its model's window is compacted rather than refused.
+          description: Optional behaviors this harness offers. A client acts on a feature only when it is true here. compaction is true while a chat whose prompt would outgrow its model's window is compacted rather than refused. manualCompaction is true while a turn of kind compact compacts a chat on request.
           type: object
           additionalProperties: {type: boolean}
 
@@ -1724,7 +1725,19 @@ components:
         key: {type: string, description: "The account's content key, base64. Absent for device chats and signed-out callers."}
         clientRequestId: {type: string, format: uuid, description: "A nonce. A turn sent again with it is answered with the run it started."}
         threadId: {$ref: "#/components/schemas/Identifier"}
-        kind: {type: string, enum: [send, edit, regenerate, continue, retry, retryToolCall, ask], description: "send when absent."}
+        kind:
+          type: string
+          enum: [send, edit, regenerate, continue, retry, retryToolCall, ask, compact]
+          description: |
+            send when absent.
+
+            compact compacts the chat on request, as COMPACTION_START describes,
+            and asks the model nothing: its run sends the compaction and ends.
+            It is refused with NOTHING_TO_COMPACT when no message after the
+            chat's latest compaction marker comes before its last question, and
+            with RUN_IN_FLIGHT while the chat has a running reply. A retry after
+            a compact turn failed compacts again. A client sends it only while
+            the session's features.manualCompaction is true.
         ephemeral: {type: boolean, description: "An ask that is never stored."}
         local: {type: boolean, description: "The chat is kept on the device, which sends it as thread."}
         thread: {$ref: "#/components/schemas/ThreadInput"}
@@ -2056,7 +2069,9 @@ components:
         the model goes on reading as they were. The marker sits before the
         first question it keeps, or else before the turn's question. A run
         compacts at most once, before its first model turn or between two of
-        them. beforeMessageId names a message of the run's MESSAGES_SNAPSHOT.
+        them. A compact turn compacts its chat the same way, taking the chat's
+        last question and what follows it for the turn's question.
+        beforeMessageId names a message of the run's MESSAGES_SNAPSHOT.
         A client shows the marker before that message, and the messages
         before it as ones the model no longer reads.
       type: object
@@ -2444,7 +2459,7 @@ components:
         webSearchEnabled: {type: boolean}
         messages: {type: array, items: {$ref: "#/components/schemas/MessageRecord"}}
         lastRequestId: {type: string}
-        lastRequestKind: {type: string, description: "What the last request's turn did, which a retry repeats."}
+        lastRequestKind: {type: string, description: "What the last request's turn did, which a retry repeats. A compaction is recorded only when it failed."}
         activeRun:
           description: "A hint that a reply may be streaming, until the run's deadline. It never locks the chat."
           type: [object, "null"]
