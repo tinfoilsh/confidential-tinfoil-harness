@@ -142,6 +142,11 @@ func (eng *Engine) finishRun(r *Run, runErr error) {
 		eng.Live.hold(r)
 	}
 	queue := queueItems(s)
+	// The turn starting next is listed until its run starts, which first
+	// reads and saves its chat, so its client does not lose sight of it.
+	if next != nil {
+		queue = append([]domain.QueueItem{next.queueItem()}, queue...)
+	}
 	deleted = s.deleted
 	eng.Live.mu.Unlock()
 	r.out.emit(domain.StateSnapshotEvent{Snapshot: domain.StateSnapshot{Thread: summary, Queue: queue, RateLimit: limit}})

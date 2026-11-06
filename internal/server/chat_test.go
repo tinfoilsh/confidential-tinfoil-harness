@@ -1320,6 +1320,42 @@ func TestStoppingAQueuedTurnRemovesIt(t *testing.T) {
 	}
 }
 
+// A reply that ends hands its chat to the turn queued behind it, and lists
+// that turn until its run starts, which first reads and saves the chat, so
+// its client never sees the message it queued vanish in between.
+func TestTheTurnStartingNextStaysQueuedUntilItsRunStarts(t *testing.T) {
+	held, release := heldModel()
+	h, _, key := testChatHarness(t, held)
+	t.Cleanup(release)
+	p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
+	run, err := h.engine.AcceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[engine.TurnRequest](sendInput(key)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitFrame(t, run.Log, "TEXT_MESSAGE_CHUNK")
+	queued, err := h.engine.AcceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[engine.TurnRequest](continueInput(key, run.Thread.ID)))
+	if err != nil || !queued.Queued {
+		t.Fatalf("turn not queued: %v", err)
+	}
+	release()
+	<-run.Finished
+	<-queued.Finished
+	queueOf := func(e *event) []any { return api.Arr(api.Obj(e.Snapshot)["queue"]) }
+	var last *event
+	for _, e := range eventsOf(t, run.Log) {
+		if e.Type == "STATE_SNAPSHOT" {
+			last = &e
+		}
+	}
+	if last == nil || len(queueOf(last)) != 1 || api.Obj(queueOf(last)[0])["queueId"] != queued.Log.ID {
+		t.Fatalf("the ended reply last listed the queue as %+v", last)
+	}
+	started := eventsOf(t, queued.Log)
+	if eventOfType(started, "RUN_STARTED") == nil || len(queueOf(eventOfType(started, "STATE_SNAPSHOT"))) != 0 {
+		t.Fatalf("the queued turn started with %+v", started)
+	}
+}
+
 // eventsOf is every event a run's log holds.
 func eventsOf(t *testing.T, log *engine.Log) []event {
 	t.Helper()

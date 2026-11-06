@@ -1920,7 +1920,7 @@ components:
             value: {$ref: "#/components/schemas/TitleState"}
 
     QueueItem:
-      description: A turn waiting behind its chat's running reply.
+      description: A turn waiting behind its chat's running reply. A run that ends lists the turn starting after it until that turn's run starts.
       type: object
       required: [queueId, kind, content, quote, attachments, createdAt]
       properties:
