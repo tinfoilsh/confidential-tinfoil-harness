@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -130,6 +131,38 @@ func TestTheModelReadsAChatFromItsLatestCompaction(t *testing.T) {
 	chat := mustRead(domain.ReadThreadRow(row))
 	if ids := messageIDs(api.Parsed(api.Raw(chat.Messages))); !reflect.DeepEqual(ids[:5], []string{"m1", "m2", "c1", "m3", "m4"}) || chat.Messages[2].Compaction == nil || chat.Messages[2].Compaction.Model != "glm-5-3" {
 		t.Fatalf("the turn stored %s", row.Data)
+	}
+}
+
+// The model is told the share of the prompt budget the chat reports its
+// prompt fills, counted again once a compaction made room, and that a full
+// chat is summarized only while one would be.
+func TestTheModelIsToldHowMuchOfItsContextTheChatFills(t *testing.T) {
+	prompts := make(chan []string, 1)
+	h, rows, key := testChatHarness(t, promptOf(prompts))
+	told := func(id string) (string, *domain.ContextUsage) {
+		t.Helper()
+		finishedRun(t, h, "/v1/threads/turn", continueInput(key, id))
+		prompt := <-prompts
+		usage := storedChat(t, rows, key, id).ContextUsage
+		if usage == nil {
+			t.Fatalf("%s stored no context usage", id)
+		}
+		return prompt[len(prompt)-1], usage
+	}
+	share := func(usage *domain.ContextUsage) string {
+		return fmt.Sprintf("Context used: %d%% ", int(math.Round(usage.Percentage)))
+	}
+	storeCompacted(rows, "short")
+	if reminder, usage := told("short"); !strings.Contains(reminder, share(usage)) || strings.Contains(reminder, "summarized") {
+		t.Fatalf("a chat filling %v was reminded %q", usage, reminder)
+	}
+	h.compactWith(func(string, string) (string, error) {
+		return compactionOf("The user plans a lighthouse tour of Maine."), nil
+	})
+	longCompacted(rows, "long")
+	if reminder, usage := told("long"); usage.Percentage >= 100 || !strings.Contains(reminder, share(usage)) || !strings.Contains(reminder, "the earlier messages are summarized") {
+		t.Fatalf("a compacted chat filling %v was reminded %q", usage, reminder)
 	}
 }
 
@@ -449,6 +482,111 @@ func TestAToolExchangeThatOutgrowsTheWindowCompactsTheChat(t *testing.T) {
 	}
 }
 
+// compactInput is a compact turn of alice's stored chat.
+func compactInput(key auth.ContentKey, thread string) api.Object {
+	in := continueInput(key, thread)
+	in["kind"] = "compact"
+	delete(in, "content")
+	return in
+}
+
+// A compact turn summarizes the messages before the chat's latest exchange
+// into a marker before it, without asking the model, adding a message or
+// changing what a retry repeats, and the chat then fills less of the window.
+func TestACompactTurnCompactsTheChatWithoutAskingTheModel(t *testing.T) {
+	prompts := make(chan []string, 1)
+	h, rows, key := testChatHarness(t, promptOf(prompts))
+	var asked []string
+	h.compactWith(func(task, text string) (string, error) {
+		if task == summarize.Compaction.Name {
+			asked = append(asked, text)
+		}
+		return compactionOf("The user plans a lighthouse tour of Maine."), nil
+	})
+	storeExchanges(rows, "chat-1", "old question", filler(100), "recent question", "recent answer")
+	name := rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat-1")
+	row := rows.rows[name]
+	editRow(&row, func(data api.Object) { data["lastRequestKind"] = "continue" })
+	rows.rows[name] = row
+	events := finishedRun(t, h, "/v1/threads/turn", compactInput(key, "chat-1"))
+	if len(prompts) != 0 || len(asked) != 1 || !strings.Contains(asked[0], "old question") || strings.Contains(asked[0], "recent question") || strings.Contains(asked[0], "recent answer") {
+		t.Fatalf("the model was asked %d times, and the summarizer %q", len(prompts), asked)
+	}
+	chat := storedChat(t, rows, key, "chat-1")
+	if ids := messageIDs(api.Parsed(api.Raw(chat.Messages))); len(ids) != 5 || !reflect.DeepEqual(ids[:2], []string{"m1", "m2"}) || !reflect.DeepEqual(ids[3:], []string{"m3", "m4"}) ||
+		chat.Messages[2].Compaction == nil || chat.Messages[2].Compaction.Messages != 2 || chat.ActiveRun != nil || chat.LastRequestKind != "continue" {
+		t.Fatalf("the turn stored %+v", chat)
+	}
+	end := slices.IndexFunc(events, func(e event) bool { return e.Type == "COMPACTION_END" })
+	if end < 0 || events[end].Before != "m3" || events[end+1].Type != "STATE_SNAPSHOT" || eventOfType(events, "TEXT_MESSAGE_CHUNK") != nil {
+		t.Fatalf("the run sent %+v", events)
+	}
+	used := func(e event) int {
+		return api.Int(api.Obj(api.Obj(api.Obj(e.Snapshot)["thread"])["contextUsage"])["usedTokens"])
+	}
+	if before, after := used(*eventOfType(events, "STATE_SNAPSHOT")), used(events[end+1]); chat.ContextUsage == nil || chat.ContextUsage.UsedTokens != after || after >= before {
+		t.Fatalf("the chat filled %d tokens before and %d after, and stored %+v", before, after, chat.ContextUsage)
+	}
+}
+
+// A compact turn is refused before it starts when no message after the
+// chat's latest marker comes before its last question, and while the chat
+// has a running reply, rather than waiting behind it.
+func TestACompactTurnIsRefusedWhenItCannotCompact(t *testing.T) {
+	model, release := heldModel()
+	h, rows, key := testChatHarness(t, model)
+	t.Cleanup(release)
+	summarized := false
+	h.compactWith(func(string, string) (string, error) { summarized = true; return compactionOf("The user chatted."), nil })
+	storeExchanges(rows, "short", "only question", "only answer")
+	storeCompacted(rows, "compacted")
+	for _, id := range []string{"short", "compacted"} {
+		if w := postRoute(h, "/v1/threads/turn", compactInput(key, id), "alice"); w.Code != 400 || !strings.Contains(w.Body.String(), "NOTHING_TO_COMPACT") || storedChat(t, rows, key, id).ActiveRun != nil {
+			t.Fatalf("compacting %s: HTTP %d %s", id, w.Code, w.Body)
+		}
+	}
+	storeExchanges(rows, "running", "old question", "old answer", "recent question", "recent answer")
+	run, err := h.engine.AcceptTurn(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), key, requestOf[engine.TurnRequest](continueInput(key, "running")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitFrame(t, run.Log, "TEXT_MESSAGE_CHUNK")
+	if w := postRoute(h, "/v1/threads/turn", compactInput(key, "running"), "alice"); w.Code != 409 || !strings.Contains(w.Body.String(), "RUN_IN_FLIGHT") {
+		t.Fatalf("compacting a chat with a running reply: HTTP %d %s", w.Code, w.Body)
+	}
+	release()
+	<-run.Finished
+	if summarized {
+		t.Fatal("a refused compaction was summarized")
+	}
+}
+
+// A retry after a compact turn failed compacts again, and once a compaction
+// succeeds a retry no longer does.
+func TestARetryCompactsAgainAfterACompactTurnFailed(t *testing.T) {
+	prompts := make(chan []string, 1)
+	h, rows, key := testChatHarness(t, promptOf(prompts))
+	failing := true
+	h.compactWith(func(string, string) (string, error) {
+		if failing {
+			return "", &inference.Refused{Status: http.StatusBadRequest}
+		}
+		return compactionOf("The user plans a lighthouse tour of Maine."), nil
+	})
+	storeExchanges(rows, "chat-1", "old question", filler(100), "recent question", "recent answer")
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", compactInput(key, "chat-1"), "alice"))
+	if last := events[len(events)-1]; last.Code != "COMPACTION_FAILED" || storedChat(t, rows, key, "chat-1").LastRequestKind != "compact" {
+		t.Fatalf("the failed compaction ended with %+v", last)
+	}
+	failing = false
+	retry := compactInput(key, "chat-1")
+	retry["kind"] = "retry"
+	finishedRun(t, h, "/v1/threads/turn", retry)
+	if chat := storedChat(t, rows, key, "chat-1"); len(prompts) != 0 || len(chat.Messages) != 5 || domain.LatestCompaction(chat.Messages) != 2 || chat.LastRequestKind != "" {
+		t.Fatalf("the retry asked the model %d times and stored %+v", len(prompts), chat)
+	}
+}
+
 // A question is refused before anything is summarized only when its chat's
 // prompt does not fit and the question would not fit beside a summary of the
 // messages before it either.
@@ -471,24 +609,25 @@ func TestAQuestionIsRefusedOnlyWhenNoCompactionCouldFitIt(t *testing.T) {
 	}
 }
 
-// A session offers compaction only while the catalog lists the model that
-// writes its summaries, without which a long chat's turn fails.
+// A session offers compaction, automatic or on request, only while the
+// catalog lists the model that writes its summaries, without which a long
+// chat's turn fails.
 func TestASessionOffersCompactionOnlyWithItsModel(t *testing.T) {
 	h, _, _ := testChatHarness(t, nil)
-	offered := func() bool {
+	offered := func() map[string]bool {
 		var session struct {
 			Features map[string]bool `json:"features"`
 		}
 		json.Unmarshal(postRoute(h, "/v1/session", api.Object{}, "alice").Body.Bytes(), &session)
-		return session.Features["compaction"]
+		return session.Features
 	}
 	h.engine.Summaries = summarize.New(summarizerFunc(nil), &h.models.Catalog, "kimi-k3", longSummaryModel)
-	if offered() {
-		t.Fatal("a session offered compaction on a model the catalog does not list")
+	if features := offered(); features["compaction"] || features["manualCompaction"] {
+		t.Fatalf("a session offered compaction on a model the catalog does not list: %v", features)
 	}
 	h.compactWith(nil)
-	if !offered() {
-		t.Fatal("a session did not offer compaction on a model the catalog lists")
+	if features := offered(); !features["compaction"] || !features["manualCompaction"] {
+		t.Fatalf("a session did not offer compaction on a model the catalog lists: %v", features)
 	}
 }
 

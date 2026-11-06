@@ -145,7 +145,11 @@ func (eng *Engine) prepareTurn(ctx context.Context, r *Run, p *auth.Principal, c
 	if err != nil {
 		return nil, err
 	}
-	if err := preflightBudget(request); err != nil {
+	if turn.Kind == "compact" {
+		if !compactable(request.messages) {
+			return nil, errNothingToCompactNow()
+		}
+	} else if err := preflightBudget(request); err != nil {
 		return nil, err
 	}
 	plan := &turnPlan{row: row, turn: turn, request: request, model: model, titleText: titleSource(&working)}
@@ -164,8 +168,12 @@ func (eng *Engine) prepareTurn(ctx context.Context, r *Run, p *auth.Principal, c
 			return nil, api.Err(503, "TOOL_UNAVAILABLE", "This widget is not enabled for the client").WithAction(api.ActionStop)
 		}
 	}
-	t.ContextUsage = requestContextUsage(request)
-	t.ActiveRun, t.LastRequestID, t.LastRequestKind = activeRun(r.Log.ID), r.nonce, turn.Kind
+	t.ContextUsage = request.usage
+	t.ActiveRun, t.LastRequestID = activeRun(r.Log.ID), r.nonce
+	// A compaction is what a retry repeats only once it fails.
+	if turn.Kind != "compact" {
+		t.LastRequestKind = turn.Kind
+	}
 	if !s.local {
 		attach.StripInlineAttachments(t)
 	}
@@ -301,6 +309,8 @@ func (eng *Engine) launch(ctx context.Context, r *Run) error {
 		}()
 		if r.retryTarget != nil {
 			runErr = eng.retryWidget(runCtx, r, request, model)
+		} else if r.turn.Kind == "compact" {
+			runErr = eng.compactChat(runCtx, r, request)
 		} else {
 			runErr = eng.loop(runCtx, r.out, request, model)
 		}

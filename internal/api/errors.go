@@ -56,6 +56,7 @@ var Actions = map[string]string{
 	"MAX_TURNS":               ActionRetry,
 	"MISSING_ATTACHMENT":      ActionStop,
 	"MODEL_UNAVAILABLE":       ActionRevise,
+	"NOTHING_TO_COMPACT":      ActionStop,
 	"PAYLOAD_TOO_LARGE":       ActionRevise,
 	"PROJECTS_REQUIRE_CLOUD":  ActionStop,
 	"QUEUE_FULL":              ActionRetry,
