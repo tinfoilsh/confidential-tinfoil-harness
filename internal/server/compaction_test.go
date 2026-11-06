@@ -561,6 +561,45 @@ func TestACompactTurnIsRefusedWhenItCannotCompact(t *testing.T) {
 	}
 }
 
+// A message sent while a compact turn runs waits behind it, and its reply
+// reads the chat from the marker the compaction wrote.
+func TestAMessageSentWhileTheChatCompactsWaitsForTheCompaction(t *testing.T) {
+	prompts := make(chan []string, 1)
+	h, rows, key := testChatHarness(t, promptOf(prompts))
+	release := make(chan struct{})
+	h.compactWith(func(task, _ string) (string, error) {
+		if task == summarize.Compaction.Name {
+			<-release
+		}
+		return compactionOf("The user plans a lighthouse tour of Maine."), nil
+	})
+	storeExchanges(rows, "chat-1", "old question", filler(100), "recent question", "recent answer")
+	p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
+	compacting, err := h.engine.AcceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[engine.TurnRequest](compactInput(key, "chat-1")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitFrame(t, compacting.Log, "COMPACTION_START")
+	queued, err := h.engine.AcceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[engine.TurnRequest](continueInput(key, "chat-1")))
+	if err != nil || !queued.Queued {
+		t.Fatalf("the message was not queued behind the compaction: %v", err)
+	}
+	if len(prompts) != 0 {
+		t.Fatal("the message was answered before the compaction ended")
+	}
+	close(release)
+	<-compacting.Finished
+	<-queued.Finished
+	if prompt := <-prompts; len(prompt) != 5 || !strings.Contains(prompt[1], "lighthouse tour of Maine") || !strings.HasSuffix(prompt[1], "recent question") ||
+		prompt[2] != "assistant: recent answer" || prompt[3] != "user: test message" {
+		t.Fatalf("the queued message's reply was asked %q", prompt)
+	}
+	chat := storedChat(t, rows, key, "chat-1")
+	if len(chat.Messages) != 7 || chat.Messages[2].Role != domain.CompactionRole || chat.Messages[5].Content != "test message" || chat.Messages[6].Role != "assistant" {
+		t.Fatalf("the chat stored %+v", chat.Messages)
+	}
+}
+
 // A retry after a compact turn failed compacts again, and once a compaction
 // succeeds a retry no longer does.
 func TestARetryCompactsAgainAfterACompactTurnFailed(t *testing.T) {
