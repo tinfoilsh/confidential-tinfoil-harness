@@ -98,6 +98,23 @@ func (s *Store) CheckRegisteredKey(ctx context.Context, p *auth.Principal, key a
 	return nil
 }
 
+// CheckKeyNotReplaced refuses a key other than the one the caller has
+// registered, naming it. An account with no key registered refuses none:
+// its client registers the key it holds.
+func (s *Store) CheckKeyNotReplaced(ctx context.Context, p *auth.Principal, key auth.ContentKey) error {
+	defer clear(key[:])
+	current, err := s.Controlplane.GetCurrentKey(ctx, string(p.JWT), p.ID)
+	if err != nil {
+		return FromControlplane(err)
+	}
+	if current == nil || current.KeyID == "" || current.KeyID == keyID(key) {
+		return nil
+	}
+	e := api.Err(409, "KEY_MISMATCH", "The key is not the registered content key")
+	e.KeyID = current.KeyID
+	return e
+}
+
 // RegisterKey registers key as the caller's current key, with a bundle
 // when given, and returns its id. ifMatch is the current key's etag, or
 // "*" for an account that must have none. The control plane refuses a
