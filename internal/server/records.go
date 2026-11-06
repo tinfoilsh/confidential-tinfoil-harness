@@ -435,6 +435,12 @@ func (h *harness) getProfile(ctx context.Context, p *auth.Principal, key auth.Co
 		return nil, err
 	}
 	if stored == nil {
+		// Clients read the profile to learn their key opens the account.
+		// With none stored the read opened nothing, so a key replaced on
+		// another device would pass and fail every write after.
+		if err := h.store.CheckKeyNotReplaced(ctx, p, key); err != nil {
+			return nil, err
+		}
 		stored = &domain.StoredProfile{}
 	}
 	return h.viewProfile(*stored), nil

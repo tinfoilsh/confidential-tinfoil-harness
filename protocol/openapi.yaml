@@ -684,6 +684,7 @@ paths:
       operationId: profileGet
       summary: Read the profile
       tags: [profile]
+      description: Refuses a key other than the account's registered one with KEY_MISMATCH, also while no profile is stored, so a client learns from this read whether its key opens the account.
       requestBody:
         required: true
         content:

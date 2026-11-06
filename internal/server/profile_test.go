@@ -323,3 +323,26 @@ func TestTheWebSearchSettingOfAnOldProfileIsKept(t *testing.T) {
 		t.Fatalf("the update answered %v and stored %v", got, rowJSON(row))
 	}
 }
+
+// Starting fresh on another device registers a new key and removes the
+// profile. A client still holding the old key learns so when it reads the
+// profile, rather than being told its key opens the account and having
+// every write refused after.
+func TestReadingNoProfileRefusesAKeyReplacedOnAnotherDevice(t *testing.T) {
+	h, _, key := testChatHarness(t, nil)
+	replacement := randomKey()
+	if w := postRoute(h, "/v1/keys/register", api.Object{"key": keyBase64(replacement), "if_match": "*", "created_via": "start_fresh", "idempotency_key": "reg-1"}, "alice"); w.Code != http.StatusOK {
+		t.Fatalf("register: HTTP %d: %s", w.Code, w.Body.String())
+	}
+	w := postRoute(h, "/v1/profile/get", api.Object{"key": keyBase64(key)}, "alice")
+	var refused struct {
+		Error api.Error `json:"error"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &refused)
+	if w.Code != http.StatusConflict || refused.Error.Code != "KEY_MISMATCH" || refused.Error.KeyID != keyIDOf(replacement) {
+		t.Fatalf("reading no profile with the replaced key: HTTP %d: %s", w.Code, w.Body.String())
+	}
+	if got := profileOf(t, postRoute(h, "/v1/profile/get", api.Object{"key": keyBase64(replacement)}, "alice")); got["selectedModel"] != domain.AutoModelName {
+		t.Fatalf("reading no profile with the registered key: %v", got)
+	}
+}
