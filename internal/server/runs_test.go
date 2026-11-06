@@ -657,6 +657,37 @@ func TestAReplyIsSavedAfterItsClientLeaves(t *testing.T) {
 	}
 }
 
+// A client that leaves while its turn starts, as when its connection drops
+// or it opens another chat, still has the turn run and its reply saved,
+// rather than its message stored without the reply it started.
+func TestATurnStartsWhenItsClientLeavesAsItStarts(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
+	request, leave := context.WithCancel(context.Background())
+	// The connection drops as the turn's chat is being saved.
+	rows.refuse = func(*domain.StoredRow) error {
+		leave()
+		return nil
+	}
+	run, err := h.engine.AcceptTurn(request, p, chatCredential("alice"), key, requestOf[engine.TurnRequest](sendInput(key)))
+	if err != nil {
+		t.Fatalf("the turn did not start once its client left: %v", err)
+	}
+	select {
+	case <-run.Finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the reply did not finish once its client left")
+	}
+	row, err := rows.Load(context.Background(), p, key, "chat", run.Thread.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thread := mustRead(domain.ReadThreadRow(row))
+	if len(thread.Messages) != 2 || thread.Messages[1].Content != "hello" || thread.ActiveRun != nil {
+		t.Fatalf("the chat was saved with messages %+v, run %+v", thread.Messages, thread.ActiveRun)
+	}
+}
+
 // A device chat's run that ends while its client is away is kept for that
 // client, which collects the chat the run returns by following the run
 // again. Once it has, the run is gone; no other account can follow it.

@@ -215,7 +215,7 @@ func (s *memoryRows) Revisions(_ context.Context, p *auth.Principal, scope, _, p
 	}
 	return listed, "", nil
 }
-func (s *memoryRows) Push(_ context.Context, p *auth.Principal, key auth.ContentKey, scope string, row *domain.StoredRow, _ string) (string, error) {
+func (s *memoryRows) Push(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope string, row *domain.StoredRow, _ string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
@@ -223,6 +223,10 @@ func (s *memoryRows) Push(_ context.Context, p *auth.Principal, key auth.Content
 		if err := s.refuse(row); err != nil {
 			return "", err
 		}
+	}
+	// Like the store's, a push whose request ends before it is answered fails.
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
 	name := rowMapKey(p, scope, row.ID)
 	current, exists := s.rows[name]

@@ -96,7 +96,12 @@ func (eng *Engine) AcceptTurn(ctx context.Context, p *auth.Principal, credential
 	if r.Queued {
 		return r, nil
 	}
-	if err := eng.launch(ctx, r); err != nil {
+	// A client that leaves while its turn starts leaves it to start, as a
+	// queued turn does: the turn's chat may already be saved with it.
+	launchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), CommitTimeout)
+	err := eng.launch(launchCtx, r)
+	cancel()
+	if err != nil {
 		err = auth.WithQuota(p, r.credential.Limit, err)
 		if next := eng.endUnstarted(r, err); next != nil {
 			go eng.runQueue(next)
