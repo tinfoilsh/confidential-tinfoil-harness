@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/summarize"
 	"golang.org/x/text/language"
 	"golang.org/x/text/language/display"
 )
@@ -46,6 +49,12 @@ type Request struct {
 	messages []domain.Message
 	vision   bool
 	loc      *time.Location
+	// The reminder closing the prompt gives the clock, then how much of the
+	// budget the prompt fills, and whether a full chat is compacted, then
+	// the turn's instruction.
+	clock, instruction string
+	compacts           bool
+	usage              *domain.ContextUsage // what the prompt fills, as the reminder and the chat state it
 }
 
 // cacheScope is the prompt cache a chat's turns share: the chats of one
@@ -166,7 +175,37 @@ func systemPrompt(c *domain.Catalog, thread *domain.Thread, profile *domain.Prof
 }
 func timeReminder(now time.Time, loc *time.Location) string {
 	zone := loc.String()
-	return "<system-reminder>Current time: " + englishTime(now.In(loc), zone) + " (" + zone + ")</system-reminder>"
+	return "Current time: " + englishTime(now.In(loc), zone) + " (" + zone + ")"
+}
+
+// contextReminder tells the model how much of the prompt budget its prompt
+// fills, as the chat's context usage tells the user.
+func contextReminder(usage *domain.ContextUsage, compacts bool) string {
+	text := fmt.Sprintf("Context used: %d%% of the room this conversation may fill (~%s of %s tokens).", int(math.Round(usage.Percentage)), thousands(usage.UsedTokens), thousands(usage.LimitTokens))
+	if compacts {
+		text += " Once it is full, the earlier messages are summarized to make room."
+	}
+	return text
+}
+
+// thousands is a token count in thousands, as the clients show it.
+func thousands(tokens int) string {
+	if tokens < 1000 {
+		return strconv.Itoa(tokens)
+	}
+	return strconv.Itoa(int(math.Round(float64(tokens)/1000))) + "k"
+}
+
+// remind counts what the prompt now fills, and sets the reminder that closes
+// it to say so. The count leaves out the reminder's own statement of it, so
+// the model and the user are told the same share.
+func (req *Request) remind() {
+	reminder := func(context string) json.RawMessage {
+		return api.Raw(api.Object{"role": "user", "content": "<system-reminder>" + req.clock + context + "</system-reminder>" + req.instruction})
+	}
+	req.reminder = reminder("")
+	req.usage = requestContextUsage(req)
+	req.reminder = reminder("\n" + contextReminder(req.usage, req.compacts))
 }
 
 // sentReminder is when a question was asked, in the zone the current time is
@@ -235,16 +274,16 @@ func (eng *Engine) BuildRequest(thread *domain.Thread, profile *domain.Profile, 
 	if err != nil {
 		return nil, nil, api.Err(400, "BAD_REQUEST", "Unknown timezone")
 	}
-	reminder := timeReminder(api.Now(), loc)
+	req.clock, req.compacts = timeReminder(api.Now(), loc), eng.Summaries.Ready(summarize.Compaction)
 	// As the web client does, the continue instruction shares the reminder's
 	// turn: some chat templates refuse two user messages in a row.
 	if in.Kind == "continue" {
-		reminder += "\n\n" + ContinueInstruction
+		req.instruction += "\n\n" + ContinueInstruction
 	}
 	// An ask's instruction follows the history too, so its prompt starts as
 	// the chat it asks about does and reuses that chat's prompt cache.
 	if in.Kind == "ask" {
-		reminder += "\n\n" + askInstruction
+		req.instruction += "\n\n" + askInstruction
 	}
 	req.System = systemPrompt(c, thread, profile, project, documents, display, zone, options.Locale)
 	req.window, req.policy = window, policy
@@ -264,7 +303,7 @@ func (eng *Engine) BuildRequest(thread *domain.Thread, profile *domain.Profile, 
 	}
 	req.messages, req.vision, req.loc = thread.Messages, c.Vision(name), loc
 	req.render()
-	req.reminder = api.Raw(api.Object{"role": "user", "content": reminder})
+	req.remind()
 	return req, picked, nil
 }
 

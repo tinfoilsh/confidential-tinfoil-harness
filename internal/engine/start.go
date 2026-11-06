@@ -168,7 +168,7 @@ func (eng *Engine) prepareTurn(ctx context.Context, r *Run, p *auth.Principal, c
 			return nil, api.Err(503, "TOOL_UNAVAILABLE", "This widget is not enabled for the client").WithAction(api.ActionStop)
 		}
 	}
-	t.ContextUsage = requestContextUsage(request)
+	t.ContextUsage = request.usage
 	t.ActiveRun, t.LastRequestID = activeRun(r.Log.ID), r.nonce
 	// A compaction is what a retry repeats only once it fails.
 	if turn.Kind != "compact" {

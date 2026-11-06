@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -130,6 +131,38 @@ func TestTheModelReadsAChatFromItsLatestCompaction(t *testing.T) {
 	chat := mustRead(domain.ReadThreadRow(row))
 	if ids := messageIDs(api.Parsed(api.Raw(chat.Messages))); !reflect.DeepEqual(ids[:5], []string{"m1", "m2", "c1", "m3", "m4"}) || chat.Messages[2].Compaction == nil || chat.Messages[2].Compaction.Model != "glm-5-3" {
 		t.Fatalf("the turn stored %s", row.Data)
+	}
+}
+
+// The model is told the share of the prompt budget the chat reports its
+// prompt fills, counted again once a compaction made room, and that a full
+// chat is summarized only while one would be.
+func TestTheModelIsToldHowMuchOfItsContextTheChatFills(t *testing.T) {
+	prompts := make(chan []string, 1)
+	h, rows, key := testChatHarness(t, promptOf(prompts))
+	told := func(id string) (string, *domain.ContextUsage) {
+		t.Helper()
+		finishedRun(t, h, "/v1/threads/turn", continueInput(key, id))
+		prompt := <-prompts
+		usage := storedChat(t, rows, key, id).ContextUsage
+		if usage == nil {
+			t.Fatalf("%s stored no context usage", id)
+		}
+		return prompt[len(prompt)-1], usage
+	}
+	share := func(usage *domain.ContextUsage) string {
+		return fmt.Sprintf("Context used: %d%% ", int(math.Round(usage.Percentage)))
+	}
+	storeCompacted(rows, "short")
+	if reminder, usage := told("short"); !strings.Contains(reminder, share(usage)) || strings.Contains(reminder, "summarized") {
+		t.Fatalf("a chat filling %v was reminded %q", usage, reminder)
+	}
+	h.compactWith(func(string, string) (string, error) {
+		return compactionOf("The user plans a lighthouse tour of Maine."), nil
+	})
+	longCompacted(rows, "long")
+	if reminder, usage := told("long"); usage.Percentage >= 100 || !strings.Contains(reminder, share(usage)) || !strings.Contains(reminder, "the earlier messages are summarized") {
+		t.Fatalf("a compacted chat filling %v was reminded %q", usage, reminder)
 	}
 }
 

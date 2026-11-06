@@ -130,7 +130,8 @@ func (eng *Engine) compact(ctx context.Context, r *Run, req *Request, reserved i
 	marker.Compaction = &domain.Compaction{Messages: covered, StartedAt: float64(started.UnixMilli()), EndedAt: float64(api.Now().UnixMilli()), Model: result.Model, Version: summarize.Compaction.Version}
 	req.messages = slices.Insert(slices.Clone(messages), kept, marker)
 	req.render()
-	r.compacted = &compaction{marker: marker, beforeID: before, usage: requestContextUsage(req)}
+	req.remind()
+	r.compacted = &compaction{marker: marker, beforeID: before, usage: req.usage}
 	view := domain.ViewMessage(&marker)
 	r.out.emit(domain.CompactionEnd{MessageID: marker.ID, BeforeMessageID: before, Outcome: domain.CompactionCompleted, Marker: &view})
 	eng.Live.mu.Lock()
