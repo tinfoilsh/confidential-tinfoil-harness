@@ -518,6 +518,29 @@ func TestAToolExchangeClearsTheResultsTheModelAnswered(t *testing.T) {
 	}
 }
 
+// A model turn that fills the room its window leaves the reply ends the reply
+// there: the run commits it stopped, for a continue turn to go on from, says
+// it was cut off, and runs no call the turn had begun.
+func TestAReplyCutOffAtTheEndOfTheWindowIsStoppedThere(t *testing.T) {
+	searched := serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
+		return nil, api.Object{"results": []api.Object{}}
+	})
+	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"Let me look that up.\"}}]}\n\n"+toolCallChunk(0, "s", "web_search", `{"query":"ti`)+
+			"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n")
+	})
+	events := finishedRun(t, h, "/v1/threads/turn", searchInput(key))
+	var metadata domain.RunMetadata
+	if err := json.Unmarshal(events[len(events)-1].Metadata, &metadata); err != nil || !metadata.Truncated || len(metadata.Messages) != 1 ||
+		!domain.ValueOr(metadata.Messages[0].IsInterrupted, false) || domain.ValueOr(metadata.Messages[0].IsError, false) {
+		t.Fatalf("the run finished with %s", events[len(events)-1].Metadata)
+	}
+	reply := storedChat(t, rows, key, events[0].ThreadID).Messages[1]
+	if reply.Content != "Let me look that up." || !domain.ValueOr(reply.IsInterrupted, false) || len(searched.list()) != 0 {
+		t.Fatalf("the run stored %+v after %d searches", reply, len(searched.list()))
+	}
+}
+
 // compactInput is a compact turn of alice's stored chat.
 func compactInput(key auth.ContentKey, thread string) api.Object {
 	in := continueInput(key, thread)

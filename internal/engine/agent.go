@@ -34,6 +34,10 @@ const (
 	// ClearedResult is what the model reads in place of a tool result it
 	// already answered, once the run's exchange outgrows the window.
 	ClearedResult = "[This result was cleared to make room in the context window. Call the tool again if you need it.]"
+
+	// lengthFinish is the finish reason of a model turn that filled the room
+	// its window left it.
+	lengthFinish = "length"
 )
 
 func (eng *Engine) loop(ctx context.Context, out *Stream, req *Request, m *inference.Model) error {
@@ -315,7 +319,7 @@ func (eng *Engine) turn(ctx context.Context, out *Stream, m *inference.Model, pa
 		}
 	}()
 	var calls []ToolCall
-	ended := false
+	ended, cutOff := false, false
 	var answer, reasoningText strings.Builder
 	reasoningField := "reasoning_content"
 	message := "msg_" + api.Token()
@@ -378,8 +382,8 @@ func (eng *Engine) turn(ctx context.Context, out *Stream, m *inference.Model, pa
 		if len(chunk.Choices) == 0 {
 			continue
 		}
-		if chunk.Choices[0].FinishReason != "" {
-			ended = true
+		if reason := chunk.Choices[0].FinishReason; reason != "" {
+			ended, cutOff = true, reason == lengthFinish
 		}
 		delta := chunk.Choices[0].Delta
 		// Reasoning first: at the think-close boundary one delta carries the last
@@ -408,6 +412,14 @@ func (eng *Engine) turn(ctx context.Context, out *Stream, m *inference.Model, pa
 	}
 	if !ended {
 		return calls, answer.String(), api.Err(502, "UPSTREAM_REFUSED", "The model stream ended before completion")
+	}
+	// A turn cut off at the end of the window ends the reply there. Its calls
+	// stay open, as a cut stream's do, and none of them runs.
+	if cutOff {
+		out.mu.Lock()
+		out.truncated = true
+		out.mu.Unlock()
+		return nil, answer.String(), nil
 	}
 	for i := range calls {
 		c := &calls[i]

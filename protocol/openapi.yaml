@@ -2144,6 +2144,7 @@ components:
             total_tokens: {type: integer}
         rateLimit: {$ref: "#/components/schemas/RateLimit"}
         cancelled: {type: boolean}
+        truncated: {type: boolean, description: "The model filled the room its window left the run's reply, which ended it there. The reply is committed interrupted, so a continue turn goes on from where it stopped; a client may say why it stopped while it shows the run's end."}
 
     CommittedReply:
       description: What a run commits to a reply beyond its streamed content.

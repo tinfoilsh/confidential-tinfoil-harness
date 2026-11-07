@@ -33,7 +33,7 @@ func (eng *Engine) finishRun(r *Run, runErr error) {
 	r.out.mu.Lock()
 	r.out.framePending()
 	messages := r.assembler.Messages()
-	spend, sources, reply := r.out.spend, r.out.sources, r.out.replyID
+	spend, sources, reply, truncated := r.out.spend, r.out.sources, r.out.replyID, r.out.truncated
 	r.out.Observe, r.out.folding, r.out.activities, r.out.sources = nil, false, nil, nil
 	if r.out.thoughts != nil {
 		r.out.thoughts.close()
@@ -44,7 +44,9 @@ func (eng *Engine) finishRun(r *Run, runErr error) {
 	committed := []domain.CommittedReply{}
 	for i := range messages {
 		m := &messages[i]
-		m.IsInterrupted, m.IsError = new(cancelled), new(runErr != nil && !cancelled)
+		// A reply cut off at the end of the window is stopped where it ended,
+		// for a continue turn to go on from.
+		m.IsInterrupted, m.IsError = new(cancelled || truncated), new(runErr != nil && !cancelled)
 		m.Model = cmp.Or(r.out.concreteModel, r.row.Model)
 		m.ModelDisplayName = eng.Models.Catalog.Get().DisplayName(m.Model)
 		m.Usage = api.Raw(domain.MessageUsage{PromptTokens: spend.Prompt, CompletionTokens: spend.Completion})
@@ -154,7 +156,7 @@ func (eng *Engine) finishRun(r *Run, runErr error) {
 	if runErr != nil && !cancelled {
 		r.out.emit(domain.FailedRun(s.ID, r.Log.ID, api.AsError(runErr), &metadata))
 	} else {
-		metadata.Usage, metadata.Cancelled = &spend, &cancelled
+		metadata.Usage, metadata.Cancelled, metadata.Truncated = &spend, &cancelled, truncated && !cancelled
 		r.out.emit(domain.RunFinished{ThreadID: s.ID, RunID: r.Log.ID, Metadata: metadata})
 	}
 	r.Log.Frames.close(ErrDone)

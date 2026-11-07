@@ -232,6 +232,9 @@ type RunMetadata struct {
 	Usage     *api.Usage       `json:"usage,omitempty"`
 	RateLimit *api.RateLimit   `json:"rateLimit,omitempty"`
 	Cancelled *bool            `json:"cancelled,omitempty"`
+	// Truncated is set when the model filled the room its window left the
+	// reply, which ended it there, interrupted.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // CommittedReply is what a run commits to a reply beyond its streamed
