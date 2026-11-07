@@ -540,13 +540,20 @@ func TestAToolExchangeClearsTheResultsTheModelAnswered(t *testing.T) {
 }
 
 // A model turn that fills the room its window leaves the reply ends the reply
-// there: the run commits it stopped, for a continue turn to go on from, says
-// it was cut off, and runs no call the turn had begun.
+// there: the run commits it stopped, says it was cut off, and runs no call the
+// turn had begun, which a continue turn does not tell the model ran.
 func TestAReplyCutOffAtTheEndOfTheWindowIsStoppedThere(t *testing.T) {
 	searched := serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
 		return nil, api.Object{"results": []api.Object{}}
 	})
+	continued := make(chan []any, 1)
+	var turns atomic.Int32
 	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if turns.Add(1) > 1 {
+			continued <- lastRequest(r)
+			io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\" Done.\"}}]}\n\ndata: [DONE]\n\n")
+			return
+		}
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"Let me look that up.\"}}]}\n\n"+toolCallChunk(0, "s", "web_search", `{"query":"ti`)+
 			"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n")
 	})
@@ -559,6 +566,14 @@ func TestAReplyCutOffAtTheEndOfTheWindowIsStoppedThere(t *testing.T) {
 	reply := storedChat(t, rows, key, events[0].ThreadID).Messages[1]
 	if reply.Content != "Let me look that up." || !domain.ValueOr(reply.IsInterrupted, false) || len(searched.list()) != 0 {
 		t.Fatalf("the run stored %+v after %d searches", reply, len(searched.list()))
+	}
+	in := continueInput(key, events[0].ThreadID)
+	in["kind"], in["messageId"] = "continue", reply.ID
+	delete(in, "content")
+	finishedRun(t, h, "/v1/threads/turn", in)
+	messages := <-continued
+	if strings.Contains(fmt.Sprint(messages), "tool_call") || toolMessage(messages, "s") != "" {
+		t.Fatalf("the continued reply was sent as %v", messages)
 	}
 }
 
