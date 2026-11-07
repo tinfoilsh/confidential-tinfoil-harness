@@ -41,7 +41,7 @@ type Principal struct {
 	AnonymousID  string
 	InferenceKey Secret
 	// The validation already performed while recognizing this request.
-	validatedFree *Credential
+	validated *Credential
 }
 
 func (p *Principal) Scope() string {
@@ -58,6 +58,18 @@ type Credential struct {
 	// firstParty marks a Tinfoil Chat access token, which only a subscriber
 	// holds and whose conversations are screened.
 	FirstParty bool
+	// APIKey marks an API key, whose holder pays for web search as an API
+	// request's caller does, and whose conversations are screened.
+	APIKey bool
+}
+
+// apiKeyPrefix begins an API key, which a caller signs in with as a
+// signed-out caller signs in with a free key.
+const apiKeyPrefix = "tk_"
+
+// isKey reports whether token is a key of the kind prefix begins.
+func isKey(token, prefix string) bool {
+	return strings.HasPrefix(token, prefix) && len(token) > len(prefix) && len(token) <= 256
 }
 
 // InferenceKeyHeader carries the credential a signed-in client minted for
@@ -84,11 +96,11 @@ type chatTokenClaims struct {
 }
 
 // Callers remembered by the caches below, each evicting its least recently
-// used entry when full. A free key validated within freeKeyTTL admits its
-// caller without asking the control plane again.
+// used entry when full. A free key or API key validated within issuedKeyTTL
+// admits its caller without asking the control plane again.
 const (
 	maxCachedCallers = 10000
-	freeKeyTTL       = time.Minute
+	issuedKeyTTL     = time.Minute
 	credentialTTL    = time.Hour
 )
 
@@ -128,7 +140,7 @@ type Authenticator struct {
 func (a *Authenticator) caches() {
 	a.cachesOnce.Do(func() {
 		a.newest = expirable.NewLRU[string, Credential](maxCachedCallers, nil, credentialTTL)
-		a.valid = expirable.NewLRU[string, struct{}](maxCachedCallers, nil, freeKeyTTL)
+		a.valid = expirable.NewLRU[string, struct{}](maxCachedCallers, nil, issuedKeyTTL)
 	})
 }
 
@@ -167,7 +179,8 @@ func New(ctx context.Context, issuer, cp string) (*Authenticator, error) {
 }
 
 // authenticate reads who a request is from: a signed-in caller's Clerk
-// session, or, where anonymous is allowed, a signed-out caller's free key.
+// session, or, where anonymous is allowed, a signed-out caller's free key or
+// an API key, whose holder is served as a signed-out caller is.
 func (a *Authenticator) Authenticate(r *http.Request, anonymous bool) (*Principal, error) {
 	if a == nil {
 		return nil, api.Err(503, "UNAUTHENTICATED", "Authentication is not configured").WithAction(api.ActionStop)
@@ -176,7 +189,7 @@ func (a *Authenticator) Authenticate(r *http.Request, anonymous bool) (*Principa
 	if token == "" {
 		return nil, api.Err(401, "UNAUTHENTICATED", "A Clerk session is required")
 	}
-	if anonymous && strings.HasPrefix(token, "free_") && len(token) > len("free_") && len(token) <= 256 {
+	if anonymous && (isKey(token, "free_") || isKey(token, apiKeyPrefix)) {
 		// Possession scopes ephemeral state. The prefix is not validation:
 		// recognize checks the key with the control plane before any work.
 		return &Principal{Anonymous: true, AnonymousID: api.HashHex([]byte(token)), InferenceKey: Secret(token)}, nil
@@ -195,7 +208,8 @@ func (a *Authenticator) Authenticate(r *http.Request, anonymous bool) (*Principa
 }
 
 // recognize refuses a caller before its body is read: a signed-out caller
-// is served only with a free key the control plane accepted, recently or now.
+// is served only with a free key or API key the control plane accepted,
+// recently or now.
 func (a *Authenticator) Recognize(ctx context.Context, p *Principal) error {
 	if !p.Anonymous {
 		return nil
@@ -203,15 +217,15 @@ func (a *Authenticator) Recognize(ctx context.Context, p *Principal) error {
 	if _, ok := a.validKeys().Get(api.HashHex([]byte(p.InferenceKey))); ok {
 		return nil
 	}
-	credential, err := a.freeKey(ctx, p)
+	credential, err := a.issuedKey(ctx, p)
 	if err == nil {
-		p.validatedFree = &credential
+		p.validated = &credential
 	}
 	return err
 }
 
-// keyValidation asks the control plane whether a free key is valid, and
-// for the quota it has left.
+// keyValidation asks the control plane whether a free key or API key is
+// valid, and for the quota it has left.
 type keyValidation struct {
 	APIKey           Secret `json:"api_key"`
 	IncludeRateLimit bool   `json:"include_rate_limit"`
@@ -223,23 +237,25 @@ type validatedKey struct {
 	RateLimit *api.Quota `json:"rate_limit"`
 }
 
-// freeKey validates a free key, a signed-out caller's or a signed-in
-// caller's without a subscription, and reads its quota. A key validated
-// recently admits its caller without asking again.
-func (a *Authenticator) freeKey(ctx context.Context, p *Principal) (Credential, error) {
-	if p.validatedFree != nil {
-		credential := *p.validatedFree
-		p.validatedFree = nil
+// issuedKey validates a key the control plane issued: a free key, a
+// signed-out caller's or a signed-in caller's without a subscription, whose
+// quota it reads, or an API key. A key validated recently admits its caller
+// without asking again.
+func (a *Authenticator) issuedKey(ctx context.Context, p *Principal) (Credential, error) {
+	if p.validated != nil {
+		credential := *p.validated
+		p.validated = nil
 		return credential, nil
 	}
-	credential, err := a.validateFreeKey(ctx, p)
+	credential, err := a.validateIssuedKey(ctx, p)
 	if err == nil {
 		a.validKeys().Add(api.HashHex([]byte(p.InferenceKey)), struct{}{})
+		credential.APIKey = isKey(string(p.InferenceKey), apiKeyPrefix)
 	}
 	return credential, err
 }
 
-func (a *Authenticator) validateFreeKey(ctx context.Context, p *Principal) (Credential, error) {
+func (a *Authenticator) validateIssuedKey(ctx context.Context, p *Principal) (Credential, error) {
 	// Reuse the validation endpoint already used by shims on Tinfoil hosts,
 	// asking it for the key's quota. No key issuance, client IP, or expiry
 	// metadata comes from this call.
@@ -272,8 +288,8 @@ func (a *Authenticator) validateFreeKey(ctx context.Context, p *Principal) (Cred
 	}
 	var detail api.Object
 	json.Unmarshal(body, &detail)
-	if resp.StatusCode == http.StatusTooManyRequests && api.Str(api.Obj(detail["error"])["code"]) == "insufficient_quota" {
-		// An exhausted key may still open the session and show the quota
+	if resp.StatusCode == http.StatusTooManyRequests && api.Str(api.Obj(detail["error"])["code"]) == "insufficient_quota" && !isKey(string(p.InferenceKey), apiKeyPrefix) {
+		// An exhausted free key may still open the session and show the quota
 		// banner. acceptTurn refuses to start work with this zero balance.
 		return Credential{Key: p.InferenceKey, Limit: api.ExhaustedLimit("free_daily")}, nil
 	}
@@ -296,15 +312,16 @@ func (a *Authenticator) validateFreeKey(ctx context.Context, p *Principal) (Cred
 }
 
 // inference is the credential a caller's model calls carry: a signed-out
-// caller's free key, or the chat token or free key a signed-in client minted.
+// caller's free key or API key, or the chat token or free key a signed-in
+// client minted.
 func (a *Authenticator) Inference(ctx context.Context, p *Principal) (Credential, error) {
 	switch {
 	case p.InferenceKey == "" && p.Anonymous:
 		return Credential{}, api.Err(401, "UNAUTHENTICATED", "An anonymous chat key is required")
 	case p.InferenceKey == "":
 		return Credential{}, errCredentialRequired
-	case strings.HasPrefix(string(p.InferenceKey), "free_"):
-		return a.freeKey(ctx, p)
+	case p.Anonymous || strings.HasPrefix(string(p.InferenceKey), "free_"):
+		return a.issuedKey(ctx, p)
 	}
 	return a.chatToken(p)
 }

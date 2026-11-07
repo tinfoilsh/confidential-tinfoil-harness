@@ -333,11 +333,16 @@ func testChatHarness(t *testing.T, upstream http.HandlerFunc) (*harness, *memory
 			return
 		}
 		var in api.Object
-		if json.NewDecoder(r.Body).Decode(&in) != nil || api.Str(in["api_key"]) != "free_anonymous-key" {
+		json.NewDecoder(r.Body).Decode(&in)
+		switch api.Str(in["api_key"]) {
+		case "free_anonymous-key":
+			io.WriteString(w, "OK")
+		case testAPIKey:
+			// The control plane reports no quota for an API key.
+			io.WriteString(w, `{"ok":true}`)
+		default:
 			w.WriteHeader(http.StatusUnauthorized)
-			return
 		}
-		io.WriteString(w, "OK")
 	}))
 	t.Cleanup(cp.Close)
 	bk := bucketstub.NewStore()
@@ -427,6 +432,9 @@ func chatCredential(user string) auth.Credential {
 
 // signIn sends a request as user, with the chat token its client minted, or
 // with no user as a signed-out visitor.
+// testAPIKey is an API key the tests' control plane accepts.
+const testAPIKey = "tk_test-api-key"
+
 func signIn(r *http.Request, user string) {
 	if user == "" {
 		r.Header.Set("Authorization", "Bearer free_anonymous-key")
@@ -1972,50 +1980,80 @@ func TestALargeSearchResultIsClippedNotFlattened(t *testing.T) {
 	}
 }
 
-func TestWebSearchIsNeverBilled(t *testing.T) {
-	enclave := serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
-		return nil, api.Object{"results": []api.Object{}}
-	})
-	turns := toolTurns(toolCallChunk(0, "one", "web_search", `{"query":"cats"}`)+toolCallChunk(1, "two", "web_search", `{"query":"dogs"}`), nil)
-	modelContexts := make(chan string, 1)
-	h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
-		if usage, ok, err := usagereporting.FromHeaders(r.Header, "test-usage-secret", time.Now(), time.Minute); err == nil && ok {
-			select {
-			case modelContexts <- usage.ContextID:
-			default:
+// Web search within a chat is billed only to an API key, whose holder pays
+// for it as an API request's caller does, once for the run, since the search
+// service bills a run's calls as one session. A subscriber's or free key's is
+// never billed.
+func TestWebSearchIsBilledOnlyToAPIKeys(t *testing.T) {
+	for name, tc := range map[string]struct {
+		key    string
+		billed bool
+	}{
+		"chat token": {chatTokenOf("alice"), false},
+		"free key":   {"free_anonymous-key", false},
+		"api key":    {testAPIKey, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			enclave := serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
+				return nil, api.Object{"results": []api.Object{}}
+			})
+			turns := toolTurns(toolCallChunk(0, "one", "web_search", `{"query":"cats"}`)+toolCallChunk(1, "two", "web_search", `{"query":"dogs"}`), nil)
+			modelContexts := make(chan string, 1)
+			h, _, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+				if usage, ok, err := usagereporting.FromHeaders(r.Header, "test-usage-secret", time.Now(), time.Minute); err == nil && ok {
+					select {
+					case modelContexts <- usage.ContextID:
+					default:
+					}
+				}
+				turns(w, r)
+			})
+			in := searchInput(key)
+			if tc.key != chatTokenOf("alice") {
+				in = localInput("", nil)
+				api.Obj(in["options"])["webSearch"] = true
 			}
-		}
-		turns(w, r)
-	})
-	events := finishedRun(t, h, "/v1/threads/turn", searchInput(key))
-	calls := enclave.list()
-	if len(calls) != 2 {
-		t.Fatalf("the enclave saw %d calls", len(calls))
-	}
-	run := <-modelContexts
-	for _, call := range calls {
-		usage, ok, err := usagereporting.FromHeaders(call.header, "test-usage-secret", time.Now(), time.Minute)
-		if err != nil || !ok {
-			t.Fatalf("no signed usage context: %v", err)
-		}
-		// The run's model turns are billed; a search within it is not.
-		if usage.BillCustomerRequest {
-			t.Fatalf("search was marked billable: %+v", usage)
-		}
-		if usage.ContextID != run || usage.RootRequestID != run || usage.ParentService != "harness" || usage.Depth != 1 || !usagereporting.VerifyAPIKeyHash(chatTokenOf("alice"), usage.APIKeyHash) {
-			t.Fatalf("search lost the run's identity: %+v", usage)
-		}
-		// Usage headers leave the enclave; the run id admits followers.
-		if strings.Contains(string(api.Raw(usage)), events[0].RunID) {
-			t.Fatalf("a usage report names the run: %+v", usage)
-		}
-		for name, values := range call.header {
-			for _, value := range values {
-				if strings.Contains(value, events[0].RunID) {
-					t.Fatalf("header %s names the run: %s", name, value)
+			r := httptest.NewRequest(http.MethodPost, "/v1/threads/turn", bytes.NewReader(api.Raw(in)))
+			if tc.key == chatTokenOf("alice") {
+				signIn(r, "alice")
+			} else {
+				r.Header.Set("Authorization", "Bearer "+tc.key)
+			}
+			w := httptest.NewRecorder()
+			h.routes().ServeHTTP(w, r)
+			events := eventsIn(t, w)
+			if last := events[len(events)-1]; last.Type != "RUN_FINISHED" {
+				t.Fatalf("the run ended with %+v", last)
+			}
+			calls := enclave.list()
+			if len(calls) != 2 {
+				t.Fatalf("the enclave saw %d calls", len(calls))
+			}
+			run := <-modelContexts
+			for _, call := range calls {
+				usage, ok, err := usagereporting.FromHeaders(call.header, "test-usage-secret", time.Now(), time.Minute)
+				if err != nil || !ok {
+					t.Fatalf("no signed usage context: %v", err)
+				}
+				if usage.BillCustomerRequest != tc.billed {
+					t.Fatalf("search was billed %v: %+v", usage.BillCustomerRequest, usage)
+				}
+				if usage.ContextID != run || usage.RootRequestID != run || usage.ParentService != "harness" || usage.Depth != 1 || !usagereporting.VerifyAPIKeyHash(tc.key, usage.APIKeyHash) {
+					t.Fatalf("search lost the run's identity: %+v", usage)
+				}
+				// Usage headers leave the enclave; the run id admits followers.
+				if strings.Contains(string(api.Raw(usage)), events[0].RunID) {
+					t.Fatalf("a usage report names the run: %+v", usage)
+				}
+				for name, values := range call.header {
+					for _, value := range values {
+						if strings.Contains(value, events[0].RunID) {
+							t.Fatalf("header %s names the run: %s", name, value)
+						}
+					}
 				}
 			}
-		}
+		})
 	}
 }
 

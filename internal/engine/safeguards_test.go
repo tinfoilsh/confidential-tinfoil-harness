@@ -98,7 +98,7 @@ func TestScreeningIsThePromptAndHistoryWithoutToolResults(t *testing.T) {
 	}
 }
 
-func TestOnlyCompletedFirstPartyChatsAreScreened(t *testing.T) {
+func TestOnlyCompletedFirstPartyAndAPIKeyChatsAreScreened(t *testing.T) {
 	reply := []domain.Message{{Content: "hello"}}
 	for name, tc := range map[string]struct {
 		change func(*Run)
@@ -111,8 +111,8 @@ func TestOnlyCompletedFirstPartyChatsAreScreened(t *testing.T) {
 		"cancelled":    {func(r *Run) { r.cancelled = true }, reply, nil, false},
 		"deleted":      {func(r *Run) { r.Thread.deleted = true }, reply, nil, false},
 		"widget retry": {func(r *Run) { r.retryTarget = &retryTarget{block: domain.Block{Name: "render_chart"}} }, reply, nil, false},
-		"anonymous":    {func(r *Run) { r.Principal.Anonymous = true }, reply, nil, false},
-		"api key":      {func(r *Run) { r.credential.FirstParty = false }, reply, nil, false},
+		"free key":     {func(r *Run) { r.Principal.Anonymous, r.credential = true, auth.Credential{Key: "free_key"} }, reply, nil, false},
+		"api key":      {func(r *Run) { r.Principal.Anonymous, r.credential = true, auth.Credential{Key: "tk_key", APIKey: true} }, reply, nil, true},
 		"not captured": {func(r *Run) { r.screening = nil }, reply, nil, false},
 		"no reply":     {func(*Run) {}, []domain.Message{{Content: ""}}, nil, false},
 	} {

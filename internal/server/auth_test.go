@@ -14,7 +14,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -57,7 +56,7 @@ func TestAnonymousInferenceValidatesTheClientKey(t *testing.T) {
 	}
 	for range 2 {
 		credential, err := a.Inference(context.Background(), p)
-		if err != nil || credential.Key != "free_client-key" || credential.Limit.Kind != nil || !credential.Expires.IsZero() {
+		if err != nil || credential.Key != "free_client-key" || credential.Limit.Kind != nil || !credential.Expires.IsZero() || credential.APIKey {
 			t.Fatalf("incorrect credential or invented quota/expiry metadata: err=%v", err)
 		}
 	}
@@ -73,6 +72,60 @@ func TestAnonymousInferenceValidatesTheClientKey(t *testing.T) {
 	}
 	if _, err := a.Inference(context.Background(), &auth.Principal{Anonymous: true}); api.AsError(err).HTTP != 401 || calls.Load() != 2 {
 		t.Fatal("missing client key reached controlplane")
+	}
+}
+
+// An API key signs in as a signed-out caller does with a free key, checked by
+// the control plane, and is not a signed-in client's chat access. One the
+// control plane refuses for its spent budget is refused, not shown a free
+// key's daily quota.
+func TestAnAPIKeySignsInAsASignedOutCaller(t *testing.T) {
+	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body api.Object
+		json.NewDecoder(r.Body).Decode(&body)
+		if api.Str(body["api_key"]) == "tk_spent-key" {
+			w.WriteHeader(http.StatusTooManyRequests)
+			io.WriteString(w, `{"error":{"message":"API key output token limit reached","code":"insufficient_quota"}}`)
+			return
+		}
+		io.WriteString(w, `{"ok":true}`)
+	}))
+	defer cp.Close()
+	a := auth.Configured(auth.Config{Client: cp.Client(), Controlplane: cp.URL, Verify: func(_ context.Context, token string) (string, error) {
+		if token != "clerk-alice" {
+			return "", errors.New("invalid Clerk session")
+		}
+		return "alice", nil
+	}})
+	signedIn := func(key string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/v1/session", nil)
+		r.Header.Set("Authorization", "Bearer "+key)
+		return r
+	}
+	p, err := a.Caller(signedIn("tk_api-key"), true)
+	if err != nil || !p.Anonymous || p.InferenceKey != "tk_api-key" {
+		t.Fatalf("an API key did not sign in as a signed-out caller: %+v %v", p, err)
+	}
+	if credential, err := a.Inference(context.Background(), p); err != nil || credential.Key != "tk_api-key" || !credential.APIKey || credential.Limit.Kind != nil {
+		t.Fatalf("an API key's credential was %+v, %v", credential, err)
+	}
+	if _, err := a.Authenticate(signedIn("tk_api-key"), false); err == nil {
+		t.Fatal("an API key reached a signed-in route")
+	}
+	if _, err := a.Caller(signedIn("admin_key"), true); err == nil {
+		t.Fatal("an admin key signed in")
+	}
+	if _, err := a.Caller(signedIn("tk_spent-key"), true); api.AsError(err).HTTP != http.StatusTooManyRequests {
+		t.Fatalf("a spent API key was answered %v", err)
+	}
+	minted := signedIn("clerk-alice")
+	minted.Header.Set(auth.InferenceKeyHeader, "tk_api-key")
+	client, err := a.Caller(minted, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Inference(context.Background(), client); api.AsError(err).HTTP != http.StatusUnauthorized {
+		t.Fatalf("a signed-in client used an API key as its chat access: %v", err)
 	}
 }
 
@@ -358,25 +411,38 @@ func TestOversizedBodiesAreRefusedAsTooLarge(t *testing.T) {
 }
 
 // A chat is screened when its credential is the Tinfoil Chat token the
-// control plane mints for subscribers, never a free key.
-func TestOnlyChatTokenChatsAreScreened(t *testing.T) {
-	for _, subscribed := range []bool{true, false} {
-		t.Run(strconv.FormatBool(subscribed), func(t *testing.T) {
+// control plane mints for subscribers, or an API key, never a free key.
+func TestOnlyChatTokenAndAPIKeyChatsAreScreened(t *testing.T) {
+	for name, tc := range map[string]struct {
+		sign     func(*http.Request)
+		local    bool
+		screened string // the credential the sidecar is sent, if any
+	}{
+		"subscriber": {func(r *http.Request) { signIn(r, "alice") }, false, chatTokenOf("alice")},
+		"signed-in free key": {func(r *http.Request) {
+			signIn(r, "alice")
+			r.Header.Set(auth.InferenceKeyHeader, "free_anonymous-key")
+		}, false, ""},
+		"signed-out free key": {func(r *http.Request) { signIn(r, "") }, true, ""},
+		"api key":             {func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+testAPIKey) }, true, testAPIKey},
+	} {
+		t.Run(name, func(t *testing.T) {
 			h, _, key := testChatHarness(t, nil)
 			drained := screenedBy(t, h)
-			r := httptest.NewRequest(http.MethodPost, "/v1/threads/turn", bytes.NewReader(api.Raw(sendInput(key))))
-			signIn(r, "alice")
-			if !subscribed {
-				r.Header.Set(auth.InferenceKeyHeader, "free_anonymous-key")
+			in := sendInput(key)
+			if tc.local {
+				in = localInput("", nil)
 			}
+			r := httptest.NewRequest(http.MethodPost, "/v1/threads/turn", bytes.NewReader(api.Raw(in)))
+			tc.sign(r)
 			w := httptest.NewRecorder()
 			h.routes().ServeHTTP(w, r)
 			if events := eventsIn(t, w); events[len(events)-1].Type != "RUN_FINISHED" {
 				t.Fatalf("the run ended with %+v", events[len(events)-1])
 			}
 			got := drained()
-			if subscribed && (len(got) != 1 || got[0].Credential != chatTokenOf("alice")) || !subscribed && len(got) != 0 {
-				t.Fatalf("subscribed %v: the sidecar received %+v", subscribed, got)
+			if tc.screened == "" && len(got) != 0 || tc.screened != "" && (len(got) != 1 || got[0].Credential != tc.screened || got[0].ConversationID != api.Str(in["threadId"])) {
+				t.Fatalf("the sidecar received %+v", got)
 			}
 		})
 	}
