@@ -18,6 +18,7 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 )
@@ -61,6 +62,10 @@ type Toolset struct {
 	Widgets map[string]domain.Widget
 	Local   func(context.Context, ToolCall) (any, error)
 	search  *session // nil unless the run searches the web
+	// searchBilled has the run's caller pay for its web search, as an API
+	// request's caller does: once, since the search service bills a run's
+	// calls as one session.
+	searchBilled bool
 
 	mu       sync.Mutex
 	rejected map[string]int // widget calls whose arguments failed validation, by name
@@ -89,7 +94,7 @@ type session struct {
 }
 
 func openTools(ctx context.Context, req *Request, model string, progress func(string, string, float64)) (*Toolset, error) {
-	set := &Toolset{}
+	set := &Toolset{searchBilled: req.searchBilled}
 	if !req.webSearch {
 		return set, nil
 	}
@@ -178,6 +183,10 @@ func (t *Toolset) call(ctx context.Context, name, progress string, args json.Raw
 		return "", nil, fmt.Errorf("no such tool %q", name)
 	}
 	s := t.search
+	if usage, ok := auth.Usage(ctx); ok && t.searchBilled {
+		usage.BillCustomerRequest = true
+		ctx = auth.WithUsage(ctx, usage)
+	}
 	arguments := map[string]any{}
 	if len(bytes.TrimSpace(args)) > 0 {
 		args, _ = domain.SanitizeToolCallArgumentsJSON(args)

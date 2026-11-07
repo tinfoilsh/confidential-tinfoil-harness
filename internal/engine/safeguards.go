@@ -14,8 +14,8 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
-// Completed first-party chat conversations are submitted to the safeguards
-// sidecar for acceptable-use classification, as the model router submits the
+// Completed first-party and API-key chat conversations are submitted to the
+// safeguards sidecar for acceptable-use classification, as the model router submits the
 // chats it serves. Ported from the router's safeguards package.
 
 const (
@@ -172,12 +172,12 @@ func (eng *Engine) screening(req *Request) *screening {
 }
 
 // screen submits a run that completed with a reply, under a first-party chat
-// credential, for classification.
+// credential or an API key, for classification.
 func (eng *Engine) screen(r *Run, reply []domain.Message, runErr error) {
 	eng.Live.mu.Lock()
 	deleted := r.Thread.deleted
 	eng.Live.mu.Unlock()
-	if r.screening == nil || runErr != nil || r.cancelled || deleted || r.retryTarget != nil || r.Principal.Anonymous || !r.credential.FirstParty {
+	if r.screening == nil || runErr != nil || r.cancelled || deleted || r.retryTarget != nil || !r.credential.FirstParty && !r.credential.APIKey {
 		return
 	}
 	var text []string

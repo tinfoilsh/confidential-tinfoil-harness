@@ -41,6 +41,7 @@ type Request struct {
 	widgets                    []domain.Widget   // what the caller draws: advertised, never dialled
 	rendered                   []json.RawMessage // their declarations
 	webSearch, piiCheck        bool
+	searchBilled               bool // the caller pays for the run's web search, as an API request's caller does
 	// Groups are the history the model reads: each message after the chat's
 	// latest compaction marker, the first carrying the marker's summary.
 	// history is every message but the markers, as the safeguards classify

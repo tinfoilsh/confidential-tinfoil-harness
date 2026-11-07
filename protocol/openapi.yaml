@@ -9,8 +9,10 @@ info:
     Every request is a POST through an attested, EHBP-sealed transport, so
     bodies are private to the client and the enclave while headers are
     visible to the gateway. Headers carry only what is not private:
-    `Authorization` carries the caller's identity (a Clerk session token, or
-    a `free_` key for a signed-out caller), `X-Tinfoil-Inference-Key` the
+    `Authorization` carries the caller's identity (a Clerk session token, a
+    `free_` key for a signed-out caller, or a `tk_` API key, whose holder is
+    served as a signed-out caller is and pays for the chat's web search as an
+    API request's caller does), `X-Tinfoil-Inference-Key` the
     chat access the client minted, and `Accept-Language` the caller's
     languages. A request about a run names the instance holding it and, when
     following it, the last event the client applied. Everything else,
