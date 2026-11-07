@@ -48,6 +48,9 @@ type Task struct {
 	// into the summary of the parts before it. Without it, such an input
 	// fails.
 	Fold bool
+	// CallerPays bills each call to the caller whose run asks for the
+	// summary, rather than the harness.
+	CallerPays bool
 }
 
 // Section is a heading a summary holds, and what goes under it.
@@ -118,5 +121,5 @@ Rules:
 	Closing: "Write the summary now, following the instructions.",
 	// The output holds the model's reasoning as well as the summary.
 	MaxTokens: 16384, Temperature: new(0.2), Timeout: 5 * time.Minute, Attempts: 3,
-	Fold: true,
+	Fold: true, CallerPays: true,
 }

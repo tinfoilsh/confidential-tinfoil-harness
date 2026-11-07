@@ -13,8 +13,10 @@ import (
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
+	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
 // testAccount is an account whose model answers with respond, and which
@@ -71,5 +73,46 @@ func TestARefusedCompletionSaysWhenToTryAgain(t *testing.T) {
 	var refused *Refused
 	if !errors.As(err, &refused) || refused.Status != http.StatusTooManyRequests || refused.RetryAfter != 7*time.Second {
 		t.Fatalf("the refusal read as %v", err)
+	}
+}
+
+// A completion its caller pays for goes through the router signed with the
+// caller's key, under the run its usage names; one the harness pays for
+// carries the harness's own key and no usage.
+func TestACompletionItsCallerPaysForCarriesTheCallersKey(t *testing.T) {
+	type received struct {
+		path, key string
+		usage     usagereporting.Context
+		signed    bool
+	}
+	requests := make(chan received, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		usage, signed, err := usagereporting.FromHeaders(r.Header, "usage-secret", time.Now(), time.Minute)
+		if err != nil {
+			t.Error(err)
+		}
+		requests <- received{r.URL.Path, r.Header.Get("Authorization"), usage, signed}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"id":"c","object":"chat.completion","model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"done"}}]}`)
+	}))
+	t.Cleanup(server.Close)
+	own := openai.NewClient(option.WithBaseURL(server.URL+"/v1"), option.WithAPIKey("harness-key"), option.WithMaxRetries(0))
+	router := &Service{URL: server.URL, Client: &http.Client{Transport: &auth.CallerTransport{Inner: http.DefaultTransport, UsageSecret: "usage-secret"}}}
+	account := &modelAccount{completions: &own.Chat.Completions, callers: callerCompletions(router)}
+	run := usagereporting.Context{ContextID: "run", RootRequestID: "run", ParentService: "harness", APIKeyHash: usagereporting.HashAPIKey("caller-key"), Depth: 1}
+	ctx := auth.WithUsage(auth.WithCallerKey(context.Background(), "caller-key"), run)
+
+	if _, err := account.Complete(ctx, Completion{Model: "m", User: "x", MaxTokens: 1, CallerPays: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-requests; got.path != chatCompletionsPath || got.key != "Bearer caller-key" || !got.signed || got.usage.ContextID != "run" || got.usage.BillCustomerRequest ||
+		!usagereporting.VerifyAPIKeyHash("caller-key", got.usage.APIKeyHash) {
+		t.Fatalf("the caller's completion reached the router as %+v", got)
+	}
+	if _, err := account.Complete(ctx, Completion{Model: "m", User: "x", MaxTokens: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-requests; got.key != "Bearer harness-key" || got.signed {
+		t.Fatalf("the harness's completion was sent as %+v", got)
 	}
 }

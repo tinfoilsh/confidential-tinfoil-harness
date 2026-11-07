@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,7 +14,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
@@ -21,6 +24,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/summarize"
+	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
 // compactionSummary is what the marker of compactedThread says of the
@@ -52,10 +56,21 @@ const longSummaryModel = "long-summary"
 
 // compactWith has f write the harness's summaries, a compaction's on
 // longSummaryModel.
-func (h *harness) compactWith(f summarizerFunc) {
+func (h *harness) compactWith(f summarizerFunc) { h.compactOn(f) }
+
+// compactOn has account write the harness's summaries, a compaction's on
+// longSummaryModel.
+func (h *harness) compactOn(account inference.Account) {
 	c := h.models.Catalog.Get()
 	c.Models = append(c.Models, api.Object{"modelName": longSummaryModel, "name": "Long summary", "budgetWindow": 1 << 20, "chatConfig": api.Object{}})
-	h.engine.Summaries = summarize.New(f, &h.models.Catalog, "kimi-k3", longSummaryModel)
+	h.engine.Summaries = summarize.New(account, &h.models.Catalog, "kimi-k3", longSummaryModel)
+}
+
+// accountFunc answers as a model on the account a completion bills.
+type accountFunc func(context.Context, inference.Completion) (inference.Completed, error)
+
+func (f accountFunc) Complete(ctx context.Context, c inference.Completion) (inference.Completed, error) {
+	return f(ctx, c)
 }
 
 // compactionOf is a summary in the form a compaction asks for, whose first
@@ -466,6 +481,66 @@ func TestAFailedCompactionEndsTheRunWithoutCuttingTheChat(t *testing.T) {
 	finishedRun(t, h, "/v1/threads/turn", retry)
 	if prompt := <-prompts; len(prompt) != 3 || !strings.Contains(prompt[1], "lighthouse tour of Maine") || !strings.HasSuffix(prompt[1], "test message") {
 		t.Fatalf("the retry sent %q", prompt)
+	}
+}
+
+// A compaction bills the caller whose run asks for it, as part of that run
+// and without counting as a request of its own. When the caller's key has
+// expired, the compaction and then the model turn each go on with the newest
+// key the caller presented.
+func TestACompactionIsBilledToItsCaller(t *testing.T) {
+	soon := mintChatToken("alice", func(_ map[string]any, claims jwt.MapClaims) { claims["exp"] = time.Now().Add(10 * time.Minute).Unix() })
+	renewed := mintChatToken("alice", nil)
+	runs := make(chan string, 2)
+	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		usage, _, _ := usagereporting.FromHeaders(r.Header, "test-usage-secret", time.Now(), time.Minute)
+		runs <- usage.ContextID
+		if r.Header.Get("Authorization") != "Bearer "+renewed {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	type billed struct {
+		key   string
+		usage usagereporting.Context
+	}
+	var summaries []billed
+	h.compactOn(accountFunc(func(ctx context.Context, c inference.Completion) (inference.Completed, error) {
+		if !c.CallerPays {
+			t.Errorf("the harness paid for a %s", c.Task)
+		}
+		usage, _ := auth.Usage(ctx)
+		summaries = append(summaries, billed{auth.CallerKey(ctx), usage})
+		if auth.CallerKey(ctx) != renewed {
+			return inference.Completed{}, &inference.Refused{Status: http.StatusUnauthorized}
+		}
+		return inference.Completed{Text: compactionOf("The user plans a lighthouse tour of Maine."), FinishReason: "stop"}, nil
+	}))
+	longCompacted(rows, "chat-1")
+	present := httptest.NewRequest(http.MethodPost, "/v1/changes", nil)
+	signIn(present, "alice")
+	present.Header.Set(auth.InferenceKeyHeader, renewed)
+	if _, err := h.auth.Authenticate(present, true); err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodPost, "/v1/threads/turn", bytes.NewReader(api.Raw(continueInput(key, "chat-1"))))
+	signIn(r, "alice")
+	r.Header.Set(auth.InferenceKeyHeader, soon)
+	w := httptest.NewRecorder()
+	h.routes().ServeHTTP(w, r)
+	events := eventsIn(t, w)
+	if last := events[len(events)-1]; last.Type != "RUN_FINISHED" || len(runs) != 2 {
+		t.Fatalf("the run ended with %+v after %d model turns", last, len(runs))
+	}
+	run := <-runs
+	if len(summaries) != 2 || summaries[0].key != soon || summaries[1].key != renewed {
+		t.Fatalf("the compaction was billed to %d keys", len(summaries))
+	}
+	for _, summary := range summaries {
+		if u := summary.usage; u.ContextID == "" || u.ContextID != run || u.ParentService != "harness" || u.Depth != 1 || u.BillCustomerRequest || !usagereporting.VerifyAPIKeyHash(summary.key, u.APIKeyHash) {
+			t.Fatalf("the compaction was billed outside the run, or as a request: %+v", u)
+		}
 	}
 }
 

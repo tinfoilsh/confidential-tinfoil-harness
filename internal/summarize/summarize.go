@@ -60,8 +60,8 @@ type Result struct {
 	Parts int
 }
 
-// Service writes summaries on the harness's account, with the model
-// configuration names for each role.
+// Service writes summaries on the harness's account, or the caller's for a
+// task its caller pays for, with the model configuration names for each role.
 type Service struct {
 	account inference.Account
 	catalog *inference.CatalogCache
@@ -108,7 +108,7 @@ func (s *Service) summarize(ctx context.Context, task *Task, model string, in In
 	system := task.system()
 	room := api.Int(def["budgetWindow"])*windowShareTenths/10 - inference.Tokens(system) - inference.Tokens(task.Closing) - int(task.MaxTokens)
 	completion := inference.Completion{Task: task.Name, Model: model, System: system, MaxTokens: task.MaxTokens, Temperature: task.Temperature,
-		Params: domain.ModelParams(def, false, summaryEffort), CacheScope: api.Token()}
+		Params: domain.ModelParams(def, false, summaryEffort), CacheScope: api.Token(), CallerPays: task.CallerPays}
 	summary, docs, parts := in.Earlier, in.Documents, 0
 	for parts == 0 || len(docs) > 0 {
 		part, rest, err := take(docs, room-inference.Tokens(summary))

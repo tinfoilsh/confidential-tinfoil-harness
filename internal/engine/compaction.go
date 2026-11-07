@@ -4,13 +4,16 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"net/http"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/summarize"
 )
 
@@ -114,7 +117,17 @@ func (eng *Engine) compact(ctx context.Context, r *Run, req *Request, reserved i
 	var result summarize.Result
 	err := errCompactionFailed()
 	if eng.Summaries != nil {
-		if result, err = eng.Summaries.Summarize(ctx, summarize.Compaction, summarize.Input{Earlier: earlier, Documents: transcript(messages[latest+1:kept], req.loc)}); err != nil {
+		input := summarize.Input{Earlier: earlier, Documents: transcript(messages[latest+1:kept], req.loc)}
+		result, err = eng.Summaries.Summarize(ctx, summarize.Compaction, input)
+		// The caller pays for the summary, so a key that expired during the
+		// run is renewed, as a model turn's is.
+		var refused *inference.Refused
+		if errors.As(err, &refused) && refused.Status == http.StatusUnauthorized && req.refreshAuth != nil {
+			if credential, renewErr := req.refreshAuth(ctx, auth.Secret(auth.CallerKey(ctx))); renewErr == nil {
+				result, err = eng.Summaries.Summarize(auth.Rekeyed(ctx, string(credential.Key)), summarize.Compaction, input)
+			}
+		}
+		if err != nil {
 			err = errCompactionFailed()
 		}
 	}
