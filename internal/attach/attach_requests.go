@@ -34,7 +34,7 @@ type speechRequest struct {
 }
 
 func (in *speechRequest) Validate() error {
-	if speed := domain.ValueOr(in.Speed, 1); speed < minSpeechSpeed || speed > maxSpeechSpeed {
+	if speed := domain.ValueOr(in.Speed, domain.VoiceSpeed); speed < domain.MinSpeechSpeed || speed > domain.MaxSpeechSpeed {
 		return api.Err(400, "BAD_REQUEST", "speed must be between 0.5 and 2")
 	}
 	if in.MessageID == "" {

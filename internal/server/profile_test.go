@@ -346,3 +346,26 @@ func TestReadingNoProfileRefusesAKeyReplacedOnAnotherDevice(t *testing.T) {
 		t.Fatalf("reading no profile with the registered key: %v", got)
 	}
 }
+
+// Read-aloud speed follows the account: a speed in range is kept and read
+// back, one out of range is refused, and an account that never chose one
+// reads aloud at the voice's own speed.
+func TestReadAloudSpeedIsKeptWithTheProfile(t *testing.T) {
+	h, _, key := testChatHarness(t, nil)
+	speed := func() any {
+		t.Helper()
+		return profileOf(t, postRoute(h, "/v1/profile/get", api.Object{"key": keyBase64(key)}, "alice"))["readAloudSpeed"]
+	}
+	choose := func(value any) int {
+		return postRoute(h, "/v1/profile/update", api.Object{"key": keyBase64(key), "patch": api.Object{"readAloudSpeed": value}}, "alice").Code
+	}
+	if got := speed(); got != 1.0 {
+		t.Fatalf("an account that never chose a speed reads at %v", got)
+	}
+	if code := choose(1.5); code != 200 || speed() != 1.5 {
+		t.Fatalf("choosing 1.5: HTTP %d, then read %v", code, speed())
+	}
+	if code := choose(4); code != 400 || speed() != 1.5 {
+		t.Fatalf("choosing 4: HTTP %d, then read %v", code, speed())
+	}
+}

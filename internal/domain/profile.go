@@ -39,6 +39,7 @@ type Profile struct {
 	PixelateSidebarChatTitlesEnabled *bool           `json:"pixelateSidebarChatTitlesEnabled,omitempty"`
 	BrowserTabChatTitleEnabled       *bool           `json:"browserTabChatTitleEnabled,omitempty"`
 	EnterToNewlineEnabled            *bool           `json:"enterToNewlineEnabled,omitempty"`
+	ReadAloudSpeed                   *float64        `json:"readAloudSpeed,omitempty"`
 	HasSeenOnboarding                *bool           `json:"hasSeenOnboarding,omitempty"`
 	HasSeenWebSearchIntro            *bool           `json:"hasSeenWebSearchIntro,omitempty"`
 	Dismissed                        map[string]bool `json:"dismissed,omitzero"`
@@ -237,6 +238,14 @@ const (
 	defaultFont         = "system"
 )
 
+// Read-aloud audio plays from MinSpeechSpeed to MaxSpeechSpeed times as fast
+// as the voice speaks it, at VoiceSpeed unless the user chose otherwise.
+const (
+	MinSpeechSpeed = 0.5
+	MaxSpeechSpeed = 2
+	VoiceSpeed     = 1
+)
+
 // DefaultProfile holds the value of every profile field a profile leaves
 // unset. An empty default prompt preset is none. Thinking has no default:
 // left unset, it follows each model's own.
@@ -245,7 +254,7 @@ func DefaultProfile() Profile {
 		IsUsingPersonalization: new(true), IsUsingCustomPrompt: new(false), CustomSystemPrompt: new(""), CustomPromptPresets: []CustomPreset{}, FavoritePromptPresetIDs: []string{}, DefaultPromptPresetID: new(""),
 		SelectedModel: new(AutoModelName), AutoIntelligence: new(DefaultIntelligence), ReasoningEffort: new(defaultEffort), WebSearchEnabled: new(true),
 		WebSearchAvailable: new(true), PIICheckEnabled: new(true), GenUIEnabled: new(true), PixelateSidebarChatTitlesEnabled: new(false), BrowserTabChatTitleEnabled: new(true), EnterToNewlineEnabled: new(false),
-		HasSeenOnboarding: new(false), HasSeenWebSearchIntro: new(false), Dismissed: map[string]bool{}}
+		ReadAloudSpeed: new(float64(VoiceSpeed)), HasSeenOnboarding: new(false), HasSeenWebSearchIntro: new(false), Dismissed: map[string]bool{}}
 }
 
 // withDefaults is the profile with every field it leaves unset at its default.
@@ -282,6 +291,10 @@ func (p *Profile) dropInvalid() *api.Error {
 			refuse("Invalid " + choice.name)
 			*choice.value = nil
 		}
+	}
+	if p.ReadAloudSpeed != nil && (*p.ReadAloudSpeed < MinSpeechSpeed || *p.ReadAloudSpeed > MaxSpeechSpeed) {
+		refuse("Invalid readAloudSpeed")
+		p.ReadAloudSpeed = nil
 	}
 	if len(p.Traits) > maxProfileList {
 		refuse("traits has too many entries")

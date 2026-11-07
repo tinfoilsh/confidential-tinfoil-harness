@@ -37,10 +37,6 @@ const (
 	// times what an English character takes and twice a Chinese one.
 	speechBaseSeconds         = 5
 	speechSecondsPerCharacter = 0.25
-	// A client may have the audio play from half to twice as fast as the
-	// voice speaks it.
-	minSpeechSpeed = 0.5
-	maxSpeechSpeed = 2
 	// speechParentService is the service the router lets bill a reading's
 	// pieces once.
 	speechParentService = "harness"
@@ -94,7 +90,7 @@ func (at *Service) HandleSpeech(w http.ResponseWriter, r *http.Request) {
 	// usage under it, and only the first is billed.
 	reading := "speech_" + api.Token()
 	ctx = auth.WithUsage(ctx, usagereporting.Context{ContextID: reading, RootRequestID: reading, ParentService: speechParentService, APIKeyHash: usagereporting.HashAPIKey(string(credential.Key)), Depth: 1})
-	if err := streamSpeech(ctx, w, router, pieces, domain.ValueOr(in.Speed, 1)); err != nil {
+	if err := streamSpeech(ctx, w, router, pieces, domain.ValueOr(in.Speed, domain.VoiceSpeed)); err != nil {
 		api.Respond(w, nil, auth.WithQuota(p, credential.Limit, err))
 	}
 }
