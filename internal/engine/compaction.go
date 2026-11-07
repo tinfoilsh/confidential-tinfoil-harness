@@ -25,9 +25,14 @@ import (
 // the turn's, and asks the model nothing.
 
 // recentTokens is how much of the chat before a compacted turn's question
-// the model goes on reading as it was, at most, so a follow-up on what was
-// just said does not rest on the summary.
+// the model may go on reading as it was, so a follow-up on what was just
+// said does not rest on the summary.
 const recentTokens = 20000
+
+// recentLimitShareTenths is the share of the prompt budget the kept
+// exchanges may fill instead, when that is more, so a model with a larger
+// window keeps more of them.
+const recentLimitShareTenths = 1
 
 // recentShareTenths is the share of the room left beside the summary that
 // the kept exchanges may fill, so the turns after a compaction have room
@@ -97,7 +102,7 @@ func (eng *Engine) compact(ctx context.Context, r *Run, req *Request, reserved i
 	if shown < 0 {
 		shown = question
 	}
-	kept := keptFrom(req, latest, question, shown, min(recentTokens, room*recentShareTenths/10))
+	kept := keptFrom(req, latest, question, shown, min(max(recentTokens, req.limit()*recentLimitShareTenths/10), room*recentShareTenths/10))
 	earlier := ""
 	if latest >= 0 {
 		earlier = messages[latest].Content

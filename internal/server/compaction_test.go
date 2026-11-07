@@ -341,6 +341,27 @@ func TestACompactionKeepsTheLatestExchanges(t *testing.T) {
 	}
 }
 
+// A model with a large window keeps a share of its prompt budget as it was
+// when that is more than the fixed amount a small one keeps.
+func TestALargeWindowKeepsMoreOfTheLatestExchanges(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	h.models.Catalog.Get().Models[0]["budgetWindow"] = 300000
+	var asked []string
+	h.compactWith(func(task, text string) (string, error) {
+		if task == summarize.Compaction.Name {
+			asked = append(asked, text)
+		}
+		return compactionOf("The user plans a lighthouse tour of Maine."), nil
+	})
+	// The latest answer is longer than the fixed amount, and shorter than a
+	// tenth of the budget.
+	storeExchanges(rows, "chat-1", "old question", filler(11000), "recent question", filler(1100))
+	events := finishedRun(t, h, "/v1/threads/turn", continueInput(key, "chat-1"))
+	if start := eventOfType(events, "COMPACTION_START"); start == nil || start.Before != "m3" || len(asked) != 1 || strings.Contains(asked[0], "recent question") {
+		t.Fatalf("the marker was opened with %+v after the summarizer was asked %d times", start, len(asked))
+	}
+}
+
 // A tool exchange that outgrows the window keeps no earlier exchange that
 // would leave it too little room beside the summary.
 func TestAToolExchangeKeepsOnlyTheExchangesItHasRoomFor(t *testing.T) {
@@ -479,6 +500,80 @@ func TestAToolExchangeThatOutgrowsTheWindowCompactsTheChat(t *testing.T) {
 	row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", "chat-1")
 	if chat := mustRead(domain.ReadThreadRow(row)); domain.LatestCompaction(chat.Messages) != 5 || chat.Messages[6].Content != "test message" || chat.Messages[7].Content != "done" {
 		t.Fatalf("the run stored %s", row.Data)
+	}
+}
+
+// A tool exchange that outgrows the window drops what the calls the model
+// already answered returned, keeping the result it has yet to read, before
+// it compacts anything; the reply keeps every result it showed.
+func TestAToolExchangeClearsTheResultsTheModelAnswered(t *testing.T) {
+	serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
+		return nil, api.Object{"results": []api.Object{{"title": "Tides", "url": "https://tides.test", "content": filler(100)}}}
+	})
+	sent := make(chan []any, 1)
+	var turns atomic.Int32
+	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		switch turns.Add(1) {
+		case 1:
+			io.WriteString(w, toolCallChunk(0, "s1", "web_search", `{"query":"tides"}`)+"data: [DONE]\n\n")
+		case 2:
+			io.WriteString(w, toolCallChunk(0, "s2", "web_search", `{"query":"currents"}`)+"data: [DONE]\n\n")
+		default:
+			sent <- lastRequest(r)
+			io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n")
+		}
+	})
+	// The window holds one search's results beside the question, not two.
+	h.models.Catalog.Get().Models[0]["budgetWindow"] = 4608
+	events := finishedRun(t, h, "/v1/threads/turn", searchInput(key))
+	messages := <-sent
+	if toolMessage(messages, "s1") != engine.ClearedResult || !strings.Contains(toolMessage(messages, "s2"), filler(1)) || eventOfType(events, "COMPACTION_START") != nil {
+		t.Fatalf("after two searches the model was sent %v", messages)
+	}
+	reply := storedChat(t, rows, key, events[0].ThreadID).Messages[1]
+	for _, id := range []string{"s1", "s2"} {
+		at := slices.IndexFunc(reply.Timeline, func(b domain.Block) bool { return b.ToolCallID == id })
+		if at < 0 || !strings.Contains(string(reply.Timeline[at].Result), filler(1)) {
+			t.Fatalf("the reply kept %+v of the call %s", reply.Timeline, id)
+		}
+	}
+}
+
+// A model turn that fills the room its window leaves the reply ends the reply
+// there: the run commits it stopped, says it was cut off, and runs no call the
+// turn had begun, which a continue turn does not tell the model ran.
+func TestAReplyCutOffAtTheEndOfTheWindowIsStoppedThere(t *testing.T) {
+	searched := serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
+		return nil, api.Object{"results": []api.Object{}}
+	})
+	continued := make(chan []any, 1)
+	var turns atomic.Int32
+	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if turns.Add(1) > 1 {
+			continued <- lastRequest(r)
+			io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\" Done.\"}}]}\n\ndata: [DONE]\n\n")
+			return
+		}
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"Let me look that up.\"}}]}\n\n"+toolCallChunk(0, "s", "web_search", `{"query":"ti`)+
+			"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n")
+	})
+	events := finishedRun(t, h, "/v1/threads/turn", searchInput(key))
+	var metadata domain.RunMetadata
+	if err := json.Unmarshal(events[len(events)-1].Metadata, &metadata); err != nil || !metadata.Truncated || len(metadata.Messages) != 1 ||
+		!domain.ValueOr(metadata.Messages[0].IsInterrupted, false) || domain.ValueOr(metadata.Messages[0].IsError, false) {
+		t.Fatalf("the run finished with %s", events[len(events)-1].Metadata)
+	}
+	reply := storedChat(t, rows, key, events[0].ThreadID).Messages[1]
+	if reply.Content != "Let me look that up." || !domain.ValueOr(reply.IsInterrupted, false) || len(searched.list()) != 0 {
+		t.Fatalf("the run stored %+v after %d searches", reply, len(searched.list()))
+	}
+	in := continueInput(key, events[0].ThreadID)
+	in["kind"], in["messageId"] = "continue", reply.ID
+	delete(in, "content")
+	finishedRun(t, h, "/v1/threads/turn", in)
+	messages := <-continued
+	if strings.Contains(fmt.Sprint(messages), "tool_call") || toolMessage(messages, "s") != "" {
+		t.Fatalf("the continued reply was sent as %v", messages)
 	}
 }
 

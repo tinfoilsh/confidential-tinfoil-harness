@@ -31,6 +31,13 @@ const (
 
 	FinalAnswerInstruction = "You have reached the maximum number of tool iterations. Do not call any more tools. Provide the best answer you can."
 	ContinueInstruction    = "Continue your previous response exactly where it left off. Do not repeat, summarize, or restate anything you already wrote, and do not add any preamble."
+	// ClearedResult is what the model reads in place of a tool result it
+	// already answered, once the run's exchange outgrows the window.
+	ClearedResult = "[This result was cleared to make room in the context window. Call the tool again if you need it.]"
+
+	// lengthFinish is the finish reason of a model turn that filled the room
+	// its window left it.
+	lengthFinish = "length"
 )
 
 func (eng *Engine) loop(ctx context.Context, out *Stream, req *Request, m *inference.Model) error {
@@ -77,9 +84,10 @@ func (eng *Engine) loop(ctx context.Context, out *Stream, req *Request, m *infer
 			tools = nil
 			conversation = append(conversation, api.Raw(api.Object{"role": "system", "content": FinalAnswerInstruction}))
 		}
-		// An exchange that outgrows the window compacts the history before
-		// it, if the run has not yet.
-		if !fits(req, conversation, tools) {
+		// An exchange that outgrows the window first drops the results the
+		// model already answered, then compacts the history before it, if the
+		// run has not yet.
+		if !fits(req, conversation, tools) && (!clearAnswered(conversation[history:]) || !fits(req, conversation, tools)) {
 			exchange := slices.Clone(conversation[history:])
 			compact := req.compact
 			req.compact = nil
@@ -156,6 +164,27 @@ func (eng *Engine) loop(ctx context.Context, out *Stream, req *Request, m *infer
 
 func errExchangeTooLarge() error {
 	return api.Err(413, "CONTEXT_TOO_LARGE", "The current tool exchange exceeds the context window")
+}
+
+// clearAnswered replaces each tool result in a run's exchange that the model
+// already answered, those before its latest turn, with ClearedResult, and
+// reports whether it cleared any. A result no longer than ClearedResult, such
+// as a widget's or one already cleared, is kept. The reply keeps every result
+// it showed.
+func clearAnswered(exchange []json.RawMessage) bool {
+	latest := len(exchange) - 1
+	for latest >= 0 && role(exchange[latest]) != "assistant" {
+		latest--
+	}
+	cleared := false
+	for i := range exchange[:max(0, latest)] {
+		var m outMessage
+		if json.Unmarshal(exchange[i], &m) != nil || m.Role != "tool" || len(m.Content) <= len(quote(ClearedResult)) {
+			continue
+		}
+		exchange[i], cleared = answered(m.ToolCallID, ClearedResult), true
+	}
+	return cleared
 }
 
 func body(req *Request, conversation []json.RawMessage, defs json.RawMessage) ([]byte, error) {
@@ -290,7 +319,7 @@ func (eng *Engine) turn(ctx context.Context, out *Stream, m *inference.Model, pa
 		}
 	}()
 	var calls []ToolCall
-	ended := false
+	ended, cutOff := false, false
 	var answer, reasoningText strings.Builder
 	reasoningField := "reasoning_content"
 	message := "msg_" + api.Token()
@@ -353,8 +382,8 @@ func (eng *Engine) turn(ctx context.Context, out *Stream, m *inference.Model, pa
 		if len(chunk.Choices) == 0 {
 			continue
 		}
-		if chunk.Choices[0].FinishReason != "" {
-			ended = true
+		if reason := chunk.Choices[0].FinishReason; reason != "" {
+			ended, cutOff = true, reason == lengthFinish
 		}
 		delta := chunk.Choices[0].Delta
 		// Reasoning first: at the think-close boundary one delta carries the last
@@ -383,6 +412,14 @@ func (eng *Engine) turn(ctx context.Context, out *Stream, m *inference.Model, pa
 	}
 	if !ended {
 		return calls, answer.String(), api.Err(502, "UPSTREAM_REFUSED", "The model stream ended before completion")
+	}
+	// A turn cut off at the end of the window ends the reply there. Its calls
+	// stay open, as a cut stream's do, and none of them runs.
+	if cutOff {
+		out.mu.Lock()
+		out.truncated = true
+		out.mu.Unlock()
+		return nil, answer.String(), nil
 	}
 	for i := range calls {
 		c := &calls[i]

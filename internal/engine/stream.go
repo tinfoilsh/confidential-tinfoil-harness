@@ -21,6 +21,7 @@ type Stream struct {
 	replyID        string
 	turnReasoning  string
 	reasoningField string // which of reasoning_content and reasoning the last turn streamed
+	truncated      bool   // the model filled the room its window left the reply
 
 	// mu serializes writes against the tool goroutines.
 	mu       sync.Mutex

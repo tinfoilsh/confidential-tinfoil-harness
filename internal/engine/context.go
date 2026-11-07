@@ -366,6 +366,11 @@ func RenderMessage(message *domain.Message, vision bool, policy string, loc *tim
 		case "thinking":
 			reasoning += block.Content
 		case "tool_call":
+			// A stopped reply's call that never finished never ran, so the
+			// model is not told it did.
+			if !block.Complete && block.Result == nil && domain.ValueOr(message.IsInterrupted, false) {
+				continue
+			}
 			id := block.CallID()
 			calls = append(calls, api.Object{"id": id, "type": "function", "function": api.Object{"name": block.Name, "arguments": domain.HistoryArgs(cmp.Or(block.Arguments, "{}"))}})
 			result := "executed"
