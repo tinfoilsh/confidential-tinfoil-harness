@@ -95,8 +95,9 @@ const stretchCoarseStep = 4
 // start whose first half is most like the audio that followed the last
 // frame's first half in the voice's audio.
 func (s *stretcher) match(at int) int {
-	coarse := s.search(max(0, at-stretchSearch), at+stretchSearch, stretchCoarseStep)
-	return s.search(max(0, coarse-stretchCoarseStep+1), coarse+stretchCoarseStep-1, 1)
+	first, last := max(0, at-stretchSearch), at+stretchSearch
+	coarse := s.search(first, last, stretchCoarseStep)
+	return s.search(max(first, coarse-stretchCoarseStep+1), min(last, coarse+stretchCoarseStep-1), 1)
 }
 
 // search is the start from first to last, every step samples, whose first
