@@ -341,6 +341,27 @@ func TestACompactionKeepsTheLatestExchanges(t *testing.T) {
 	}
 }
 
+// A model with a large window keeps a share of its prompt budget as it was
+// when that is more than the fixed amount a small one keeps.
+func TestALargeWindowKeepsMoreOfTheLatestExchanges(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	h.models.Catalog.Get().Models[0]["budgetWindow"] = 300000
+	var asked []string
+	h.compactWith(func(task, text string) (string, error) {
+		if task == summarize.Compaction.Name {
+			asked = append(asked, text)
+		}
+		return compactionOf("The user plans a lighthouse tour of Maine."), nil
+	})
+	// The latest answer is longer than the fixed amount, and shorter than a
+	// tenth of the budget.
+	storeExchanges(rows, "chat-1", "old question", filler(11000), "recent question", filler(1100))
+	events := finishedRun(t, h, "/v1/threads/turn", continueInput(key, "chat-1"))
+	if start := eventOfType(events, "COMPACTION_START"); start == nil || start.Before != "m3" || len(asked) != 1 || strings.Contains(asked[0], "recent question") {
+		t.Fatalf("the marker was opened with %+v after the summarizer was asked %d times", start, len(asked))
+	}
+}
+
 // A tool exchange that outgrows the window keeps no earlier exchange that
 // would leave it too little room beside the summary.
 func TestAToolExchangeKeepsOnlyTheExchangesItHasRoomFor(t *testing.T) {
