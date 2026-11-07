@@ -25,6 +25,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
 func TestSpeechStreamsTheRoutersAudio(t *testing.T) {
@@ -217,6 +218,56 @@ func TestAMessageIsReadAloudInOrderWithoutItsCode(t *testing.T) {
 		if device, _ := read(in, ""); !strings.HasPrefix(device, "<Trip plan\n") {
 			t.Fatalf("the device chat's reply was read as %q", device)
 		}
+	}
+}
+
+// A reading counts as one request however many pieces it is read in: every
+// piece reports usage under the reading, and only the first is billed, so a
+// long reply does not use up a signed-out caller's daily requests.
+func TestAReadingIsBilledOnce(t *testing.T) {
+	var mu sync.Mutex
+	usages := map[string]usagereporting.Context{}
+	h := routerHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Input string `json:"input"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		usage, signed, err := usagereporting.FromHeaders(r.Header, "test-usage-secret", time.Now(), time.Minute)
+		if err != nil || !signed {
+			t.Errorf("a piece carried no signed usage: %v", err)
+		}
+		mu.Lock()
+		usages[body.Input] = usage
+		mu.Unlock()
+		w.Header().Set("Content-Type", "audio/pcm")
+		io.WriteString(w, "a")
+	})
+	var long strings.Builder
+	for i := 1; i <= 12; i++ {
+		fmt.Fprintf(&long, "Sentence %d walks through the plan in enough detail to fill a piece. ", i)
+	}
+	if w := postRoute(h, "/v1/speech", api.Object{"text": long.String()}, ""); w.Code != 200 {
+		t.Fatalf("HTTP %d %s", w.Code, w.Body.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	billed, reading := 0, ""
+	for piece, usage := range usages {
+		if usage.BillCustomerRequest {
+			billed++
+			if !strings.HasPrefix(piece, "Sentence 1 ") {
+				t.Errorf("a later piece was billed: %q", piece)
+			}
+		}
+		if reading == "" {
+			reading = usage.ContextID
+		}
+		if usage.ContextID != reading || usage.ParentService != "harness" || usage.Depth != 1 || !usagereporting.VerifyAPIKeyHash("free_anonymous-key", usage.APIKeyHash) {
+			t.Errorf("a piece reported usage as %+v", usage)
+		}
+	}
+	if len(usages) < 2 || billed != 1 {
+		t.Fatalf("%d of %d pieces were billed", billed, len(usages))
 	}
 }
 

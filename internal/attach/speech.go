@@ -15,6 +15,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
+	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
 // Read-aloud audio is mono 16-bit 24 kHz PCM. Each piece of a message is
@@ -40,6 +41,9 @@ const (
 	// voice speaks it.
 	minSpeechSpeed = 0.5
 	maxSpeechSpeed = 2
+	// speechParentService is the service the router lets bill a reading's
+	// pieces once.
+	speechParentService = "harness"
 )
 
 func (at *Service) HandleSpeech(w http.ResponseWriter, r *http.Request) {
@@ -86,6 +90,10 @@ func (at *Service) HandleSpeech(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := auth.WithCallerKey(r.Context(), string(credential.Key))
+	// A reading counts as one request, as a run does: its pieces report
+	// usage under it, and only the first is billed.
+	reading := "speech_" + api.Token()
+	ctx = auth.WithUsage(ctx, usagereporting.Context{ContextID: reading, RootRequestID: reading, ParentService: speechParentService, APIKeyHash: usagereporting.HashAPIKey(string(credential.Key)), Depth: 1})
 	if err := streamSpeech(ctx, w, router, pieces, domain.ValueOr(in.Speed, 1)); err != nil {
 		api.Respond(w, nil, auth.WithQuota(p, credential.Limit, err))
 	}
@@ -184,7 +192,12 @@ func streamSpeech(ctx context.Context, w http.ResponseWriter, router *inference.
 			case <-ctx.Done():
 				return
 			}
-			go synthesize(ctx, router, piece, speed, audio[i])
+			pieceCtx := ctx
+			if usage, ok := auth.Usage(ctx); ok && i == 0 {
+				usage.BillCustomerRequest = true
+				pieceCtx = auth.WithUsage(ctx, usage)
+			}
+			go synthesize(pieceCtx, router, piece, speed, audio[i])
 		}
 	}()
 	started := false
