@@ -15,7 +15,7 @@ import (
 )
 
 // Account calls models of the inference service under the harness's own
-// account, so what it asks for bills no caller.
+// account, so what it asks for bills no caller, unless its caller pays.
 type Account interface {
 	Complete(ctx context.Context, c Completion) (Completed, error)
 }
@@ -36,6 +36,9 @@ type Completion struct {
 	// CacheScope partitions the enclave's prompt cache: requests that share
 	// one may reuse each other's prompt, and no others.
 	CacheScope string
+	// CallerPays bills the completion to the caller whose key the context
+	// carries, as part of the run its usage names, instead of the harness.
+	CallerPays bool
 }
 
 // Completed is a model's answer to a Completion.
@@ -64,11 +67,14 @@ type completionService interface {
 
 type modelAccount struct {
 	completions completionService
+	// callers takes the completions their callers pay for.
+	callers completionService
 }
 
 // NewAccount calls models with apiKey through the Tinfoil SDK's attested,
-// enclave-bound transport.
-func NewAccount(apiKey string) (Account, error) {
+// enclave-bound transport, and those a caller pays for through router, whose
+// client signs each request with the caller's key and usage.
+func NewAccount(apiKey string, router *Service) (Account, error) {
 	secureClient, err := tinfoil.NewClientWithOptions(
 		attestedTLS,
 		cacheFallback,
@@ -80,7 +86,14 @@ func NewAccount(apiKey string) (Account, error) {
 	if err != nil {
 		return nil, fmt.Errorf("inference: initialize the attested account client: %w", err)
 	}
-	return &modelAccount{completions: &secureClient.Chat.Completions}, nil
+	return &modelAccount{completions: &secureClient.Chat.Completions, callers: callerCompletions(router)}, nil
+}
+
+// callerCompletions takes completions through router, whose client signs
+// each with the caller's key and usage.
+func callerCompletions(router *Service) completionService {
+	client := openai.NewClient(option.WithBaseURL(router.URL+"/v1"), option.WithHTTPClient(router.Client), option.WithMaxRetries(0))
+	return &client.Chat.Completions
 }
 
 func (a *modelAccount) Complete(ctx context.Context, c Completion) (Completed, error) {
@@ -96,8 +109,12 @@ func (a *modelAccount) Complete(ctx context.Context, c Completion) (Completed, e
 	for key, value := range c.Params {
 		options = append(options, option.WithJSONSet(key, value))
 	}
+	completions := a.completions
+	if c.CallerPays {
+		completions = a.callers
+	}
 	started := time.Now()
-	response, err := a.completions.New(ctx, params, options...)
+	response, err := completions.New(ctx, params, options...)
 	if err != nil {
 		var refused *openai.Error
 		if errors.As(err, &refused) {
@@ -114,7 +131,7 @@ func (a *modelAccount) Complete(ctx context.Context, c Completion) (Completed, e
 	}
 	done := Completed{Text: response.Choices[0].Message.Content, FinishReason: string(response.Choices[0].FinishReason),
 		Usage: api.Usage{Prompt: response.Usage.PromptTokens, Completion: response.Usage.CompletionTokens, Total: response.Usage.TotalTokens}}
-	// What the harness spends of its own account, by what spent it.
-	slog.Info("account completion", "task", c.Task, "model", c.Model, "promptTokens", done.Usage.Prompt, "completionTokens", done.Usage.Completion, "finishReason", done.FinishReason, "duration", time.Since(started))
+	// What each completion spends, by what spent it and who pays.
+	slog.Info("account completion", "task", c.Task, "model", c.Model, "callerPays", c.CallerPays, "promptTokens", done.Usage.Prompt, "completionTokens", done.Usage.Completion, "finishReason", done.FinishReason, "duration", time.Since(started))
 	return done, nil
 }

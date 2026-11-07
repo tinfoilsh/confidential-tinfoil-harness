@@ -122,7 +122,7 @@ func (eng *Engine) loop(ctx context.Context, out *Stream, req *Request, m *infer
 			// A 401 rejected this model request before processing. Replay its
 			// exact body once, retaining the run ID and request billing flag.
 			refreshed = true
-			credential, refreshErr := req.refreshAuth(ctx)
+			credential, refreshErr := req.refreshAuth(ctx, auth.Secret(auth.CallerKey(ctx)))
 			if refreshErr != nil {
 				return refreshErr
 			}

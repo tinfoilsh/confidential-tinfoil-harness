@@ -22,6 +22,16 @@ func CallerKey(ctx context.Context) string {
 	return key
 }
 
+// Rekeyed has ctx's requests signed with key, a renewal of the caller's,
+// under the same usage.
+func Rekeyed(ctx context.Context, key string) context.Context {
+	if usage, ok := Usage(ctx); ok {
+		usage.APIKeyHash = usagereporting.HashAPIKey(key)
+		ctx = WithUsage(ctx, usage)
+	}
+	return WithCallerKey(ctx, key)
+}
+
 type usageKey struct{}
 
 // WithUsage has ctx's requests report usage under the run it names.

@@ -37,8 +37,8 @@ func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
 	// index itself, with the control plane's service secret, the buckets
 	// sidecars beside it, and the embedding model of the inference service.
 	// It names chats and labels reasoning with a summary model there,
-	// compacts long chats with a model whose window holds them, and reads
-	// link previews through context.dev.
+	// compacts long chats, on the caller's account, with a model whose
+	// window holds them, and reads link previews through context.dev.
 	secret, bucketsURL, bucket := os.Getenv("SYNC_ENCLAVE_SECRET"), os.Getenv("BUCKETS_URL"), os.Getenv("CHAT_ATTACHMENTS_BUCKET")
 	searchURL, searchBucket, apiKey, model := os.Getenv("SEARCH_BUCKETS_URL"), os.Getenv("SEARCH_INDEXES_BUCKET"), os.Getenv("TINFOIL_API_KEY"), os.Getenv("EMBEDDING_MODEL")
 	summaryModel, longSummaryModel, contextDevKey := os.Getenv("SUMMARY_MODEL"), os.Getenv("LONG_SUMMARY_MODEL"), os.Getenv("CONTEXT_DEV_API_KEY")
@@ -64,7 +64,7 @@ func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
 	if err != nil {
 		return err
 	}
-	account, err := inference.NewAccount(apiKey)
+	account, err := inference.NewAccount(apiKey, h.models.Services["router"])
 	if err != nil {
 		return err
 	}
