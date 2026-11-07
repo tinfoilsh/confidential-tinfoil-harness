@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
@@ -212,6 +213,45 @@ func TestAMessageIsReadAloudInOrderWithoutItsCode(t *testing.T) {
 		if device, _ := read(in, ""); !strings.HasPrefix(device, "<Trip plan\n") {
 			t.Fatalf("the device chat's reply was read as %q", device)
 		}
+	}
+}
+
+// widePieceCharacters is the most Chinese characters a piece holds: each
+// takes about as long to read as two English ones, so a piece holds half as
+// many, and never so many that its audio runs past what a piece may take.
+const widePieceCharacters = 300
+
+// Chinese text, whose sentences no space follows, is read in pieces of whole
+// sentences no longer to read than an English piece.
+func TestWideTextIsReadAloudInWholeSentences(t *testing.T) {
+	var mu sync.Mutex
+	var asked []string
+	h := routerHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Input string `json:"input"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		asked = append(asked, body.Input)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "audio/pcm")
+		io.WriteString(w, "a")
+	})
+	text := strings.Repeat("今天我们讨论旅行计划的每一个细节，包括交通、住宿和预算。", 20)
+	if w := postRoute(h, "/v1/speech", api.Object{"text": text}, ""); w.Code != 200 {
+		t.Fatalf("HTTP %d %s", w.Code, w.Body.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	read := ""
+	for _, piece := range asked {
+		if !strings.HasSuffix(piece, "。") || utf8.RuneCountInString(piece) > widePieceCharacters {
+			t.Fatalf("the text was read in pieces %q", asked)
+		}
+		read += strings.ReplaceAll(piece, " ", "")
+	}
+	if len(asked) < 2 || utf8.RuneCountInString(read) != utf8.RuneCountInString(text) {
+		t.Fatalf("the text was read in pieces %q", asked)
 	}
 }
 
