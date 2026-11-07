@@ -544,6 +544,21 @@ func TestACompactionIsBilledToItsCaller(t *testing.T) {
 	}
 }
 
+// A compaction refused for a key the caller has presented no renewal of ends
+// the run asking for a new one, as a model turn does.
+func TestACompactionWithoutARenewedKeyAsksForOne(t *testing.T) {
+	prompts := make(chan []string, 1)
+	h, rows, key := testChatHarness(t, promptOf(prompts))
+	h.compactOn(accountFunc(func(context.Context, inference.Completion) (inference.Completed, error) {
+		return inference.Completed{}, &inference.Refused{Status: http.StatusUnauthorized}
+	}))
+	longCompacted(rows, "chat-1")
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", continueInput(key, "chat-1"), "alice"))
+	if last := events[len(events)-1]; last.Type != "RUN_ERROR" || last.Code != "CREDENTIAL_REQUIRED" || len(prompts) != 0 {
+		t.Fatalf("the run ended with %s %s", last.Type, last.Code)
+	}
+}
+
 // A tool exchange that outgrows the window compacts the history before the
 // question, and the model goes on with the summary, the question and the
 // exchange so far.

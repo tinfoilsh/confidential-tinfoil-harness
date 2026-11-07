@@ -119,16 +119,19 @@ func (eng *Engine) compact(ctx context.Context, r *Run, req *Request, reserved i
 	if eng.Summaries != nil {
 		input := summarize.Input{Earlier: earlier, Documents: transcript(messages[latest+1:kept], req.loc)}
 		result, err = eng.Summaries.Summarize(ctx, summarize.Compaction, input)
+		failed := errCompactionFailed()
 		// The caller pays for the summary, so a key that expired during the
-		// run is renewed, as a model turn's is.
+		// run is renewed, as a model turn's is, or the run ends asking for one.
 		var refused *inference.Refused
 		if errors.As(err, &refused) && refused.Status == http.StatusUnauthorized && req.refreshAuth != nil {
-			if credential, renewErr := req.refreshAuth(ctx, auth.Secret(auth.CallerKey(ctx))); renewErr == nil {
+			if credential, renewErr := req.refreshAuth(ctx, auth.Secret(auth.CallerKey(ctx))); renewErr != nil {
+				failed = renewErr
+			} else {
 				result, err = eng.Summaries.Summarize(auth.Rekeyed(ctx, string(credential.Key)), summarize.Compaction, input)
 			}
 		}
 		if err != nil {
-			err = errCompactionFailed()
+			err = failed
 		}
 	}
 	if err != nil {
