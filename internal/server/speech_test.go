@@ -210,8 +210,10 @@ func TestAMessageIsReadAloudInOrderWithoutItsCode(t *testing.T) {
 		}
 	}
 	// A device chat's message reads the same, without an account, and
-	// without its id, as released clients send it.
-	for _, in := range []api.Object{{"local": true, "threadId": "chat-1", "thread": thread, "messageId": "short"}, {"local": true, "thread": thread, "messageId": "short"}} {
+	// without its id, as released clients send it: an older record's messages
+	// are then named by the id the record holds.
+	legacy := api.Object{"id": "chat-1", "title": "Trip", "messages": []any{api.Object{"role": "user", "content": "Plan it"}, api.Object{"role": "assistant", "content": reply}}}
+	for _, in := range []api.Object{{"local": true, "threadId": "chat-1", "thread": thread, "messageId": "short"}, {"local": true, "thread": thread, "messageId": "short"}, {"local": true, "thread": legacy, "messageId": "chat-1-message-1"}} {
 		if device, _ := read(in, ""); !strings.HasPrefix(device, "<Trip plan\n") {
 			t.Fatalf("the device chat's reply was read as %q", device)
 		}
@@ -283,11 +285,20 @@ func TestSpeechReadsFasterWithoutRaisingThePitch(t *testing.T) {
 	if w := postRoute(h, "/v1/speech", api.Object{"text": "Hello there.", "speed": 4}, ""); w.Code != 400 {
 		t.Fatalf("an unknown speed: HTTP %d", w.Code)
 	}
+	// No audio played faster is still no audio.
+	silent := routerHarness(t, func(w http.ResponseWriter, r *http.Request) { w.Header().Set("Content-Type", "audio/pcm") })
+	if w := postRoute(silent, "/v1/speech", api.Object{"text": "Hello there.", "speed": 2}, ""); w.Code != 502 {
+		t.Fatalf("no audio at twice the speed: HTTP %d, %d bytes", w.Code, w.Body.Len())
+	}
 }
 
 // loopingAudioBytes is about a minute of audio, far more than a short
-// sentence takes, as a speech model that runs on in a loop streams.
-const loopingAudioBytes = 60 * 24000 * 2
+// sentence takes, as a speech model that runs on in a loop streams, and
+// shortSentenceAudioBytes a little more than "Hello there." may be read with.
+const (
+	loopingAudioBytes       = 60 * 24000 * 2
+	shortSentenceAudioBytes = 10 * 24000 * 2
+)
 
 // A voice that runs on past what its text takes is cut off soon after.
 func TestSpeechCutsOffAVoiceThatRunsOn(t *testing.T) {
@@ -295,7 +306,7 @@ func TestSpeechCutsOffAVoiceThatRunsOn(t *testing.T) {
 		w.Header().Set("Content-Type", "audio/pcm")
 		w.Write(make([]byte, loopingAudioBytes))
 	})
-	if w := postRoute(h, "/v1/speech", api.Object{"text": "Hello there."}, ""); w.Code != 200 || w.Body.Len() == 0 || w.Body.Len() >= loopingAudioBytes/4 {
+	if w := postRoute(h, "/v1/speech", api.Object{"text": "Hello there."}, ""); w.Code != 200 || w.Body.Len() == 0 || w.Body.Len() > shortSentenceAudioBytes {
 		t.Fatalf("HTTP %d streamed %d bytes", w.Code, w.Body.Len())
 	}
 }
@@ -321,7 +332,7 @@ func TestWideTextIsReadAloudInWholeSentences(t *testing.T) {
 		w.Header().Set("Content-Type", "audio/pcm")
 		io.WriteString(w, "a")
 	})
-	text := strings.Repeat("今天我们讨论旅行计划的每一个细节，包括交通、住宿和预算。", 20)
+	text := strings.Repeat("今天我们讨论旅行计划的每一个细节，包括交通、住宿和预算。真的吗！？", 12)
 	if w := postRoute(h, "/v1/speech", api.Object{"text": text}, ""); w.Code != 200 {
 		t.Fatalf("HTTP %d %s", w.Code, w.Body.String())
 	}
@@ -329,7 +340,8 @@ func TestWideTextIsReadAloudInWholeSentences(t *testing.T) {
 	defer mu.Unlock()
 	read := ""
 	for _, piece := range asked {
-		if !strings.HasSuffix(piece, "。") || utf8.RuneCountInString(piece) > widePieceCharacters {
+		whole := strings.HasSuffix(piece, "。") || strings.HasSuffix(piece, "！？")
+		if !whole || strings.HasPrefix(piece, "？") || strings.Contains(piece, "！ ？") || utf8.RuneCountInString(piece) > widePieceCharacters {
 			t.Fatalf("the text was read in pieces %q", asked)
 		}
 		read += strings.ReplaceAll(piece, " ", "")

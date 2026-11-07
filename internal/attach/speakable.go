@@ -173,10 +173,10 @@ func speechLength(points []rune) int {
 	return length
 }
 
-// Sentences end at these marks before a space or the end, and at the wide
-// marks of Chinese, Japanese and Korean text, which no space follows, with
-// the closing quotes and brackets after them. A long sentence of wide text
-// is cut after one of widePauses.
+// Sentences end at these marks before a space or the end, and at a run of
+// the wide marks of Chinese, Japanese and Korean text, which no space
+// follows, with the closing quotes and brackets after them. A long sentence
+// of wide text is cut after one of widePauses.
 const (
 	sentenceEnds     = ".!?"
 	wideSentenceEnds = "。！？"
@@ -193,7 +193,7 @@ func sentences(text string) []string {
 		ends := strings.ContainsRune(sentenceEnds, r) && (i+1 == len(runes) || unicode.IsSpace(runes[i+1]))
 		if strings.ContainsRune(wideSentenceEnds, r) {
 			ends = true
-			for i+1 < len(runes) && unicode.In(runes[i+1], unicode.Pe, unicode.Pf) {
+			for i+1 < len(runes) && (strings.ContainsRune(wideSentenceEnds, runes[i+1]) || unicode.In(runes[i+1], unicode.Pe, unicode.Pf)) {
 				i++
 			}
 		}

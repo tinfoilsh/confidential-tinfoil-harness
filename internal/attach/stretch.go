@@ -80,22 +80,33 @@ func (s *stretcher) lay(ended bool) []byte {
 		copy(s.sum, s.sum[stretchHop:])
 		clear(s.sum[stretchHop:])
 	}
-	if ended {
+	if ended && s.frames > 0 {
 		out = appendSamples(out, s.sum[:stretchHop])
 		clear(s.sum)
 	}
 	return out
 }
 
+// stretchCoarseStep is how far apart a frame's first search looks, over
+// every stretchCoarseStep-th sample, before it looks closer around the best.
+const stretchCoarseStep = 4
+
 // match is where near at the next frame best continues the last one: the
 // start whose first half is most like the audio that followed the last
 // frame's first half in the voice's audio.
 func (s *stretcher) match(at int) int {
+	coarse := s.search(max(0, at-stretchSearch), at+stretchSearch, stretchCoarseStep)
+	return s.search(max(0, coarse-stretchCoarseStep+1), coarse+stretchCoarseStep-1, 1)
+}
+
+// search is the start from first to last, every step samples, whose first
+// half, read every step samples, best continues the last frame.
+func (s *stretcher) search(first, last, step int) int {
 	follows := s.from + stretchHop
-	best, bestScore := max(0, at-stretchSearch), math.Inf(-1)
-	for start := max(0, at-stretchSearch); start <= at+stretchSearch; start++ {
+	best, bestScore := first, math.Inf(-1)
+	for start := first; start <= last; start += step {
 		var product, energy float64
-		for i := range stretchHop {
+		for i := 0; i < stretchHop; i += step {
 			candidate := s.sample(start + i)
 			product += candidate * s.sample(follows+i)
 			energy += candidate * candidate
