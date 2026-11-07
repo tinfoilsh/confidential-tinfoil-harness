@@ -216,6 +216,38 @@ func TestAMessageIsReadAloudInOrderWithoutItsCode(t *testing.T) {
 	}
 }
 
+// A piece the speech service fails before any of its audio arrives is asked
+// for again, so a passing failure does not end the reading.
+func TestSpeechAsksAgainForAPieceThatFailedBeforeItsAudio(t *testing.T) {
+	var calls atomic.Int32
+	h := routerHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "audio/pcm")
+		io.WriteString(w, "<audio>")
+	})
+	if w := postRoute(h, "/v1/speech", api.Object{"text": "Hello there."}, ""); w.Code != 200 || w.Body.String() != "<audio>" || calls.Load() != 2 {
+		t.Fatalf("HTTP %d %q after %d calls", w.Code, w.Body.String(), calls.Load())
+	}
+}
+
+// loopingAudioBytes is about a minute of audio, far more than a short
+// sentence takes, as a speech model that runs on in a loop streams.
+const loopingAudioBytes = 60 * 24000 * 2
+
+// A voice that runs on past what its text takes is cut off soon after.
+func TestSpeechCutsOffAVoiceThatRunsOn(t *testing.T) {
+	h := routerHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "audio/pcm")
+		w.Write(make([]byte, loopingAudioBytes))
+	})
+	if w := postRoute(h, "/v1/speech", api.Object{"text": "Hello there."}, ""); w.Code != 200 || w.Body.Len() == 0 || w.Body.Len() >= loopingAudioBytes/4 {
+		t.Fatalf("HTTP %d streamed %d bytes", w.Code, w.Body.Len())
+	}
+}
+
 // widePieceCharacters is the most Chinese characters a piece holds: each
 // takes about as long to read as two English ones, so a piece holds half as
 // many, and never so many that its audio runs past what a piece may take.
