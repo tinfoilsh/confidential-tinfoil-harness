@@ -3,6 +3,7 @@ package attach
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"mime"
 	"net/http"
@@ -87,8 +88,16 @@ func (at *Service) speechText(ctx context.Context, p *auth.Principal, in *speech
 		var thread domain.Thread
 		switch {
 		case in.Local:
+			id := in.ThreadID
+			if id == "" {
+				var named struct {
+					ID string `json:"id"`
+				}
+				json.Unmarshal(in.Thread, &named)
+				id = named.ID
+			}
 			var err error
-			if thread, err = domain.ReadDeviceThread(in.ThreadID, in.Thread); err != nil {
+			if thread, err = domain.ReadDeviceThread(id, in.Thread); err != nil {
 				return "", err
 			}
 		case p.Anonymous:

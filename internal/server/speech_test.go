@@ -199,9 +199,12 @@ func TestAMessageIsReadAloudInOrderWithoutItsCode(t *testing.T) {
 			t.Fatalf("%v was asked as %q (overlapping %v) and streamed as %q", in["messageId"], pieces, overlapped.Load(), audio)
 		}
 	}
-	// A device chat's message reads the same, without an account.
-	if device, _ := read(api.Object{"local": true, "threadId": "chat-1", "thread": thread, "messageId": "short"}, ""); !strings.HasPrefix(device, "<Trip plan\n") {
-		t.Fatalf("the device chat's reply was read as %q", device)
+	// A device chat's message reads the same, without an account, and
+	// without its id, as released clients send it.
+	for _, in := range []api.Object{{"local": true, "threadId": "chat-1", "thread": thread, "messageId": "short"}, {"local": true, "thread": thread, "messageId": "short"}} {
+		if device, _ := read(in, ""); !strings.HasPrefix(device, "<Trip plan\n") {
+			t.Fatalf("the device chat's reply was read as %q", device)
+		}
 	}
 }
 

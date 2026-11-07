@@ -22,7 +22,8 @@ func (in *PageRequest) Validate() error {
 
 // speechRequest names a message to read aloud: one of a stored chat, named
 // with the content key, or of a device chat its client sends. Text a client
-// selected, or a shared chat's message, is sent as it is.
+// selected, or a shared chat's message, is sent as it is. A device chat may
+// leave its id out, as clients released before it was asked for do.
 type speechRequest struct {
 	domain.ThreadSource
 	api.KeyRequest
@@ -38,8 +39,10 @@ func (in *speechRequest) Validate() error {
 		}
 		return nil
 	}
-	if err := api.RequireID("threadId", in.ThreadID); err != nil {
-		return err
+	if !in.Local || in.ThreadID != "" {
+		if err := api.RequireID("threadId", in.ThreadID); err != nil {
+			return err
+		}
 	}
 	if err := api.RequireID("messageId", in.MessageID); err != nil {
 		return err
