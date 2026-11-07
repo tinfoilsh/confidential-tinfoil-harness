@@ -3,10 +3,12 @@ package server
 import (
 	"bytes"
 	"cmp"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -230,6 +232,56 @@ func TestSpeechAsksAgainForAPieceThatFailedBeforeItsAudio(t *testing.T) {
 	})
 	if w := postRoute(h, "/v1/speech", api.Object{"text": "Hello there."}, ""); w.Code != 200 || w.Body.String() != "<audio>" || calls.Load() != 2 {
 		t.Fatalf("HTTP %d %q after %d calls", w.Code, w.Body.String(), calls.Load())
+	}
+}
+
+// A test tone: toneSeconds of toneHertz, as the speech service streams it,
+// and how far a test lets its length and pitch drift.
+const (
+	speechSampleRate = 24000
+	toneHertz        = 220
+	toneSeconds      = 2
+	toneTolerance    = 0.05
+)
+
+// tone is the test tone as mono 16-bit PCM.
+func tone() []byte {
+	pcm := []byte{}
+	for i := range toneSeconds * speechSampleRate {
+		pcm = binary.LittleEndian.AppendUint16(pcm, uint16(int16(8000*math.Sin(2*math.Pi*toneHertz*float64(i)/speechSampleRate))))
+	}
+	return pcm
+}
+
+// pitchOf is the frequency of a tone in mono 16-bit PCM, from how often it
+// crosses zero going up.
+func pitchOf(pcm []byte) float64 {
+	rises := 0
+	for i := 2; i+1 < len(pcm); i += 2 {
+		if int16(binary.LittleEndian.Uint16(pcm[i-2:])) < 0 && int16(binary.LittleEndian.Uint16(pcm[i:])) >= 0 {
+			rises++
+		}
+	}
+	return float64(rises) / (float64(len(pcm)/2) / speechSampleRate)
+}
+
+// Audio read twice as fast takes half as long and keeps the voice's pitch,
+// even when its samples arrive split across reads.
+func TestSpeechReadsFasterWithoutRaisingThePitch(t *testing.T) {
+	audio := tone()
+	h := routerHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "audio/pcm")
+		w.Write(audio[:len(audio)/3|1])
+		w.(http.Flusher).Flush()
+		w.Write(audio[len(audio)/3|1:])
+	})
+	w := postRoute(h, "/v1/speech", api.Object{"text": "Hello there.", "speed": 2}, "")
+	seconds := float64(w.Body.Len()/2) / speechSampleRate
+	if w.Code != 200 || math.Abs(seconds-toneSeconds/2.0) > toneSeconds/2.0*toneTolerance || math.Abs(pitchOf(w.Body.Bytes())-toneHertz) > toneHertz*toneTolerance {
+		t.Fatalf("HTTP %d: %.2f s at %.0f Hz", w.Code, seconds, pitchOf(w.Body.Bytes()))
+	}
+	if w := postRoute(h, "/v1/speech", api.Object{"text": "Hello there.", "speed": 4}, ""); w.Code != 400 {
+		t.Fatalf("an unknown speed: HTTP %d", w.Code)
 	}
 }
 

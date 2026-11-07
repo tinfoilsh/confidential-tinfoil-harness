@@ -27,12 +27,16 @@ func (in *PageRequest) Validate() error {
 type speechRequest struct {
 	domain.ThreadSource
 	api.KeyRequest
-	ThreadID  string  `json:"threadId"`
-	MessageID string  `json:"messageId"`
-	Text      *string `json:"text"`
+	ThreadID  string   `json:"threadId"`
+	MessageID string   `json:"messageId"`
+	Text      *string  `json:"text"`
+	Speed     *float64 `json:"speed"`
 }
 
 func (in *speechRequest) Validate() error {
+	if speed := domain.ValueOr(in.Speed, 1); speed < minSpeechSpeed || speed > maxSpeechSpeed {
+		return api.Err(400, "BAD_REQUEST", "speed must be between 0.5 and 2")
+	}
 	if in.MessageID == "" {
 		if strings.TrimSpace(domain.ValueOr(in.Text, "")) == "" {
 			return api.Err(400, "BAD_REQUEST", "A message or text is required")
