@@ -262,7 +262,7 @@ func TestAReadingIsBilledOnce(t *testing.T) {
 		if reading == "" {
 			reading = usage.ContextID
 		}
-		if usage.ContextID != reading || usage.ParentService != "harness" || usage.Depth != 1 || !usagereporting.VerifyAPIKeyHash("free_anonymous-key", usage.APIKeyHash) {
+		if usage.ContextID == "" || usage.ContextID != reading || usage.RootRequestID != reading || usage.ParentService != "harness" || usage.Depth != 1 || !usagereporting.VerifyAPIKeyHash("free_anonymous-key", usage.APIKeyHash) {
 			t.Errorf("a piece reported usage as %+v", usage)
 		}
 	}
