@@ -66,7 +66,7 @@ func (at *Service) HandleSpeech(w http.ResponseWriter, r *http.Request) {
 	}
 	pieces := splitSpeech(text)
 	if len(pieces) == 0 {
-		api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "There is nothing to read aloud"))
+		api.Respond(w, nil, api.Err(400, "NOTHING_TO_READ", "There is nothing to read aloud"))
 		return
 	}
 	router := at.Models.Services["router"]

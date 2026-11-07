@@ -71,19 +71,26 @@ func TestSpeechRefusesWhatTheClientWouldNotSend(t *testing.T) {
 	for _, tc := range []struct {
 		in   api.Object
 		want int
+		code string
 	}{
-		{api.Object{"text": strings.Repeat("a", attach.MaxSpeechText+1)}, 413},
-		{api.Object{"text": " \n "}, 400},
-		{api.Object{}, 400},
-		{api.Object{"text": 42}, 400},
-		{api.Object{"messageId": "m1"}, 400},
-		{api.Object{"threadId": "chat-1", "messageId": "m1", "key": keyBase64(randomKey())}, 401},
-		{api.Object{"threadId": "chat-1", "messageId": "m1", "local": true}, 400},
-		{api.Object{"threadId": "chat-1", "messageId": "m9", "local": true, "thread": priorThread()}, 404},
-		{api.Object{"threadId": "chat-1", "messageId": "m2", "local": true, "thread": api.Object{"messages": []any{api.Object{"id": "m2", "role": "assistant", "content": "```\ncode\n```"}}}}, 400},
+		{api.Object{"text": strings.Repeat("a", attach.MaxSpeechText+1)}, 413, "PAYLOAD_TOO_LARGE"},
+		{api.Object{"text": " \n "}, 400, "BAD_REQUEST"},
+		{api.Object{}, 400, "BAD_REQUEST"},
+		{api.Object{"text": 42}, 400, "BAD_REQUEST"},
+		{api.Object{"messageId": "m1"}, 400, "BAD_REQUEST"},
+		{api.Object{"threadId": "chat-1", "messageId": "m1", "key": keyBase64(randomKey())}, 401, "UNAUTHENTICATED"},
+		{api.Object{"threadId": "chat-1", "messageId": "m1", "local": true}, 400, "BAD_REQUEST"},
+		{api.Object{"threadId": "chat-1", "messageId": "m9", "local": true, "thread": priorThread()}, 404, "THREAD_NOT_FOUND"},
+		// A reply of only code has nothing to read, which its client tells apart from a request it got wrong.
+		{api.Object{"threadId": "chat-1", "messageId": "m2", "local": true, "thread": api.Object{"messages": []any{api.Object{"id": "m2", "role": "assistant", "content": "```\ncode\n```"}}}}, 400, "NOTHING_TO_READ"},
 	} {
-		if response := postRoute(h, "/v1/speech", tc.in, ""); response.Code != tc.want {
-			t.Errorf("%v: HTTP %d, want %d", tc.in, response.Code, tc.want)
+		response := postRoute(h, "/v1/speech", tc.in, "")
+		var body struct {
+			Error api.Error `json:"error"`
+		}
+		json.Unmarshal(response.Body.Bytes(), &body)
+		if response.Code != tc.want || body.Error.Code != tc.code {
+			t.Errorf("%v: HTTP %d %s, want %d %s", tc.in, response.Code, body.Error.Code, tc.want, tc.code)
 		}
 	}
 	r := httptest.NewRequest("POST", "/v1/speech", bytes.NewReader(api.Raw(api.Object{"text": "Hello"})))

@@ -1180,7 +1180,7 @@ paths:
       operationId: speech
       summary: Read text aloud
       tags: [speech]
-      description: Reads a message, or text a client sends, aloud.
+      description: Reads a message, or text a client sends, aloud. Text with nothing left to read once its code, images and bare links are left out is refused with NOTHING_TO_READ.
       requestBody:
         required: true
         content:
@@ -1560,6 +1560,7 @@ components:
             - MISSING_ATTACHMENT
             - MODEL_UNAVAILABLE
             - NOTHING_TO_COMPACT
+            - NOTHING_TO_READ
             - PAYLOAD_TOO_LARGE
             - PROJECTS_REQUIRE_CLOUD
             - QUEUE_FULL
