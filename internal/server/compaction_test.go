@@ -482,6 +482,42 @@ func TestAToolExchangeThatOutgrowsTheWindowCompactsTheChat(t *testing.T) {
 	}
 }
 
+// A tool exchange that outgrows the window drops what the calls the model
+// already answered returned, keeping the result it has yet to read, before
+// it compacts anything; the reply keeps every result it showed.
+func TestAToolExchangeClearsTheResultsTheModelAnswered(t *testing.T) {
+	serveWebsearch(t, func(string, map[string]any) (*mcp.CallToolResult, any) {
+		return nil, api.Object{"results": []api.Object{{"title": "Tides", "url": "https://tides.test", "content": filler(100)}}}
+	})
+	sent := make(chan []any, 1)
+	var turns atomic.Int32
+	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		switch turns.Add(1) {
+		case 1:
+			io.WriteString(w, toolCallChunk(0, "s1", "web_search", `{"query":"tides"}`)+"data: [DONE]\n\n")
+		case 2:
+			io.WriteString(w, toolCallChunk(0, "s2", "web_search", `{"query":"currents"}`)+"data: [DONE]\n\n")
+		default:
+			sent <- lastRequest(r)
+			io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n")
+		}
+	})
+	// The window holds one search's results beside the question, not two.
+	h.models.Catalog.Get().Models[0]["budgetWindow"] = 4608
+	events := finishedRun(t, h, "/v1/threads/turn", searchInput(key))
+	messages := <-sent
+	if toolMessage(messages, "s1") != engine.ClearedResult || !strings.Contains(toolMessage(messages, "s2"), filler(1)) || eventOfType(events, "COMPACTION_START") != nil {
+		t.Fatalf("after two searches the model was sent %v", messages)
+	}
+	reply := storedChat(t, rows, key, events[0].ThreadID).Messages[1]
+	for _, id := range []string{"s1", "s2"} {
+		at := slices.IndexFunc(reply.Timeline, func(b domain.Block) bool { return b.ToolCallID == id })
+		if at < 0 || !strings.Contains(string(reply.Timeline[at].Result), filler(1)) {
+			t.Fatalf("the reply kept %+v of the call %s", reply.Timeline, id)
+		}
+	}
+}
+
 // compactInput is a compact turn of alice's stored chat.
 func compactInput(key auth.ContentKey, thread string) api.Object {
 	in := continueInput(key, thread)
