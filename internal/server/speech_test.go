@@ -3,10 +3,12 @@ package server
 import (
 	"bytes"
 	"cmp"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -17,11 +19,13 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
+	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
 func TestSpeechStreamsTheRoutersAudio(t *testing.T) {
@@ -71,19 +75,26 @@ func TestSpeechRefusesWhatTheClientWouldNotSend(t *testing.T) {
 	for _, tc := range []struct {
 		in   api.Object
 		want int
+		code string
 	}{
-		{api.Object{"text": strings.Repeat("a", attach.MaxSpeechText+1)}, 413},
-		{api.Object{"text": " \n "}, 400},
-		{api.Object{}, 400},
-		{api.Object{"text": 42}, 400},
-		{api.Object{"messageId": "m1"}, 400},
-		{api.Object{"threadId": "chat-1", "messageId": "m1", "key": keyBase64(randomKey())}, 401},
-		{api.Object{"threadId": "chat-1", "messageId": "m1", "local": true}, 400},
-		{api.Object{"threadId": "chat-1", "messageId": "m9", "local": true, "thread": priorThread()}, 404},
-		{api.Object{"threadId": "chat-1", "messageId": "m2", "local": true, "thread": api.Object{"messages": []any{api.Object{"id": "m2", "role": "assistant", "content": "```\ncode\n```"}}}}, 400},
+		{api.Object{"text": strings.Repeat("a", attach.MaxSpeechText+1)}, 413, "PAYLOAD_TOO_LARGE"},
+		{api.Object{"text": " \n "}, 400, "BAD_REQUEST"},
+		{api.Object{}, 400, "BAD_REQUEST"},
+		{api.Object{"text": 42}, 400, "BAD_REQUEST"},
+		{api.Object{"messageId": "m1"}, 400, "BAD_REQUEST"},
+		{api.Object{"threadId": "chat-1", "messageId": "m1", "key": keyBase64(randomKey())}, 401, "UNAUTHENTICATED"},
+		{api.Object{"threadId": "chat-1", "messageId": "m1", "local": true}, 400, "BAD_REQUEST"},
+		{api.Object{"threadId": "chat-1", "messageId": "m9", "local": true, "thread": priorThread()}, 404, "THREAD_NOT_FOUND"},
+		// A reply of only code has nothing to read, which its client tells apart from a request it got wrong.
+		{api.Object{"threadId": "chat-1", "messageId": "m2", "local": true, "thread": api.Object{"messages": []any{api.Object{"id": "m2", "role": "assistant", "content": "```\ncode\n```"}}}}, 400, "NOTHING_TO_READ"},
 	} {
-		if response := postRoute(h, "/v1/speech", tc.in, ""); response.Code != tc.want {
-			t.Errorf("%v: HTTP %d, want %d", tc.in, response.Code, tc.want)
+		response := postRoute(h, "/v1/speech", tc.in, "")
+		var body struct {
+			Error api.Error `json:"error"`
+		}
+		json.Unmarshal(response.Body.Bytes(), &body)
+		if response.Code != tc.want || body.Error.Code != tc.code {
+			t.Errorf("%v: HTTP %d %s, want %d %s", tc.in, response.Code, body.Error.Code, tc.want, tc.code)
 		}
 	}
 	r := httptest.NewRequest("POST", "/v1/speech", bytes.NewReader(api.Raw(api.Object{"text": "Hello"})))
@@ -199,9 +210,195 @@ func TestAMessageIsReadAloudInOrderWithoutItsCode(t *testing.T) {
 			t.Fatalf("%v was asked as %q (overlapping %v) and streamed as %q", in["messageId"], pieces, overlapped.Load(), audio)
 		}
 	}
-	// A device chat's message reads the same, without an account.
-	if device, _ := read(api.Object{"local": true, "threadId": "chat-1", "thread": thread, "messageId": "short"}, ""); !strings.HasPrefix(device, "<Trip plan\n") {
-		t.Fatalf("the device chat's reply was read as %q", device)
+	// A device chat's message reads the same, without an account, and
+	// without its id, as released clients send it: an older record's messages
+	// are then named by the id the record holds.
+	legacy := api.Object{"id": "chat-1", "title": "Trip", "messages": []any{api.Object{"role": "user", "content": "Plan it"}, api.Object{"role": "assistant", "content": reply}}}
+	for _, in := range []api.Object{{"local": true, "threadId": "chat-1", "thread": thread, "messageId": "short"}, {"local": true, "thread": thread, "messageId": "short"}, {"local": true, "thread": legacy, "messageId": "chat-1-message-1"}} {
+		if device, _ := read(in, ""); !strings.HasPrefix(device, "<Trip plan\n") {
+			t.Fatalf("the device chat's reply was read as %q", device)
+		}
+	}
+}
+
+// A reading counts as one request however many pieces it is read in: every
+// piece reports usage under the reading, and only the first is billed, so a
+// long reply does not use up a signed-out caller's daily requests.
+func TestAReadingIsBilledOnce(t *testing.T) {
+	var mu sync.Mutex
+	usages := map[string]usagereporting.Context{}
+	h := routerHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Input string `json:"input"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		usage, signed, err := usagereporting.FromHeaders(r.Header, "test-usage-secret", time.Now(), time.Minute)
+		if err != nil || !signed {
+			t.Errorf("a piece carried no signed usage: %v", err)
+		}
+		mu.Lock()
+		usages[body.Input] = usage
+		mu.Unlock()
+		w.Header().Set("Content-Type", "audio/pcm")
+		io.WriteString(w, "a")
+	})
+	var long strings.Builder
+	for i := 1; i <= 12; i++ {
+		fmt.Fprintf(&long, "Sentence %d walks through the plan in enough detail to fill a piece. ", i)
+	}
+	if w := postRoute(h, "/v1/speech", api.Object{"text": long.String()}, ""); w.Code != 200 {
+		t.Fatalf("HTTP %d %s", w.Code, w.Body.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	billed, reading := 0, ""
+	for piece, usage := range usages {
+		if usage.BillCustomerRequest {
+			billed++
+			if !strings.HasPrefix(piece, "Sentence 1 ") {
+				t.Errorf("a later piece was billed: %q", piece)
+			}
+		}
+		if reading == "" {
+			reading = usage.ContextID
+		}
+		if usage.ContextID == "" || usage.ContextID != reading || usage.RootRequestID != reading || usage.ParentService != "harness" || usage.Depth != 1 || !usagereporting.VerifyAPIKeyHash("free_anonymous-key", usage.APIKeyHash) {
+			t.Errorf("a piece reported usage as %+v", usage)
+		}
+	}
+	if len(usages) < 2 || billed != 1 {
+		t.Fatalf("%d of %d pieces were billed", billed, len(usages))
+	}
+}
+
+// A piece the speech service fails before any of its audio arrives is asked
+// for again, so a passing failure does not end the reading.
+func TestSpeechAsksAgainForAPieceThatFailedBeforeItsAudio(t *testing.T) {
+	var calls atomic.Int32
+	h := routerHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "audio/pcm")
+		io.WriteString(w, "<audio>")
+	})
+	if w := postRoute(h, "/v1/speech", api.Object{"text": "Hello there."}, ""); w.Code != 200 || w.Body.String() != "<audio>" || calls.Load() != 2 {
+		t.Fatalf("HTTP %d %q after %d calls", w.Code, w.Body.String(), calls.Load())
+	}
+}
+
+// A test tone: toneSeconds of toneHertz, as the speech service streams it,
+// and how far a test lets its length and pitch drift.
+const (
+	speechSampleRate = 24000
+	toneHertz        = 220
+	toneSeconds      = 2
+	toneTolerance    = 0.05
+)
+
+// tone is the test tone as mono 16-bit PCM.
+func tone() []byte {
+	pcm := []byte{}
+	for i := range toneSeconds * speechSampleRate {
+		pcm = binary.LittleEndian.AppendUint16(pcm, uint16(int16(8000*math.Sin(2*math.Pi*toneHertz*float64(i)/speechSampleRate))))
+	}
+	return pcm
+}
+
+// pitchOf is the frequency of a tone in mono 16-bit PCM, from how often it
+// crosses zero going up.
+func pitchOf(pcm []byte) float64 {
+	rises := 0
+	for i := 2; i+1 < len(pcm); i += 2 {
+		if int16(binary.LittleEndian.Uint16(pcm[i-2:])) < 0 && int16(binary.LittleEndian.Uint16(pcm[i:])) >= 0 {
+			rises++
+		}
+	}
+	return float64(rises) / (float64(len(pcm)/2) / speechSampleRate)
+}
+
+// Audio read twice as fast takes half as long and keeps the voice's pitch,
+// even when its samples arrive split across reads.
+func TestSpeechReadsFasterWithoutRaisingThePitch(t *testing.T) {
+	audio := tone()
+	h := routerHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "audio/pcm")
+		w.Write(audio[:len(audio)/3|1])
+		w.(http.Flusher).Flush()
+		w.Write(audio[len(audio)/3|1:])
+	})
+	w := postRoute(h, "/v1/speech", api.Object{"text": "Hello there.", "speed": 2}, "")
+	seconds := float64(w.Body.Len()/2) / speechSampleRate
+	if w.Code != 200 || math.Abs(seconds-toneSeconds/2.0) > toneSeconds/2.0*toneTolerance || math.Abs(pitchOf(w.Body.Bytes())-toneHertz) > toneHertz*toneTolerance {
+		t.Fatalf("HTTP %d: %.2f s at %.0f Hz", w.Code, seconds, pitchOf(w.Body.Bytes()))
+	}
+	if w := postRoute(h, "/v1/speech", api.Object{"text": "Hello there.", "speed": 4}, ""); w.Code != 400 {
+		t.Fatalf("an unknown speed: HTTP %d", w.Code)
+	}
+	// No audio played faster is still no audio.
+	silent := routerHarness(t, func(w http.ResponseWriter, r *http.Request) { w.Header().Set("Content-Type", "audio/pcm") })
+	if w := postRoute(silent, "/v1/speech", api.Object{"text": "Hello there.", "speed": 2}, ""); w.Code != 502 {
+		t.Fatalf("no audio at twice the speed: HTTP %d, %d bytes", w.Code, w.Body.Len())
+	}
+}
+
+// loopingAudioBytes is about a minute of audio, far more than a short
+// sentence takes, as a speech model that runs on in a loop streams, and
+// shortSentenceAudioBytes a little more than "Hello there." may be read with.
+const (
+	loopingAudioBytes       = 60 * 24000 * 2
+	shortSentenceAudioBytes = 10 * 24000 * 2
+)
+
+// A voice that runs on past what its text takes is cut off soon after.
+func TestSpeechCutsOffAVoiceThatRunsOn(t *testing.T) {
+	h := routerHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "audio/pcm")
+		w.Write(make([]byte, loopingAudioBytes))
+	})
+	if w := postRoute(h, "/v1/speech", api.Object{"text": "Hello there."}, ""); w.Code != 200 || w.Body.Len() == 0 || w.Body.Len() > shortSentenceAudioBytes {
+		t.Fatalf("HTTP %d streamed %d bytes", w.Code, w.Body.Len())
+	}
+}
+
+// widePieceCharacters is the most Chinese characters a piece holds: each
+// takes about as long to read as two English ones, so a piece holds half as
+// many, and never so many that its audio runs past what a piece may take.
+const widePieceCharacters = 300
+
+// Chinese text, whose sentences no space follows, is read in pieces of whole
+// sentences no longer to read than an English piece.
+func TestWideTextIsReadAloudInWholeSentences(t *testing.T) {
+	var mu sync.Mutex
+	var asked []string
+	h := routerHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Input string `json:"input"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		asked = append(asked, body.Input)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "audio/pcm")
+		io.WriteString(w, "a")
+	})
+	text := strings.Repeat("今天我们讨论旅行计划的每一个细节，包括交通、住宿和预算。真的吗！？", 12)
+	if w := postRoute(h, "/v1/speech", api.Object{"text": text}, ""); w.Code != 200 {
+		t.Fatalf("HTTP %d %s", w.Code, w.Body.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	read := ""
+	for _, piece := range asked {
+		whole := strings.HasSuffix(piece, "。") || strings.HasSuffix(piece, "！？")
+		if !whole || strings.HasPrefix(piece, "？") || strings.Contains(piece, "！ ？") || utf8.RuneCountInString(piece) > widePieceCharacters {
+			t.Fatalf("the text was read in pieces %q", asked)
+		}
+		read += strings.ReplaceAll(piece, " ", "")
+	}
+	if len(asked) < 2 || utf8.RuneCountInString(read) != utf8.RuneCountInString(text) {
+		t.Fatalf("the text was read in pieces %q", asked)
 	}
 }
 

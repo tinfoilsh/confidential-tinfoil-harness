@@ -4,7 +4,6 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
-	"unicode/utf8"
 
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
@@ -98,9 +97,9 @@ func htmlBreak(tag string) string {
 	return ""
 }
 
-// splitSpeech cuts text into pieces of at most maxSpeechCharacters, joining
-// sentences until a piece reaches speechTargetCharacters and cutting a
-// longer sentence at a space where it can.
+// splitSpeech cuts text into pieces that take at most maxSpeechCharacters to
+// read, joining sentences until a piece reaches speechTargetCharacters and
+// cutting a longer sentence at a pause where it can.
 func splitSpeech(text string) []string {
 	pieces := []string{}
 	current := ""
@@ -112,15 +111,9 @@ func splitSpeech(text string) []string {
 	}
 	for _, sentence := range sentences(text) {
 		points := []rune(strings.TrimSpace(sentence))
-		for len(points) > maxSpeechCharacters {
+		for speechLength(points) > maxSpeechCharacters {
 			flush()
-			end := maxSpeechCharacters
-			for i := end; i > speechTargetCharacters; i-- {
-				if unicode.IsSpace(points[i]) {
-					end = i
-					break
-				}
-			}
+			end := cutSpeech(points)
 			pieces = append(pieces, strings.TrimSpace(string(points[:end])))
 			points = points[end:]
 		}
@@ -128,14 +121,14 @@ func splitSpeech(text string) []string {
 		if remainder == "" {
 			continue
 		}
-		if utf8.RuneCountInString(current)+len(points)+1 > maxSpeechCharacters {
+		if speechLength([]rune(current))+speechLength(points)+1 > maxSpeechCharacters {
 			flush()
 		}
 		if current != "" {
 			current += " "
 		}
 		current += remainder
-		if utf8.RuneCountInString(current) >= speechTargetCharacters {
+		if speechLength([]rune(current)) >= speechTargetCharacters {
 			flush()
 		}
 	}
@@ -143,14 +136,68 @@ func splitSpeech(text string) []string {
 	return pieces
 }
 
-// sentences cuts text after each sentence's closing punctuation that a space
-// or the end follows.
+// cutSpeech is where a sentence too long for one piece is cut: after the
+// most it can read in one, moved back to the last space or Chinese, Japanese
+// or Korean pause past speechTargetCharacters where there is one.
+func cutSpeech(points []rune) int {
+	end, target, length := len(points), 0, 0
+	for i, r := range points {
+		if length += speechLength([]rune{r}); length > maxSpeechCharacters {
+			end = i
+			break
+		}
+		if length <= speechTargetCharacters {
+			target = i
+		}
+	}
+	for i := end; i > target; i-- {
+		if unicode.IsSpace(points[i]) {
+			return i
+		}
+		if strings.ContainsRune(widePauses, points[i-1]) {
+			return i
+		}
+	}
+	return end
+}
+
+// speechLength is how long text takes to read, in characters of Latin text:
+// a Chinese, Japanese or Korean character takes about as long as two.
+func speechLength(points []rune) int {
+	length := len(points)
+	for _, r := range points {
+		if unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Hangul) {
+			length++
+		}
+	}
+	return length
+}
+
+// Sentences end at these marks before a space or the end, and at a run of
+// the wide marks of Chinese, Japanese and Korean text, which no space
+// follows, with the closing quotes and brackets after them. A long sentence
+// of wide text is cut after one of widePauses.
+const (
+	sentenceEnds     = ".!?"
+	wideSentenceEnds = "。！？"
+	widePauses       = "，、；：。！？"
+)
+
+// sentences cuts text after each sentence's closing punctuation.
 func sentences(text string) []string {
 	var cut []string
 	runes := []rune(text)
 	start := 0
-	for i, r := range runes {
-		if strings.ContainsRune(".!?。！？", r) && (i+1 == len(runes) || unicode.IsSpace(runes[i+1])) {
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		ends := strings.ContainsRune(sentenceEnds, r) && (i+1 == len(runes) || unicode.IsSpace(runes[i+1]))
+		if strings.ContainsRune(wideSentenceEnds, r) {
+			ends = true
+			for i+1 < len(runes) && (strings.ContainsRune(wideSentenceEnds, runes[i+1]) || unicode.In(runes[i+1], unicode.Pe, unicode.Pf)) {
+				i++
+			}
+		}
+		if ends {
 			cut = append(cut, string(runes[start:i+1]))
 			start = i + 1
 		}

@@ -22,24 +22,31 @@ func (in *PageRequest) Validate() error {
 
 // speechRequest names a message to read aloud: one of a stored chat, named
 // with the content key, or of a device chat its client sends. Text a client
-// selected, or a shared chat's message, is sent as it is.
+// selected, or a shared chat's message, is sent as it is. A device chat may
+// leave its id out, as clients released before it was asked for do.
 type speechRequest struct {
 	domain.ThreadSource
 	api.KeyRequest
-	ThreadID  string  `json:"threadId"`
-	MessageID string  `json:"messageId"`
-	Text      *string `json:"text"`
+	ThreadID  string   `json:"threadId"`
+	MessageID string   `json:"messageId"`
+	Text      *string  `json:"text"`
+	Speed     *float64 `json:"speed"`
 }
 
 func (in *speechRequest) Validate() error {
+	if speed := domain.ValueOr(in.Speed, 1); speed < minSpeechSpeed || speed > maxSpeechSpeed {
+		return api.Err(400, "BAD_REQUEST", "speed must be between 0.5 and 2")
+	}
 	if in.MessageID == "" {
 		if strings.TrimSpace(domain.ValueOr(in.Text, "")) == "" {
 			return api.Err(400, "BAD_REQUEST", "A message or text is required")
 		}
 		return nil
 	}
-	if err := api.RequireID("threadId", in.ThreadID); err != nil {
-		return err
+	if !in.Local || in.ThreadID != "" {
+		if err := api.RequireID("threadId", in.ThreadID); err != nil {
+			return err
+		}
 	}
 	if err := api.RequireID("messageId", in.MessageID); err != nil {
 		return err

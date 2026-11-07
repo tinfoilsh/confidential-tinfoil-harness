@@ -3,6 +3,7 @@ package attach
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"mime"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
+	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
 // Read-aloud audio is mono 16-bit 24 kHz PCM. Each piece of a message is
@@ -24,10 +26,24 @@ const (
 	SpeechVoice        = "aiden"
 	SpeechInstructions = "Read in a calm, natural conversational voice with a steady pace, consistent pitch range, and restrained expression. Use natural sentence pauses and maintain an even narration style."
 	speechMediaType    = "audio/pcm"
-	maxSpeechBytes     = 120 * 24000 * 2 // two minutes of audio, more than any piece takes
 	speechTimeout      = 2 * time.Minute // for each piece
 	speechParallelism  = 2
 	speechReadSize     = 32 << 10
+	speechAttempts     = 2
+	// speechBytesPerSecond is how much audio a second of speech takes.
+	speechBytesPerSecond = 24000 * 2
+	// A piece is read with at most speechBaseSeconds of audio, and
+	// speechSecondsPerCharacter for each character it reads, about four
+	// times what an English character takes and twice a Chinese one.
+	speechBaseSeconds         = 5
+	speechSecondsPerCharacter = 0.25
+	// A client may have the audio play from half to twice as fast as the
+	// voice speaks it.
+	minSpeechSpeed = 0.5
+	maxSpeechSpeed = 2
+	// speechParentService is the service the router lets bill a reading's
+	// pieces once.
+	speechParentService = "harness"
 )
 
 func (at *Service) HandleSpeech(w http.ResponseWriter, r *http.Request) {
@@ -65,7 +81,7 @@ func (at *Service) HandleSpeech(w http.ResponseWriter, r *http.Request) {
 	}
 	pieces := splitSpeech(text)
 	if len(pieces) == 0 {
-		api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "There is nothing to read aloud"))
+		api.Respond(w, nil, api.Err(400, "NOTHING_TO_READ", "There is nothing to read aloud"))
 		return
 	}
 	router := at.Models.Services["router"]
@@ -74,7 +90,11 @@ func (at *Service) HandleSpeech(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := auth.WithCallerKey(r.Context(), string(credential.Key))
-	if err := streamSpeech(ctx, w, router, pieces); err != nil {
+	// A reading counts as one request, as a run does: its pieces report
+	// usage under it, and only the first is billed.
+	reading := "speech_" + api.Token()
+	ctx = auth.WithUsage(ctx, usagereporting.Context{ContextID: reading, RootRequestID: reading, ParentService: speechParentService, APIKeyHash: usagereporting.HashAPIKey(string(credential.Key)), Depth: 1})
+	if err := streamSpeech(ctx, w, router, pieces, domain.ValueOr(in.Speed, 1)); err != nil {
 		api.Respond(w, nil, auth.WithQuota(p, credential.Limit, err))
 	}
 }
@@ -87,8 +107,16 @@ func (at *Service) speechText(ctx context.Context, p *auth.Principal, in *speech
 		var thread domain.Thread
 		switch {
 		case in.Local:
+			id := in.ThreadID
+			if id == "" {
+				var named struct {
+					ID string `json:"id"`
+				}
+				json.Unmarshal(in.Thread, &named)
+				id = named.ID
+			}
 			var err error
-			if thread, err = domain.ReadDeviceThread(in.ThreadID, in.Thread); err != nil {
+			if thread, err = domain.ReadDeviceThread(id, in.Thread); err != nil {
 				return "", err
 			}
 		case p.Anonymous:
@@ -145,11 +173,11 @@ func (a *speechAudio) from(offset int) ([]byte, bool, error, <-chan struct{}) {
 	return a.data[offset:], a.done, a.err, a.wake
 }
 
-// streamSpeech writes the audio of each piece in order. A piece is
-// synthesized once a slot frees up, and its slot frees up once its audio
-// is written. A failure before any audio is returned; one after aborts the
-// response, so its client reads the audio as incomplete.
-func streamSpeech(ctx context.Context, w http.ResponseWriter, router *inference.Service, pieces []string) error {
+// streamSpeech writes the audio of each piece in order, played at speed. A
+// piece is synthesized once a slot frees up, and its slot frees up once its
+// audio is written. A failure before any audio is returned; one after
+// aborts the response, so its client reads the audio as incomplete.
+func streamSpeech(ctx context.Context, w http.ResponseWriter, router *inference.Service, pieces []string, speed float64) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	audio := make([]*speechAudio, len(pieces))
@@ -164,7 +192,12 @@ func streamSpeech(ctx context.Context, w http.ResponseWriter, router *inference.
 			case <-ctx.Done():
 				return
 			}
-			go synthesize(ctx, router, piece, audio[i])
+			pieceCtx := ctx
+			if usage, ok := auth.Usage(ctx); ok && i == 0 {
+				usage.BillCustomerRequest = true
+				pieceCtx = auth.WithUsage(ctx, usage)
+			}
+			go synthesize(pieceCtx, router, piece, speed, audio[i])
 		}
 	}()
 	started := false
@@ -209,8 +242,10 @@ func streamSpeech(ctx context.Context, w http.ResponseWriter, router *inference.
 	return nil
 }
 
-// synthesize reads the audio the router speaks one piece of text with.
-func synthesize(ctx context.Context, router *inference.Service, text string, out *speechAudio) {
+// synthesize reads the audio the router speaks one piece of text with. A
+// piece the speech service failed before any of its audio arrived is asked
+// for again, up to speechAttempts times in all.
+func synthesize(ctx context.Context, router *inference.Service, text string, speed float64, out *speechAudio) {
 	var err error
 	defer func() {
 		if failure := api.Rescued("speech synthesis", recover()); failure != nil {
@@ -218,40 +253,73 @@ func synthesize(ctx context.Context, router *inference.Service, text string, out
 		}
 		out.add(nil, true, err)
 	}()
+	for attempt := 1; ; attempt++ {
+		var spoke, retry bool
+		spoke, retry, err = speak(ctx, router, text, speed, out)
+		if err == nil || spoke || !retry || attempt == speechAttempts || ctx.Err() != nil {
+			return
+		}
+	}
+}
+
+// speak asks the router once for a piece's audio, which it adds to out as it
+// arrives, at most what speechBudget allows, played at speed. It reports
+// whether it added any audio, and whether a failure is one the speech
+// service may not repeat.
+func speak(ctx context.Context, router *inference.Service, text string, speed float64, out *speechAudio) (spoke, retry bool, err error) {
 	ctx, cancel := context.WithTimeout(ctx, speechTimeout)
 	defer cancel()
 	speech := api.Raw(api.Object{"model": speechModel, "voice": SpeechVoice, "instructions": SpeechInstructions, "input": text, "response_format": "pcm", "stream_format": "audio"})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, router.URL+"/v1/audio/speech", bytes.NewReader(speech))
 	if err != nil {
-		return
+		return false, false, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := router.Client.Do(req)
 	if err != nil {
-		return
+		return false, true, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-		err = api.WithRetryAfter(api.DownstreamError(resp.StatusCode, b), resp.Header)
-		return
+		return false, resp.StatusCode >= http.StatusInternalServerError, api.WithRetryAfter(api.DownstreamError(resp.StatusCode, b), resp.Header)
 	}
 	if media, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type")); media != speechMediaType {
-		err = api.Err(502, "UPSTREAM_REFUSED", "The speech service returned unsupported audio")
-		return
+		return false, false, api.Err(502, "UPSTREAM_REFUSED", "The speech service returned unsupported audio")
 	}
-	body, chunk := io.LimitReader(resp.Body, maxSpeechBytes), make([]byte, speechReadSize)
+	var stretch *stretcher
+	if speed != 1 {
+		stretch = newStretcher(speed)
+	}
+	body, chunk := io.LimitReader(resp.Body, speechBudget(text)), make([]byte, speechReadSize)
 	for {
 		n, readErr := body.Read(chunk)
 		if n > 0 {
-			out.add(chunk[:n], false, nil)
+			audio := chunk[:n]
+			if stretch != nil {
+				audio = stretch.push(audio)
+			}
+			if len(audio) > 0 {
+				out.add(audio, false, nil)
+				spoke = true
+			}
 		}
 		if readErr == io.EOF {
-			return
+			if stretch != nil {
+				out.add(stretch.flush(), false, nil)
+			}
+			return spoke, false, nil
 		}
 		if readErr != nil {
-			err = readErr
-			return
+			return spoke, true, readErr
 		}
 	}
+}
+
+// speechBudget is the most audio a piece is read with, in bytes: several
+// times what reading it takes, so a voice that runs on in a loop stops soon
+// after it should have, and the next piece is read.
+func speechBudget(text string) int64 {
+	seconds := speechBaseSeconds + speechSecondsPerCharacter*float64(speechLength([]rune(text)))
+	return int64(seconds * speechBytesPerSecond)
 }
