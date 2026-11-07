@@ -239,8 +239,8 @@ type validatedKey struct {
 
 // issuedKey validates a key the control plane issued: a free key, a
 // signed-out caller's or a signed-in caller's without a subscription, whose
-// quota it reads, or an API key. A key validated recently admits its caller
-// without asking again.
+// quota it reads, or an API key. Recognize then admits a caller whose key it
+// validated recently without asking again.
 func (a *Authenticator) issuedKey(ctx context.Context, p *Principal) (Credential, error) {
 	if p.validated != nil {
 		credential := *p.validated
