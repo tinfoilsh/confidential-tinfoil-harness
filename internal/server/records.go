@@ -147,6 +147,11 @@ func (h *harness) getThread(ctx context.Context, p *auth.Principal, key auth.Con
 	return domain.Window(row, in.Before, in.Limit), nil
 }
 func (h *harness) updateThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *updateThreadRequest) (any, error) {
+	if !in.Local {
+		var cancel context.CancelFunc
+		ctx, cancel = committing(ctx)
+		defer cancel()
+	}
 	if in.Model != nil && !h.models.Catalog.Get().Offers(*in.Model) {
 		return nil, api.Err(404, "MODEL_UNAVAILABLE", "Unknown model")
 	}
@@ -218,14 +223,17 @@ func (h *harness) pinnedThreads(ctx context.Context, p *auth.Principal, key auth
 	return threads, nil
 }
 
+// committing is the context a change to a stored chat is saved under. Its
+// client leaving before the answer, as a page reloaded right after a rename
+// does, does not end it; the commit timeout a turn's start has does.
+func committing(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), engine.CommitTimeout)
+}
+
 // changeThread applies change to a chat: a stored one as read now, saved
 // once changed, or the device chat its client sent.
 func (h *harness) changeThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, source domain.ThreadSource, id string, change func(*domain.Thread) error) (*domain.ThreadRow, error) {
 	if !source.Local {
-		// A change its client sent is saved even if the client leaves before
-		// it is answered, as a page reloaded right after a rename does.
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), engine.CommitTimeout)
-		defer cancel()
 		return h.store.MutateThread(ctx, p, key, id, change)
 	}
 	t, err := domain.ReadDeviceThread(id, source.Thread)
@@ -386,6 +394,11 @@ func (h *harness) answerQuestions(ctx context.Context, p *auth.Principal, key au
 	})
 }
 func (h *harness) changeMessages(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *messageRequest, change func(*domain.Thread, int) error) (any, error) {
+	if !in.Local {
+		var cancel context.CancelFunc
+		ctx, cancel = committing(ctx)
+		defer cancel()
+	}
 	row, err := h.changeThread(ctx, p, key, in.ThreadSource, in.ThreadID, func(t *domain.Thread) error {
 		index := t.MessageIndex(in.MessageID)
 		if index < 0 {
