@@ -138,12 +138,14 @@ func TestFetchRefusesUnsafeAndExcessiveRedirects(t *testing.T) {
 
 func TestFetchBoundsBodiesAndDecodedPixels(t *testing.T) {
 	oversized := image.NewGray(image.Rect(0, 0, 5000, 4001))
+	valid := testPNG(t, image.NewGray(image.Rect(0, 0, 1, 1)))
+	oversizedDownload := append(valid, bytes.Repeat([]byte("x"), maxImageBytes+1-len(valid))...)
 	for _, tc := range []struct {
 		name string
 		body []byte
 	}{
 		{"active SVG", []byte(`<svg xmlns="http://www.w3.org/2000/svg"><image href="https://tracker.example/pixel"/></svg>`)},
-		{"oversized download", bytes.Repeat([]byte("x"), maxImageBytes+1)},
+		{"oversized download", oversizedDownload},
 		{"oversized decoded image", testPNG(t, oversized)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

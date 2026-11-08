@@ -135,13 +135,13 @@ func (c *Client) Fetch(ctx context.Context, rawURL string) (*Image, error) {
 	if err != nil || len(body) == 0 || len(body) > maxImageBytes {
 		return nil, unavailable
 	}
-	config, format, err := image.DecodeConfig(bytes.NewReader(body))
-	if err != nil || config.Width <= 0 || config.Height <= 0 || config.Width > maxImagePixels/config.Height {
+	switch http.DetectContentType(body) {
+	case "image/png", "image/jpeg", "image/gif", "image/webp":
+	default:
 		return nil, unavailable
 	}
-	switch format {
-	case "png", "jpeg", "gif", "webp":
-	default:
+	config, _, err := image.DecodeConfig(bytes.NewReader(body))
+	if err != nil || config.Width <= 0 || config.Height <= 0 || config.Width > maxImagePixels/config.Height {
 		return nil, unavailable
 	}
 	decoded, _, err := image.Decode(bytes.NewReader(body))
