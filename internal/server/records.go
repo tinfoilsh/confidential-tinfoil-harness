@@ -222,6 +222,10 @@ func (h *harness) pinnedThreads(ctx context.Context, p *auth.Principal, key auth
 // once changed, or the device chat its client sent.
 func (h *harness) changeThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, source domain.ThreadSource, id string, change func(*domain.Thread) error) (*domain.ThreadRow, error) {
 	if !source.Local {
+		// A change its client sent is saved even if the client leaves before
+		// it is answered, as a page reloaded right after a rename does.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), engine.CommitTimeout)
+		defer cancel()
 		return h.store.MutateThread(ctx, p, key, id, change)
 	}
 	t, err := domain.ReadDeviceThread(id, source.Thread)
