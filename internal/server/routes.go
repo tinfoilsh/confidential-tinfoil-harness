@@ -71,7 +71,6 @@ var contractCheck func(http.Handler) http.Handler
 // handlers are every route the harness serves, by method and path.
 func (h *harness) handlers() map[string]http.HandlerFunc {
 	handlers := map[string]http.HandlerFunc{
-		metricsPattern:                       h.metrics.ServeHTTP,
 		"POST " + remoteImagePath:            boundedHandler(imageResponseSlots, h.jsonRoute(routeSpec{remoteImagePath, true, false, decoded(h.attachments.Image)})),
 		"GET /healthz":                       func(w http.ResponseWriter, r *http.Request) { api.Respond(w, api.Object{"ok": true}, nil) },
 		"POST /v1/threads/turn":              h.engine.HandleTurn,
@@ -92,6 +91,9 @@ func (h *harness) handlers() map[string]http.HandlerFunc {
 			panic("two handlers serve " + pattern)
 		}
 		handlers[pattern] = handler
+	}
+	if h.metrics != nil {
+		add(metricsPattern, h.metrics.ServeHTTP)
 	}
 	for _, spec := range h.apiRoutes() {
 		add("POST "+spec.path, h.jsonRoute(spec))
