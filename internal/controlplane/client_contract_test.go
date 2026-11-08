@@ -72,6 +72,7 @@ func TestWireContractMirrorsControlplane(t *testing.T) {
 			"StatusProfileSyncUpgradeRequired": {StatusProfileSyncUpgradeRequired, "PROFILE_SYNC_UPGRADE_REQUIRED"},
 			"StatusMissingAttachment":          {StatusMissingAttachment, "MISSING_ATTACHMENT"},
 			"StatusAttachmentPurgeInProgress":  {StatusAttachmentPurgeInProgress, "ATTACHMENT_PURGE_IN_PROGRESS"},
+			"StatusDeepResearchLimitReached":   {StatusDeepResearchLimitReached, "DEEP_RESEARCH_LIMIT_REACHED"},
 		}
 		for name, c := range cases {
 			if c.have != c.want {

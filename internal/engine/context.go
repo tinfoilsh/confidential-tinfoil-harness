@@ -42,6 +42,7 @@ type Request struct {
 	rendered                   []json.RawMessage // their declarations
 	webSearch, piiCheck        bool
 	searchBilled               bool // the caller pays for the run's web search, as an API request's caller does
+	research                   bool // the turn researches its question on the web before it answers
 	// Groups are the history the model reads: each message after the chat's
 	// latest compaction marker, the first carrying the marker's summary.
 	// history is every message but the markers, as the safeguards classify
@@ -291,10 +292,22 @@ func (eng *Engine) BuildRequest(thread *domain.Thread, profile *domain.Profile, 
 	req.piiCheck = domain.ValueOr(options.PIICheck, domain.ValueOr(profile.PIICheckEnabled, true))
 	// Turning web search off in the settings leaves each chat's own setting.
 	req.webSearch = domain.ValueOr(profile.WebSearchAvailable, true) && domain.ValueOr(options.WebSearch, thread.WebSearchEnabled)
+	// A research searches the web whatever the chat's setting, unless the
+	// settings turn web search off.
+	if options.Research {
+		if !domain.ValueOr(profile.WebSearchAvailable, true) {
+			return nil, nil, api.Err(403, "TOOL_UNAVAILABLE", "Deep research needs web search, which the settings turn off").WithAction(api.ActionStop)
+		}
+		req.research, req.webSearch = true, true
+	}
 	if req.webSearch && webSearch.client == nil {
 		return nil, nil, api.Err(503, "TOOL_UNAVAILABLE", "webSearch is unavailable")
 	}
 	widgets := c.SelectedWidgets(in.Widgets, domain.ValueOr(options.GenUI, domain.ValueOr(profile.GenUIEnabled, true)))
+	// A research offers no widget but the questions it may ask first.
+	if req.research {
+		widgets = slices.DeleteFunc(widgets, func(w domain.Widget) bool { return w.Name != domain.QuestionsWidget || !asksFirst(thread.Messages) })
+	}
 	if len(widgets) > 0 {
 		req.widgetHint = c.WidgetHeader
 		for _, w := range widgets {
@@ -361,6 +374,10 @@ func RenderMessage(message *domain.Message, vision bool, policy string, loc *tim
 	content, reasoning := "", ""
 	calls, results := []api.Object{}, []json.RawMessage{}
 	for _, block := range message.Timeline {
+		// A research's reply is read back as its report alone.
+		if message.Research != nil && block.Type != "content" {
+			continue
+		}
 		switch block.Type {
 		case "content":
 			content += block.Content
@@ -501,11 +518,23 @@ func (req *Request) groupCosts() []int {
 // the rest to the reply.
 func (req *Request) limit() int { return req.window * 4 / 5 }
 
+// toolInstructions are what a turn's system prompt says of the web search
+// it offers: how to research, for a research.
+func (req *Request) toolInstructions(searching bool) string {
+	switch {
+	case req.research:
+		return researchInstructions
+	case searching:
+		return searchInstructions
+	}
+	return ""
+}
+
 // system is the system prompt a turn sends.
 func (req *Request) system(searching bool) string {
 	system := req.System
-	if searching {
-		system += "\n\n" + searchInstructions
+	if instructions := req.toolInstructions(searching); instructions != "" {
+		system += "\n\n" + instructions
 	}
 	if req.widgetHint != "" {
 		system += "\n\n" + req.widgetHint
@@ -639,8 +668,8 @@ func preflightBudget(req *Request) error {
 // the turn's compaction then brings it back under.
 func requestContextUsage(req *Request) *domain.ContextUsage {
 	system := req.System + "\n\n" + req.widgetHint
-	if req.webSearch {
-		system += "\n\n" + searchInstructions
+	if instructions := req.toolInstructions(req.webSearch); instructions != "" {
+		system += "\n\n" + instructions
 	}
 	used := inference.Tokens(system) + inference.Tokens(string(api.Raw(req.rendered))) + messageTokens(req.reminder) + 8
 	for _, cost := range req.groupCosts() {

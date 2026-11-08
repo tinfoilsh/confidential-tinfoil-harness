@@ -101,6 +101,9 @@ type Store struct {
 	searchClaims         map[string]string // deletion id to the token that claimed it
 	// ImportOutcomes are the imports the enclave reported ended, in order.
 	ImportOutcomes []controlplane.ImportOutcome
+	// ResearchStarts are when each user last started a deep research, by
+	// user id; the stub allows one a researchWindow, as the control plane does.
+	ResearchStarts map[string]time.Time
 	// answered are the changes made under an idempotency key, by the
 	// caller and the key. The control plane keeps them for a day, the
 	// stub for its life.
@@ -156,6 +159,7 @@ func New() *Store {
 		RegisterAttachmentIndexFailures: map[string][]int{},
 		AttachmentOwnerFailures:         map[string][]int{},
 		ReserveAttachmentPurges:         map[string]int{},
+		ResearchStarts:                  map[string]time.Time{},
 		purgeClaims:                     map[string]string{},
 		searchClaims:                    map[string]string{},
 		answered:                        map[string]idempotentAnswer{},
@@ -203,7 +207,41 @@ func New() *Store {
 	s.mux.HandleFunc("POST /api/sync/attachment-purges/claim", s.handleClaimAttachmentPurges)
 	s.mux.HandleFunc("POST /api/sync/attachment-purges/ack", s.handleAckAttachmentPurges)
 	s.mux.HandleFunc("POST /api/sync/notify-import-complete", s.handleNotifyImportOutcome)
+	s.mux.HandleFunc("GET "+controlplane.ResearchPath, s.handleResearchAllowance)
+	s.mux.HandleFunc("POST "+controlplane.ResearchPath, s.handleStartResearch)
 	return s
+}
+
+// researchWindow is how long after a user starts a deep research the
+// control plane refuses them another.
+const researchWindow = time.Hour
+
+// researchLimit is when a user's last deep research stops refusing another,
+// and whether it still does.
+func (s *Store) researchLimit(user string) (time.Time, bool) {
+	started, ok := s.ResearchStarts[user]
+	resets := started.Add(researchWindow)
+	return resets, ok && time.Now().Before(resets)
+}
+
+func (s *Store) handleResearchAllowance(w http.ResponseWriter, r *http.Request) {
+	resets, limited := s.researchLimit(r.Header.Get(controlplane.HeaderClerkUserID))
+	if !limited {
+		writeJSON(w, http.StatusOK, controlplane.ResearchAllowance{Available: true})
+		return
+	}
+	writeJSON(w, http.StatusOK, controlplane.ResearchAllowance{ResetsAt: resets.UTC().Format(time.RFC3339), RetryAfterSeconds: int64(time.Until(resets).Seconds()) + 1})
+}
+
+func (s *Store) handleStartResearch(w http.ResponseWriter, r *http.Request) {
+	user := r.Header.Get(controlplane.HeaderClerkUserID)
+	if resets, limited := s.researchLimit(user); limited {
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{"code": controlplane.StatusDeepResearchLimitReached, "error": "deep research limit reached",
+			"resets_at": resets.UTC().Format(time.RFC3339), "retry_after_seconds": int64(time.Until(resets).Seconds()) + 1})
+		return
+	}
+	s.ResearchStarts[user] = time.Now()
+	writeJSON(w, http.StatusOK, map[string]string{"started_at": s.ResearchStarts[user].UTC().Format(time.RFC3339)})
 }
 
 func (s *Store) ServeHTTP(w http.ResponseWriter, r *http.Request) {

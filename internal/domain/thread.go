@@ -63,6 +63,17 @@ type Message struct {
 	Answers []WidgetAnswers `json:"answers,omitzero"`
 	// Compaction is set on a compaction marker, whose content is its summary.
 	Compaction *Compaction `json:"compaction,omitempty"`
+	// Research is set on a reply that researched its question, whose
+	// content is its report.
+	Research *Research `json:"research,omitempty"`
+}
+
+// Research is what a reply that researched its question records of it. The
+// model reads such a reply back as its report alone: what it searched and
+// read stays in the reply's timeline for the user, not in later prompts.
+type Research struct {
+	// Version is the version of the instructions it researched under.
+	Version int `json:"version"`
 }
 
 // CompactionRole is the role of a compaction marker: a message whose content
@@ -306,6 +317,10 @@ func (m *Message) clone() Message {
 	if m.Compaction != nil {
 		compaction := *m.Compaction
 		copy.Compaction = &compaction
+	}
+	if m.Research != nil {
+		research := *m.Research
+		copy.Research = &research
 	}
 	return copy
 }

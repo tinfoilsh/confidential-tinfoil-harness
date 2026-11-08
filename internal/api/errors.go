@@ -64,6 +64,7 @@ var Actions = map[string]string{
 	"QUOTA_EXHAUSTED":         ActionWait,
 	"RECORD_UNSUPPORTED":      ActionStop,
 	"RATE_LIMITED":            ActionRetry,
+	"RESEARCH_LIMIT_REACHED":  ActionWait,
 	"REQUEST_TIMEOUT":         ActionRetry,
 	"REVISION_CONFLICT":       ActionReload,
 	"RUN_IN_FLIGHT":           ActionReload,

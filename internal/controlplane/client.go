@@ -114,6 +114,7 @@ const (
 	StatusSearchIndexConflict        = "SEARCH_INDEX_CONFLICT"
 	StatusProfileSyncUpgradeRequired = "PROFILE_SYNC_UPGRADE_REQUIRED"
 	StatusLegacyBlobNotMigrated      = "LEGACY_BLOB_NOT_MIGRATED"
+	StatusDeepResearchLimitReached   = "DEEP_RESEARCH_LIMIT_REACHED"
 )
 
 // maxLegacyAttachmentBytes caps the body read for legacy attachment
@@ -140,6 +141,8 @@ type Error struct {
 	// PROFILE_SYNC_UPGRADE_REQUIRED) and names the lowest protocol
 	// version the controlplane still accepts.
 	MinimumProtocol int `json:"minimum_protocol,omitempty"`
+	// ResetsAt accompanies a limit the caller reached: when it lifts.
+	ResetsAt string `json:"resets_at,omitempty"`
 	// MissingAttachments accompanies MISSING_ATTACHMENT: the ids the
 	// pushed chat referenced that the controlplane does not hold.
 	MissingAttachments []string        `json:"missing_attachments,omitempty"`
@@ -1423,6 +1426,58 @@ func (c *Client) NotifyImportOutcome(ctx context.Context, outcome ImportOutcome)
 		return err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	c.addAuth(httpReq, "", clerkUserID)
+	resp, err := c.doRequest(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return parseError(resp.StatusCode, raw)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
+}
+
+// ResearchPath is where the control plane counts each user's deep
+// researches, which it allows one an hour.
+const ResearchPath = "/api/sync/deep-research"
+
+// ResearchAllowance is whether a user may start a deep research now, and if
+// not, when they may.
+type ResearchAllowance struct {
+	Available         bool   `json:"available"`
+	ResetsAt          string `json:"resets_at,omitempty"`
+	RetryAfterSeconds int64  `json:"retry_after_seconds,omitempty"`
+}
+
+// ResearchAllowance reads whether the user may start a deep research now,
+// without starting one. Like every call that asserts the user only through
+// X-Clerk-User-Id, it forwards no JWT, which may expire before a queued
+// turn starts.
+func (c *Client) ResearchAllowance(ctx context.Context, clerkUserID string) (*ResearchAllowance, error) {
+	if clerkUserID == "" {
+		return nil, fmt.Errorf("controlplane: clerk user id is required")
+	}
+	var out ResearchAllowance
+	if err := c.getSyncJSON(ctx, ResearchPath, nil, "", clerkUserID, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// StartResearch counts a deep research as the user's for the hour. The
+// control plane refuses it with StatusDeepResearchLimitReached, and when the
+// limit lifts, while the user's last one started less than an hour ago.
+func (c *Client) StartResearch(ctx context.Context, clerkUserID string) error {
+	if clerkUserID == "" {
+		return fmt.Errorf("controlplane: clerk user id is required")
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+ResearchPath, nil)
+	if err != nil {
+		return err
+	}
 	c.addAuth(httpReq, "", clerkUserID)
 	resp, err := c.doRequest(httpReq)
 	if err != nil {

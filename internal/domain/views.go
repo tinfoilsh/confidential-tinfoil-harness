@@ -140,11 +140,12 @@ type MessageView struct {
 	Attachments      []Attachment    `json:"attachments,omitempty"`
 	Answers          []WidgetAnswers `json:"answers,omitzero"`
 	Compaction       *Compaction     `json:"compaction,omitempty"`
+	Research         *Research       `json:"research,omitempty"`
 }
 
 func ViewMessage(m *Message) MessageView {
 	view := MessageView{ID: m.ID, Role: m.Role, CreatedAt: m.CreatedAt, Quote: m.Quote, Model: m.Model, ModelDisplayName: m.ModelDisplayName,
-		IsError: m.IsError, IsInterrupted: m.IsInterrupted, Usage: m.Usage, Annotations: m.Annotations, Answers: m.Answers, Compaction: m.Compaction}
+		IsError: m.IsError, IsInterrupted: m.IsInterrupted, Usage: m.Usage, Annotations: m.Annotations, Answers: m.Answers, Compaction: m.Compaction, Research: m.Research}
 	if m.Role == "assistant" {
 		view.Timeline = CheckedWidgets(m.Timeline)
 		if view.Timeline == nil {
@@ -248,6 +249,7 @@ type CommittedReply struct {
 	IsError          *bool           `json:"isError,omitempty"`
 	IsInterrupted    *bool           `json:"isInterrupted,omitempty"`
 	Annotations      []Annotation    `json:"annotations,omitempty"`
+	Research         *Research       `json:"research,omitempty"`
 }
 
 // QueueItem is a turn waiting behind its chat's running reply.

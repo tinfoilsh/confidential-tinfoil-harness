@@ -50,6 +50,11 @@ func (eng *Engine) finishRun(r *Run, runErr error) {
 		m.Model = cmp.Or(r.out.concreteModel, r.row.Model)
 		m.ModelDisplayName = eng.Models.Catalog.Get().DisplayName(m.Model)
 		m.Usage = api.Raw(domain.MessageUsage{PromptTokens: spend.Prompt, CompletionTokens: spend.Completion})
+		// A research that ended before its report is read back with its
+		// steps, which hold what it found.
+		if r.researched && m.ID == reply && m.Content != "" {
+			m.Research = &domain.Research{Version: researchVersion}
+		}
 		// A continued reply keeps the citations it already had.
 		for _, annotation := range citationAnnotations(m.Content, sources) {
 			if !slices.ContainsFunc(m.Annotations, func(kept domain.Annotation) bool { return citedFrom(kept) == citedFrom(annotation) }) {
@@ -60,7 +65,7 @@ func (eng *Engine) finishRun(r *Run, runErr error) {
 		// client that stores the thread itself stores the same messages. A
 		// widget retry commits only its call, so its reply keeps its own.
 		if r.retryTarget == nil {
-			committed = append(committed, domain.CommittedReply{ID: m.ID, Model: m.Model, ModelDisplayName: m.ModelDisplayName, Usage: m.Usage, IsError: m.IsError, IsInterrupted: m.IsInterrupted, Annotations: m.Annotations})
+			committed = append(committed, domain.CommittedReply{ID: m.ID, Model: m.Model, ModelDisplayName: m.ModelDisplayName, Usage: m.Usage, IsError: m.IsError, IsInterrupted: m.IsInterrupted, Annotations: m.Annotations, Research: m.Research})
 		}
 	}
 	compacted := r.compacted

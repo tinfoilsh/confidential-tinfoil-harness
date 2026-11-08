@@ -30,6 +30,14 @@ func refusedByControlplane(err error) bool {
 	return errors.As(err, &cpe) && cpe.StatusCode/100 == 4
 }
 
+// ResearchLimit refuses a deep research its caller started another of within
+// the hour, until resetsAt.
+func ResearchLimit(resetsAt string, retryAfter int64) *api.Error {
+	e := api.Err(429, "RESEARCH_LIMIT_REACHED", "A deep research was already started within the hour")
+	e.ResetsAt, e.RetryAfter = resetsAt, int(retryAfter)
+	return e
+}
+
 // FromControlplane is the harness's error for what the control plane, or
 // the sealing of a row, refused.
 func FromControlplane(err error) *api.Error {
@@ -63,6 +71,8 @@ func FromControlplane(err error) *api.Error {
 		return e
 	case "PAYLOAD_TOO_LARGE":
 		return api.Err(413, "THREAD_TOO_LARGE", "The chat is too large to store")
+	case controlplane.StatusDeepResearchLimitReached:
+		return ResearchLimit(cpe.ResetsAt, cpe.RetryAfterSeconds)
 	}
 	switch cpe.StatusCode {
 	case http.StatusUnauthorized:

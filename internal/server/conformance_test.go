@@ -128,6 +128,27 @@ func TestRunsShowTheChatTheHarnessKeeps(t *testing.T) {
 	}
 }
 
+// A research shows the chat the harness keeps: its reasoning and searches
+// as steps, its report as its text, and the research it records.
+func TestAResearchShowsTheChatTheHarnessKeeps(t *testing.T) {
+	lighthouses(t, "Maine has 65 lighthouses.")
+	model := scripted(
+		toolCallChunk(0, "s1", "web_search", `{"query":"maine"}`),
+		contentChunk("Found the count."),
+		toolCallChunk(0, "s2", "web_search", `{"query":"vermont"}`),
+		contentChunk("Covered."),
+		contentChunk("Maine has 65 lighthouses [Lighthouses of maine](https://lights.test/maine)."),
+	)
+	h, rows, key := testChatHarness(t, model.ServeHTTP)
+	w := postRoute(h, "/v1/threads/turn", researchInput(key), "alice")
+	events := eventsIn(t, w)
+	if last := events[len(events)-1].Type; last != "RUN_FINISHED" {
+		t.Fatalf("the run ended with %s", last)
+	}
+	kept := storedChat(t, rows, key, events[0].ThreadID)
+	conformance(t, "research", "A research that searches, is asked to check what it found and searches again, then writes its report.", framesOf(t, w.Body.Bytes()), &kept)
+}
+
 // framesOf are a stream's whole frames, as sent.
 func framesOf(t *testing.T, stream []byte) []fixtureFrame {
 	t.Helper()
@@ -220,6 +241,9 @@ func projectedMessage(m domain.MessageView) api.Object {
 		timeline = append(timeline, step)
 	}
 	out["timeline"] = timeline
+	if m.Research != nil {
+		out["research"] = m.Research
+	}
 	return out
 }
 

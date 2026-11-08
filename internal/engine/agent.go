@@ -41,18 +41,8 @@ const (
 )
 
 func (eng *Engine) loop(ctx context.Context, out *Stream, req *Request, m *inference.Model) error {
-	apiKey := auth.CallerKey(ctx)
-	inRun := usagereporting.Context{
-		ContextID:     req.usageID,
-		RootRequestID: req.usageID,
-		ParentService: "harness",
-		APIKeyHash:    usagereporting.HashAPIKey(apiKey),
-		Depth:         1,
-	}
-	billing := inRun
-	billing.BillCustomerRequest = true
-	ctx = auth.WithUsage(ctx, inRun)
-	first := auth.WithUsage(ctx, billing)
+	c := newRunCaller(ctx, req)
+	ctx = c.ctx
 
 	set, err := openTools(ctx, req, m.Name, out.progress)
 	if err != nil {
@@ -76,7 +66,6 @@ func (eng *Engine) loop(ctx context.Context, out *Stream, req *Request, m *infer
 	}
 	// The run's own exchange follows the history it starts from.
 	history := len(conversation)
-	refreshed := false
 	for turn := 1; ; turn++ {
 		// Past the cap the model answers from what it has, with no tools to call.
 		tools := defs
@@ -89,18 +78,7 @@ func (eng *Engine) loop(ctx context.Context, out *Stream, req *Request, m *infer
 		// run has not yet.
 		if !fits(req, conversation, tools) && (!clearAnswered(conversation[history:]) || !fits(req, conversation, tools)) {
 			exchange := slices.Clone(conversation[history:])
-			compact := req.compact
-			req.compact = nil
-			if compact == nil {
-				return errExchangeTooLarge()
-			}
-			reserved := fixedCost(req, searching, tools)
-			for _, message := range exchange {
-				reserved += messageTokens(message)
-			}
-			if err := compact(ctx, reserved); errors.Is(err, errNothingToCompact) {
-				return errExchangeTooLarge()
-			} else if err != nil {
+			if err := compactHistory(ctx, req, fixedCost(req, searching, tools)+tokensOf(exchange)); err != nil {
 				return err
 			}
 			conversation = append(promptOf(req, searching), exchange...)
@@ -113,29 +91,8 @@ func (eng *Engine) loop(ctx context.Context, out *Stream, req *Request, m *infer
 		if err != nil {
 			return err
 		}
-		turnCtx := ctx
-		if turn == 1 {
-			turnCtx = first
-		}
-		calls, answer, err := eng.turn(turnCtx, out, m, payload, set.Widgets)
-		if err != nil && req.refreshAuth != nil && !refreshed && api.AsError(err).HTTP == http.StatusUnauthorized {
-			// A 401 rejected this model request before processing. Replay its
-			// exact body once, retaining the run ID and request billing flag.
-			refreshed = true
-			credential, refreshErr := req.refreshAuth(ctx, auth.Secret(auth.CallerKey(ctx)))
-			if refreshErr != nil {
-				return refreshErr
-			}
-			inRun.APIKeyHash = usagereporting.HashAPIKey(string(credential.Key))
-			ctx = auth.WithCallerKey(ctx, string(credential.Key))
-			ctx = auth.WithUsage(ctx, inRun)
-			turnCtx = ctx
-			if turn == 1 {
-				billing.APIKeyHash = inRun.APIKeyHash
-				turnCtx = auth.WithUsage(ctx, billing)
-			}
-			calls, answer, err = eng.turn(turnCtx, out, m, payload, set.Widgets)
-		}
+		calls, answer, err := eng.ask(c, out, m, payload, set.Widgets)
+		ctx = c.ctx
 		if err != nil {
 			return err
 		}
@@ -145,21 +102,104 @@ func (eng *Engine) loop(ctx context.Context, out *Stream, req *Request, m *infer
 		if turn > MaxTurns {
 			return api.Err(502, "MAX_TURNS", fmt.Sprintf("The model called tools for %d turns without answering", MaxTurns))
 		}
-		reply := requested(answer, calls)
-		if req.policy == "all" || req.policy == "tool-call-only" {
-			out.mu.Lock()
-			reasoning, field := out.turnReasoning, out.reasoningField
-			out.mu.Unlock()
-			if reasoning != "" {
-				// Echoed in the field the enclave streamed it in, since vLLM versions disagree on it.
-				value := api.Obj(api.Parsed(reply))
-				value[field] = reasoning
-				reply = api.Raw(value)
-			}
-		}
-		conversation = append(conversation, reply)
+		conversation = append(conversation, replied(out, req, answer, calls))
 		conversation = append(conversation, execute(ctx, out, set, calls)...)
 	}
+}
+
+// runCaller is who a run's model turns are asked for: the caller whose key
+// they carry, under the run's usage, and whose request the first turn is.
+type runCaller struct {
+	ctx         context.Context
+	usage       usagereporting.Context
+	refreshAuth func(ctx context.Context, rejected auth.Secret) (auth.Credential, error)
+	refreshed   bool
+	turns       int
+}
+
+func newRunCaller(ctx context.Context, req *Request) *runCaller {
+	usage := usagereporting.Context{
+		ContextID:     req.usageID,
+		RootRequestID: req.usageID,
+		ParentService: "harness",
+		APIKeyHash:    usagereporting.HashAPIKey(auth.CallerKey(ctx)),
+		Depth:         1,
+	}
+	return &runCaller{ctx: auth.WithUsage(ctx, usage), usage: usage, refreshAuth: req.refreshAuth}
+}
+
+// turnCtx is what the caller's next model turn is asked under: the first
+// bills the caller's request.
+func (c *runCaller) turnCtx() context.Context {
+	if c.turns > 1 {
+		return c.ctx
+	}
+	billing := c.usage
+	billing.BillCustomerRequest = true
+	return auth.WithUsage(c.ctx, billing)
+}
+
+// ask streams one model turn for the caller. A 401 rejects a request before
+// it is processed, so the first one a run meets renews the caller's key and
+// replays the turn's exact body, keeping the run's id and billing flag.
+func (eng *Engine) ask(c *runCaller, out *Stream, m *inference.Model, payload []byte, widgets map[string]domain.Widget) ([]ToolCall, string, error) {
+	c.turns++
+	calls, answer, err := eng.turn(c.turnCtx(), out, m, payload, widgets)
+	if err == nil || c.refreshAuth == nil || c.refreshed || api.AsError(err).HTTP != http.StatusUnauthorized {
+		return calls, answer, err
+	}
+	c.refreshed = true
+	credential, err := c.refreshAuth(c.ctx, auth.Secret(auth.CallerKey(c.ctx)))
+	if err != nil {
+		return nil, "", err
+	}
+	c.usage.APIKeyHash = usagereporting.HashAPIKey(string(credential.Key))
+	c.ctx = auth.WithUsage(auth.WithCallerKey(c.ctx, string(credential.Key)), c.usage)
+	return eng.turn(c.turnCtx(), out, m, payload, widgets)
+}
+
+// replied is the message a model turn that called tools adds to its run's
+// exchange: its text and calls, and its reasoning when the model's history
+// policy replays it.
+func replied(out *Stream, req *Request, answer string, calls []ToolCall) json.RawMessage {
+	reply := requested(answer, calls)
+	if req.policy == "all" || req.policy == "tool-call-only" {
+		out.mu.Lock()
+		reasoning, field := out.turnReasoning, out.reasoningField
+		out.mu.Unlock()
+		if reasoning != "" {
+			// Echoed in the field the enclave streamed it in, since vLLM versions disagree on it.
+			value := api.Obj(api.Parsed(reply))
+			value[field] = reasoning
+			reply = api.Raw(value)
+		}
+	}
+	return reply
+}
+
+// compactHistory compacts the chat before a run's exchange to make room for
+// it, once a run. reserved is what the turn's prompt fills besides the chat.
+func compactHistory(ctx context.Context, req *Request, reserved int) error {
+	compact := req.compact
+	req.compact = nil
+	if compact == nil {
+		return errExchangeTooLarge()
+	}
+	if err := compact(ctx, reserved); errors.Is(err, errNothingToCompact) {
+		return errExchangeTooLarge()
+	} else if err != nil {
+		return err
+	}
+	return nil
+}
+
+// tokensOf is what messages fill of a prompt.
+func tokensOf(messages []json.RawMessage) int {
+	tokens := 0
+	for _, message := range messages {
+		tokens += messageTokens(message)
+	}
+	return tokens
 }
 
 func errExchangeTooLarge() error {

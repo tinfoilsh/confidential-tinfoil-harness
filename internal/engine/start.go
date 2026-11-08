@@ -215,6 +215,14 @@ func (eng *Engine) launch(ctx context.Context, r *Run) error {
 		if plan, err = eng.prepareTurn(ctx, r, p, attempt == 1); err != nil {
 			return err
 		}
+		// Refused once the turn is known not to be applied already, and
+		// before it is, so a research the caller may not start leaves their
+		// chat as it was.
+		if attempt == 1 {
+			if err := eng.allowResearch(ctx, r, p); err != nil {
+				return err
+			}
+		}
 		if s.local {
 			break
 		}
@@ -312,6 +320,8 @@ func (eng *Engine) launch(ctx context.Context, r *Run) error {
 			runErr = eng.retryWidget(runCtx, r, request, model)
 		} else if r.turn.Kind == "compact" {
 			runErr = eng.compactChat(runCtx, r, request)
+		} else if request.research {
+			runErr = eng.research(runCtx, r, request, model)
 		} else {
 			runErr = eng.loop(runCtx, r.out, request, model)
 		}
