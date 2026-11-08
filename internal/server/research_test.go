@@ -236,6 +236,19 @@ func TestAResearchSentAgainIsAlreadyApplied(t *testing.T) {
 	}
 }
 
+// A research counts as the hour's once it first searches: one that answers
+// without searching is not counted, and its reply is an ordinary one.
+func TestAResearchThatNeverSearchesIsNotCounted(t *testing.T) {
+	lighthouses(t, "Maine has 65 lighthouses.")
+	model := scripted(contentChunk("Plan: recall it."), contentChunk("I know this."), contentChunk("Maine has 65 lighthouses."))
+	h, rows, key := testChatHarness(t, model.ServeHTTP)
+	events := finishedRun(t, h, "/v1/threads/turn", researchInput(key))
+	reply := storedChat(t, rows, key, events[0].ThreadID).Messages[1]
+	if _, counted := researchStarted(rows); counted || reply.Research != nil || reply.Content != "Maine has 65 lighthouses." || len(model.sent()) != 3 {
+		t.Fatalf("counted %v, after %d turns, a reply %+v", counted, len(model.sent()), reply)
+	}
+}
+
 // notesOf is research notes in the form their task asks for, whose findings
 // are findings.
 func notesOf(findings string) string {

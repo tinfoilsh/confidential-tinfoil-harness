@@ -150,7 +150,7 @@ func (eng *Engine) research(ctx context.Context, r *Run, req *Request, m *infere
 		s.pending = researchOpeningAsks
 	}
 	deadline := api.Now().Add(researchTime)
-	searched, urged, reviewed, writing := false, false, false, false
+	urged, reviewed, writing := false, false, false
 	defer out.muse(false)
 	for turn := 1; ; turn++ {
 		tools := search
@@ -188,25 +188,24 @@ func (eng *Engine) research(ctx context.Context, r *Run, req *Request, m *infere
 			return nil
 		}
 		delete(set.Widgets, domain.QuestionsWidget)
-		if !r.researched {
-			if err := eng.startResearch(c.ctx, r); err != nil {
-				return err
-			}
-			r.researched = true
-		}
 		if len(calls) == 0 {
 			s.answered(api.Raw(api.Object{"role": "assistant", "content": answer}))
 			switch {
-			case !searched && !urged:
+			case !r.researched && !urged:
 				urged, s.pending = true, researchBegin
-			case searched && !reviewed:
+			case r.researched && !reviewed:
 				reviewed, s.pending = true, researchReview
 			default:
 				writing, s.pending = true, researchWrite
 			}
 			continue
 		}
-		searched = true
+		if !r.researched {
+			if err := eng.startResearch(c.ctx, r); err != nil {
+				return err
+			}
+			r.researched = true
+		}
 		s.answered(append([]json.RawMessage{replied(out, req, answer, calls)}, execute(c.ctx, out, set, calls)...)...)
 		if turn >= researchTurns || !api.Now().Before(deadline) {
 			writing, s.pending = true, researchSpent+" "+researchWrite
