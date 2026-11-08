@@ -207,6 +207,11 @@ func (eng *Engine) launch(ctx context.Context, r *Run) error {
 	if err := eng.refuseFlagged(ctx, r, p); err != nil {
 		return err
 	}
+	// Refused before the turn is applied, so a research the caller may not
+	// start leaves their chat as it was.
+	if err := eng.allowResearch(ctx, r, p); err != nil {
+		return err
+	}
 	var plan *turnPlan
 	// A chat another writer changed since it was read takes the turn again.
 	// One that writer removed was deleted, so only a first attempt creates it.
@@ -312,6 +317,8 @@ func (eng *Engine) launch(ctx context.Context, r *Run) error {
 			runErr = eng.retryWidget(runCtx, r, request, model)
 		} else if r.turn.Kind == "compact" {
 			runErr = eng.compactChat(runCtx, r, request)
+		} else if request.research {
+			runErr = eng.research(runCtx, r, request, model)
 		} else {
 			runErr = eng.loop(runCtx, r.out, request, model)
 		}

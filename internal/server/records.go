@@ -84,7 +84,7 @@ func (h *harness) session(ctx context.Context, p *auth.Principal, _ auth.Content
 		ProfileDefaults: domain.DefaultProfile(),
 		Composer:        attach.Composer(),
 		Presets:         presets,
-		Features:        map[string]bool{"webSearch": engine.WebSearchReady(), "transcription": h.models.ServiceReady("router"), "speech": h.models.ServiceReady("router"), "promptPresetEdits": true, "promptPresetUpdates": true, "compaction": h.engine.Summaries.Ready(summarize.Compaction), "manualCompaction": h.engine.Summaries.Ready(summarize.Compaction)},
+		Features:        map[string]bool{"webSearch": engine.WebSearchReady(), "transcription": h.models.ServiceReady("router"), "speech": h.models.ServiceReady("router"), "promptPresetEdits": true, "promptPresetUpdates": true, "compaction": h.engine.Summaries.Ready(summarize.Compaction), "manualCompaction": h.engine.Summaries.Ready(summarize.Compaction), "research": engine.WebSearchReady() && !p.Anonymous && credential.FirstParty},
 	}, nil
 }
 

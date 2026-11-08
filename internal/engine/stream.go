@@ -22,6 +22,9 @@ type Stream struct {
 	turnReasoning  string
 	reasoningField string // which of reasoning_content and reasoning the last turn streamed
 	truncated      bool   // the model filled the room its window left the reply
+	// musing shows what the model writes as its reasoning, as a research's
+	// notes between its calls are, which are not its reply.
+	musing bool
 
 	// mu serializes writes against the tool goroutines.
 	mu       sync.Mutex
@@ -142,7 +145,21 @@ func (s *Stream) emit(e domain.Event) {
 }
 
 func (s *Stream) text(message, delta string) {
+	s.mu.Lock()
+	musing := s.musing
+	s.mu.Unlock()
+	if musing {
+		s.reasoning(message, delta)
+		return
+	}
 	s.emit(domain.TextChunk{MessageID: message, Role: "assistant", Delta: delta})
+}
+
+// muse sets whether what the model writes is shown as its reasoning.
+func (s *Stream) muse(on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.musing = on
 }
 
 func (s *Stream) reasoning(message, delta string) {

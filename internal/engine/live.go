@@ -168,6 +168,7 @@ type Run struct {
 	profile                  *domain.Profile // a local thread's settings, sent by its client
 	screening                *screening
 	compacted                *compaction // what the run's compaction left, once it compacted
+	researched               bool        // the run started a research, which its reply records
 
 	// yielded marks an active run stopped so a queued turn starts now.
 	yielded bool

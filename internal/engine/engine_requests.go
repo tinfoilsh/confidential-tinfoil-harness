@@ -68,6 +68,9 @@ type turnOptions struct {
 	WebSearch        *bool  `json:"webSearch,omitempty"`
 	PIICheck         *bool  `json:"piiCheck,omitempty"`
 	GenUI            *bool  `json:"genUI,omitempty"`
+	// Research has the turn research its question on the web at length
+	// before it answers with a report.
+	Research bool `json:"research,omitempty"`
 	// CacheSecret scopes the prompt cache to the client that holds it, as
 	// the Tinfoil SDKs scope theirs: 256 random bits, hex encoded.
 	CacheSecret string `json:"cacheSecret,omitempty"`
@@ -77,6 +80,9 @@ var cacheSecretPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 var (
 	turnKinds = []string{"send", "edit", "regenerate", "continue", "retryToolCall", "ask", "retry", "compact"}
+	// researchKinds are the turns that answer a question anew, which a
+	// research may answer.
+	researchKinds = []string{"send", "edit", "regenerate", "retry"}
 )
 
 // Validate refuses a turn its run could not carry out. Who may send it is
@@ -95,6 +101,9 @@ func (in *TurnRequest) Validate() error {
 	}
 	if secret := in.Options.CacheSecret; secret != "" && !cacheSecretPattern.MatchString(secret) {
 		return api.Err(400, "BAD_REQUEST", "cacheSecret must be 64 hex characters")
+	}
+	if in.Options.Research && !slices.Contains(researchKinds, in.Kind) {
+		return api.Err(400, "BAD_REQUEST", "Only a question can be researched")
 	}
 	return in.PresetID.Check("presetId")
 }
