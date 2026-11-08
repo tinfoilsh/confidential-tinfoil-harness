@@ -50,7 +50,9 @@ func (eng *Engine) finishRun(r *Run, runErr error) {
 		m.Model = cmp.Or(r.out.concreteModel, r.row.Model)
 		m.ModelDisplayName = eng.Models.Catalog.Get().DisplayName(m.Model)
 		m.Usage = api.Raw(domain.MessageUsage{PromptTokens: spend.Prompt, CompletionTokens: spend.Completion})
-		if r.researched && m.ID == reply {
+		// A research that ended before its report is read back with its
+		// steps, which hold what it found.
+		if r.researched && m.ID == reply && m.Content != "" {
 			m.Research = &domain.Research{Version: researchVersion}
 		}
 		// A continued reply keeps the citations it already had.

@@ -249,6 +249,29 @@ func TestAResearchThatNeverSearchesIsNotCounted(t *testing.T) {
 	}
 }
 
+// A research that fails before its report keeps its steps for later turns
+// to read, rather than being read back as an empty report.
+func TestAResearchThatFailsBeforeItsReportIsNotMarkedAsOne(t *testing.T) {
+	lighthouses(t, "Maine has 65 lighthouses.")
+	searchThenFail := scripted(toolCallChunk(0, "s1", "web_search", `{"query":"maine"}`))
+	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if len(searchThenFail.sent()) > 0 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		searchThenFail.ServeHTTP(w, r)
+	})
+	in := researchInput(key)
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice"))
+	if last := events[len(events)-1]; last.Type != "RUN_ERROR" {
+		t.Fatalf("the run ended with %+v", last)
+	}
+	reply := storedChat(t, rows, key, api.Str(in["threadId"])).Messages[1]
+	if reply.Research != nil || len(reply.Timeline) != 1 || reply.Timeline[0].Name != "web_search" {
+		t.Fatalf("the failed research left the reply %+v", reply)
+	}
+}
+
 // notesOf is research notes in the form their task asks for, whose findings
 // are findings.
 func notesOf(findings string) string {
