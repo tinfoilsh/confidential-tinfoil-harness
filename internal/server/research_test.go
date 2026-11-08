@@ -188,7 +188,8 @@ func TestAResearchMayAskFirstAndStartsOnceAnswered(t *testing.T) {
 
 // A research its caller may not start is refused before its turn is
 // applied: within an hour of their last, with when the next may start, and
-// to a caller without a subscription, whose session does not offer it.
+// to a caller without a subscription. A session offers it to a subscriber
+// while the harness can keep a research's notes.
 func TestAResearchIsRefusedWithinTheHourAndWithoutASubscription(t *testing.T) {
 	lighthouses(t, "Maine has 65 lighthouses.")
 	model := scripted(contentChunk("never"))
@@ -214,6 +215,10 @@ func TestAResearchIsRefusedWithinTheHourAndWithoutASubscription(t *testing.T) {
 	offers := func(user string) any {
 		return api.Obj(api.Obj(api.Parsed(postRoute(h, "/v1/session", api.Object{}, user).Body.Bytes()))["features"])["research"]
 	}
+	if withoutNotes := offers("alice"); withoutNotes != false {
+		t.Fatalf("research is offered without notes: %v", withoutNotes)
+	}
+	h.summarizeWith(func(string, string) (string, error) { return "", nil })
 	if subscriber, visitor := offers("alice"), offers(""); subscriber != true || visitor != false {
 		t.Fatalf("research is offered to a subscriber: %v, to a visitor: %v", subscriber, visitor)
 	}
