@@ -147,6 +147,7 @@ func TestFetchBoundsBodiesAndDecodedPixels(t *testing.T) {
 		{"active SVG", []byte(`<svg xmlns="http://www.w3.org/2000/svg"><image href="https://tracker.example/pixel"/></svg>`)},
 		{"oversized download", oversizedDownload},
 		{"oversized decoded image", testPNG(t, oversized)},
+		{"extreme image dimension", testPNG(t, image.NewGray(image.Rect(0, 0, maxImageSide+1, 1)))},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client := testClient(t, func(w http.ResponseWriter, r *http.Request) {

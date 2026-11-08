@@ -3,6 +3,7 @@ module github.com/tinfoilsh/confidential-tinfoil-harness
 go 1.27.3
 
 require (
+	code.dny.dev/ssrf v0.3.0
 	github.com/MicahParks/keyfunc/v3 v3.7.0
 	github.com/context-dot-dev/context-go-sdk v1.5.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
@@ -24,7 +25,6 @@ require (
 )
 
 require (
-	code.dny.dev/ssrf v0.3.0 // indirect
 	github.com/MicahParks/jwkset v0.11.0 // indirect
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
 	github.com/blang/semver v3.5.1+incompatible // indirect

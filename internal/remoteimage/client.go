@@ -26,6 +26,7 @@ const (
 	maxURLBytes          = 8192
 	maxImageBytes        = 8 << 20
 	maxImagePixels       = 20_000_000
+	maxImageSide         = 16_384
 	maxConcurrentFetches = 16
 	maxRedirects         = 3
 	busyRetrySeconds     = 5
@@ -141,7 +142,8 @@ func (c *Client) Fetch(ctx context.Context, rawURL string) (*Image, error) {
 		return nil, unavailable
 	}
 	config, _, err := image.DecodeConfig(bytes.NewReader(body))
-	if err != nil || config.Width <= 0 || config.Height <= 0 || config.Width > maxImagePixels/config.Height {
+	if err != nil || config.Width <= 0 || config.Height <= 0 ||
+		config.Width > maxImageSide || config.Height > maxImageSide || config.Width > maxImagePixels/config.Height {
 		return nil, unavailable
 	}
 	decoded, _, err := image.Decode(bytes.NewReader(body))
