@@ -35,7 +35,6 @@ func (h *harness) apiRoutes() []routeSpec {
 		{"/v1/import/status", false, false, decoded(h.archives.ImportStatus)},
 		{"/v1/projects/delete-all", false, true, h.deleteAllProjects},
 		{"/v1/metadata/favicon", true, false, decoded(h.attachments.Favicon)}, {"/v1/metadata/link", true, false, decoded(h.attachments.LinkPreview)},
-		{"/v1/metadata/image", true, false, decoded(h.attachments.Image)},
 	}
 	return append(routes, h.keyRoutes()...)
 }

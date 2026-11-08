@@ -17,18 +17,18 @@ import (
 	"time"
 
 	"code.dny.dev/ssrf"
-	"github.com/disintegration/imaging"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/pages"
 	_ "golang.org/x/image/webp"
 )
 
 const (
-	maxURLBytes          = 8192
-	maxImageBytes        = 8 << 20
-	maxImagePixels       = 20_000_000
-	maxImageSide         = 16_384
-	maxConcurrentFetches = 16
+	maxURLBytes    = 8192
+	maxImageBytes  = 8 << 20
+	maxImagePixels = 20_000_000
+	maxImageSide   = 16_384
+	// Decoding and orientation can each hold a full-size raster.
+	maxConcurrentFetches = 8
 	maxRedirects         = 3
 	busyRetrySeconds     = 5
 	fetchTimeout         = 15 * time.Second
@@ -147,9 +147,12 @@ func (c *Client) Fetch(ctx context.Context, rawURL string) (*Image, error) {
 		config.Width > maxImageSide || config.Height > maxImageSide || config.Width > maxImagePixels/config.Height {
 		return nil, unavailable
 	}
-	decoded, err := imaging.Decode(bytes.NewReader(body), imaging.AutoOrientation(true))
+	decoded, format, err := image.Decode(bytes.NewReader(body))
 	if err != nil {
 		return nil, unavailable
+	}
+	if format == "jpeg" {
+		decoded = orientJPEG(decoded, body)
 	}
 	var encoded boundedImage
 	if err := png.Encode(&encoded, decoded); err != nil {

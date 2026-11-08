@@ -41,6 +41,13 @@ type routeSpec struct {
 	handler     jsonEndpoint
 }
 
+const (
+	remoteImagePath   = "/v1/metadata/image"
+	maxImageResponses = 16
+)
+
+var imageResponseSlots = make(chan struct{}, maxImageResponses)
+
 func (h *harness) routes() http.Handler {
 	mux := http.NewServeMux()
 	for pattern, handler := range h.handlers() {
@@ -59,6 +66,7 @@ var contractCheck func(http.Handler) http.Handler
 // handlers are every route the harness serves, by method and path.
 func (h *harness) handlers() map[string]http.HandlerFunc {
 	handlers := map[string]http.HandlerFunc{
+		"POST " + remoteImagePath:            boundedHandler(imageResponseSlots, h.jsonRoute(routeSpec{remoteImagePath, true, false, decoded(h.attachments.Image)})),
 		"GET /healthz":                       func(w http.ResponseWriter, r *http.Request) { api.Respond(w, api.Object{"ok": true}, nil) },
 		"POST /v1/threads/turn":              h.engine.HandleTurn,
 		"POST /v1/threads/import":            h.engine.HandleThreadImport,

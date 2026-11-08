@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
@@ -17,6 +18,51 @@ type imageFetch func(context.Context, string) (*remoteimage.Image, error)
 
 func (fetch imageFetch) Fetch(ctx context.Context, url string) (*remoteimage.Image, error) {
 	return fetch(ctx, url)
+}
+
+type heldImageResponse struct {
+	*httptest.ResponseRecorder
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (w *heldImageResponse) Write(body []byte) (int, error) {
+	w.once.Do(func() { close(w.started) })
+	<-w.release
+	return w.ResponseRecorder.Write(body)
+}
+
+func TestAnImageResponseKeepsItsBudgetUntilItIsWritten(t *testing.T) {
+	h, _, _ := testChatHarness(t, nil)
+	h.attachments.Images = imageFetch(func(context.Context, string) (*remoteimage.Image, error) {
+		return &remoteimage.Image{Bytes: []byte{1, 2, 3}, ContentType: "image/png"}, nil
+	})
+	req := httptest.NewRequest(http.MethodPost, remoteImagePath, bytes.NewReader(api.Raw(api.Object{"url": "https://images.example/photo.png"})))
+	signIn(req, "alice")
+	req.Header.Set("Content-Type", "application/json")
+	w := &heldImageResponse{ResponseRecorder: httptest.NewRecorder(), started: make(chan struct{}), release: make(chan struct{})}
+	done := make(chan struct{})
+	release := sync.OnceFunc(func() { close(w.release) })
+	t.Cleanup(func() { release(); <-done })
+	go func() { defer close(done); h.routes().ServeHTTP(w, req) }()
+	select {
+	case <-w.started:
+	case <-done:
+		t.Fatal("the image response ended without writing its body")
+	}
+	if len(imageResponseSlots) != 1 {
+		t.Fatal("an unwritten image response released its memory budget")
+	}
+	release()
+	<-done
+	if len(imageResponseSlots) != 0 {
+		t.Fatal("a completed image response kept its memory budget")
+	}
+	var payload remoteimage.Image
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil || w.Code != http.StatusOK || !bytes.Equal(payload.Bytes, []byte{1, 2, 3}) || payload.ContentType != "image/png" {
+		t.Fatalf("held image response did not finish: status=%d error=%v", w.Code, err)
+	}
 }
 
 func TestRemoteImagesRequireChatAccessAndReturnImagePayload(t *testing.T) {

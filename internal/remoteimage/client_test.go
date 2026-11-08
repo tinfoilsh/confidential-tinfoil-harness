@@ -3,6 +3,7 @@ package remoteimage
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"image"
 	"image/color"
@@ -105,32 +106,94 @@ func TestFetchPreservesJPEGDisplayOrientation(t *testing.T) {
 	const width, height = 32, 16
 	picture := image.NewGray(image.Rect(0, 0, width, height))
 	for y := range height {
-		for x := width / 2; x < width; x++ {
-			picture.SetGray(x, y, color.Gray{Y: 255})
+		for x := range width {
+			picture.SetGray(x, y, color.Gray{Y: uint8(85 * (x/(width/2) + 2*(y/(height/2))))})
 		}
 	}
 	var jpegBytes bytes.Buffer
 	if err := jpeg.Encode(&jpegBytes, picture, &jpeg.Options{Quality: 100}); err != nil {
 		t.Fatal(err)
 	}
+	segment := func(marker byte, payload []byte) []byte {
+		header := binary.BigEndian.AppendUint16([]byte{0xff, marker}, uint16(len(payload)+2))
+		return append(header, payload...)
+	}
 	// A little-endian EXIF directory containing orientation 6 (clockwise).
-	exif := []byte{0xff, 0xe1, 0, 34, 'E', 'x', 'i', 'f', 0, 0, 'I', 'I', 42, 0, 8, 0, 0, 0, 1, 0, 0x12, 1, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0}
-	original := jpegBytes.Bytes()
-	oriented := append(append(append([]byte{}, original[:2]...), exif...), original[2:]...)
-	client := testClient(t, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(oriented) })
-	result, err := client.Fetch(t.Context(), testImageURL)
-	if err != nil {
-		t.Fatal(err)
+	exif := []byte{'E', 'x', 'i', 'f', 0, 0, 'I', 'I', 42, 0, 8, 0, 0, 0, 1, 0, 0x12, 1, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0}
+	xmp := segment(0xe1, []byte("http://ns.adobe.com/xap/1.0/\x00<x:xmpmeta/>"))
+	check := func(t *testing.T, metadata []byte, w, h int, corners [4]uint8) {
+		t.Helper()
+		original := jpegBytes.Bytes()
+		body := append(append(bytes.Clone(original[:2]), metadata...), original[2:]...)
+		client := testClient(t, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(body) })
+		result, err := client.Fetch(t.Context(), testImageURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := png.Decode(bytes.NewReader(result.Bytes))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if decoded.Bounds() != image.Rect(0, 0, w, h) {
+			t.Fatalf("incorrect oriented dimensions: %v", decoded.Bounds())
+		}
+		for i, point := range []image.Point{{0, 0}, {w - 1, 0}, {0, h - 1}, {w - 1, h - 1}} {
+			if got := color.GrayModel.Convert(decoded.At(point.X, point.Y)).(color.Gray).Y; got != corners[i] {
+				t.Fatalf("corner %d: got %d, want %d", i, got, corners[i])
+			}
+		}
 	}
-	decoded, err := png.Decode(bytes.NewReader(result.Bytes))
-	if err != nil || decoded.Bounds() != image.Rect(0, 0, height, width) {
-		t.Fatalf("JPEG orientation was not preserved: %v", err)
+	for _, tc := range []struct {
+		name        string
+		orientation byte
+		w, h        int
+		corners     [4]uint8
+	}{
+		{"normal", 1, width, height, [4]uint8{0, 85, 170, 255}},
+		{"horizontal", 2, width, height, [4]uint8{85, 0, 255, 170}},
+		{"half turn", 3, width, height, [4]uint8{255, 170, 85, 0}},
+		{"vertical", 4, width, height, [4]uint8{170, 255, 0, 85}},
+		{"transpose", 5, height, width, [4]uint8{0, 170, 85, 255}},
+		{"clockwise", 6, height, width, [4]uint8{170, 0, 255, 85}},
+		{"transverse", 7, height, width, [4]uint8{255, 85, 170, 0}},
+		{"counterclockwise", 8, height, width, [4]uint8{85, 255, 0, 170}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := bytes.Clone(exif)
+			payload[24] = tc.orientation
+			check(t, append(bytes.Clone(xmp), segment(0xe1, payload)...), tc.w, tc.h, tc.corners)
+		})
 	}
-	top, _, _, _ := decoded.At(height/2, 0).RGBA()
-	bottom, _, _, _ := decoded.At(height/2, width-1).RGBA()
-	const middleGray = 1 << 15
-	if top >= middleGray || bottom <= middleGray {
-		t.Fatal("JPEG was rotated in the wrong direction")
+	t.Run("big endian without XMP", func(t *testing.T) {
+		payload := []byte{'E', 'x', 'i', 'f', 0, 0, 'M', 'M', 0, 42, 0, 0, 0, 8, 0, 1, 1, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, 0, 0, 0, 0}
+		check(t, segment(0xe1, payload), height, width, [4]uint8{170, 0, 255, 85})
+	})
+	t.Run("orientation after another IFD entry", func(t *testing.T) {
+		payload := append(bytes.Clone(exif[:16]), []byte{0, 1, 4, 0, 1, 0, 0, 0, 32, 0, 0, 0}...)
+		payload[14] = 2
+		payload = append(payload, exif[16:]...)
+		check(t, segment(0xe1, payload), height, width, [4]uint8{170, 0, 255, 85})
+	})
+	t.Run("IFD outside APP1", func(t *testing.T) {
+		payload := bytes.Clone(exif[:14])
+		payload[10] = 12
+		metadata := append(segment(0xe1, payload), segment(0xe2, exif[14:])...)
+		check(t, metadata, width, height, [4]uint8{0, 85, 170, 255})
+	})
+	for _, tc := range []struct {
+		name   string
+		offset int
+		value  []byte
+	}{
+		{"oversized IFD offset", 10, []byte{255, 255, 255, 255}},
+		{"oversized entry count", 14, []byte{255, 255}},
+		{"out-of-line orientation", 20, []byte{255, 255, 255, 255}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := bytes.Clone(exif)
+			copy(payload[tc.offset:], tc.value)
+			check(t, segment(0xe1, payload), width, height, [4]uint8{0, 85, 170, 255})
+		})
 	}
 }
 
