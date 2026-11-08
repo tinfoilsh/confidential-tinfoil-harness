@@ -6,12 +6,24 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/pages"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/remoteimage"
 )
 
 // Pages reads what a link preview shows of a page, and a site's favicon.
 type Pages interface {
 	Details(ctx context.Context, url string) (*pages.Details, error)
 	Favicon(ctx context.Context, url string) (*pages.Favicon, error)
+}
+
+type Images interface {
+	Fetch(context.Context, string) (*remoteimage.Image, error)
+}
+
+func (at *Service) Image(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *PageRequest) (any, error) {
+	if _, err := at.Auth.Inference(ctx, p); err != nil {
+		return nil, err
+	}
+	return at.Images.Fetch(ctx, in.URL)
 }
 
 // Favicon reads a site's favicon for a caller with chat access.
