@@ -154,6 +154,37 @@ func TestRecordingsTranscribeThroughTheRouter(t *testing.T) {
 	}
 }
 
+// A speech model that keeps talking fails its transcription at the deadline
+// and is asked to stop, rather than holding its caller until it ends.
+func TestATranscriptionThatRunsOnFailsAtItsDeadline(t *testing.T) {
+	deadline := attach.TranscriptionDeadline
+	attach.TranscriptionDeadline = 100 * time.Millisecond
+	t.Cleanup(func() { attach.TranscriptionDeadline = deadline })
+	stopped := make(chan struct{})
+	h := routerHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		select {
+		case <-r.Context().Done():
+			close(stopped)
+		case <-time.After(10 * time.Second):
+		}
+	})
+	began := time.Now()
+	response := uploadRoute(h, "/v1/transcriptions", "memo.mp3", []byte("ID3 audio"), nil, "alice")
+	var body struct {
+		Error api.Error `json:"error"`
+	}
+	json.Unmarshal(response.Body.Bytes(), &body)
+	if response.Code != http.StatusGatewayTimeout || body.Error.Code != "UPSTREAM_REFUSED" || body.Error.Action != api.ActionRetry || time.Since(began) > 5*time.Second {
+		t.Fatalf("after %v: HTTP %d %s", time.Since(began), response.Code, response.Body.String())
+	}
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the speech model was not asked to stop")
+	}
+}
+
 // Each group of files the session's composer offers is what uploads take,
 // up to the group's size, and text, which is read whole, has its own.
 func TestTheComposerOffersWhatUploadsAccept(t *testing.T) {
@@ -169,6 +200,7 @@ func TestTheComposerOffersWhatUploadsAccept(t *testing.T) {
 			Attachments, ProjectDocuments []attach.UploadGroup
 			PasteAsFileChars              int
 			DictationMaxSeconds           int
+			DictationSegmentSeconds       int
 		} `json:"composer"`
 	}
 	json.Unmarshal(postRoute(h, "/v1/session", api.Object{}, "").Body.Bytes(), &session)
@@ -182,7 +214,7 @@ func TestTheComposerOffersWhatUploadsAccept(t *testing.T) {
 		return 0
 	}
 	if slices.Contains([]int{limitOf(offered.Attachments, ".png"), limitOf(offered.Attachments, ".pdf"), limitOf(offered.Attachments, ".mp3"), limitOf(offered.ProjectDocuments, ".pdf"), limitOf(offered.ProjectDocuments, ".txt")}, 0) ||
-		limitOf(offered.Attachments, ".txt") == limitOf(offered.Attachments, ".png") || limitOf(offered.ProjectDocuments, ".png") == 0 || offered.PasteAsFileChars == 0 || offered.DictationMaxSeconds == 0 {
+		limitOf(offered.Attachments, ".txt") == limitOf(offered.Attachments, ".png") || limitOf(offered.ProjectDocuments, ".png") == 0 || offered.PasteAsFileChars == 0 || offered.DictationMaxSeconds == 0 || offered.DictationSegmentSeconds == 0 {
 		t.Fatalf("the composer offers %+v", offered)
 	}
 	refusal := func(name string, size int) api.Error {

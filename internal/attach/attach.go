@@ -135,20 +135,25 @@ func (g *UploadGroup) maxContent() int {
 }
 
 // What a client's composer does before anything reaches the harness: a
-// paste longer than pasteAsFileChars becomes a text file, and dictation
-// stops after dictationMaxSeconds.
+// paste longer than pasteAsFileChars becomes a text file, and dictation is
+// sent to be transcribed in recordings of about dictationSegmentSeconds,
+// each ended at a pause, since a long recording can keep the speech model
+// talking past its deadline. A client that sends dictation as one recording
+// stops it after dictationMaxSeconds.
 const (
-	pasteAsFileChars    = 3000
-	dictationMaxSeconds = 10 * 60
+	pasteAsFileChars        = 3000
+	dictationMaxSeconds     = 10 * 60
+	dictationSegmentSeconds = 60
 )
 
 // ComposerView is what a client's composer accepts: the groups of files
 // uploads take, for a message and for a project.
 type ComposerView struct {
-	Attachments         []UploadGroup `json:"attachments"`
-	ProjectDocuments    []UploadGroup `json:"projectDocuments"`
-	PasteAsFileChars    int           `json:"pasteAsFileChars"`
-	DictationMaxSeconds int           `json:"dictationMaxSeconds"`
+	Attachments             []UploadGroup `json:"attachments"`
+	ProjectDocuments        []UploadGroup `json:"projectDocuments"`
+	PasteAsFileChars        int           `json:"pasteAsFileChars"`
+	DictationMaxSeconds     int           `json:"dictationMaxSeconds"`
+	DictationSegmentSeconds int           `json:"dictationSegmentSeconds"`
 }
 
 func Composer() ComposerView {
@@ -160,10 +165,11 @@ func Composer() ComposerView {
 		return out
 	}
 	return ComposerView{
-		Attachments:         shown(AttachmentGroups),
-		ProjectDocuments:    shown(projectDocumentGroups),
-		PasteAsFileChars:    pasteAsFileChars,
-		DictationMaxSeconds: dictationMaxSeconds,
+		Attachments:             shown(AttachmentGroups),
+		ProjectDocuments:        shown(projectDocumentGroups),
+		PasteAsFileChars:        pasteAsFileChars,
+		DictationMaxSeconds:     dictationMaxSeconds,
+		DictationSegmentSeconds: dictationSegmentSeconds,
 	}
 }
 
@@ -555,6 +561,12 @@ func multipartCall(ctx context.Context, service *inference.Service, path, fileFi
 	}
 	return b, nil
 }
+
+// A recording not transcribed by TranscriptionDeadline fails, so a speech
+// model that keeps talking does not hold its caller. A dictation segment
+// transcribes in seconds.
+var TranscriptionDeadline = 2 * time.Minute
+
 func (at *Service) transcribe(ctx context.Context, filename string, data []byte) (string, error) {
 	if len(data) > audioUploads.MaxBytes {
 		return "", api.Err(413, "ATTACHMENT_TOO_LARGE", "The recording exceeds the size limit")
@@ -567,7 +579,12 @@ func (at *Service) transcribe(ctx context.Context, filename string, data []byte)
 	if router == nil {
 		return "", api.Err(503, "TOOL_UNAVAILABLE", "Transcription is unavailable")
 	}
+	ctx, cancel := context.WithTimeout(ctx, TranscriptionDeadline)
+	defer cancel()
 	b, err := multipartCall(ctx, router, "/v1/audio/transcriptions", "file", filename, data, map[string]string{"model": "voxtral-small-24b", "response_format": "text"})
+	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return "", api.Err(http.StatusGatewayTimeout, "UPSTREAM_REFUSED", "The recording took too long to transcribe")
+	}
 	if err != nil {
 		return "", err
 	}
