@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"code.dny.dev/ssrf"
+	"github.com/disintegration/imaging"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/pages"
 	_ "golang.org/x/image/webp"
@@ -146,7 +147,7 @@ func (c *Client) Fetch(ctx context.Context, rawURL string) (*Image, error) {
 		config.Width > maxImageSide || config.Height > maxImageSide || config.Width > maxImagePixels/config.Height {
 		return nil, unavailable
 	}
-	decoded, _, err := image.Decode(bytes.NewReader(body))
+	decoded, err := imaging.Decode(bytes.NewReader(body), imaging.AutoOrientation(true))
 	if err != nil {
 		return nil, unavailable
 	}

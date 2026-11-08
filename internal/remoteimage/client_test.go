@@ -6,6 +6,7 @@ import (
 	"errors"
 	"image"
 	"image/color"
+	"image/jpeg"
 	"image/png"
 	"io"
 	"net"
@@ -97,6 +98,39 @@ func TestFetchRefusesUnsafeURLsBeforeNetwork(t *testing.T) {
 	}
 	if requests.Load() != 0 {
 		t.Fatal("unsafe URL reached a server")
+	}
+}
+
+func TestFetchPreservesJPEGDisplayOrientation(t *testing.T) {
+	const width, height = 32, 16
+	picture := image.NewGray(image.Rect(0, 0, width, height))
+	for y := range height {
+		for x := width / 2; x < width; x++ {
+			picture.SetGray(x, y, color.Gray{Y: 255})
+		}
+	}
+	var jpegBytes bytes.Buffer
+	if err := jpeg.Encode(&jpegBytes, picture, &jpeg.Options{Quality: 100}); err != nil {
+		t.Fatal(err)
+	}
+	// A little-endian EXIF directory containing orientation 6 (clockwise).
+	exif := []byte{0xff, 0xe1, 0, 34, 'E', 'x', 'i', 'f', 0, 0, 'I', 'I', 42, 0, 8, 0, 0, 0, 1, 0, 0x12, 1, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0}
+	original := jpegBytes.Bytes()
+	oriented := append(append(append([]byte{}, original[:2]...), exif...), original[2:]...)
+	client := testClient(t, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(oriented) })
+	result, err := client.Fetch(t.Context(), testImageURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := png.Decode(bytes.NewReader(result.Bytes))
+	if err != nil || decoded.Bounds() != image.Rect(0, 0, height, width) {
+		t.Fatalf("JPEG orientation was not preserved: %v", err)
+	}
+	top, _, _, _ := decoded.At(height/2, 0).RGBA()
+	bottom, _, _, _ := decoded.At(height/2, width-1).RGBA()
+	const middleGray = 1 << 15
+	if top >= middleGray || bottom <= middleGray {
+		t.Fatal("JPEG was rotated in the wrong direction")
 	}
 }
 
