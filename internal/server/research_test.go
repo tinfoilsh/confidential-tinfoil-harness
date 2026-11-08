@@ -187,9 +187,10 @@ func TestAResearchMayAskFirstAndStartsOnceAnswered(t *testing.T) {
 }
 
 // A research its caller may not start is refused before its turn is
-// applied: within an hour of their last, with when the next may start, and
-// to a caller without a subscription. A session offers it to a subscriber
-// while the harness can keep a research's notes.
+// applied: within an hour of their last, with when the next may start, to a
+// caller without a subscription, and on a turn that answers no question
+// anew. A session offers it to a subscriber while the harness can keep a
+// research's notes.
 func TestAResearchIsRefusedWithinTheHourAndWithoutASubscription(t *testing.T) {
 	lighthouses(t, "Maine has 65 lighthouses.")
 	model := scripted(contentChunk("never"))
@@ -211,6 +212,11 @@ func TestAResearchIsRefusedWithinTheHourAndWithoutASubscription(t *testing.T) {
 	api.Obj(anonymous["options"])["research"] = true
 	if w := postRoute(h, "/v1/threads/turn", anonymous, ""); w.Code != 403 || api.Obj(api.Obj(api.Parsed(w.Body.Bytes()))["error"])["code"] != "TOOL_UNAVAILABLE" {
 		t.Fatalf("a signed-out research: HTTP %d %s", w.Code, w.Body.String())
+	}
+	continued := researchInput(key)
+	continued["kind"] = "continue"
+	if w := postRoute(h, "/v1/threads/turn", continued, "alice"); w.Code != 400 || api.Obj(api.Obj(api.Parsed(w.Body.Bytes()))["error"])["code"] != "BAD_REQUEST" {
+		t.Fatalf("a researched continuation: HTTP %d %s", w.Code, w.Body.String())
 	}
 	offers := func(user string) any {
 		return api.Obj(api.Obj(api.Parsed(postRoute(h, "/v1/session", api.Object{}, user).Body.Bytes()))["features"])["research"]
