@@ -207,11 +207,6 @@ func (eng *Engine) launch(ctx context.Context, r *Run) error {
 	if err := eng.refuseFlagged(ctx, r, p); err != nil {
 		return err
 	}
-	// Refused before the turn is applied, so a research the caller may not
-	// start leaves their chat as it was.
-	if err := eng.allowResearch(ctx, r, p); err != nil {
-		return err
-	}
 	var plan *turnPlan
 	// A chat another writer changed since it was read takes the turn again.
 	// One that writer removed was deleted, so only a first attempt creates it.
@@ -219,6 +214,14 @@ func (eng *Engine) launch(ctx context.Context, r *Run) error {
 		var err error
 		if plan, err = eng.prepareTurn(ctx, r, p, attempt == 1); err != nil {
 			return err
+		}
+		// Refused once the turn is known not to be applied already, and
+		// before it is, so a research the caller may not start leaves their
+		// chat as it was.
+		if attempt == 1 {
+			if err := eng.allowResearch(ctx, r, p); err != nil {
+				return err
+			}
 		}
 		if s.local {
 			break

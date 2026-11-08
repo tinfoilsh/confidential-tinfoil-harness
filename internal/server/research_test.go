@@ -219,6 +219,23 @@ func TestAResearchIsRefusedWithinTheHourAndWithoutASubscription(t *testing.T) {
 	}
 }
 
+// A research request sent again once its run ended is the turn already
+// applied, not a second research the hour refuses.
+func TestAResearchSentAgainIsAlreadyApplied(t *testing.T) {
+	lighthouses(t, "Maine has 65 lighthouses.")
+	h, _, key := testChatHarness(t, scripted(
+		toolCallChunk(0, "s1", "web_search", `{"query":"maine"}`),
+		contentChunk("Covered."),
+		contentChunk("Covered."),
+		contentChunk("Maine has 65 lighthouses."),
+	).ServeHTTP)
+	in := researchInput(key)
+	finishedRun(t, h, "/v1/threads/turn", in)
+	if w := postRoute(h, "/v1/threads/turn", in, "alice"); w.Code != 409 || api.Obj(api.Obj(api.Parsed(w.Body.Bytes()))["error"])["code"] != "ALREADY_APPLIED" {
+		t.Fatalf("the research sent again: HTTP %d %s", w.Code, w.Body.String())
+	}
+}
+
 // notesOf is research notes in the form their task asks for, whose findings
 // are findings.
 func notesOf(findings string) string {
