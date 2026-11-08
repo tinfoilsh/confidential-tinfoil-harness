@@ -48,9 +48,14 @@ const (
 
 var imageResponseSlots = make(chan struct{}, maxImageResponses)
 
+const metricsPattern = "GET /metrics"
+
 func (h *harness) routes() http.Handler {
 	mux := http.NewServeMux()
 	for pattern, handler := range h.handlers() {
+		if h.metrics != nil && pattern != metricsPattern {
+			handler = h.metrics.Instrument(pattern, handler)
+		}
 		mux.HandleFunc(pattern, handler)
 	}
 	if contractCheck != nil {
@@ -66,6 +71,7 @@ var contractCheck func(http.Handler) http.Handler
 // handlers are every route the harness serves, by method and path.
 func (h *harness) handlers() map[string]http.HandlerFunc {
 	handlers := map[string]http.HandlerFunc{
+		metricsPattern:                       h.metrics.ServeHTTP,
 		"POST " + remoteImagePath:            boundedHandler(imageResponseSlots, h.jsonRoute(routeSpec{remoteImagePath, true, false, decoded(h.attachments.Image)})),
 		"GET /healthz":                       func(w http.ResponseWriter, r *http.Request) { api.Respond(w, api.Object{"ok": true}, nil) },
 		"POST /v1/threads/turn":              h.engine.HandleTurn,

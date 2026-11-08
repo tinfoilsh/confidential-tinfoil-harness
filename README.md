@@ -35,6 +35,8 @@ Anonymous chat works only from a deployed harness, because Tinfoil validates `fr
 
 A chat model is offered when Tinfoil's model catalog lists it with a context window, and the system prompt names it as the catalog does. Turns reach it through the router, which verifies the replica serving it.
 
+`GET /metrics` exports aggregate HTTP rates and latency, active and queued turns, retained replies, completed/canceled/failed run durations, and Go runtime metrics. The measured shim requires an admin key with `metrics.read`; metrics contain no chat text, caller identifiers, keys, URLs, or model/tool arguments.
+
 ## Reporting Vulnerabilities
 
 Please report security vulnerabilities by either:

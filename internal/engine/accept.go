@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
@@ -243,6 +244,8 @@ func (eng *Engine) admit(ctx context.Context, p *auth.Principal, credential auth
 	}
 	r.Thread = s
 	eng.Live.runs[liveKey(p, r.Log.ID)] = r
+	r.admittedAt = time.Now()
+	eng.Metrics.AdmitRun()
 	// The accepting request drains the run until it answers.
 	r.Log.Frames.Attach()
 	if s.Active != nil {

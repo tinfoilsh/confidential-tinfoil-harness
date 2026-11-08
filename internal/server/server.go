@@ -18,6 +18,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/jobs"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/observability"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/pages"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/remoteimage"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/search"
@@ -36,6 +37,7 @@ type harness struct {
 	archives     *archives.Service
 	engine       *engine.Engine
 	summaries    *summarize.Service
+	metrics      *observability.Metrics
 }
 
 // listenAddr is the shim's upstream port in tinfoil-config.yml, which also
@@ -76,6 +78,8 @@ func Run() {
 	h.attachments = &attach.Service{Auth: h.auth, Models: h.models, Store: h.store, Pages: h.pages, Images: remoteimage.New()}
 	h.store.Repair = h.attachments
 	h.engine = &engine.Engine{Safeguards: engine.NewSubmitter(os.Getenv("SAFEGUARDS_URL")), Store: h.store, Models: h.models, Attachments: h.attachments, Auth: h.auth, Summaries: h.summaries, Memory: engine.SystemMemory}
+	h.metrics = observability.New(h.engine.Live.Stats)
+	h.engine.Metrics = h.metrics
 	if available, total, err := engine.SystemMemory(); err != nil {
 		slog.Error("read the enclave's memory; turns are admitted without a memory reserve", "error", err)
 		h.engine.Memory = nil

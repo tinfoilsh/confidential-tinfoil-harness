@@ -158,6 +158,7 @@ func (eng *Engine) finishRun(r *Run, runErr error) {
 	eng.Live.mu.Unlock()
 	r.out.emit(domain.StateSnapshotEvent{Snapshot: domain.StateSnapshot{Thread: summary, Queue: queue, RateLimit: limit}})
 	metadata.RateLimit = &limit
+	eng.Metrics.FinishRun(r.admittedAt, cancelled, runErr != nil)
 	if runErr != nil && !cancelled {
 		r.out.emit(domain.FailedRun(s.ID, r.Log.ID, api.AsError(runErr), &metadata))
 	} else {
