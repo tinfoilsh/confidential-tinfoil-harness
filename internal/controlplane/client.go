@@ -1492,6 +1492,31 @@ func (c *Client) StartResearch(ctx context.Context, clerkUserID string) error {
 	return nil
 }
 
+// SafeguardFlagsPath lists the chats the safeguards flagged for a user.
+const SafeguardFlagsPath = "/api/sync/safeguard-flags"
+
+// SafeguardFlags are the ids of the user's chats the safeguards flagged.
+// It forwards no JWT, so a turn that waited in a queue is checked as one
+// that starts at once is.
+func (c *Client) SafeguardFlags(ctx context.Context, clerkUserID string) ([]string, error) {
+	if clerkUserID == "" {
+		return nil, fmt.Errorf("controlplane: clerk user id is required")
+	}
+	var listed struct {
+		Flags []struct {
+			ConversationID string `json:"conversation_id"`
+		} `json:"flags"`
+	}
+	if err := c.getSyncJSON(ctx, SafeguardFlagsPath, nil, "", clerkUserID, &listed); err != nil {
+		return nil, err
+	}
+	chats := make([]string, 0, len(listed.Flags))
+	for _, flag := range listed.Flags {
+		chats = append(chats, flag.ConversationID)
+	}
+	return chats, nil
+}
+
 func (c *Client) DeleteAttachmentIndex(ctx context.Context, jwt, clerkUserID, attachmentID string) error {
 	if attachmentID == "" {
 		return fmt.Errorf("controlplane: attachment id is required")

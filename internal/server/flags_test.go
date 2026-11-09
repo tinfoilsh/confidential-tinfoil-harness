@@ -13,6 +13,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
@@ -55,7 +56,9 @@ func TestAFlaggedChatTakesNoTurns(t *testing.T) {
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n")
 	})
 	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != auth.SafeguardFlagsPath || r.Header.Get("Authorization") != "Bearer clerk-alice" {
+		// The flags are asked for as the harness, for the user it verified:
+		// a queued turn's Clerk session has expired by the time it starts.
+		if r.URL.Path != controlplane.SafeguardFlagsPath || r.Header.Get(controlplane.HeaderServiceSecret) != testStorageSecret || r.Header.Get(controlplane.HeaderClerkUserID) != "alice" || r.Header.Get("Authorization") != "" {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -127,7 +130,7 @@ func TestFlagsAreReusedOnlyForTheirCaller(t *testing.T) {
 	var reads atomic.Int32
 	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reads.Add(1)
-		if r.Header.Get("Authorization") == "Bearer clerk-alice" {
+		if r.Header.Get(controlplane.HeaderClerkUserID) == "alice" {
 			io.WriteString(w, `{"flags":[{"conversation_id":"chat-1"}]}`)
 			return
 		}

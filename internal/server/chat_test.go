@@ -448,7 +448,7 @@ func signIn(r *http.Request, user string) {
 // everything else with handler.
 func unflagged(handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == auth.SafeguardFlagsPath {
+		if r.URL.Path == controlplane.SafeguardFlagsPath {
 			io.WriteString(w, `{"flags":[]}`)
 			return
 		}
@@ -2360,7 +2360,8 @@ func testAuth(cp *httptest.Server) *auth.Authenticator {
 			return "", errors.New("bad session")
 		}
 		return strings.TrimPrefix(s, "clerk-"), nil
-	}, ChatKeys: func(*jwt.Token) (any, error) { return testChatKeys().Public(), nil }, ChatIssuer: testChatIssuer, Client: cp.Client(), Controlplane: cp.URL})
+	}, ChatKeys: func(*jwt.Token) (any, error) { return testChatKeys().Public(), nil }, ChatIssuer: testChatIssuer, Client: cp.Client(), Controlplane: cp.URL,
+		Flags: controlplane.NewClient(cp.URL, cp.Client(), controlplane.WithServiceSecret(testStorageSecret)).SafeguardFlags})
 }
 
 // useAuth has the harness and every layer that checks callers use a.

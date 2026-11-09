@@ -117,11 +117,13 @@ type Config struct {
 	// Client reaches the control plane at Controlplane.
 	Client       *http.Client
 	Controlplane string
+	// Flags lists the chats the safeguards flagged for a user.
+	Flags func(ctx context.Context, userID string) ([]string, error)
 }
 
 // Configured is an Authenticator checking callers as c says.
 func Configured(c Config) *Authenticator {
-	return &Authenticator{verify: c.Verify, chatKeys: c.ChatKeys, chatIssuer: c.ChatIssuer, client: c.Client, controlplane: c.Controlplane}
+	return &Authenticator{verify: c.Verify, chatKeys: c.ChatKeys, chatIssuer: c.ChatIssuer, client: c.Client, controlplane: c.Controlplane, readFlags: c.Flags}
 }
 
 type Authenticator struct {
@@ -135,6 +137,7 @@ type Authenticator struct {
 	valid        *expirable.LRU[string, struct{}]
 	flagsOnce    sync.Once
 	flags        *expirable.LRU[string, ChatFlags]
+	readFlags    func(ctx context.Context, userID string) ([]string, error)
 }
 
 func (a *Authenticator) caches() {
@@ -146,7 +149,7 @@ func (a *Authenticator) caches() {
 
 func (a *Authenticator) validKeys() *expirable.LRU[string, struct{}] { a.caches(); return a.valid }
 
-func New(ctx context.Context, issuer, cp string) (*Authenticator, error) {
+func New(ctx context.Context, issuer, cp string, flags func(ctx context.Context, userID string) ([]string, error)) (*Authenticator, error) {
 	if !strings.HasPrefix(issuer, "https://") {
 		return nil, errors.New("CLERK_ISSUER must be an HTTPS issuer URL")
 	}
@@ -163,7 +166,7 @@ func New(ctx context.Context, issuer, cp string) (*Authenticator, error) {
 	c := Config{Client: &http.Client{
 		Timeout:       15 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}, Controlplane: cp, ChatKeys: chatKeys.Keyfunc, ChatIssuer: cp}
+	}, Controlplane: cp, ChatKeys: chatKeys.Keyfunc, ChatIssuer: cp, Flags: flags}
 	c.Verify = func(ctx context.Context, token string) (string, error) {
 		parsed, err := jwt.NewParser(options...).Parse(token, kf.KeyfuncCtx(ctx))
 		if err != nil || !parsed.Valid {
