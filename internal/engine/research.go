@@ -310,11 +310,54 @@ func asksFirst(messages []domain.Message) bool {
 		return false
 	}
 	for i := question - 1; i >= 0 && messages[i].Role != "user"; i-- {
-		if slices.ContainsFunc(messages[i].Timeline, func(b domain.Block) bool { return b.Type == "tool_call" && b.Name == domain.QuestionsWidget }) {
+		if slices.ContainsFunc(messages[i].Timeline, isQuestions) {
 			return false
 		}
 	}
 	return true
+}
+
+func isQuestions(b domain.Block) bool {
+	return b.Type == "tool_call" && b.Name == domain.QuestionsWidget
+}
+
+// answersAnew are the turns, as carried out, that answer a question anew,
+// which a research may answer. A continuation goes on with the reply it
+// extends.
+var answersAnew = []string{"send", "edit", "regenerate", "answer"}
+
+// markResearch marks the question a turn answers as one that asks for deep
+// research: when the turn asks for it, and when the question follows the
+// questions a research asked first, which answering them continues. An edit,
+// regeneration or retry of a marked question researches it again.
+func markResearch(t *domain.Thread, turn *TurnRequest) {
+	question := lastQuestion(t.Messages)
+	if !slices.Contains(answersAnew, turn.Kind) || question < 0 {
+		return
+	}
+	if turn.Options.Research || turn.Kind == "send" && askedFirst(t.Messages[:question]) {
+		t.Messages[question].Research = &domain.Research{Version: researchVersion}
+	}
+}
+
+// researches reports whether a turn of a chat researches: whether it answers
+// anew a question that asks for deep research.
+func researches(t *domain.Thread, kind string) bool {
+	question := lastQuestion(t.Messages)
+	return slices.Contains(answersAnew, kind) && question >= 0 && t.Messages[question].Research != nil
+}
+
+// askedFirst reports whether messages end with the questions a research
+// asked first: a reply to a question that asks for deep research, which
+// called the questions widget and wrote no report.
+func askedFirst(messages []domain.Message) bool {
+	question := lastQuestion(messages)
+	if question < 0 || messages[question].Research == nil {
+		return false
+	}
+	return slices.ContainsFunc(messages[question+1:], func(m domain.Message) bool {
+		return m.Role == "assistant" && m.Research == nil && slices.ContainsFunc(m.Timeline, isQuestions)
+	})
 }
 
 // errResearchUnavailable refuses a research to a caller without a
@@ -326,8 +369,8 @@ func errResearchUnavailable() error {
 // allowResearch refuses a research turn its caller may not start now: one
 // from a caller without a subscription, or within an hour of when their last
 // research started. It counts nothing; startResearch does.
-func (eng *Engine) allowResearch(ctx context.Context, r *Run, p *auth.Principal) error {
-	if !r.input.Options.Research {
+func (eng *Engine) allowResearch(ctx context.Context, r *Run, p *auth.Principal, research bool) error {
+	if !research {
 		return nil
 	}
 	if p.Anonymous || !r.credential.FirstParty {

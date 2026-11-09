@@ -294,7 +294,7 @@ func (eng *Engine) BuildRequest(thread *domain.Thread, profile *domain.Profile, 
 	req.webSearch = domain.ValueOr(profile.WebSearchAvailable, true) && domain.ValueOr(options.WebSearch, thread.WebSearchEnabled)
 	// A research searches the web whatever the chat's setting, unless the
 	// settings turn web search off.
-	if options.Research {
+	if researches(thread, in.Kind) {
 		if !domain.ValueOr(profile.WebSearchAvailable, true) {
 			return nil, nil, api.Err(403, "TOOL_UNAVAILABLE", "Deep research needs web search, which the settings turn off").WithAction(api.ActionStop)
 		}

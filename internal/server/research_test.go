@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"reflect"
 	"slices"
@@ -95,8 +96,8 @@ func researchStarted(rows *memoryRows) (time.Time, bool) {
 
 // A research plans and searches with what it writes shown as its thinking,
 // is asked once to check what it found, then writes its report without
-// tools: the reply's only text, citing the page it read. The reply records
-// the research, and the caller's hour counts it.
+// tools: the reply's only text, citing the page it read. The question and
+// the reply record the research, and the caller's hour counts it.
 func TestAResearchShowsItsWorkAsThinkingAndAnswersWithACitedReport(t *testing.T) {
 	lighthouses(t, "Maine has 65 lighthouses.")
 	model := scripted(
@@ -107,7 +108,11 @@ func TestAResearchShowsItsWorkAsThinkingAndAnswersWithACitedReport(t *testing.T)
 	)
 	h, rows, key := testChatHarness(t, model.ServeHTTP)
 	events := finishedRun(t, h, "/v1/threads/turn", researchInput(key))
-	reply := storedChat(t, rows, key, events[0].ThreadID).Messages[1]
+	chat := storedChat(t, rows, key, events[0].ThreadID)
+	if question := chat.Messages[0]; question.Research == nil {
+		t.Fatalf("the question was stored as %+v", question)
+	}
+	reply := chat.Messages[1]
 	report := "Maine has 65 lighthouses [Lighthouses of maine](https://lights.test/maine)."
 	steps := []string{}
 	for _, block := range reply.Timeline {
@@ -144,7 +149,8 @@ func TestAResearchShowsItsWorkAsThinkingAndAnswersWithACitedReport(t *testing.T)
 
 // A research may first ask the user what it needs to know, which ends its
 // run without counting it as the hour's research. The turn that sends the
-// answers researches without being offered the questions again.
+// answers continues the research without asking for it, and without being
+// offered the questions again.
 func TestAResearchMayAskFirstAndStartsOnceAnswered(t *testing.T) {
 	lighthouses(t, "Maine has 65 lighthouses.")
 	questions := `{"title":"Scope","questions":[{"id":"q1","prompt":"Which state?","selection":"single","options":[{"id":"me","label":"Maine"},{"id":"ma","label":"Massachusetts"}]}]}`
@@ -170,16 +176,17 @@ func TestAResearchMayAskFirstAndStartsOnceAnswered(t *testing.T) {
 	if w := postRoute(h, "/v1/threads/messages/answer", api.Object{"key": keyBase64(key), "threadId": id, "messageId": asked.ID, "toolCallId": "ask", "answers": api.Object{"q1": []any{"me"}}}, "alice"); w.Code != 200 {
 		t.Fatalf("answering: HTTP %d %s", w.Code, w.Body.String())
 	}
-	answered := researchInput(key)
-	answered["threadId"], answered["widgets"] = id, []any{domain.QuestionsWidget}
+	answered := continueInput(key, id)
+	answered["widgets"] = []any{domain.QuestionsWidget}
 	delete(answered, "content")
 	finishedRun(t, h, "/v1/threads/turn", answered)
 	sent := model.sent()
 	if slices.Contains(offered(sent[1]), domain.QuestionsWidget) || !strings.Contains(string(api.Raw(sent[1]["messages"])), "[me] Maine") {
 		t.Fatalf("the answered research was offered %v and sent %v", offered(sent[1]), sent[1]["messages"])
 	}
-	if reply := storedChat(t, rows, key, id).Messages[3]; reply.Research == nil || reply.Content != "Maine has 65 lighthouses." {
-		t.Fatalf("the answered research left the reply %+v", reply)
+	chat := storedChat(t, rows, key, id)
+	if question, reply := chat.Messages[2], chat.Messages[3]; question.Research == nil || reply.Research == nil || reply.Content != "Maine has 65 lighthouses." {
+		t.Fatalf("the answered research left the question %+v and the reply %+v", question, reply)
 	}
 	if _, counted := researchStarted(rows); !counted {
 		t.Fatal("the answered research was not counted")
@@ -244,6 +251,40 @@ func TestAResearchSentAgainIsAlreadyApplied(t *testing.T) {
 	finishedRun(t, h, "/v1/threads/turn", in)
 	if w := postRoute(h, "/v1/threads/turn", in, "alice"); w.Code != 409 || api.Obj(api.Obj(api.Parsed(w.Body.Bytes()))["error"])["code"] != "ALREADY_APPLIED" {
 		t.Fatalf("the research sent again: HTTP %d %s", w.Code, w.Body.String())
+	}
+}
+
+// After a research, an edit or a regeneration of its question researches it
+// again without asking for it, which the hour then refuses. Continuing the
+// report, or asking a new question, does not research.
+func TestAnEditOrRegenerationOfAResearchResearchesAgain(t *testing.T) {
+	lighthouses(t, "Maine has 65 lighthouses.")
+	h, rows, key := testChatHarness(t, scripted(
+		toolCallChunk(0, "s1", "web_search", `{"query":"maine"}`),
+		contentChunk("Covered."),
+		contentChunk("Covered."),
+		contentChunk("Maine has 65 lighthouses."),
+	).ServeHTTP)
+	id := finishedRun(t, h, "/v1/threads/turn", researchInput(key))[0].ThreadID
+	researched := storedChat(t, rows, key, id)
+	turn := func(fields api.Object) api.Object {
+		in := continueInput(key, id)
+		maps.Copy(in, fields)
+		return in
+	}
+	for name, in := range map[string]api.Object{
+		"edit":       turn(api.Object{"kind": "edit", "messageId": researched.Messages[0].ID, "content": "How many lighthouses has Maine now?"}),
+		"regenerate": turn(api.Object{"kind": "regenerate", "messageId": researched.Messages[1].ID, "content": ""}),
+	} {
+		if w := postRoute(h, "/v1/threads/turn", in, "alice"); w.Code != 429 || api.Obj(api.Obj(api.Parsed(w.Body.Bytes()))["error"])["code"] != "RESEARCH_LIMIT_REACHED" {
+			t.Fatalf("an %s of the research: HTTP %d %s", name, w.Code, w.Body.String())
+		}
+	}
+	finishedRun(t, h, "/v1/threads/turn", turn(api.Object{"kind": "continue", "messageId": researched.Messages[1].ID, "content": ""}))
+	finishedRun(t, h, "/v1/threads/turn", turn(api.Object{"content": "And Vermont?"}))
+	chat := storedChat(t, rows, key, id)
+	if question, reply := chat.Messages[len(chat.Messages)-2], chat.Messages[len(chat.Messages)-1]; question.Content != "And Vermont?" || question.Research != nil || reply.Research != nil {
+		t.Fatalf("the new question was stored as %+v with the reply %+v", question, reply)
 	}
 }
 
