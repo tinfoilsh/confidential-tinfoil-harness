@@ -696,6 +696,7 @@ func TestTheHarnessSendsOnlyTheValuesAnOpenListNames(t *testing.T) {
 // every route the protocol names.
 func TestTheProtocolNamesEveryRoute(t *testing.T) {
 	h, _, _ := testChatHarness(t, nil)
+	enableMetrics(h)
 	c, err := loadContract()
 	if err != nil {
 		t.Fatal(err)

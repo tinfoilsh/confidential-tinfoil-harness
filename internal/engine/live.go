@@ -10,6 +10,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/observability"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/summarize"
 )
@@ -21,6 +22,7 @@ type Engine struct {
 	Auth        *auth.Authenticator
 	Models      *inference.Models
 	Store       *store.Store
+	Metrics     *observability.Metrics
 	// Summaries title chats, label reasoning and compact chats; nil when
 	// the harness has none.
 	Summaries *summarize.Service
@@ -107,6 +109,19 @@ func (l *liveRuns) Counts() (threads, runs, requests int) {
 	return len(l.threads), len(l.runs), len(l.requests)
 }
 
+// Stats reads workload counts without exposing a caller or run identifier.
+func (l *liveRuns) Stats() (active, queued, held int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, thread := range l.threads {
+		if thread.Active != nil {
+			active++
+		}
+		queued += len(thread.Queue)
+	}
+	return active, queued, len(l.held)
+}
+
 // Locked runs f under the registry's lock.
 func (l *liveRuns) Locked(f func()) {
 	l.mu.Lock()
@@ -148,6 +163,7 @@ type Run struct {
 	input                    *TurnRequest
 	turn                     *TurnRequest // the turn as carried out, once started
 	received                 string       // when the turn's request arrived
+	admittedAt               time.Time
 	Principal                *auth.Principal
 	key                      auth.ContentKey
 	credential               auth.Credential
@@ -279,6 +295,7 @@ func (eng *Engine) dropIdle(s *threadSession) {
 // failed with why otherwise. live.mu is held.
 func (eng *Engine) endQueued(r *Run, why error) {
 	eng.Live.forget(r)
+	eng.Metrics.FinishRun(r.admittedAt, why == nil, why != nil)
 	if why == nil {
 		r.out.emit(domain.RunFinished{ThreadID: r.Thread.ID, RunID: r.Log.ID, Metadata: domain.RunMetadata{Cancelled: new(true)}})
 	} else {

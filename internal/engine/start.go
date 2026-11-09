@@ -377,6 +377,7 @@ func (eng *Engine) runQueue(next *Run) {
 // endUnstarted ends a turn that failed to start and returns the queued turn
 // to start after it.
 func (eng *Engine) endUnstarted(r *Run, err error) *Run {
+	eng.Metrics.FinishRun(r.admittedAt, false, true)
 	eng.Live.mu.Lock()
 	next := eng.advance(r, true)
 	eng.Live.mu.Unlock()

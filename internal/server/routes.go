@@ -48,9 +48,14 @@ const (
 
 var imageResponseSlots = make(chan struct{}, maxImageResponses)
 
+const metricsPattern = "GET /metrics"
+
 func (h *harness) routes() http.Handler {
 	mux := http.NewServeMux()
 	for pattern, handler := range h.handlers() {
+		if h.metrics != nil && pattern != metricsPattern {
+			handler = h.metrics.Instrument(pattern, handler)
+		}
 		mux.HandleFunc(pattern, handler)
 	}
 	if contractCheck != nil {
@@ -86,6 +91,9 @@ func (h *harness) handlers() map[string]http.HandlerFunc {
 			panic("two handlers serve " + pattern)
 		}
 		handlers[pattern] = handler
+	}
+	if h.metrics != nil {
+		add(metricsPattern, h.metrics.ServeHTTP)
 	}
 	for _, spec := range h.apiRoutes() {
 		add("POST "+spec.path, h.jsonRoute(spec))

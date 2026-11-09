@@ -6,7 +6,7 @@ info:
   description: |
     The protocol between Tinfoil Chat clients and the harness enclave.
 
-    Every request is a POST through an attested, EHBP-sealed transport, so
+    Every chat request is a POST through an attested, EHBP-sealed transport, so
     bodies are private to the client and the enclave while headers are
     visible to the gateway. Headers carry only what is not private:
     `Authorization` carries the caller's identity (a Clerk session token, a
@@ -141,6 +141,20 @@ paths:
                 required: [ok]
                 properties:
                   ok: {const: true}
+
+  /metrics:
+    get:
+      operationId: metrics
+      summary: Export aggregate service metrics
+      description: Prometheus HTTP, run lifecycle, and runtime metrics. The measured shim validates an admin key with metrics.read before forwarding this operational endpoint. No chat content, caller identifiers, or credentials are exported.
+      security:
+        - metricsAdmin: []
+      responses:
+        "200":
+          description: Prometheus text exposition.
+          content:
+            text/plain:
+              schema: {type: string}
 
   /v1/session:
     post:
@@ -1377,6 +1391,10 @@ components:
       schema: {type: string}
 
   securitySchemes:
+    metricsAdmin:
+      type: http
+      scheme: bearer
+      description: An admin API key authorized for metrics.read, validated online by the shim.
     identity:
       type: http
       scheme: bearer

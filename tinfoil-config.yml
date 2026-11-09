@@ -12,6 +12,10 @@ shim:
   paths:
     - /healthz
     - /v1/*
+    - /metrics
+  authenticated: true
+  authenticated-endpoints:
+    - /metrics
 
 networks:
   upstream:
