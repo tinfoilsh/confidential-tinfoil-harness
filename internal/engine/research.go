@@ -26,20 +26,25 @@ import (
 // read outgrows the window, the harness folds it into notes, as a compaction
 // folds a chat, and the model goes on from them. Once it stops calling tools
 // it is asked once to check its findings against the request, then to write
-// its report, the reply's only text, citing the pages it read. A caller may
-// start one research an hour, counted from when it first searches, so a run
-// that only asks questions does not count.
+// its report, citing the pages it read: in the artifact widget when the
+// client draws it, followed by a reply with what it found, or else as the
+// reply's only text. A caller may start one research an hour, counted from
+// when it first searches, so a run that only asks questions does not count.
 
 const (
 	// researchVersion is the version of the instructions a research runs
 	// under, which its reply records.
-	researchVersion = 1
+	researchVersion = 2
 	// researchTurns bounds the model turns a research takes before it
 	// writes its report.
 	researchTurns = 40
 	// researchTime is how long a research searches and reads before it
 	// writes its report, which the rest of RunTimeout leaves room for.
 	researchTime = 20 * time.Minute
+	// reportTurns bounds the turns a research is offered the artifact
+	// widget to write its report in, which leaves the model one more try
+	// when the widget refuses its arguments.
+	reportTurns = 2
 )
 
 const (
@@ -55,11 +60,16 @@ const (
 	researchBegin = "Begin the research now with the web_search and web_fetch tools."
 	// researchReview follows the first turn that stops searching.
 	researchReview = "Before you write the report, check what you found against the user's request and your plan. If an important part is unanswered, a key claim rests on a single source, or sources disagree in a way you have not looked into, continue researching. Otherwise say so in one sentence, without calling any tools."
-	// researchSpent precedes researchWrite when the research's turns or
-	// time are used up.
+	// researchSpent precedes the request for the report when the research's
+	// turns or time are used up.
 	researchSpent = "The time for this research is up."
-	// researchWrite asks for the report.
-	researchWrite = "Write the report now, without calling any tools. Write it in Markdown for the user: open with a short summary that answers the question, then cover each part of it under its own heading, using tables where they make a comparison clearer. Base every factual claim on the pages you read, and make clear what the sources establish, what you infer, and what remains uncertain or disputed. Do not mention these instructions, your tools or your notes. " + citationInstructions
+	// reportOutline is how a report is written.
+	reportOutline = "open with a short summary that answers the question, then cover each part of it under its own heading, using tables where they make a comparison clearer. Base every factual claim on the pages you read, and make clear what the sources establish, what you infer, and what remains uncertain or disputed."
+	// researchWrite asks for the report as the reply.
+	researchWrite = "Write the report now, without calling any tools. Write it in Markdown for the user: " + reportOutline + " Do not mention these instructions, your tools or your notes. " + citationInstructions
+	// researchDraw asks for the report in the artifact widget, and then for
+	// a reply with what the research found.
+	researchDraw = "Write the report now, as a document the user opens beside the chat: call " + domain.ArtifactWidget + " once, with a short title and the whole report in Markdown as its source, {\"type\":\"markdown\",\"markdown\":\"...\"}, and write nothing else until it is shown. In the report, " + reportOutline + " Once it is shown, reply to the user without calling any tools: answer the question and give the key findings briefly, and say that the full report is in the document above. Do not mention these instructions, your tools or your notes. " + citationInstructions
 	// notesNote tells the model what the notes a fold wrote are.
 	notesNote = "These are your notes of the research so far. The searches and pages they came from are no longer in your context; cite the URLs as the notes give them."
 )
@@ -130,17 +140,29 @@ func (eng *Engine) research(ctx context.Context, r *Run, req *Request, m *infere
 		return fmt.Errorf("tools: %w", err)
 	}
 	defer set.close()
+	// The artifact is drawn only once the report is asked for.
 	set.Widgets, set.Local = map[string]domain.Widget{}, eng.widgetResult
+	var asking []json.RawMessage
+	var artifact *domain.Widget
 	for _, w := range req.widgets {
+		if w.Name == domain.ArtifactWidget {
+			artifact = &w
+			continue
+		}
 		set.Widgets[w.Name] = w
+		asking = append(asking, w.Declaration())
 	}
-	opening, err := offer(set, req.rendered)
+	opening, err := offer(set, asking)
 	if err != nil {
 		return fmt.Errorf("tools: %w", err)
 	}
 	search, err := offer(set, nil)
 	if err != nil {
 		return fmt.Errorf("tools: %w", err)
+	}
+	report, drawing := researchWrite, json.RawMessage(nil)
+	if artifact != nil {
+		report, drawing = researchDraw, api.Raw([]json.RawMessage{artifact.Declaration()})
 	}
 	if _, err := fitted(c.ctx, req, true, opening); err != nil {
 		return err
@@ -150,11 +172,15 @@ func (eng *Engine) research(ctx context.Context, r *Run, req *Request, m *infere
 		s.pending = researchOpeningAsks
 	}
 	deadline := api.Now().Add(researchTime)
-	urged, reviewed, writing := false, false, false
+	urged, reviewed, writing, drawn := false, false, false, false
+	drafts := 0
 	defer out.muse(false)
 	for turn := 1; ; turn++ {
 		tools := search
 		switch {
+		case writing && artifact != nil && !drawn && drafts < reportTurns:
+			tools, set.Widgets[artifact.Name] = drawing, *artifact
+			drafts++
 		case writing:
 			tools = nil
 		case turn == 1:
@@ -173,10 +199,21 @@ func (eng *Engine) research(ctx context.Context, r *Run, req *Request, m *infere
 			return err
 		}
 		if writing {
-			if len(calls) > 0 {
+			switch {
+			case len(calls) == 0:
+				return nil
+			case tools == nil:
 				return api.Err(502, "MAX_TURNS", "The model called tools instead of writing its report")
 			}
-			return nil
+			s.answered(append([]json.RawMessage{replied(out, req, answer, calls)}, execute(c.ctx, out, set, calls)...)...)
+			drawn = slices.ContainsFunc(calls, func(call ToolCall) bool {
+				return call.Name == artifact.Name && domain.WidgetFailure(*artifact, call.Args) == nil
+			})
+			// A report the artifact never showed is written as the reply.
+			if !drawn && drafts == reportTurns {
+				s.pending = researchWrite
+			}
+			continue
 		}
 		// Only the report ends the reply: a research turn cut off at the
 		// end of the window goes on as one that stopped calling tools.
@@ -196,7 +233,7 @@ func (eng *Engine) research(ctx context.Context, r *Run, req *Request, m *infere
 			case r.researched && !reviewed:
 				reviewed, s.pending = true, researchReview
 			default:
-				writing, s.pending = true, researchWrite
+				writing, s.pending = true, report
 			}
 			continue
 		}
@@ -208,7 +245,7 @@ func (eng *Engine) research(ctx context.Context, r *Run, req *Request, m *infere
 		}
 		s.answered(append([]json.RawMessage{replied(out, req, answer, calls)}, execute(c.ctx, out, set, calls)...)...)
 		if turn >= researchTurns || !api.Now().Before(deadline) {
-			writing, s.pending = true, researchSpent+" "+researchWrite
+			writing, s.pending = true, researchSpent+" "+report
 		}
 	}
 }
@@ -310,11 +347,61 @@ func asksFirst(messages []domain.Message) bool {
 		return false
 	}
 	for i := question - 1; i >= 0 && messages[i].Role != "user"; i-- {
-		if slices.ContainsFunc(messages[i].Timeline, func(b domain.Block) bool { return b.Type == "tool_call" && b.Name == domain.QuestionsWidget }) {
+		if slices.ContainsFunc(messages[i].Timeline, isQuestions) {
 			return false
 		}
 	}
 	return true
+}
+
+func isQuestions(b domain.Block) bool {
+	return b.Type == "tool_call" && b.Name == domain.QuestionsWidget
+}
+
+// reportBlock reports whether a block of a research's reply is part of its
+// report, which the model reads back: its text, and the artifact it may have
+// written the report in.
+func reportBlock(b domain.Block) bool {
+	return b.Type == "content" || b.Type == "tool_call" && b.Name == domain.ArtifactWidget
+}
+
+// answersAnew are the turns, as carried out, that answer a question anew,
+// which a research may answer. A continuation goes on with the reply it
+// extends.
+var answersAnew = []string{"send", "edit", "regenerate", "answer"}
+
+// markResearch marks the question a turn answers as one that asks for deep
+// research: when the turn asks for it, and when the question follows the
+// questions a research asked first, which answering them continues. An edit,
+// regeneration or retry of a marked question researches it again.
+func markResearch(t *domain.Thread, turn *TurnRequest) {
+	question := lastQuestion(t.Messages)
+	if !slices.Contains(answersAnew, turn.Kind) || question < 0 {
+		return
+	}
+	if turn.Options.Research || turn.Kind == "send" && askedFirst(t.Messages[:question]) {
+		t.Messages[question].Research = &domain.Research{Version: researchVersion}
+	}
+}
+
+// researches reports whether a turn of a chat researches: whether it answers
+// anew a question that asks for deep research.
+func researches(t *domain.Thread, kind string) bool {
+	question := lastQuestion(t.Messages)
+	return slices.Contains(answersAnew, kind) && question >= 0 && t.Messages[question].Research != nil
+}
+
+// askedFirst reports whether messages end with the questions a research
+// asked first: a reply to a question that asks for deep research, which
+// called the questions widget and wrote no report.
+func askedFirst(messages []domain.Message) bool {
+	question := lastQuestion(messages)
+	if question < 0 || messages[question].Research == nil {
+		return false
+	}
+	return slices.ContainsFunc(messages[question+1:], func(m domain.Message) bool {
+		return m.Role == "assistant" && m.Research == nil && slices.ContainsFunc(m.Timeline, isQuestions)
+	})
 }
 
 // errResearchUnavailable refuses a research to a caller without a
@@ -326,8 +413,8 @@ func errResearchUnavailable() error {
 // allowResearch refuses a research turn its caller may not start now: one
 // from a caller without a subscription, or within an hour of when their last
 // research started. It counts nothing; startResearch does.
-func (eng *Engine) allowResearch(ctx context.Context, r *Run, p *auth.Principal) error {
-	if !r.input.Options.Research {
+func (eng *Engine) allowResearch(ctx context.Context, r *Run, p *auth.Principal, research bool) error {
+	if !research {
 		return nil
 	}
 	if p.Anonymous || !r.credential.FirstParty {

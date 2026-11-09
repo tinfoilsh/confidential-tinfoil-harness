@@ -236,7 +236,8 @@ func questionText(m *domain.Message) string {
 }
 
 // replyText is a reply's text with a line for each tool call where it ran.
-// A research's reply is its report alone, as the model reads it.
+// A research's reply is its report alone, as the model reads it, with the
+// artifact it may have written the report in.
 func replyText(m *domain.Message) string {
 	var b strings.Builder
 	wrote := false
@@ -246,7 +247,7 @@ func replyText(m *domain.Message) string {
 			b.WriteString(block.Content)
 			wrote = wrote || block.Content != ""
 		case "tool_call":
-			if m.Research == nil {
+			if m.Research == nil || reportBlock(block) {
 				b.WriteString("\n[" + callLine(&block) + "]\n")
 			}
 		}
