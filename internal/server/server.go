@@ -19,6 +19,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/jobs"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/pages"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/remoteimage"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/search"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/summarize"
@@ -72,7 +73,7 @@ func Run() {
 	}
 	go h.search.RunDeletionWorker(ctx)
 	go h.store.RunAttachmentMaintenance(ctx)
-	h.attachments = &attach.Service{Auth: h.auth, Models: h.models, Store: h.store, Pages: h.pages}
+	h.attachments = &attach.Service{Auth: h.auth, Models: h.models, Store: h.store, Pages: h.pages, Images: remoteimage.New()}
 	h.store.Repair = h.attachments
 	h.engine = &engine.Engine{Safeguards: engine.NewSubmitter(os.Getenv("SAFEGUARDS_URL")), Store: h.store, Models: h.models, Attachments: h.attachments, Auth: h.auth, Summaries: h.summaries, Memory: engine.SystemMemory}
 	if available, total, err := engine.SystemMemory(); err != nil {

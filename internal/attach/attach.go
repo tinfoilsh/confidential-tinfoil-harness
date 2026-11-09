@@ -37,6 +37,7 @@ type Service struct {
 	Models *inference.Models
 	Store  *store.Store
 	Pages  Pages
+	Images Images
 }
 
 // Text is read whole into a chat, so a text file may be larger than the

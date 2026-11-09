@@ -122,7 +122,7 @@ tags:
   - name: speech
     description: Transcription and read-aloud.
   - name: metadata
-    description: Favicons and link previews, fetched inside an enclave.
+    description: Images, favicons and link previews, fetched inside an enclave.
 
 paths:
 
@@ -1325,6 +1325,25 @@ paths:
                   favicon_content_type: {type: string}
         default: {$ref: "#/components/responses/Error"}
 
+  /v1/metadata/image:
+    post:
+      operationId: remoteImage
+      summary: Load a public image inside the enclave
+      tags: [metadata]
+      description: Fetches an HTTPS image without caller headers or cookies and returns a PNG copy. Private destinations, nonstandard ports, excessive redirects, oversized downloads and images over the pixel limit are refused. Animation is reduced to its first frame. Clients never fall back to downloading the URL directly.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PageRequest"}
+      responses:
+        "200":
+          description: Image bytes for local display.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/RemoteImage"}
+        default: {$ref: "#/components/responses/Error"}
+
   /v1/metadata/link:
     post:
       operationId: linkMetadata
@@ -1491,6 +1510,13 @@ components:
       required: [url]
       properties:
         url: {type: string}
+
+    RemoteImage:
+      type: object
+      required: [image_bytes, image_content_type]
+      properties:
+        image_bytes: {type: string, description: "Base64-encoded PNG, no more than 8 MiB before base64 encoding."}
+        image_content_type: {type: string, const: "image/png"}
 
     # --- Errors ---------------------------------------------------------------
 
