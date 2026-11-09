@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -201,6 +202,34 @@ func TestRenamingAChatPreservesItsConversationActivity(t *testing.T) {
 	var summary domain.ThreadSummary
 	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &summary) != nil || summary.Title != "Renamed" || summary.ActivityAt != "2026-03-01T00:00:00Z" || summary.UpdatedAt == nil || *summary.UpdatedAt == summary.ActivityAt {
 		t.Fatalf("rename activity: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// A change a client sent is saved whole even if the client leaves before it
+// is answered, as a page reloaded right after a rename does: the chat, and
+// the favorites a pin changes.
+func TestARenameIsSavedWhenItsClientLeaves(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	rows.rows["user:alice/chat/renamed"] = domain.StoredRow{ID: "renamed", ETag: "1", Data: api.Raw(domain.Thread{ID: "renamed", Title: "Old", CreatedAt: "2026-01-01T00:00:00Z", Messages: []domain.Message{}})}
+	r := httptest.NewRequest("POST", "/v1/threads/update", bytes.NewReader(api.Raw(api.Object{"id": "renamed", "key": keyBase64(key), "title": "New", "pinned": true})))
+	r.Header.Set("Content-Type", "application/json")
+	signIn(r, "alice")
+	ctx, leave := context.WithCancel(r.Context())
+	defer leave()
+	// The client leaves while the chat is being written.
+	rows.refuse = func(*domain.StoredRow) error {
+		leave()
+		return nil
+	}
+	h.routes().ServeHTTP(httptest.NewRecorder(), r.WithContext(ctx))
+	p := &auth.Principal{ID: "alice"}
+	row, err := rows.Load(context.Background(), p, key, "chat", "renamed")
+	if err != nil || mustRead(domain.ReadThreadRow(row)).Title != "New" {
+		t.Fatalf("the rename was lost when its client left: %v", err)
+	}
+	profile, saved := rows.rows[rowMapKey(p, "profile", "profile")]
+	if !saved || !slices.Contains(mustRead(domain.ReadProfile(profile.Data)).PinnedChatIDs, "renamed") {
+		t.Fatal("the pin was lost from the favorites when its client left")
 	}
 }
 
