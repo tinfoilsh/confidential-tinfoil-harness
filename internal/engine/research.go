@@ -39,8 +39,10 @@ const (
 	// writes its report.
 	researchTurns = 40
 	// researchTime is how long a research searches and reads before it
-	// writes its report, which the rest of RunTimeout leaves room for.
-	researchTime = 20 * time.Minute
+	// writes its report, and researchReportTime how long it then has to
+	// write it.
+	researchTime       = 20 * time.Minute
+	researchReportTime = 10 * time.Minute
 	// reportTurns bounds the turns a research is offered the artifact
 	// widget to write its report in, which leaves the model one more try
 	// when the widget refuses its arguments.

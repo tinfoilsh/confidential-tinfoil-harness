@@ -146,7 +146,7 @@ func (eng *Engine) admit(ctx context.Context, p *auth.Principal, credential auth
 	id, local := in.ThreadID, in.Local
 	keyless := p.Anonymous || local
 	if !keyless {
-		granted, err := eng.Store.Rows.AuthorizeRun(ctx, p, key, in.ThreadID, in.ProjectID)
+		granted, err := eng.Store.Rows.AuthorizeRun(ctx, p, key, in.ThreadID, in.ProjectID, runGrant)
 		if err != nil {
 			return err
 		}
@@ -212,6 +212,7 @@ func (eng *Engine) admit(ctx context.Context, p *auth.Principal, credential auth
 	r.Log.stop = stop
 	// The user message a turn adds is named by the client's request.
 	r.stopped, r.input, r.received, r.Principal, r.key, r.messageID, r.credential, r.assembler = stopped, &clean, api.Timestamp(), p, key, r.nonce, credential, domain.NewMessageAssembler()
+	r.access = eng.access(p, credential)
 	if keyless {
 		clear(r.key[:])
 	}

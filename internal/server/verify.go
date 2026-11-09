@@ -25,11 +25,6 @@ const (
 )
 
 func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
-	authenticator, err := auth.New(ctx, os.Getenv("CLERK_ISSUER"), h.controlplane)
-	if err != nil {
-		return err
-	}
-	h.auth = authenticator
 	if err := h.models.Boot(ctx, usageSecret); err != nil {
 		return err
 	}
@@ -52,6 +47,11 @@ func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
 		}
 	}
 	cp := controlplane.NewClient(h.controlplane, &http.Client{Timeout: controlplaneTimeout}, controlplane.WithServiceSecret(secret))
+	authenticator, err := auth.New(ctx, os.Getenv("CLERK_ISSUER"), h.controlplane, cp.SafeguardFlags)
+	if err != nil {
+		return err
+	}
+	h.auth = authenticator
 	bk := buckets.NewClient(bucketsURL, bucket, &http.Client{Timeout: bucketsTimeout})
 	if !bk.Configured() {
 		return fmt.Errorf("CHAT_ATTACHMENTS_BUCKET %q is not a valid bucket name", bucket)

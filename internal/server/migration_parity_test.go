@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
@@ -238,9 +239,9 @@ type countedRunGrants struct {
 	grants atomic.Int32
 }
 
-func (s *countedRunGrants) AuthorizeRun(ctx context.Context, p *auth.Principal, key auth.ContentKey, id string, project *string) (*auth.StorageGrant, error) {
+func (s *countedRunGrants) AuthorizeRun(ctx context.Context, p *auth.Principal, key auth.ContentKey, id string, project *string, lifetime time.Duration) (*auth.StorageGrant, error) {
 	s.grants.Add(1)
-	return s.memoryRows.AuthorizeRun(ctx, p, key, id, project)
+	return s.memoryRows.AuthorizeRun(ctx, p, key, id, project, lifetime)
 }
 
 func TestAQueuedTurnRefreshesStorageAccessBeforeStarting(t *testing.T) {

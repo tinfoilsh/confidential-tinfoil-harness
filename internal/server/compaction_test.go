@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -16,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
@@ -485,20 +483,12 @@ func TestAFailedCompactionEndsTheRunWithoutCuttingTheChat(t *testing.T) {
 }
 
 // A compaction bills the caller whose run asks for it, as part of that run
-// and without counting as a request of its own. When the caller's key has
-// expired, the compaction and then the model turn each go on with the newest
-// key the caller presented.
+// and without counting as a request of its own.
 func TestACompactionIsBilledToItsCaller(t *testing.T) {
-	soon := mintChatToken("alice", func(_ map[string]any, claims jwt.MapClaims) { claims["exp"] = time.Now().Add(10 * time.Minute).Unix() })
-	renewed := mintChatToken("alice", nil)
-	runs := make(chan string, 2)
+	runs := make(chan string, 1)
 	h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		usage, _, _ := usagereporting.FromHeaders(r.Header, "test-usage-secret", time.Now(), time.Minute)
 		runs <- usage.ContextID
-		if r.Header.Get("Authorization") != "Bearer "+renewed {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\ndata: [DONE]\n\n")
 	})
 	type billed struct {
@@ -512,50 +502,34 @@ func TestACompactionIsBilledToItsCaller(t *testing.T) {
 		}
 		usage, _ := auth.Usage(ctx)
 		summaries = append(summaries, billed{auth.CallerKey(ctx), usage})
-		if auth.CallerKey(ctx) != renewed {
-			return inference.Completed{}, &inference.Refused{Status: http.StatusUnauthorized}
-		}
 		return inference.Completed{Text: compactionOf("The user plans a lighthouse tour of Maine."), FinishReason: "stop"}, nil
 	}))
 	longCompacted(rows, "chat-1")
-	present := httptest.NewRequest(http.MethodPost, "/v1/changes", nil)
-	signIn(present, "alice")
-	present.Header.Set(auth.InferenceKeyHeader, renewed)
-	if _, err := h.auth.Authenticate(present, true); err != nil {
-		t.Fatal(err)
-	}
-	r := httptest.NewRequest(http.MethodPost, "/v1/threads/turn", bytes.NewReader(api.Raw(continueInput(key, "chat-1"))))
-	signIn(r, "alice")
-	r.Header.Set(auth.InferenceKeyHeader, soon)
-	w := httptest.NewRecorder()
-	h.routes().ServeHTTP(w, r)
-	events := eventsIn(t, w)
-	if last := events[len(events)-1]; last.Type != "RUN_FINISHED" || len(runs) != 2 {
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", continueInput(key, "chat-1"), "alice"))
+	if last := events[len(events)-1]; last.Type != "RUN_FINISHED" || len(runs) != 1 {
 		t.Fatalf("the run ended with %+v after %d model turns", last, len(runs))
 	}
 	run := <-runs
-	if len(summaries) != 2 || summaries[0].key != soon || summaries[1].key != renewed {
+	if len(summaries) != 1 || summaries[0].key != chatTokenOf("alice") {
 		t.Fatalf("the compaction was billed to %d keys", len(summaries))
 	}
-	for _, summary := range summaries {
-		if u := summary.usage; u.ContextID == "" || u.ContextID != run || u.ParentService != "harness" || u.Depth != 1 || u.BillCustomerRequest || !usagereporting.VerifyAPIKeyHash(summary.key, u.APIKeyHash) {
-			t.Fatalf("the compaction was billed outside the run, or as a request: %+v", u)
-		}
+	if u := summaries[0].usage; u.ContextID == "" || u.ContextID != run || u.ParentService != "harness" || u.Depth != 1 || u.BillCustomerRequest {
+		t.Fatalf("the compaction was billed outside the run, or as a request: %+v", u)
 	}
 }
 
-// A compaction refused for a key the caller has presented no renewal of ends
-// the run asking for a new one, as a model turn does.
-func TestACompactionWithoutARenewedKeyAsksForOne(t *testing.T) {
+// A compaction the caller's chat access could not be renewed for ends the
+// run saying so, as a model turn does, instead of as a summary that failed.
+func TestACompactionWithoutChatAccessSaysWhy(t *testing.T) {
 	prompts := make(chan []string, 1)
 	h, rows, key := testChatHarness(t, promptOf(prompts))
 	h.compactOn(accountFunc(func(context.Context, inference.Completion) (inference.Completed, error) {
-		return inference.Completed{}, &inference.Refused{Status: http.StatusUnauthorized}
+		return inference.Completed{}, fmt.Errorf("caller's completion: %w", api.Err(403, "UPSTREAM_REFUSED", "This account is suspended").WithAction(api.ActionStop))
 	}))
 	longCompacted(rows, "chat-1")
 	events := eventsIn(t, postRoute(h, "/v1/threads/turn", continueInput(key, "chat-1"), "alice"))
-	if last := events[len(events)-1]; last.Type != "RUN_ERROR" || last.Code != "CREDENTIAL_REQUIRED" || len(prompts) != 0 {
-		t.Fatalf("the run ended with %s %s", last.Type, last.Code)
+	if last := events[len(events)-1]; last.Type != "RUN_ERROR" || last.Code != "UPSTREAM_REFUSED" || last.Message != "This account is suspended" || last.Action != api.ActionStop || len(prompts) != 0 {
+		t.Fatalf("the run ended with %s %s %q", last.Type, last.Code, last.Message)
 	}
 }
 

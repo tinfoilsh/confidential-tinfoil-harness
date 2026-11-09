@@ -235,7 +235,7 @@ func TestPullWithAnotherKeyNamesTheSealingKey(t *testing.T) {
 	if e := api.AsError(failed["c1"]); e.Code != "KEY_MISMATCH" || e.KeyID != h.kid {
 		t.Fatalf("failure = %+v, want KEY_MISMATCH naming %s", e, h.kid)
 	}
-	if _, err := h.rows.AuthorizeRun(ctx, h.p, other, "c1", nil); codeOf(err) != "KEY_MISMATCH" {
+	if _, err := h.rows.AuthorizeRun(ctx, h.p, other, "c1", nil, time.Hour); codeOf(err) != "KEY_MISMATCH" {
 		t.Fatalf("a run was granted a chat its key cannot open: %v", err)
 	}
 }
@@ -457,11 +457,11 @@ func TestARunsGrantCoversItsChatAndItsProjectsContext(t *testing.T) {
 	h.push(t, "project", "project", `{"name":"House"}`)
 	h.push(t, "project_document", "project/doc", `{"content":"Context"}`)
 	h.push(t, "project_document", "other/doc", `{"content":"Not ours"}`)
-	grant, err := h.rows.AuthorizeRun(ctx, h.p, h.key, "target", nil)
-	if err != nil || grant.ChatID != "target" || grant.ProjectID != "project" || grant.KeyID != h.kid || !grant.ExpiresAt.After(api.Now().Add(grantLifetime-time.Minute)) {
-		t.Fatalf("grant = %+v (%v), want the stored chat's project under this key for an hour", grant, err)
+	grant, err := h.rows.AuthorizeRun(ctx, h.p, h.key, "target", nil, 3*time.Hour)
+	if err != nil || grant.ChatID != "target" || grant.ProjectID != "project" || grant.KeyID != h.kid || !grant.ExpiresAt.After(api.Now().Add(3*time.Hour-time.Minute)) || grant.ExpiresAt.After(api.Now().Add(3*time.Hour)) {
+		t.Fatalf("grant = %+v (%v), want the stored chat's project under this key for the three hours asked", grant, err)
 	}
-	if fresh, err := h.rows.AuthorizeRun(ctx, h.p, h.key, "new-chat", &project); err != nil || fresh.ProjectID != project {
+	if fresh, err := h.rows.AuthorizeRun(ctx, h.p, h.key, "new-chat", &project, time.Hour); err != nil || fresh.ProjectID != project {
 		t.Fatalf("a new chat's grant = %+v (%v), want the project it names", fresh, err)
 	}
 	run := *h.p

@@ -95,8 +95,8 @@ func (stubEmbedder) Embed(_ context.Context, inputs []string) ([][]float32, erro
 	return out, nil
 }
 
-func (s *memoryRows) AuthorizeRun(_ context.Context, _ *auth.Principal, _ auth.ContentKey, id string, project *string) (*auth.StorageGrant, error) {
-	return &auth.StorageGrant{ChatID: id, ProjectID: domain.ValueOr(project, ""), ExpiresAt: api.Now().Add(time.Hour)}, nil
+func (s *memoryRows) AuthorizeRun(_ context.Context, _ *auth.Principal, _ auth.ContentKey, id string, project *string, lifetime time.Duration) (*auth.StorageGrant, error) {
+	return &auth.StorageGrant{ChatID: id, ProjectID: domain.ValueOr(project, ""), ExpiresAt: api.Now().Add(lifetime)}, nil
 }
 
 func (s *memoryRows) AuthorizeStorage(_ context.Context, p *auth.Principal, _ auth.ContentKey, operation, project string) (*auth.StorageGrant, error) {
@@ -448,7 +448,7 @@ func signIn(r *http.Request, user string) {
 // everything else with handler.
 func unflagged(handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == auth.SafeguardFlagsPath {
+		if r.URL.Path == controlplane.SafeguardFlagsPath {
 			io.WriteString(w, `{"flags":[]}`)
 			return
 		}
@@ -581,6 +581,7 @@ type event struct {
 	Metadata   json.RawMessage     `json:"metadata,omitempty"`
 	Display    *domain.ToolDisplay `json:"display,omitempty"`
 	Outcome    string              `json:"outcome,omitempty"`
+	Action     string              `json:"action,omitempty"`
 	Before     string              `json:"beforeMessageId,omitempty"`
 }
 
@@ -1584,6 +1585,13 @@ func (r *recordedCalls) list() []recordedCall {
 // schemas as it does, and answers every call with respond.
 func serveWebsearch(t *testing.T, respond func(name string, args map[string]any) (*mcp.CallToolResult, any)) *recordedCalls {
 	t.Helper()
+	return serveWebsearchBehind(t, func(enclave http.Handler) http.Handler { return enclave }, respond)
+}
+
+// serveWebsearchBehind is serveWebsearch with shim answering each request
+// before the enclave does, as the shim that checks its caller's key does.
+func serveWebsearchBehind(t *testing.T, shim func(enclave http.Handler) http.Handler, respond func(name string, args map[string]any) (*mcp.CallToolResult, any)) *recordedCalls {
+	t.Helper()
 	type searchArgs struct {
 		Query      string `json:"query"`
 		MaxResults int    `json:"max_results,omitempty"`
@@ -1601,7 +1609,7 @@ func serveWebsearch(t *testing.T, respond func(name string, args map[string]any)
 		result, structured := respond(req.Params.Name, args)
 		return result, structured, nil
 	}
-	server := httptest.NewTLSServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+	server := httptest.NewTLSServer(shim(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		s := mcp.NewServer(&mcp.Implementation{Name: "confidential-websearch", Version: "test"}, nil)
 		mcp.AddTool(s, &mcp.Tool{Name: "search", Description: "Search the web."}, func(_ context.Context, req *mcp.CallToolRequest, _ searchArgs) (*mcp.CallToolResult, any, error) {
 			return record(req)
@@ -1610,7 +1618,7 @@ func serveWebsearch(t *testing.T, respond func(name string, args map[string]any)
 			return record(req)
 		})
 		return s
-	}, &mcp.StreamableHTTPOptions{Stateless: true}))
+	}, &mcp.StreamableHTTPOptions{Stateless: true})))
 	t.Cleanup(server.Close)
 	t.Cleanup(engine.UseWebSearch(strings.TrimPrefix(server.URL, "https://"), &http.Client{Transport: &auth.CallerTransport{Inner: server.Client().Transport, UsageSecret: "test-usage-secret"}}))
 	return recorded
@@ -2038,7 +2046,7 @@ func TestWebSearchIsBilledOnlyToAPIKeys(t *testing.T) {
 				if usage.BillCustomerRequest != tc.billed {
 					t.Fatalf("search was billed %v: %+v", usage.BillCustomerRequest, usage)
 				}
-				if usage.ContextID != run || usage.RootRequestID != run || usage.ParentService != "harness" || usage.Depth != 1 || !usagereporting.VerifyAPIKeyHash(tc.key, usage.APIKeyHash) {
+				if usage.ContextID != run || usage.RootRequestID != run || usage.ParentService != "harness" || usage.Depth != 1 || usage.APIKeyHash != usagereporting.HashAPIKey(tc.key) {
 					t.Fatalf("search lost the run's identity: %+v", usage)
 				}
 				// Usage headers leave the enclave; the run id admits followers.
@@ -2360,7 +2368,8 @@ func testAuth(cp *httptest.Server) *auth.Authenticator {
 			return "", errors.New("bad session")
 		}
 		return strings.TrimPrefix(s, "clerk-"), nil
-	}, ChatKeys: func(*jwt.Token) (any, error) { return testChatKeys().Public(), nil }, ChatIssuer: testChatIssuer, Client: cp.Client(), Controlplane: cp.URL})
+	}, ChatKeys: func(*jwt.Token) (any, error) { return testChatKeys().Public(), nil }, ChatIssuer: testChatIssuer, Client: cp.Client(), Controlplane: cp.URL,
+		Flags: controlplane.NewClient(cp.URL, cp.Client(), controlplane.WithServiceSecret(testStorageSecret)).SafeguardFlags})
 }
 
 // useAuth has the harness and every layer that checks callers use a.

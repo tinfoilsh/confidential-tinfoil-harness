@@ -25,7 +25,6 @@ import (
 )
 
 type Request struct {
-	refreshAuth                func(ctx context.Context, rejected auth.Secret) (auth.Credential, error)
 	compact                    func(context.Context, int) error // compacts the chat, once, when its prompt would not fit
 	params                     api.Object
 	System, widgetHint, policy string

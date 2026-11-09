@@ -104,6 +104,10 @@ type Store struct {
 	// ResearchStarts are when each user last started a deep research, by
 	// user id; the stub allows one a researchWindow, as the control plane does.
 	ResearchStarts map[string]time.Time
+	// RenewChatToken answers a renewal of the chat token a user's run holds
+	// with the next token, or with the status the control plane refuses it
+	// by. Unset, every renewal is refused as not found.
+	RenewChatToken func(user, held string) (token string, refused int)
 	// answered are the changes made under an idempotency key, by the
 	// caller and the key. The control plane keeps them for a day, the
 	// stub for its life.
@@ -209,7 +213,24 @@ func New() *Store {
 	s.mux.HandleFunc("POST /api/sync/notify-import-complete", s.handleNotifyImportOutcome)
 	s.mux.HandleFunc("GET "+controlplane.ResearchPath, s.handleResearchAllowance)
 	s.mux.HandleFunc("POST "+controlplane.ResearchPath, s.handleStartResearch)
+	s.mux.HandleFunc("POST "+controlplane.ChatTokenPath, s.handleRenewChatToken)
 	return s
+}
+
+func (s *Store) handleRenewChatToken(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || s.RenewChatToken == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
+	token, refused := s.RenewChatToken(r.Header.Get(controlplane.HeaderClerkUserID), in.Token)
+	if refused != 0 {
+		writeJSON(w, refused, map[string]string{"error": "refused"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"key": token})
 }
 
 // researchWindow is how long after a user starts a deep research the

@@ -1492,6 +1492,81 @@ func (c *Client) StartResearch(ctx context.Context, clerkUserID string) error {
 	return nil
 }
 
+// ChatTokenPath is where the control plane renews the chat access token of
+// a reply the harness is still writing.
+const ChatTokenPath = "/api/sync/chat-token"
+
+// maxChatTokenResponseBytes bounds the control plane's answer to a renewal.
+const maxChatTokenResponseBytes = 32 << 10
+
+// RenewChatToken trades the chat access token a user's run holds, expired
+// or not, for a fresh one, so the run outlives the token it started with
+// whether or not the user's client is there to mint another. The control
+// plane refuses it once the user's subscription ends or their account is
+// suspended, and not for their hourly cap, which a reply already started
+// may finish past.
+func (c *Client) RenewChatToken(ctx context.Context, clerkUserID, held string) (string, error) {
+	if clerkUserID == "" {
+		return "", fmt.Errorf("controlplane: clerk user id is required")
+	}
+	body, err := json.Marshal(struct {
+		Token string `json:"token"`
+	}{held})
+	if err != nil {
+		return "", err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+ChatTokenPath, bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	httpReq.Header.Set(HeaderContentType, "application/json")
+	c.addAuth(httpReq, "", clerkUserID)
+	resp, err := c.doRequest(httpReq)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxChatTokenResponseBytes))
+	if resp.StatusCode/100 != 2 {
+		return "", parseError(resp.StatusCode, raw)
+	}
+	if err != nil {
+		return "", fmt.Errorf("controlplane: read %s: %w", ChatTokenPath, err)
+	}
+	var renewed struct {
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal(raw, &renewed); err != nil || renewed.Key == "" {
+		return "", fmt.Errorf("controlplane: %s returned no chat token", ChatTokenPath)
+	}
+	return renewed.Key, nil
+}
+
+// SafeguardFlagsPath lists the chats the safeguards flagged for a user.
+const SafeguardFlagsPath = "/api/sync/safeguard-flags"
+
+// SafeguardFlags are the ids of the user's chats the safeguards flagged.
+// It forwards no JWT, so a turn that waited in a queue is checked as one
+// that starts at once is.
+func (c *Client) SafeguardFlags(ctx context.Context, clerkUserID string) ([]string, error) {
+	if clerkUserID == "" {
+		return nil, fmt.Errorf("controlplane: clerk user id is required")
+	}
+	var listed struct {
+		Flags []struct {
+			ConversationID string `json:"conversation_id"`
+		} `json:"flags"`
+	}
+	if err := c.getSyncJSON(ctx, SafeguardFlagsPath, nil, "", clerkUserID, &listed); err != nil {
+		return nil, err
+	}
+	chats := make([]string, 0, len(listed.Flags))
+	for _, flag := range listed.Flags {
+		chats = append(chats, flag.ConversationID)
+	}
+	return chats, nil
+}
+
 func (c *Client) DeleteAttachmentIndex(ctx context.Context, jwt, clerkUserID, attachmentID string) error {
 	if attachmentID == "" {
 		return fmt.Errorf("controlplane: attachment id is required")
