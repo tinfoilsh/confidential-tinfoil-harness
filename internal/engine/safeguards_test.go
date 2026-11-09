@@ -127,6 +127,7 @@ func TestOnlyCompletedFirstPartyAndAPIKeyChatsAreScreened(t *testing.T) {
 			r := &Run{Thread: &threadSession{ID: "chat-1"}, turn: &TurnRequest{Kind: "send"}, Principal: &auth.Principal{ID: "alice"}, credential: chatToken,
 				screening: &screening{conversation: "chat-1", messages: []SafeguardMessage{{Role: "user", Content: "hi"}}}}
 			tc.change(r)
+			r.access = auth.NewAccess(r.credential, nil)
 			h.screen(r, tc.reply, tc.err)
 			if submitted := submissions.Load() == 1; submitted != tc.want {
 				t.Fatalf("submitted = %v, want %v", submitted, tc.want)

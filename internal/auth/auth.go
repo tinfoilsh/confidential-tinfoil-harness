@@ -95,13 +95,12 @@ type chatTokenClaims struct {
 	jwt.RegisteredClaims
 }
 
-// Callers remembered by the caches below, each evicting its least recently
-// used entry when full. A free key or API key validated within issuedKeyTTL
-// admits its caller without asking the control plane again.
+// Up to maxCachedCallers callers are remembered, the least recently used
+// leaving first. A free key or API key validated within issuedKeyTTL admits
+// its caller without asking the control plane again.
 const (
 	maxCachedCallers = 10000
 	issuedKeyTTL     = time.Minute
-	credentialTTL    = time.Hour
 )
 
 var errCredentialRequired = api.Err(401, "CREDENTIAL_REQUIRED", "Chat access is missing or expired")
@@ -132,22 +131,17 @@ type Authenticator struct {
 	chatIssuer   string
 	client       *http.Client
 	controlplane string
-	cachesOnce   sync.Once
-	newest       *expirable.LRU[string, Credential]
+	validOnce    sync.Once
 	valid        *expirable.LRU[string, struct{}]
 	flagsOnce    sync.Once
 	flags        *expirable.LRU[string, ChatFlags]
 	readFlags    func(ctx context.Context, userID string) ([]string, error)
 }
 
-func (a *Authenticator) caches() {
-	a.cachesOnce.Do(func() {
-		a.newest = expirable.NewLRU[string, Credential](maxCachedCallers, nil, credentialTTL)
-		a.valid = expirable.NewLRU[string, struct{}](maxCachedCallers, nil, issuedKeyTTL)
-	})
+func (a *Authenticator) validKeys() *expirable.LRU[string, struct{}] {
+	a.validOnce.Do(func() { a.valid = expirable.NewLRU[string, struct{}](maxCachedCallers, nil, issuedKeyTTL) })
+	return a.valid
 }
-
-func (a *Authenticator) validKeys() *expirable.LRU[string, struct{}] { a.caches(); return a.valid }
 
 func New(ctx context.Context, issuer, cp string, flags func(ctx context.Context, userID string) ([]string, error)) (*Authenticator, error) {
 	if !strings.HasPrefix(issuer, "https://") {
@@ -201,13 +195,7 @@ func (a *Authenticator) Authenticate(r *http.Request, anonymous bool) (*Principa
 	if err != nil {
 		return nil, api.Err(401, "UNAUTHENTICATED", "The Clerk session is invalid or expired")
 	}
-	p := &Principal{ID: id, JWT: Secret(token), InferenceKey: Secret(strings.TrimSpace(r.Header.Get(InferenceKeyHeader)))}
-	// Every request carrying a chat token keeps the newest one at hand for
-	// runs that outlive theirs.
-	if p.InferenceKey != "" && !strings.HasPrefix(string(p.InferenceKey), "free_") {
-		a.chatToken(p)
-	}
-	return p, nil
+	return &Principal{ID: id, JWT: Secret(token), InferenceKey: Secret(strings.TrimSpace(r.Header.Get(InferenceKeyHeader)))}, nil
 }
 
 // recognize refuses a caller before its body is read: a signed-out caller
@@ -326,40 +314,24 @@ func (a *Authenticator) Inference(ctx context.Context, p *Principal) (Credential
 	case p.Anonymous || strings.HasPrefix(string(p.InferenceKey), "free_"):
 		return a.issuedKey(ctx, p)
 	}
-	return a.chatToken(p)
+	return a.ChatCredential(p.ID, p.InferenceKey)
 }
 
-// chatToken verifies a signed-in caller's chat access token: the control
-// plane signed it for the Tinfoil Chat client, for this caller, and it has
-// not expired.
-func (a *Authenticator) chatToken(p *Principal) (Credential, error) {
+// ChatCredential verifies a chat access token as a signed-in user's: the
+// control plane signed it for the Tinfoil Chat client, for this user, and
+// it has not expired.
+func (a *Authenticator) ChatCredential(userID string, token Secret) (Credential, error) {
 	var claims chatTokenClaims
 	parsed, err := jwt.NewParser(jwt.WithValidMethods([]string{"EdDSA"}), jwt.WithIssuer(a.chatIssuer), jwt.WithAudience(ChatTokenAudience), jwt.WithExpirationRequired(), jwt.WithIssuedAt(), jwt.WithLeeway(30*time.Second)).
-		ParseWithClaims(string(p.InferenceKey), &claims, a.chatKeys)
+		ParseWithClaims(string(token), &claims, a.chatKeys)
 	if err != nil || !parsed.Valid {
 		return Credential{}, errCredentialRequired
 	}
 	kind, _ := parsed.Header["typ"].(string)
-	if !strings.EqualFold(kind, ChatTokenType) || p.Anonymous || claims.Subject != p.ID || claims.ID == "" || claims.ClientID != ChatTokenClient || claims.Product != ChatTokenProduct || !slices.Contains(strings.Fields(claims.Scope), ChatTokenScope) {
+	if !strings.EqualFold(kind, ChatTokenType) || userID == "" || claims.Subject != userID || claims.ID == "" || claims.ClientID != ChatTokenClient || claims.Product != ChatTokenProduct || !slices.Contains(strings.Fields(claims.Scope), ChatTokenScope) {
 		return Credential{}, errCredentialRequired
 	}
-	credential := Credential{Key: p.InferenceKey, Expires: claims.ExpiresAt.Time, FirstParty: true}
-	a.caches()
-	if held, ok := a.newest.Get(p.Scope()); !ok || credential.Expires.After(held.Expires) {
-		a.newest.Add(p.Scope(), credential)
-	}
-	return credential, nil
-}
-
-// renewed is the newest chat token the caller presented, for a run whose
-// own was refused, unless it is the refused one or has expired.
-func (a *Authenticator) Renewed(p *Principal, refused Secret) (Credential, error) {
-	a.caches()
-	credential, ok := a.newest.Get(p.Scope())
-	if !ok || credential.Key == refused || !credential.Expires.After(api.Now()) {
-		return Credential{}, errCredentialRequired
-	}
-	return credential, nil
+	return Credential{Key: token, Expires: claims.ExpiresAt.Time, FirstParty: true}, nil
 }
 
 // Exhausted is the quota a refusal for a spent one leaves: no request left,

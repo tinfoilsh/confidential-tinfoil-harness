@@ -581,6 +581,7 @@ type event struct {
 	Metadata   json.RawMessage     `json:"metadata,omitempty"`
 	Display    *domain.ToolDisplay `json:"display,omitempty"`
 	Outcome    string              `json:"outcome,omitempty"`
+	Action     string              `json:"action,omitempty"`
 	Before     string              `json:"beforeMessageId,omitempty"`
 }
 
@@ -1584,6 +1585,13 @@ func (r *recordedCalls) list() []recordedCall {
 // schemas as it does, and answers every call with respond.
 func serveWebsearch(t *testing.T, respond func(name string, args map[string]any) (*mcp.CallToolResult, any)) *recordedCalls {
 	t.Helper()
+	return serveWebsearchBehind(t, func(enclave http.Handler) http.Handler { return enclave }, respond)
+}
+
+// serveWebsearchBehind is serveWebsearch with shim answering each request
+// before the enclave does, as the shim that checks its caller's key does.
+func serveWebsearchBehind(t *testing.T, shim func(enclave http.Handler) http.Handler, respond func(name string, args map[string]any) (*mcp.CallToolResult, any)) *recordedCalls {
+	t.Helper()
 	type searchArgs struct {
 		Query      string `json:"query"`
 		MaxResults int    `json:"max_results,omitempty"`
@@ -1601,7 +1609,7 @@ func serveWebsearch(t *testing.T, respond func(name string, args map[string]any)
 		result, structured := respond(req.Params.Name, args)
 		return result, structured, nil
 	}
-	server := httptest.NewTLSServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+	server := httptest.NewTLSServer(shim(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		s := mcp.NewServer(&mcp.Implementation{Name: "confidential-websearch", Version: "test"}, nil)
 		mcp.AddTool(s, &mcp.Tool{Name: "search", Description: "Search the web."}, func(_ context.Context, req *mcp.CallToolRequest, _ searchArgs) (*mcp.CallToolResult, any, error) {
 			return record(req)
@@ -1610,7 +1618,7 @@ func serveWebsearch(t *testing.T, respond func(name string, args map[string]any)
 			return record(req)
 		})
 		return s
-	}, &mcp.StreamableHTTPOptions{Stateless: true}))
+	}, &mcp.StreamableHTTPOptions{Stateless: true})))
 	t.Cleanup(server.Close)
 	t.Cleanup(engine.UseWebSearch(strings.TrimPrefix(server.URL, "https://"), &http.Client{Transport: &auth.CallerTransport{Inner: server.Client().Transport, UsageSecret: "test-usage-secret"}}))
 	return recorded

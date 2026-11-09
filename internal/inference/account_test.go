@@ -116,3 +116,24 @@ func TestACompletionItsCallerPaysForCarriesTheCallersKey(t *testing.T) {
 		t.Fatalf("the harness's completion was sent as %+v", got)
 	}
 }
+
+// A completion its caller pays for, sent when the caller's chat access has
+// expired and could not be renewed, fails with that refusal without reaching
+// the model, so the run asking for it ends saying why.
+func TestACompletionWithoutChatAccessFailsWithItsRefusal(t *testing.T) {
+	var reached bool
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }))
+	t.Cleanup(server.Close)
+	router := &Service{URL: server.URL, Client: &http.Client{Transport: &auth.CallerTransport{Inner: http.DefaultTransport, UsageSecret: "usage-secret"}}}
+	account := &modelAccount{callers: callerCompletions(router)}
+	suspended := api.Err(403, "UPSTREAM_REFUSED", "This account is suspended").WithAction(api.ActionStop)
+	access := auth.NewAccess(auth.Credential{Key: "expired-token", Expires: time.Now().Add(-time.Minute)}, func(context.Context, auth.Secret) (auth.Credential, error) {
+		return auth.Credential{}, suspended
+	})
+
+	_, err := account.Complete(auth.WithCaller(context.Background(), access), Completion{Model: "m", User: "x", MaxTokens: 1, CallerPays: true})
+	var refusal *api.Error
+	if !errors.As(err, &refusal) || refusal != suspended || reached {
+		t.Fatalf("the completion failed with %v, reaching the model: %t", err, reached)
+	}
+}

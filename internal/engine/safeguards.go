@@ -191,5 +191,5 @@ func (eng *Engine) screen(r *Run, reply []domain.Message, runErr error) {
 	if r.turn.Kind == "continue" && len(history) > 0 && history[len(history)-1].Role == "assistant" {
 		history = history[:len(history)-1]
 	}
-	eng.Safeguards.submit(string(r.credential.Key), r.screening.conversation, append(history, SafeguardMessage{Role: "assistant", Content: strings.Join(text, "\n")}))
+	eng.Safeguards.submit(string(r.access.Current()), r.screening.conversation, append(history, SafeguardMessage{Role: "assistant", Content: strings.Join(text, "\n")}))
 }

@@ -92,7 +92,6 @@ func (eng *Engine) loop(ctx context.Context, out *Stream, req *Request, m *infer
 			return err
 		}
 		calls, answer, err := eng.ask(c, out, m, payload, set.Widgets)
-		ctx = c.ctx
 		if err != nil {
 			return err
 		}
@@ -110,11 +109,9 @@ func (eng *Engine) loop(ctx context.Context, out *Stream, req *Request, m *infer
 // runCaller is who a run's model turns are asked for: the caller whose key
 // they carry, under the run's usage, and whose request the first turn is.
 type runCaller struct {
-	ctx         context.Context
-	usage       usagereporting.Context
-	refreshAuth func(ctx context.Context, rejected auth.Secret) (auth.Credential, error)
-	refreshed   bool
-	turns       int
+	ctx   context.Context
+	usage usagereporting.Context
+	turns int
 }
 
 func newRunCaller(ctx context.Context, req *Request) *runCaller {
@@ -122,10 +119,9 @@ func newRunCaller(ctx context.Context, req *Request) *runCaller {
 		ContextID:     req.usageID,
 		RootRequestID: req.usageID,
 		ParentService: "harness",
-		APIKeyHash:    usagereporting.HashAPIKey(auth.CallerKey(ctx)),
 		Depth:         1,
 	}
-	return &runCaller{ctx: auth.WithUsage(ctx, usage), usage: usage, refreshAuth: req.refreshAuth}
+	return &runCaller{ctx: auth.WithUsage(ctx, usage), usage: usage}
 }
 
 // turnCtx is what the caller's next model turn is asked under: the first
@@ -139,22 +135,9 @@ func (c *runCaller) turnCtx() context.Context {
 	return auth.WithUsage(c.ctx, billing)
 }
 
-// ask streams one model turn for the caller. A 401 rejects a request before
-// it is processed, so the first one a run meets renews the caller's key and
-// replays the turn's exact body, keeping the run's id and billing flag.
+// ask streams one model turn for the caller.
 func (eng *Engine) ask(c *runCaller, out *Stream, m *inference.Model, payload []byte, widgets map[string]domain.Widget) ([]ToolCall, string, error) {
 	c.turns++
-	calls, answer, err := eng.turn(c.turnCtx(), out, m, payload, widgets)
-	if err == nil || c.refreshAuth == nil || c.refreshed || api.AsError(err).HTTP != http.StatusUnauthorized {
-		return calls, answer, err
-	}
-	c.refreshed = true
-	credential, err := c.refreshAuth(c.ctx, auth.Secret(auth.CallerKey(c.ctx)))
-	if err != nil {
-		return nil, "", err
-	}
-	c.usage.APIKeyHash = usagereporting.HashAPIKey(string(credential.Key))
-	c.ctx = auth.WithUsage(auth.WithCallerKey(c.ctx, string(credential.Key)), c.usage)
 	return eng.turn(c.turnCtx(), out, m, payload, widgets)
 }
 

@@ -11,14 +11,11 @@ import (
 	"image/png"
 	"io"
 	"net/http"
-	"net/http/httptest"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/archives"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
@@ -68,61 +65,6 @@ func TestImagePreprocessingBoundsAndTransparency(t *testing.T) {
 		if err != nil || cfg.Height != 1 || cfg.Width != []int{1536, 256}[index] {
 			t.Fatal("unexpected resized dimensions", cfg, err)
 		}
-	}
-}
-
-// A model that refuses a run's chat token is asked once more, with the newest
-// token the same caller has presented since, never another caller's.
-func TestManagedModelRetriesARejectedChatTokenOnce(t *testing.T) {
-	for _, rejectAgain := range []bool{false, true} {
-		t.Run(strconv.FormatBool(rejectAgain), func(t *testing.T) {
-			soon := mintChatToken("alice", func(_ map[string]any, claims jwt.MapClaims) { claims["exp"] = time.Now().Add(10 * time.Minute).Unix() })
-			renewed := mintChatToken("alice", nil)
-			others := mintChatToken("bob", func(_ map[string]any, claims jwt.MapClaims) { claims["exp"] = time.Now().Add(2 * time.Hour).Unix() })
-			var modelCalls atomic.Int32
-			var original []byte
-			h, rows, key := testChatHarness(t, func(w http.ResponseWriter, r *http.Request) {
-				body, _ := io.ReadAll(r.Body)
-				call := modelCalls.Add(1)
-				if call == 1 {
-					original = body
-				} else if !bytes.Equal(original, body) || r.Header.Get("Authorization") != "Bearer "+renewed {
-					t.Error("retry changed the request body or did not take the caller's newest token")
-				}
-				if call == 1 || rejectAgain {
-					w.WriteHeader(http.StatusUnauthorized)
-					return
-				}
-				io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\ndata: [DONE]\n\n")
-			})
-			present := func(user, token string) {
-				r := httptest.NewRequest(http.MethodPost, "/v1/changes", nil)
-				signIn(r, user)
-				r.Header.Set(auth.InferenceKeyHeader, token)
-				if _, err := h.auth.Authenticate(r, true); err != nil {
-					t.Fatal(err)
-				}
-			}
-			present("alice", renewed)
-			present("bob", others)
-			r := httptest.NewRequest(http.MethodPost, "/v1/threads/turn", bytes.NewReader(api.Raw(sendInput(key))))
-			signIn(r, "alice")
-			r.Header.Set(auth.InferenceKeyHeader, soon)
-			w := httptest.NewRecorder()
-			h.routes().ServeHTTP(w, r)
-			events := eventsIn(t, w)
-			if modelCalls.Load() != 2 {
-				t.Fatalf("the model was asked %d times", modelCalls.Load())
-			}
-			last := events[len(events)-1]
-			if rejectAgain && last.Code != "UNAUTHENTICATED" || !rejectAgain && last.Type != "RUN_FINISHED" {
-				t.Fatal("unexpected run result", last)
-			}
-			row, _ := rows.Load(context.Background(), &auth.Principal{ID: "alice"}, key, "chat", events[0].ThreadID)
-			if !rejectAgain && len(mustRead(domain.ReadThreadRow(row)).Messages) != 2 {
-				t.Fatal("credential retry duplicated the turn")
-			}
-		})
 	}
 }
 

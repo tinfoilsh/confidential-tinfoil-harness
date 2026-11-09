@@ -27,7 +27,7 @@ func (eng *Engine) finishRun(r *Run, runErr error) {
 	eng.Live.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), CommitTimeout)
 	defer cancel()
-	ctx = auth.WithCallerKey(ctx, string(r.credential.Key))
+	ctx = auth.WithCaller(ctx, r.access)
 	ctx = auth.WithUsage(ctx, usageForRun(r))
 	ctx = inference.WithUsageSink(ctx, r.out)
 	r.out.mu.Lock()

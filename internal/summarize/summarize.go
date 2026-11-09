@@ -267,13 +267,15 @@ func (s *Service) attempt(ctx context.Context, task *Task, c inference.Completio
 
 // retryable is a failure another call may not repeat: a summary that failed
 // its check, a refusal for load, a call that timed out, or a connection
-// that failed. Any other refusal would be refused again.
+// that failed. Any other refusal would be refused again, and so would a
+// call its caller's chat access could not be renewed for.
 func retryable(err error) bool {
 	var refused *inference.Refused
 	if errors.As(err, &refused) {
 		return refused.Status == 429 || refused.Status >= 500
 	}
-	return true
+	var access *api.Error
+	return !errors.As(err, &access)
 }
 
 func delayAfter(attempt int, err error) time.Duration {

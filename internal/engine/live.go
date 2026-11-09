@@ -167,6 +167,7 @@ type Run struct {
 	Principal                *auth.Principal
 	key                      auth.ContentKey
 	credential               auth.Credential
+	access                   *auth.Access // the key the run's calls carry, kept current
 	nonce, digest, messageID string
 	Queued, cancelled        bool
 	running                  bool            // its RUN_STARTED is framed
@@ -204,7 +205,7 @@ func (r *Run) release() {
 	r.input, r.turn, r.retryTarget, r.assembler, r.screening, r.profile = nil, nil, nil, nil, nil, nil
 	r.replacement = domain.ReplacedWidget{}
 	r.Principal = &auth.Principal{ID: r.Principal.ID, AnonymousID: r.Principal.AnonymousID, Anonymous: r.Principal.Anonymous}
-	r.credential.Key = ""
+	r.credential.Key, r.access = "", nil
 }
 
 func (eng *Engine) authorizedRun(p *auth.Principal, key auth.ContentKey, id, runID string) (*Run, error) {
