@@ -117,23 +117,53 @@ func TestACompletionItsCallerPaysForCarriesTheCallersKey(t *testing.T) {
 	}
 }
 
-// A completion its caller pays for, sent when the caller's chat access has
-// expired and could not be renewed, fails with that refusal without reaching
-// the model, so the run asking for it ends saying why.
-func TestACompletionWithoutChatAccessFailsWithItsRefusal(t *testing.T) {
-	var reached bool
-	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }))
+// A completion its caller pays for carries the chat token the caller's run
+// holds as it is sent. One that has expired is renewed first, and the usage
+// is signed as the renewed token's. A token that could not be renewed fails
+// the completion with that refusal, without reaching the model, so the run
+// asking for it ends saying why.
+func TestACallersCompletionCarriesTheirRenewedChatAccess(t *testing.T) {
+	type received struct {
+		key   string
+		usage usagereporting.Context
+	}
+	requests := make(chan received, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		usage, _, err := usagereporting.FromHeaders(r.Header, "usage-secret", time.Now(), time.Minute)
+		if err != nil {
+			t.Error(err)
+		}
+		requests <- received{r.Header.Get("Authorization"), usage}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"id":"c","object":"chat.completion","model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"done"}}]}`)
+	}))
 	t.Cleanup(server.Close)
 	router := &Service{URL: server.URL, Client: &http.Client{Transport: &auth.CallerTransport{Inner: http.DefaultTransport, UsageSecret: "usage-secret"}}}
 	account := &modelAccount{callers: callerCompletions(router)}
+	expired := auth.Credential{Key: "expired-token", Expires: time.Now().Add(-time.Minute)}
+	run := usagereporting.Context{ContextID: "run", RootRequestID: "run", ParentService: "harness", Depth: 1}
+	paid := Completion{Model: "m", User: "x", MaxTokens: 1, CallerPays: true}
+
+	renewed := auth.NewAccess(expired, func(_ context.Context, held auth.Secret) (auth.Credential, error) {
+		if held != expired.Key {
+			t.Errorf("asked to renew %q", held)
+		}
+		return auth.Credential{Key: "renewed-token", Expires: time.Now().Add(15 * time.Minute)}, nil
+	})
+	if _, err := account.Complete(auth.WithUsage(auth.WithCaller(context.Background(), renewed), run), paid); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-requests; got.key != "Bearer renewed-token" || got.usage.ContextID != "run" || got.usage.APIKeyHash != usagereporting.HashAPIKey("renewed-token") {
+		t.Fatalf("the caller's completion reached the router as %+v", got)
+	}
+
 	suspended := api.Err(403, "UPSTREAM_REFUSED", "This account is suspended").WithAction(api.ActionStop)
-	access := auth.NewAccess(auth.Credential{Key: "expired-token", Expires: time.Now().Add(-time.Minute)}, func(context.Context, auth.Secret) (auth.Credential, error) {
+	refused := auth.NewAccess(expired, func(context.Context, auth.Secret) (auth.Credential, error) {
 		return auth.Credential{}, suspended
 	})
-
-	_, err := account.Complete(auth.WithCaller(context.Background(), access), Completion{Model: "m", User: "x", MaxTokens: 1, CallerPays: true})
+	_, err := account.Complete(auth.WithUsage(auth.WithCaller(context.Background(), refused), run), paid)
 	var refusal *api.Error
-	if !errors.As(err, &refusal) || refusal != suspended || reached {
-		t.Fatalf("the completion failed with %v, reaching the model: %t", err, reached)
+	if !errors.As(err, &refusal) || refusal != suspended || len(requests) != 0 {
+		t.Fatalf("the completion failed with %v, after %d more requests reached the model", err, len(requests))
 	}
 }

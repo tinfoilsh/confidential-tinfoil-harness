@@ -2046,7 +2046,7 @@ func TestWebSearchIsBilledOnlyToAPIKeys(t *testing.T) {
 				if usage.BillCustomerRequest != tc.billed {
 					t.Fatalf("search was billed %v: %+v", usage.BillCustomerRequest, usage)
 				}
-				if usage.ContextID != run || usage.RootRequestID != run || usage.ParentService != "harness" || usage.Depth != 1 || !usagereporting.VerifyAPIKeyHash(tc.key, usage.APIKeyHash) {
+				if usage.ContextID != run || usage.RootRequestID != run || usage.ParentService != "harness" || usage.Depth != 1 || usage.APIKeyHash != usagereporting.HashAPIKey(tc.key) {
 					t.Fatalf("search lost the run's identity: %+v", usage)
 				}
 				// Usage headers leave the enclave; the run id admits followers.
