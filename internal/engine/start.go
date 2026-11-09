@@ -172,7 +172,7 @@ func (eng *Engine) prepareTurn(ctx context.Context, r *Run, p *auth.Principal, c
 		}
 	}
 	t.ContextUsage = request.usage
-	t.ActiveRun, t.LastRequestID = activeRun(r.Log.ID), r.nonce
+	t.ActiveRun, t.LastRequestID = activeRun(r.Log.ID, runBudget(request.research)), r.nonce
 	// A compaction is what a retry repeats only once it fails.
 	if turn.Kind != "compact" {
 		t.LastRequestKind = turn.Kind
@@ -191,10 +191,10 @@ func (eng *Engine) launch(ctx context.Context, r *Run) error {
 	eng.Live.mu.Lock()
 	p := r.Principal
 	eng.Live.mu.Unlock()
-	if !s.keyless && (p.Grant == nil || !p.Grant.ExpiresAt.After(api.Now().Add(RunTimeout+CommitTimeout))) {
+	if !s.keyless && (p.Grant == nil || !p.Grant.ExpiresAt.After(api.Now().Add(longestRun+CommitTimeout))) {
 		fresh := *p
 		fresh.Grant = nil
-		grant, err := eng.Store.Rows.AuthorizeRun(ctx, &fresh, r.key, r.input.ThreadID, r.input.ProjectID)
+		grant, err := eng.Store.Rows.AuthorizeRun(ctx, &fresh, r.key, r.input.ThreadID, r.input.ProjectID, runGrant)
 		if err != nil {
 			return err
 		}
@@ -279,7 +279,7 @@ func (eng *Engine) launch(ctx context.Context, r *Run) error {
 	titlePrincipal := *r.Principal
 	eng.Live.working.Add(1)
 	eng.Live.mu.Unlock()
-	runCtx, cancel := context.WithTimeout(r.stopped, RunTimeout)
+	runCtx, cancel := context.WithTimeout(r.stopped, runBudget(request.research))
 	runCtx = auth.WithCaller(runCtx, r.access)
 	runCtx = auth.WithUsage(runCtx, usageForRun(r))
 	runCtx = inference.WithUsageSink(runCtx, r.out)
@@ -343,8 +343,8 @@ func (eng *Engine) refuseFlagged(ctx context.Context, r *Run, p *auth.Principal)
 }
 
 // activeRun marks a chat's reply as streaming until the run's deadline.
-func activeRun(runID string) *domain.ActiveRun {
-	return &domain.ActiveRun{RunID: runID, ExpiresAt: api.Now().Add(RunTimeout).Format(time.RFC3339Nano), Instance: InstanceID()}
+func activeRun(runID string, budget time.Duration) *domain.ActiveRun {
+	return &domain.ActiveRun{RunID: runID, ExpiresAt: api.Now().Add(budget).Format(time.RFC3339Nano), Instance: InstanceID()}
 }
 
 func usageForRun(r *Run) usagereporting.Context {

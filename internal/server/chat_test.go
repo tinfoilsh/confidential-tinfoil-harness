@@ -95,8 +95,8 @@ func (stubEmbedder) Embed(_ context.Context, inputs []string) ([][]float32, erro
 	return out, nil
 }
 
-func (s *memoryRows) AuthorizeRun(_ context.Context, _ *auth.Principal, _ auth.ContentKey, id string, project *string) (*auth.StorageGrant, error) {
-	return &auth.StorageGrant{ChatID: id, ProjectID: domain.ValueOr(project, ""), ExpiresAt: api.Now().Add(time.Hour)}, nil
+func (s *memoryRows) AuthorizeRun(_ context.Context, _ *auth.Principal, _ auth.ContentKey, id string, project *string, lifetime time.Duration) (*auth.StorageGrant, error) {
+	return &auth.StorageGrant{ChatID: id, ProjectID: domain.ValueOr(project, ""), ExpiresAt: api.Now().Add(lifetime)}, nil
 }
 
 func (s *memoryRows) AuthorizeStorage(_ context.Context, p *auth.Principal, _ auth.ContentKey, operation, project string) (*auth.StorageGrant, error) {

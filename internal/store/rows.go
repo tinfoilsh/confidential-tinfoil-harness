@@ -45,7 +45,7 @@ type ChatIndexer interface {
 // RowStore is what the store reads and writes rows through: Rows, or a
 // test's stand-in for it.
 type RowStore interface {
-	AuthorizeRun(context.Context, *auth.Principal, auth.ContentKey, string, *string) (*auth.StorageGrant, error)
+	AuthorizeRun(context.Context, *auth.Principal, auth.ContentKey, string, *string, time.Duration) (*auth.StorageGrant, error)
 	AuthorizeStorage(context.Context, *auth.Principal, auth.ContentKey, string, string) (*auth.StorageGrant, error)
 	Load(context.Context, *auth.Principal, auth.ContentKey, string, string) (*domain.StoredRow, error)
 	Pull(context.Context, *auth.Principal, auth.ContentKey, string, []string) ([]domain.StoredRow, map[string]error, error)
@@ -85,7 +85,8 @@ const (
 	ListStatusPage = 500
 	// MaxCommitAttempts bounds the pushes of one change to a row.
 	MaxCommitAttempts = 3
-	// grantLifetime is how long a run or an operation may use the rows.
+	// grantLifetime is how long an operation may use the rows. A run's
+	// grant lasts as long as the engine gives the run.
 	grantLifetime = time.Hour
 	// pullConcurrency bounds the rows fetched from the control plane at
 	// once, so a full batch finishes well within a request without
@@ -104,9 +105,9 @@ const (
 )
 
 // AuthorizeRun grants a run the chat it is for and the project its context
-// reads: an existing chat's own project, including one a move changed only
-// in storage metadata, or the project a new chat names.
-func (r *Rows) AuthorizeRun(ctx context.Context, p *auth.Principal, key auth.ContentKey, threadID string, projectID *string) (*auth.StorageGrant, error) {
+// reads, for lifetime: an existing chat's own project, including one a move
+// changed only in storage metadata, or the project a new chat names.
+func (r *Rows) AuthorizeRun(ctx context.Context, p *auth.Principal, key auth.ContentKey, threadID string, projectID *string, lifetime time.Duration) (*auth.StorageGrant, error) {
 	defer clear(key[:])
 	project := domain.ValueOr(projectID, "")
 	if !runIDValid(threadID) || project != "" && !runIDValid(project) {
@@ -138,7 +139,7 @@ func (r *Rows) AuthorizeRun(ctx context.Context, p *auth.Principal, key auth.Con
 	if project != "" && !runIDValid(project) {
 		return nil, api.Err(400, "BAD_REQUEST", "invalid project id")
 	}
-	return &auth.StorageGrant{ChatID: threadID, ProjectID: project, KeyID: keyID(key), ExpiresAt: api.Now().Add(grantLifetime)}, nil
+	return &auth.StorageGrant{ChatID: threadID, ProjectID: project, KeyID: keyID(key), ExpiresAt: api.Now().Add(lifetime)}, nil
 }
 
 // AuthorizeStorage grants an operation its rows: an import's writes, an

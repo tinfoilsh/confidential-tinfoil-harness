@@ -146,7 +146,7 @@ func (eng *Engine) admit(ctx context.Context, p *auth.Principal, credential auth
 	id, local := in.ThreadID, in.Local
 	keyless := p.Anonymous || local
 	if !keyless {
-		granted, err := eng.Store.Rows.AuthorizeRun(ctx, p, key, in.ThreadID, in.ProjectID)
+		granted, err := eng.Store.Rows.AuthorizeRun(ctx, p, key, in.ThreadID, in.ProjectID, runGrant)
 		if err != nil {
 			return err
 		}
