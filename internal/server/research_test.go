@@ -474,7 +474,7 @@ func TestAResearchThatKeepsSearchingWritesItsReportWhenItsTurnsRunOut(t *testing
 
 // researchedReport is the artifact storeResearched's research wrote its
 // report in.
-const researchedReport = `{"source":{"markdown":"# Maine lighthouses\nMaine has 65.","type":"markdown"},"title":"Maine lighthouses"}`
+const researchedReport = `{"source":{"markdown":"# Maine lighthouses\nThe state counts 65 lights.","type":"markdown"},"title":"Maine lighthouses"}`
 
 // storeResearched stores for alice chat-1, whose question a research
 // answered with its steps, its report in an artifact and a reply, followed
