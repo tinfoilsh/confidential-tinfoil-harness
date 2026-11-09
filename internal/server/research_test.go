@@ -121,7 +121,7 @@ func TestAResearchShowsItsWorkAsThinkingAndAnswersWithACitedReport(t *testing.T)
 	if want := []string{"thinking:Plan: count the lighthouses.", "tool_call:web_search", "thinking:Found the count. Covered.", "content:" + report}; reply.Content != report || !reflect.DeepEqual(steps, want) {
 		t.Fatalf("the reply holds %q with the steps %q", reply.Content, steps)
 	}
-	if reply.Research == nil || reply.Research.Version != 1 || len(reply.Annotations) != 1 || reply.Annotations[0].URLCitation.URL != "https://lights.test/maine" {
+	if reply.Research == nil || reply.Research.Version != 2 || len(reply.Annotations) != 1 || reply.Annotations[0].URLCitation.URL != "https://lights.test/maine" {
 		t.Fatalf("the reply records research %+v and annotations %+v", reply.Research, reply.Annotations)
 	}
 	var metadata domain.RunMetadata
@@ -144,6 +144,75 @@ func TestAResearchShowsItsWorkAsThinkingAndAnswersWithACitedReport(t *testing.T)
 	}
 	if _, counted := researchStarted(rows); !counted {
 		t.Fatal("the research was not counted")
+	}
+}
+
+// artifactResearch is the first turn of a new chat, researched by a client
+// that draws the artifact widget.
+func artifactResearch(h *harness, key auth.ContentKey) api.Object {
+	h.models.Catalog.Get().EnabledWidgets = []string{domain.ArtifactWidget}
+	in := researchInput(key)
+	in["widgets"] = []any{domain.ArtifactWidget}
+	return in
+}
+
+// A research whose client draws the artifact widget is offered it only once
+// the report is asked for, writes the report in it, and then replies with
+// what it found without tools: the reply's text, after the artifact.
+func TestAResearchWritesItsReportInAnArtifactAndRepliesWithWhatItFound(t *testing.T) {
+	lighthouses(t, "Maine has 65 lighthouses.")
+	report := `{"title":"Maine lighthouses","source":{"type":"markdown","markdown":"# Maine lighthouses\nMaine has 65 [Lighthouses of maine](https://lights.test/maine)."}}`
+	summary := "Maine has 65 lighthouses [Lighthouses of maine](https://lights.test/maine). The full report is above."
+	model := scripted(
+		toolCallChunk(0, "s1", "web_search", `{"query":"maine"}`),
+		contentChunk("Found the count."),
+		contentChunk(" Covered."),
+		toolCallChunk(0, "a1", domain.ArtifactWidget, report),
+		contentChunk(summary),
+	)
+	h, rows, key := testChatHarness(t, model.ServeHTTP)
+	events := finishedRun(t, h, "/v1/threads/turn", artifactResearch(h, key))
+	sent := model.sent()
+	if len(sent) != 5 || !reflect.DeepEqual(offered(sent[0]), []string{"web_search", "web_fetch"}) || !reflect.DeepEqual(offered(sent[2]), []string{"web_search", "web_fetch"}) {
+		t.Fatalf("the research took %d turns, offered %v first", len(sent), offered(sent[0]))
+	}
+	if !reflect.DeepEqual(offered(sent[3]), []string{domain.ArtifactWidget}) || !strings.Contains(lastMessage(sent[3]), "call "+domain.ArtifactWidget) || sent[4]["tools"] != nil {
+		t.Fatalf("the report was asked for with %q and %v, the reply with %v", lastMessage(sent[3]), offered(sent[3]), offered(sent[4]))
+	}
+	reply := storedChat(t, rows, key, events[0].ThreadID).Messages[1]
+	steps := []string{}
+	for _, block := range reply.Timeline {
+		steps = append(steps, block.Type+":"+block.Content+block.Name)
+	}
+	if want := []string{"tool_call:web_search", "thinking:Found the count. Covered.", "tool_call:" + domain.ArtifactWidget, "content:" + summary}; reply.Content != summary || !reflect.DeepEqual(steps, want) {
+		t.Fatalf("the reply holds %q with the steps %q", reply.Content, steps)
+	}
+	if drawn := reply.Timeline[2]; !strings.Contains(drawn.Arguments, "# Maine lighthouses") || reply.Research == nil {
+		t.Fatalf("the artifact was drawn with %s, the reply recording research %+v", drawn.Arguments, reply.Research)
+	}
+}
+
+// A report the artifact widget refuses is asked for in it once more, then
+// written as the reply.
+func TestAResearchWhoseArtifactIsRefusedWritesItsReportAsTheReply(t *testing.T) {
+	lighthouses(t, "Maine has 65 lighthouses.")
+	refused := `{"title":"Maine lighthouses"}`
+	model := scripted(
+		toolCallChunk(0, "s1", "web_search", `{"query":"maine"}`),
+		contentChunk("Covered."),
+		contentChunk("Covered."),
+		toolCallChunk(0, "a1", domain.ArtifactWidget, refused),
+		toolCallChunk(0, "a2", domain.ArtifactWidget, refused),
+		contentChunk("Maine has 65 lighthouses."),
+	)
+	h, rows, key := testChatHarness(t, model.ServeHTTP)
+	events := finishedRun(t, h, "/v1/threads/turn", artifactResearch(h, key))
+	sent := model.sent()
+	if len(sent) != 6 || !reflect.DeepEqual(offered(sent[4]), []string{domain.ArtifactWidget}) || sent[5]["tools"] != nil || !strings.Contains(lastMessage(sent[5]), "Write the report now, without calling any tools") {
+		t.Fatalf("the research took %d turns, the last told %q", len(sent), lastMessage(sent[len(sent)-1]))
+	}
+	if reply := storedChat(t, rows, key, events[0].ThreadID).Messages[1]; reply.Content != "Maine has 65 lighthouses." || reply.Research == nil {
+		t.Fatalf("the reply holds %q and records research %+v", reply.Content, reply.Research)
 	}
 }
 
@@ -403,29 +472,64 @@ func TestAResearchThatKeepsSearchingWritesItsReportWhenItsTurnsRunOut(t *testing
 	}
 }
 
-// The model reads a research's reply back as its report alone, without the
-// steps that led to it.
+// researchedReport is the artifact storeResearched's research wrote its
+// report in.
+const researchedReport = `{"source":{"markdown":"# Maine lighthouses\nMaine has 65.","type":"markdown"},"title":"Maine lighthouses"}`
+
+// storeResearched stores for alice chat-1, whose question a research
+// answered with its steps, its report in an artifact and a reply, followed
+// by more messages.
+func storeResearched(rows *memoryRows, more ...any) {
+	messages := append([]any{
+		api.Object{"id": "m1", "role": "user", "createdAt": "2026-01-01T00:00:00Z", "content": "How many lighthouses has Maine?", "research": api.Object{"version": 2}},
+		api.Object{"id": "m2", "role": "assistant", "createdAt": "2026-01-01T00:00:01Z", "content": "Maine has 65.", "research": api.Object{"version": 2}, "timeline": []any{
+			api.Object{"id": "t1", "type": "thinking", "content": "Plan: count them."},
+			api.Object{"id": "s1", "toolCallId": "s1", "type": "tool_call", "name": "web_search", "arguments": `{"query":"maine"}`, "complete": true, "result": api.Object{"query": "maine", "results": []any{}}},
+			api.Object{"id": "a1", "toolCallId": "a1", "type": "tool_call", "name": domain.ArtifactWidget, "arguments": researchedReport, "complete": true},
+			api.Object{"id": "c1", "type": "content", "content": "Maine has 65."},
+		}},
+	}, more...)
+	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat-1")] = domain.StoredRow{ID: "chat-1", ETag: "1", Data: api.Raw(api.Object{"id": "chat-1", "title": "Lighthouses", "titleState": "generated",
+		"model": "kimi-k3", "presetId": nil, "pinned": false, "webSearchEnabled": false, "recordVersion": 2, "createdAt": "2026-01-01T00:00:00Z", "messages": messages})}
+}
+
+// The model reads a research's reply back as its report alone, and the
+// artifact it wrote the report in, without the steps that led to them.
 func TestLaterTurnsReadAResearchAsItsReport(t *testing.T) {
 	var prompt string
 	h, rows, key := testChatHarness(t, capturePrompt(&prompt))
-	rows.rows[rowMapKey(&auth.Principal{ID: "alice"}, "chat", "chat-1")] = domain.StoredRow{ID: "chat-1", ETag: "1", Data: api.Raw(api.Object{"id": "chat-1", "title": "Lighthouses", "titleState": "generated",
-		"model": "kimi-k3", "presetId": nil, "pinned": false, "webSearchEnabled": false, "recordVersion": 2, "createdAt": "2026-01-01T00:00:00Z", "messages": []any{
-			api.Object{"id": "m1", "role": "user", "createdAt": "2026-01-01T00:00:00Z", "content": "How many lighthouses has Maine?"},
-			api.Object{"id": "m2", "role": "assistant", "createdAt": "2026-01-01T00:00:01Z", "content": "Maine has 65.", "research": api.Object{"version": 1}, "timeline": []any{
-				api.Object{"id": "t1", "type": "thinking", "content": "Plan: count them."},
-				api.Object{"id": "s1", "toolCallId": "s1", "type": "tool_call", "name": "web_search", "arguments": `{"query":"maine"}`, "complete": true, "result": api.Object{"query": "maine", "results": []any{}}},
-				api.Object{"id": "c1", "type": "content", "content": "Maine has 65."},
-			}},
-		}})}
+	storeResearched(rows)
 	finishedRun(t, h, "/v1/threads/turn", continueInput(key, "chat-1"))
 	var sent struct {
 		Messages []api.Object `json:"messages"`
 	}
 	json.Unmarshal([]byte(prompt), &sent)
-	if len(sent.Messages) != 5 || !reflect.DeepEqual(sent.Messages[2], api.Object{"role": "assistant", "content": "Maine has 65."}) {
+	drawn := api.Raw([]api.Object{{"id": "a1", "type": "function", "function": api.Object{"name": domain.ArtifactWidget, "arguments": researchedReport}}})
+	if len(sent.Messages) != 6 || sent.Messages[2]["content"] != "Maine has 65." || api.Str(sent.Messages[2]["reasoning_content"]) != "" || string(api.Raw(sent.Messages[2]["tool_calls"])) != string(drawn) || sent.Messages[3]["role"] != "tool" {
 		t.Fatalf("the model was sent %v", sent.Messages)
 	}
-	if stored := storedChat(t, rows, key, "chat-1").Messages[1]; stored.Research == nil || stored.Research.Version != 1 {
+	if stored := storedChat(t, rows, key, "chat-1").Messages[1]; stored.Research == nil || stored.Research.Version != 2 {
 		t.Fatalf("the research reply was stored back as %+v", stored)
+	}
+}
+
+// A compaction reads a research's reply as the model does: its report and
+// the artifact it wrote the report in, without its searches.
+func TestACompactionReadsAResearchAsItsReport(t *testing.T) {
+	h, rows, key := testChatHarness(t, capturePrompt(new(string)))
+	var asked []string
+	h.compactWith(func(task, text string) (string, error) {
+		if task == summarize.Compaction.Name {
+			asked = append(asked, text)
+		}
+		return compactionOf("The user counts lighthouses."), nil
+	})
+	storeResearched(rows,
+		api.Object{"id": "m3", "role": "user", "createdAt": "2026-01-01T00:00:02Z", "content": "And Vermont?"},
+		api.Object{"id": "m4", "role": "assistant", "createdAt": "2026-01-01T00:00:03Z", "content": "Vermont has 9.", "timeline": []any{api.Object{"id": "b4", "type": "content", "content": "Vermont has 9."}}},
+	)
+	finishedRun(t, h, "/v1/threads/turn", compactInput(key, "chat-1"))
+	if len(asked) != 1 || !strings.Contains(asked[0], "Maine has 65.") || !strings.Contains(asked[0], "# Maine lighthouses") || strings.Contains(asked[0], "Searched the web") {
+		t.Fatalf("the compaction read %q", asked)
 	}
 }
