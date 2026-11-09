@@ -17,6 +17,10 @@ import (
 // arguments failed validation; two cover fixing one field surfacing another.
 const MaxWidgetRetries = 2
 
+// ArtifactWidget is the widget that shows a document, page or site in a side
+// panel.
+const ArtifactWidget = "render_artifact_preview"
+
 // WidgetArguments is what a widget call is drawn and validated with: repaired,
 // then canonical.
 func WidgetArguments(raw string) string {

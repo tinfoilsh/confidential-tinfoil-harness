@@ -123,6 +123,7 @@ func (eng *Engine) prepareTurn(ctx context.Context, r *Run, p *auth.Principal, c
 	if err := applyTurn(t, turn, r.messageID, attachments); err != nil {
 		return nil, err
 	}
+	markResearch(t, turn)
 	options := r.input.Options
 	t.Model = cmp.Or(options.Model, t.Model, domain.AutoModelName)
 	t.WebSearchEnabled = domain.ValueOr(options.WebSearch, t.WebSearchEnabled)
@@ -222,7 +223,7 @@ func (eng *Engine) launch(ctx context.Context, r *Run) error {
 		// before it is, so a research the caller may not start leaves their
 		// chat as it was.
 		if attempt == 1 {
-			if err := eng.allowResearch(ctx, r, p); err != nil {
+			if err := eng.allowResearch(ctx, r, p, plan.request.research); err != nil {
 				return err
 			}
 		}

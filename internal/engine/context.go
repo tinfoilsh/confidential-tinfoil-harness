@@ -293,7 +293,7 @@ func (eng *Engine) BuildRequest(thread *domain.Thread, profile *domain.Profile, 
 	req.webSearch = domain.ValueOr(profile.WebSearchAvailable, true) && domain.ValueOr(options.WebSearch, thread.WebSearchEnabled)
 	// A research searches the web whatever the chat's setting, unless the
 	// settings turn web search off.
-	if options.Research {
+	if researches(thread, in.Kind) {
 		if !domain.ValueOr(profile.WebSearchAvailable, true) {
 			return nil, nil, api.Err(403, "TOOL_UNAVAILABLE", "Deep research needs web search, which the settings turn off").WithAction(api.ActionStop)
 		}
@@ -303,9 +303,12 @@ func (eng *Engine) BuildRequest(thread *domain.Thread, profile *domain.Profile, 
 		return nil, nil, api.Err(503, "TOOL_UNAVAILABLE", "webSearch is unavailable")
 	}
 	widgets := c.SelectedWidgets(in.Widgets, domain.ValueOr(options.GenUI, domain.ValueOr(profile.GenUIEnabled, true)))
-	// A research offers no widget but the questions it may ask first.
+	// A research offers no widget but the questions it may ask first and the
+	// artifact it writes its report in.
 	if req.research {
-		widgets = slices.DeleteFunc(widgets, func(w domain.Widget) bool { return w.Name != domain.QuestionsWidget || !asksFirst(thread.Messages) })
+		widgets = slices.DeleteFunc(widgets, func(w domain.Widget) bool {
+			return w.Name != domain.ArtifactWidget && (w.Name != domain.QuestionsWidget || !asksFirst(thread.Messages))
+		})
 	}
 	if len(widgets) > 0 {
 		req.widgetHint = c.WidgetHeader
@@ -374,7 +377,7 @@ func RenderMessage(message *domain.Message, vision bool, policy string, loc *tim
 	calls, results := []api.Object{}, []json.RawMessage{}
 	for _, block := range message.Timeline {
 		// A research's reply is read back as its report alone.
-		if message.Research != nil && block.Type != "content" {
+		if message.Research != nil && !reportBlock(block) {
 			continue
 		}
 		switch block.Type {

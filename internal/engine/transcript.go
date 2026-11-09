@@ -17,6 +17,7 @@ func applyTurn(t *domain.Thread, in *TurnRequest, messageID string, attachments 
 	}
 	messages := t.Messages
 	content, quote := domain.ValueOr(in.Content, ""), domain.ValueOr(in.Quote, "")
+	var research *domain.Research
 	if in.Kind == "edit" || in.Kind == "regenerate" || in.Kind == "continue" {
 		index := t.MessageIndex(in.MessageID)
 		// A continuation names its reply or extends the last message.
@@ -46,6 +47,8 @@ func applyTurn(t *domain.Thread, in *TurnRequest, messageID string, attachments 
 			if in.Quote == nil {
 				quote = messages[index].Quote
 			}
+			// An edited question still asks for deep research if it did.
+			research = messages[index].Research
 		}
 		// As on the web client, the continued reply becomes the last message.
 		if in.Kind == "continue" {
@@ -57,7 +60,7 @@ func applyTurn(t *domain.Thread, in *TurnRequest, messageID string, attachments 
 		content, quote = domain.ValueOr(in.Quote, ""), ""
 	}
 	if in.Kind != "regenerate" && in.Kind != "retryToolCall" && in.Kind != "continue" && in.Kind != "answer" && in.Kind != "compact" {
-		message := domain.Message{ID: messageID, Role: "user", Content: content, Quote: quote, Attachments: attachments, CreatedAt: api.Timestamp()}
+		message := domain.Message{ID: messageID, Role: "user", Content: content, Quote: quote, Attachments: attachments, CreatedAt: api.Timestamp(), Research: research}
 		// A question sends the answers the user gave since the last one, so
 		// later changes leave what earlier replies read as it was.
 		if in.Kind == "send" || in.Kind == "edit" {

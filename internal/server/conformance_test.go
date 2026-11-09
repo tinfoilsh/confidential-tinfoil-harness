@@ -129,7 +129,8 @@ func TestRunsShowTheChatTheHarnessKeeps(t *testing.T) {
 }
 
 // A research shows the chat the harness keeps: its reasoning and searches
-// as steps, its report as its text, and the research it records.
+// as steps, its report in an artifact, what it found as its text, and the
+// research it records.
 func TestAResearchShowsTheChatTheHarnessKeeps(t *testing.T) {
 	lighthouses(t, "Maine has 65 lighthouses.")
 	model := scripted(
@@ -137,16 +138,17 @@ func TestAResearchShowsTheChatTheHarnessKeeps(t *testing.T) {
 		contentChunk("Found the count."),
 		toolCallChunk(0, "s2", "web_search", `{"query":"vermont"}`),
 		contentChunk("Covered."),
-		contentChunk("Maine has 65 lighthouses [Lighthouses of maine](https://lights.test/maine)."),
+		toolCallChunk(0, "a1", domain.ArtifactWidget, `{"title":"Maine lighthouses","source":{"type":"markdown","markdown":"# Maine lighthouses\nMaine has 65 [Lighthouses of maine](https://lights.test/maine)."}}`),
+		contentChunk("Maine has 65 lighthouses [Lighthouses of maine](https://lights.test/maine). The full report is above."),
 	)
 	h, rows, key := testChatHarness(t, model.ServeHTTP)
-	w := postRoute(h, "/v1/threads/turn", researchInput(key), "alice")
+	w := postRoute(h, "/v1/threads/turn", artifactResearch(h, key), "alice")
 	events := eventsIn(t, w)
 	if last := events[len(events)-1].Type; last != "RUN_FINISHED" {
 		t.Fatalf("the run ended with %s", last)
 	}
 	kept := storedChat(t, rows, key, events[0].ThreadID)
-	conformance(t, "research", "A research that searches, is asked to check what it found and searches again, then writes its report.", framesOf(t, w.Body.Bytes()), &kept)
+	conformance(t, "research", "A research that searches, is asked to check what it found and searches again, then writes its report in an artifact and says what it found.", framesOf(t, w.Body.Bytes()), &kept)
 }
 
 // framesOf are a stream's whole frames, as sent.
