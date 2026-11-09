@@ -21,10 +21,13 @@ const (
 	RunTimeout      = 30 * time.Minute
 	researchTimeout = researchTime + researchReportTime
 	longestRun      = max(RunTimeout, researchTimeout)
-	// runGrant is how long a run may use its chat's rows: twice what the
-	// longest run and its last writes take, so a turn that waited a while
-	// in its chat's queue starts without asking again.
-	runGrant = 2 * (longestRun + CommitTimeout)
+	// runNeeds is how long the grant of a turn about to start must last:
+	// through its start, the longest run, and its last writes.
+	runNeeds = CommitTimeout + longestRun + CommitTimeout
+	// runGrant is how long a run may use its chat's rows: twice what it
+	// needs, so a turn that waited a while in its chat's queue starts
+	// without asking again.
+	runGrant = 2 * runNeeds
 )
 
 // runBudget is how long a run may last.

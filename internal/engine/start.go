@@ -191,7 +191,7 @@ func (eng *Engine) launch(ctx context.Context, r *Run) error {
 	eng.Live.mu.Lock()
 	p := r.Principal
 	eng.Live.mu.Unlock()
-	if !s.keyless && (p.Grant == nil || !p.Grant.ExpiresAt.After(api.Now().Add(longestRun+CommitTimeout))) {
+	if !s.keyless && (p.Grant == nil || !p.Grant.ExpiresAt.After(api.Now().Add(runNeeds))) {
 		fresh := *p
 		fresh.Grant = nil
 		grant, err := eng.Store.Rows.AuthorizeRun(ctx, &fresh, r.key, r.input.ThreadID, r.input.ProjectID, runGrant)
