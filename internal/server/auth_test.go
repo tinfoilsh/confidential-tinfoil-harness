@@ -31,7 +31,7 @@ import (
 
 // A Clerk session token names its caller for ten minutes after it expires,
 // so one sent with a chat that takes minutes to arrive is still accepted,
-// and is refused after that.
+// and is refused after that. One used before it is valid gets no such time.
 func TestASessionTokenIsAcceptedForAWhileAfterItExpires(t *testing.T) {
 	const issuer = "https://clerk.example"
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -41,8 +41,8 @@ func TestASessionTokenIsAcceptedForAWhileAfterItExpires(t *testing.T) {
 	a := auth.Configured(auth.Config{Verify: auth.SessionVerifier(issuer, func(context.Context) jwt.Keyfunc {
 		return func(*jwt.Token) (any, error) { return &key.PublicKey, nil }
 	})})
-	expired := func(ago time.Duration) *http.Request {
-		claims := jwt.RegisteredClaims{Issuer: issuer, Subject: "alice", ExpiresAt: jwt.NewNumericDate(time.Now().Add(-ago))}
+	sent := func(expired, early time.Duration) *http.Request {
+		claims := jwt.RegisteredClaims{Issuer: issuer, Subject: "alice", ExpiresAt: jwt.NewNumericDate(time.Now().Add(-expired)), NotBefore: jwt.NewNumericDate(time.Now().Add(early))}
 		token, err := jwt.NewWithClaims(jwt.SigningMethodES256, claims).SignedString(key)
 		if err != nil {
 			t.Fatal(err)
@@ -51,11 +51,16 @@ func TestASessionTokenIsAcceptedForAWhileAfterItExpires(t *testing.T) {
 		r.Header.Set("Authorization", "Bearer "+token)
 		return r
 	}
-	if p, err := a.Authenticate(expired(9*time.Minute), false); err != nil || p.ID != "alice" {
+	if p, err := a.Authenticate(sent(9*time.Minute, -10*time.Minute), false); err != nil || p.ID != "alice" {
 		t.Fatalf("a session token that expired nine minutes ago was refused: %v", err)
 	}
-	if _, err := a.Authenticate(expired(11*time.Minute), false); api.AsError(err).HTTP != http.StatusUnauthorized || api.AsError(err).Code != "UNAUTHENTICATED" {
-		t.Fatalf("a session token that expired eleven minutes ago was answered %v", err)
+	for name, r := range map[string]*http.Request{
+		"expired eleven minutes ago":      sent(11*time.Minute, -12*time.Minute),
+		"is not valid for another minute": sent(-2*time.Minute, time.Minute),
+	} {
+		if _, err := a.Authenticate(r, false); api.AsError(err).HTTP != http.StatusUnauthorized || api.AsError(err).Code != "UNAUTHENTICATED" {
+			t.Fatalf("a session token that %s was answered %v", name, err)
+		}
 	}
 }
 

@@ -1398,7 +1398,7 @@ components:
     identity:
       type: http
       scheme: bearer
-      description: A Clerk session token, or a free_ key for a signed-out caller. A session token is accepted for ten minutes after it expires, since a request that carries a chat can take minutes to arrive over a slow connection. A signed-out caller's request about a run already started, to follow or cancel it or to send or remove a turn queued behind it, carries the key the run started under, which is accepted for it even once it has expired.
+      description: A Clerk session token, or a free_ key for a signed-out caller. A session token is accepted for ten minutes after it expires, since a request that carries a chat can take minutes to arrive over a slow connection, except to share a chat, revoke its share or read the share's status, which the control plane authorizes by the token itself. A signed-out caller's request about a run already started, to follow or cancel it or to send or remove a turn queued behind it, carries the key the run started under, which is accepted for it even once it has expired.
     chatAccess:
       type: apiKey
       in: header
