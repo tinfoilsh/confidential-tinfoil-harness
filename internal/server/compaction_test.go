@@ -240,7 +240,7 @@ func TestADeviceChatSentFromItsLatestCompactionIsReturnedFromThere(t *testing.T)
 	}
 	last := events[len(events)-1]
 	returned := messageIDs(api.Obj(api.Obj(api.Parsed(last.Metadata))["thread"])["messages"])
-	if last.Type != "RUN_FINISHED" || len(returned) != 5 || !reflect.DeepEqual(returned[:3], []string{"c1", "m3", "m4"}) {
+	if last.Type != "RUN_FINISHED" || len(returned) != 5 || !reflect.DeepEqual(returned[:4], []string{"c1", "m3", "m4", api.Str(in["clientRequestId"])}) {
 		t.Fatalf("the run ended with %s and returned %v", last.Type, returned)
 	}
 	if summary := api.Obj(api.Obj(eventOfType(events, "STATE_SNAPSHOT").Snapshot)["thread"]); api.Int(summary["messageCount"]) != 3 {
