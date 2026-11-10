@@ -217,6 +217,59 @@ func TestADeviceChatKeepsItsCompactionMarker(t *testing.T) {
 	}
 }
 
+// fromMarker is compactedThread as a device sends it from its latest
+// compaction marker on, without the exchange that marker's summary covers.
+func fromMarker(id string) api.Object {
+	thread := compactedThread(id)
+	thread["messages"] = api.Arr(thread["messages"])[2:]
+	return api.Obj(api.Parsed(api.Raw(thread)))
+}
+
+// A device chat sent from its latest compaction marker on is read as the
+// whole chat is, and its run returns it from that marker.
+func TestADeviceChatSentFromItsLatestCompactionIsReturnedFromThere(t *testing.T) {
+	prompts := make(chan []string, 1)
+	h, _, _ := testChatHarness(t, promptOf(prompts))
+	in := localInput("", nil)
+	in["thread"] = fromMarker(api.Str(in["threadId"]))
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice"))
+	if prompt := <-prompts; len(prompt) != 5 || !strings.HasPrefix(prompt[1], "user: <conversation_summary>") || !strings.Contains(prompt[1], compactionSummary+"\n</conversation_summary>") ||
+		!strings.HasSuffix(prompt[1], "recent question") || prompt[2] != "assistant: recent answer" || prompt[3] != "user: second question" {
+		t.Fatalf("the model was sent %q", prompt)
+	}
+	last := events[len(events)-1]
+	returned := messageIDs(api.Obj(api.Obj(api.Parsed(last.Metadata))["thread"])["messages"])
+	if last.Type != "RUN_FINISHED" || len(returned) != 5 || !reflect.DeepEqual(returned[:3], []string{"c1", "m3", "m4"}) {
+		t.Fatalf("the run ended with %s and returned %v", last.Type, returned)
+	}
+}
+
+// A compaction of a device chat sent from its latest marker on counts the
+// messages that marker covers, which the harness was not sent, with the ones
+// it summarizes.
+func TestACompactionCountsTheMessagesADeviceLeftOut(t *testing.T) {
+	h, _, _ := testChatHarness(t, nil)
+	h.compactWith(func(string, string) (string, error) {
+		return compactionOf("The user plans a lighthouse tour of Maine."), nil
+	})
+	in := localInput("", nil)
+	thread := fromMarker(api.Str(in["threadId"]))
+	thread["messages"] = append(api.Arr(thread["messages"]),
+		api.Object{"id": "m5", "role": "user", "createdAt": "2026-01-03T00:00:00Z", "content": "latest question"},
+		api.Object{"id": "m6", "role": "assistant", "createdAt": "2026-01-03T00:00:01Z", "content": "latest answer", "timeline": []any{api.Object{"id": "b6", "type": "content", "content": "latest answer"}}})
+	in["thread"], in["kind"] = thread, "compact"
+	delete(in, "content")
+	events := eventsIn(t, postRoute(h, "/v1/threads/turn", in, "alice"))
+	last := events[len(events)-1]
+	messages := api.Arr(api.Obj(api.Obj(api.Parsed(last.Metadata))["thread"])["messages"])
+	if ids := messageIDs(messages); last.Type != "RUN_FINISHED" || len(ids) != 6 || !reflect.DeepEqual(ids[:3], []string{"c1", "m3", "m4"}) || !reflect.DeepEqual(ids[4:], []string{"m5", "m6"}) {
+		t.Fatalf("the run ended with %s and returned %v", last.Type, ids)
+	}
+	if marker := api.Obj(messages[3]); marker["role"] != "compaction" || api.Obj(marker["compaction"])["messages"] != 4.0 {
+		t.Fatalf("the new marker is %v", marker)
+	}
+}
+
 // A summary must not keep what a deleted or edited message said, and a
 // marker is not deleted on its own.
 func TestChangingACompactedMessageDropsItsSummary(t *testing.T) {
