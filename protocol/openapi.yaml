@@ -2615,12 +2615,16 @@ components:
         in a turn, in a change of the chat's settings, in an answer to a
         questions widget and in a request to read a message aloud, unless the
         request names a message, a tool call or an attachment among the
-        messages left out, which sends the record whole. The harness reads
-        the chat as it reads the whole record. What it returns of the chat
-        starts at that marker too, a run's thread and window among them, and
-        its messageCount counts the messages sent: the client keeps the
-        messages it left out before the messages returned. Every other
-        request sends the record whole.
+        messages left out, which sends the record whole. A turn also sends
+        the record whole unless a question after the marker comes before the
+        one it answers: the harness reads the exchange before the question a
+        turn answers, which the marker otherwise covers. The harness reads
+        the chat as it reads the whole record, except that a question sends
+        no answers to a questions widget among the messages left out. What it
+        returns of the chat starts at that marker too, a run's thread and
+        window among them, and its messageCount counts the messages sent: the
+        client keeps the messages it left out before the messages returned.
+        Every other request sends the record whole.
       type: object
       additionalProperties: true
       properties:
