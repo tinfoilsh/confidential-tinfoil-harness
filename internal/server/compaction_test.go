@@ -226,7 +226,8 @@ func fromMarker(id string) api.Object {
 }
 
 // A device chat sent from its latest compaction marker on is read as the
-// whole chat is, and its run returns it from that marker.
+// whole chat is, and its run returns it from that marker and counts the
+// messages it was sent.
 func TestADeviceChatSentFromItsLatestCompactionIsReturnedFromThere(t *testing.T) {
 	prompts := make(chan []string, 1)
 	h, _, _ := testChatHarness(t, promptOf(prompts))
@@ -241,6 +242,9 @@ func TestADeviceChatSentFromItsLatestCompactionIsReturnedFromThere(t *testing.T)
 	returned := messageIDs(api.Obj(api.Obj(api.Parsed(last.Metadata))["thread"])["messages"])
 	if last.Type != "RUN_FINISHED" || len(returned) != 5 || !reflect.DeepEqual(returned[:3], []string{"c1", "m3", "m4"}) {
 		t.Fatalf("the run ended with %s and returned %v", last.Type, returned)
+	}
+	if summary := api.Obj(api.Obj(eventOfType(events, "STATE_SNAPSHOT").Snapshot)["thread"]); api.Int(summary["messageCount"]) != 3 {
+		t.Fatalf("the chat was shown as %v", summary)
 	}
 }
 
