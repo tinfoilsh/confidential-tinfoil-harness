@@ -156,14 +156,36 @@ func New(ctx context.Context, issuer, cp string, flags func(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
-	options := []jwt.ParserOption{jwt.WithValidMethods([]string{"RS256", "RS384", "RS512", "ES256", "ES384", "ES512"}), jwt.WithIssuer(issuer), jwt.WithExpirationRequired(), jwt.WithLeeway(30 * time.Second)}
 	c := Config{Client: &http.Client{
 		Timeout:       15 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}, Controlplane: cp, ChatKeys: chatKeys.Keyfunc, ChatIssuer: cp, Flags: flags}
-	c.Verify = func(ctx context.Context, token string) (string, error) {
-		parsed, err := jwt.NewParser(options...).Parse(token, kf.KeyfuncCtx(ctx))
+	c.Verify = SessionVerifier(issuer, kf.KeyfuncCtx)
+	return Configured(c), nil
+}
+
+const (
+	// sessionLeeway is how long a Clerk session token is accepted after it
+	// expires. Clerk issues one for a minute, and a request that carries a
+	// chat over a slow connection can take minutes to arrive.
+	sessionLeeway = 10 * time.Minute
+	// sessionClockSkew is how far ahead of the harness's clock Clerk's may
+	// run, which is how early a session token is accepted.
+	sessionClockSkew = 30 * time.Second
+)
+
+// SessionVerifier reads the subject of a Clerk session token that issuer
+// signed with one of keys, until sessionLeeway after the token expires.
+func SessionVerifier(issuer string, keys func(context.Context) jwt.Keyfunc) func(context.Context, string) (string, error) {
+	options := []jwt.ParserOption{jwt.WithValidMethods([]string{"RS256", "RS384", "RS512", "ES256", "ES384", "ES512"}), jwt.WithIssuer(issuer), jwt.WithExpirationRequired(), jwt.WithLeeway(sessionLeeway)}
+	return func(ctx context.Context, token string) (string, error) {
+		parsed, err := jwt.NewParser(options...).Parse(token, keys(ctx))
 		if err != nil || !parsed.Valid {
+			return "", errors.New("invalid session")
+		}
+		// The parser's leeway is for a token that arrives late, and would
+		// take one used that long before it is valid too.
+		if early, err := parsed.Claims.GetNotBefore(); err != nil || early != nil && early.After(time.Now().Add(sessionClockSkew)) {
 			return "", errors.New("invalid session")
 		}
 		sub, err := parsed.Claims.GetSubject()
@@ -172,7 +194,6 @@ func New(ctx context.Context, issuer, cp string, flags func(ctx context.Context,
 		}
 		return sub, nil
 	}
-	return Configured(c), nil
 }
 
 // authenticate reads who a request is from: a signed-in caller's Clerk
