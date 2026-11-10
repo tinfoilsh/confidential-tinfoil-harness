@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -26,6 +28,36 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 )
+
+// A Clerk session token names its caller for ten minutes after it expires,
+// so one sent with a chat that takes minutes to arrive is still accepted,
+// and is refused after that.
+func TestASessionTokenIsAcceptedForAWhileAfterItExpires(t *testing.T) {
+	const issuer = "https://clerk.example"
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := auth.Configured(auth.Config{Verify: auth.SessionVerifier(issuer, func(context.Context) jwt.Keyfunc {
+		return func(*jwt.Token) (any, error) { return &key.PublicKey, nil }
+	})})
+	expired := func(ago time.Duration) *http.Request {
+		claims := jwt.RegisteredClaims{Issuer: issuer, Subject: "alice", ExpiresAt: jwt.NewNumericDate(time.Now().Add(-ago))}
+		token, err := jwt.NewWithClaims(jwt.SigningMethodES256, claims).SignedString(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := httptest.NewRequest(http.MethodPost, "/v1/session", nil)
+		r.Header.Set("Authorization", "Bearer "+token)
+		return r
+	}
+	if p, err := a.Authenticate(expired(9*time.Minute), false); err != nil || p.ID != "alice" {
+		t.Fatalf("a session token that expired nine minutes ago was refused: %v", err)
+	}
+	if _, err := a.Authenticate(expired(11*time.Minute), false); api.AsError(err).HTTP != http.StatusUnauthorized || api.AsError(err).Code != "UNAUTHENTICATED" {
+		t.Fatalf("a session token that expired eleven minutes ago was answered %v", err)
+	}
+}
 
 func TestAnonymousInferenceValidatesTheClientKey(t *testing.T) {
 	var calls atomic.Int32
