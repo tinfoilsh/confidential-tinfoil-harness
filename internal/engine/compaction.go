@@ -132,7 +132,12 @@ func (eng *Engine) compact(ctx context.Context, r *Run, req *Request, reserved i
 		}
 		return err
 	}
+	// A device may send its chat from a compaction marker on, whose summary
+	// covers messages the harness was not sent.
 	covered := 0
+	if first := messages[0]; first.Role == domain.CompactionRole && first.Compaction != nil {
+		covered = first.Compaction.Messages
+	}
 	for _, m := range messages[:kept] {
 		if m.Role != domain.CompactionRole {
 			covered++
