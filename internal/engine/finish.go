@@ -74,10 +74,11 @@ func (eng *Engine) finishRun(r *Run, runErr error) {
 	var unreplaced error
 	commit := func(t *domain.Thread) error {
 		unreplaced = nil
-		// The run's compaction is kept before the first question it kept,
-		// even when the reply then failed, unless that question is gone.
+		// The run's compaction is kept before the first question it kept, or
+		// after the reply it summarized last, even when the reply then
+		// failed, unless that message is gone.
 		if compacted != nil && t.MessageIndex(compacted.marker.ID) < 0 {
-			if at := t.MessageIndex(compacted.beforeID); at >= 0 {
+			if at := compacted.at(t); at >= 0 {
 				t.Messages = slices.Insert(t.Messages, at, compacted.marker)
 				t.ContextUsage = compacted.usage
 			}

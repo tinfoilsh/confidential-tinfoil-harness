@@ -150,7 +150,7 @@ func (eng *Engine) prepareTurn(ctx context.Context, r *Run, p *auth.Principal, c
 		return nil, err
 	}
 	if turn.Kind == "compact" {
-		if !compactable(request.messages) {
+		if !compactable(request.messages, turn.CompactLatest) {
 			return nil, errNothingToCompactNow()
 		}
 	} else if err := preflightBudget(request); err != nil {

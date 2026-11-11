@@ -55,7 +55,10 @@ type TurnRequest struct {
 	ToolCallID      string               `json:"toolCallId,omitempty"`
 	Attachments     []attach.Sent        `json:"attachments,omitzero"`
 	Widgets         []string             `json:"widgets,omitzero"`
-	Options         turnOptions          `json:"options"`
+	// CompactLatest has a compaction on request summarize the chat's latest
+	// exchange too, for a client that shows a marker at the end of a chat.
+	CompactLatest bool        `json:"compactLatest,omitempty"`
+	Options       turnOptions `json:"options"`
 }
 
 type turnOptions struct {

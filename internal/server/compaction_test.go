@@ -745,6 +745,81 @@ func TestACompactTurnCompactsTheChatWithoutAskingTheModel(t *testing.T) {
 	}
 }
 
+// compactLatestInput is a compact turn of alice's stored chat that
+// summarizes its latest exchange too.
+func compactLatestInput(key auth.ContentKey, thread string) api.Object {
+	in := compactInput(key, thread)
+	in["compactLatest"] = true
+	return in
+}
+
+// A compact turn that compacts the latest exchange too summarizes every
+// message into a marker at the end of the chat, leaves nothing to compact
+// until the next question, and the model reads that question after the
+// summary alone.
+func TestACompactTurnCompactsTheLatestExchangeWhenAsked(t *testing.T) {
+	prompts := make(chan []string, 1)
+	h, rows, key := testChatHarness(t, promptOf(prompts))
+	var asked []string
+	h.compactWith(func(task, text string) (string, error) {
+		if task == summarize.Compaction.Name {
+			asked = append(asked, text)
+		}
+		return compactionOf("The user plans a lighthouse tour of Maine."), nil
+	})
+	storeExchanges(rows, "chat-1", "old question", "old answer", "recent question", "recent answer")
+	events := finishedRun(t, h, "/v1/threads/turn", compactLatestInput(key, "chat-1"))
+	if len(prompts) != 0 || len(asked) != 1 || !strings.Contains(asked[0], "old question") || !strings.Contains(asked[0], "recent answer") {
+		t.Fatalf("the model was asked %d times, and the summarizer %q", len(prompts), asked)
+	}
+	if start, end := eventOfType(events, "COMPACTION_START"), eventOfType(events, "COMPACTION_END"); start == nil || end == nil || start.Before != "" || end.Before != "" {
+		t.Fatalf("the marker was opened with %+v and closed with %+v", start, end)
+	}
+	chat := storedChat(t, rows, key, "chat-1")
+	if ids := messageIDs(api.Parsed(api.Raw(chat.Messages))); len(ids) != 5 || !reflect.DeepEqual(ids[:4], []string{"m1", "m2", "m3", "m4"}) ||
+		chat.Messages[4].Compaction == nil || chat.Messages[4].Compaction.Messages != 4 {
+		t.Fatalf("the turn stored %+v", chat)
+	}
+	if w := postRoute(h, "/v1/threads/turn", compactLatestInput(key, "chat-1"), "alice"); w.Code != 400 || !strings.Contains(w.Body.String(), "NOTHING_TO_COMPACT") {
+		t.Fatalf("compacting again: HTTP %d %s", w.Code, w.Body)
+	}
+	finishedRun(t, h, "/v1/threads/turn", continueInput(key, "chat-1"))
+	if prompt := <-prompts; len(prompt) != 3 || !strings.Contains(prompt[1], "lighthouse tour of Maine") || !strings.HasSuffix(prompt[1], "test message") {
+		t.Fatalf("the next question was sent as %q", prompt)
+	}
+}
+
+// A compact turn that compacts the latest exchange too leaves a last
+// question without a reply after its marker, for a retry to answer.
+func TestACompactTurnLeavesAQuestionWithoutAReply(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	h.compactWith(func(string, string) (string, error) { return compactionOf("The user chatted."), nil })
+	storeExchanges(rows, "chat-1", "old question", "old answer", "unanswered question")
+	events := finishedRun(t, h, "/v1/threads/turn", compactLatestInput(key, "chat-1"))
+	if start := eventOfType(events, "COMPACTION_START"); start == nil || start.Before != "m3" {
+		t.Fatalf("the marker was opened with %+v", start)
+	}
+}
+
+// A retry of a chat a compaction ends with regenerates the reply the summary
+// covers last, without that summary.
+func TestARetryRegeneratesTheReplyACompactionEndsTheChatWith(t *testing.T) {
+	prompts := make(chan []string, 1)
+	h, rows, key := testChatHarness(t, promptOf(prompts))
+	h.compactWith(func(string, string) (string, error) { return compactionOf("The user chatted."), nil })
+	storeExchanges(rows, "chat-1", "old question", "old answer", "recent question", "recent answer")
+	finishedRun(t, h, "/v1/threads/turn", compactLatestInput(key, "chat-1"))
+	retry := compactInput(key, "chat-1")
+	retry["kind"] = "retry"
+	finishedRun(t, h, "/v1/threads/turn", retry)
+	if prompt := <-prompts; len(prompt) != 5 || prompt[3] != "user: recent question" || strings.Contains(strings.Join(prompt, "\n"), "The user chatted.") {
+		t.Fatalf("the retry sent %q", prompt)
+	}
+	if chat := storedChat(t, rows, key, "chat-1"); len(chat.Messages) != 4 || domain.LatestCompaction(chat.Messages) != -1 || chat.Messages[3].Content != "hello" {
+		t.Fatalf("the retry stored %+v", chat)
+	}
+}
+
 // A compact turn is refused before it starts when no message after the
 // chat's latest marker comes before its last question, and while the chat
 // has a running reply, rather than waiting behind it.

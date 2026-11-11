@@ -78,6 +78,7 @@ func TestRunsShowTheChatTheHarnessKeeps(t *testing.T) {
 		{"replayed", "A reply whose whole stream arrives twice.", streamed("data: {\"choices\":[{\"delta\":{\"content\":\"Said once.\"}}]}\n\ndata: [DONE]\n\n"), false, false, true, false},
 		{"compaction", "A turn of a device chat too long for the model's window, which first summarizes the messages before its latest exchange into a compaction marker.", streamed("data: {\"choices\":[{\"delta\":{\"content\":\"Second answer.\"}}]}\n\ndata: [DONE]\n\n"), false, true, false, true},
 		{"compact", "A compact turn of a device chat, which summarizes the messages before its latest exchange into a compaction marker and asks the model nothing.", nil, false, true, false, true},
+		{"compact-latest", "A compact turn of a device chat with compactLatest, which summarizes every message into a compaction marker at the end of the chat and asks the model nothing.", nil, false, true, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.search {
@@ -96,9 +97,12 @@ func TestRunsShowTheChatTheHarnessKeeps(t *testing.T) {
 			case tc.local:
 				in = localInput("", priorThread())
 			}
-			if tc.name == "compact" {
+			if tc.name == "compact" || tc.name == "compact-latest" {
 				in["kind"] = "compact"
 				delete(in, "content")
+			}
+			if tc.name == "compact-latest" {
+				in["compactLatest"] = true
 			}
 			w := postRoute(h, "/v1/threads/turn", in, "alice")
 			frames := framesOf(t, w.Body.Bytes())
