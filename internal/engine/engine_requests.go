@@ -86,6 +86,9 @@ var (
 	// researchKinds are the turns that answer a question anew, which a
 	// research may answer.
 	researchKinds = []string{"send", "edit", "regenerate", "retry"}
+	// compactingKinds are the turns that may compact a chat on request: a
+	// compaction, and a retry, which compacts again after one failed.
+	compactingKinds = []string{"compact", "retry"}
 )
 
 // Validate refuses a turn its run could not carry out. Who may send it is
@@ -107,6 +110,9 @@ func (in *TurnRequest) Validate() error {
 	}
 	if in.Options.Research && !slices.Contains(researchKinds, in.Kind) {
 		return api.Err(400, "BAD_REQUEST", "Only a question can be researched")
+	}
+	if in.CompactLatest && !slices.Contains(compactingKinds, in.Kind) {
+		return api.Err(400, "BAD_REQUEST", "Only a compaction compacts the latest exchange")
 	}
 	return in.PresetID.Check("presetId")
 }

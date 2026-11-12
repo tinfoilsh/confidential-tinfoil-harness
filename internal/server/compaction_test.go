@@ -783,6 +783,12 @@ func TestACompactTurnCompactsTheLatestExchangeWhenAsked(t *testing.T) {
 	if w := postRoute(h, "/v1/threads/turn", compactLatestInput(key, "chat-1"), "alice"); w.Code != 400 || !strings.Contains(w.Body.String(), "NOTHING_TO_COMPACT") {
 		t.Fatalf("compacting again: HTTP %d %s", w.Code, w.Body)
 	}
+	// A turn that compacts nothing refuses the member rather than ignoring it.
+	question := continueInput(key, "chat-1")
+	question["compactLatest"] = true
+	if w := postRoute(h, "/v1/threads/turn", question, "alice"); w.Code != 400 || !strings.Contains(w.Body.String(), "BAD_REQUEST") || len(storedChat(t, rows, key, "chat-1").Messages) != 5 {
+		t.Fatalf("a question sent with compactLatest: HTTP %d %s", w.Code, w.Body)
+	}
 	finishedRun(t, h, "/v1/threads/turn", continueInput(key, "chat-1"))
 	if prompt := <-prompts; len(prompt) != 3 || !strings.Contains(prompt[1], "lighthouse tour of Maine") || !strings.HasSuffix(prompt[1], "test message") {
 		t.Fatalf("the next question was sent as %q", prompt)
@@ -809,7 +815,7 @@ func TestARetryRegeneratesTheReplyACompactionEndsTheChatWith(t *testing.T) {
 	h.compactWith(func(string, string) (string, error) { return compactionOf("The user chatted."), nil })
 	storeExchanges(rows, "chat-1", "old question", "old answer", "recent question", "recent answer")
 	finishedRun(t, h, "/v1/threads/turn", compactLatestInput(key, "chat-1"))
-	retry := compactInput(key, "chat-1")
+	retry := compactLatestInput(key, "chat-1")
 	retry["kind"] = "retry"
 	finishedRun(t, h, "/v1/threads/turn", retry)
 	if prompt := <-prompts; len(prompt) != 5 || prompt[3] != "user: recent question" || strings.Contains(strings.Join(prompt, "\n"), "The user chatted.") {

@@ -1810,7 +1810,7 @@ components:
         toolCallId: {type: string, description: "The widget call a retryToolCall regenerates."}
         attachments: {type: array, items: {$ref: "#/components/schemas/SentAttachment"}}
         widgets: {type: array, items: {type: string}, description: "The widgets this client renders."}
-        compactLatest: {type: boolean, description: "A compact turn, or a retry that compacts again, summarizes the chat's latest exchange too, as COMPACTION_START describes. A client sends it only while the session's features.compactLatest is true, and when it shows a compaction marker at the end of a chat."}
+        compactLatest: {type: boolean, description: "A compact turn, or a retry that compacts again, summarizes the chat's latest exchange too, as COMPACTION_START describes. It is refused on any other kind. A client sends it only while the session's features.compactLatest is true, and when it shows a compaction marker at the end of a chat."}
         options: {$ref: "#/components/schemas/TurnOptions"}
 
     TurnOptions:
