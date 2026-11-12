@@ -92,7 +92,11 @@ func TestRunsShowTheChatTheHarnessKeeps(t *testing.T) {
 			case tc.search:
 				in = searchInput(key)
 			case tc.compacts:
-				h.compactWith(func(string, string) (string, error) { return compactionOf("The user asked a first question."), nil })
+				summary := "The user asked a first question."
+				if tc.name == "compact-latest" {
+					summary = "The user asked two questions."
+				}
+				h.compactWith(func(string, string) (string, error) { return compactionOf(summary), nil })
 				in = localInput("", longThread())
 			case tc.local:
 				in = localInput("", priorThread())
