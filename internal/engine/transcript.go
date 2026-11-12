@@ -78,12 +78,17 @@ func applyTurn(t *domain.Thread, in *TurnRequest, messageID string, attachments 
 // retried is the turn a retry carries out, which the chat decides: a failed
 // compaction compacts again, a failed or stopped continuation continues
 // again, any other last reply is regenerated, and a last question without a
-// reply is answered.
+// reply is answered. A marker that ends the chat is read past, so the reply
+// it covers is regenerated or continued without it.
 func retried(t *domain.Thread, in *TurnRequest) (*TurnRequest, error) {
-	if len(t.Messages) == 0 {
+	messages := t.Messages
+	if n := len(messages); n > 1 && messages[n-1].Role == domain.CompactionRole {
+		messages = messages[:n-1]
+	}
+	if len(messages) == 0 {
 		return nil, api.Err(400, "BAD_REQUEST", "The chat has nothing to retry")
 	}
-	turn, last := *in, t.Messages[len(t.Messages)-1]
+	turn, last := *in, messages[len(messages)-1]
 	switch {
 	case t.LastRequestKind == "compact":
 		turn.Kind, turn.MessageID = "compact", ""

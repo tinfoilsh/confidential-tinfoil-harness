@@ -22,7 +22,10 @@ import (
 // compacts once, before its first model turn or between two of them, and
 // its marker is kept with the turn even when the reply then fails. A compact
 // turn compacts its chat the same way on request, its last question being
-// the turn's, and asks the model nothing.
+// the turn's, and asks the model nothing. One that compacts the latest
+// exchange too summarizes every message up to the chat's last reply, and
+// its marker sits after that reply, at the end of the chat unless a question
+// without a reply follows.
 
 // recentTokens is how much of the chat before a compacted turn's question
 // the model may go on reading as it was, so a follow-up on what was just
@@ -39,12 +42,26 @@ const recentLimitShareTenths = 1
 // before the next one, and a summary longer than its reserve still fits.
 const recentShareTenths = 5
 
-// compaction is what a run's compaction leaves: its marker, the question it
-// sits before, and the context the turn's prompt fills after it.
+// compaction is what a run's compaction leaves: its marker, the message it
+// sits before, or else the one it sits after at the end of the chat, and the
+// context the turn's prompt fills after it.
 type compaction struct {
 	marker   domain.Message
 	beforeID string
+	afterID  string
 	usage    *domain.ContextUsage
+}
+
+// at is where the marker goes among messages: before the message it sits
+// before, or after the one it sits after, or -1 once that message is gone.
+func (c *compaction) at(t *domain.Thread) int {
+	if c.beforeID != "" {
+		return t.MessageIndex(c.beforeID)
+	}
+	if after := t.MessageIndex(c.afterID); after >= 0 {
+		return after + 1
+	}
+	return -1
 }
 
 // errNothingToCompact is a prompt too large whose chat holds no message
@@ -57,29 +74,42 @@ func errCompactionFailed() error {
 }
 
 // errNothingToCompactNow refuses a compact turn whose chat holds no message
-// before its last question that a summary could replace.
+// after its latest marker that a summary could replace.
 func errNothingToCompactNow() error {
-	return api.Err(400, "NOTHING_TO_COMPACT", "The chat holds nothing before its latest exchange to compact")
+	return api.Err(400, "NOTHING_TO_COMPACT", "The chat holds nothing to compact")
+}
+
+// lastOf is the index of the last message of role among messages, or -1.
+func lastOf(messages []domain.Message, role string) int {
+	last := len(messages) - 1
+	for last >= 0 && messages[last].Role != role {
+		last--
+	}
+	return last
 }
 
 // lastQuestion is the index of the last question among messages, or -1.
 func lastQuestion(messages []domain.Message) int {
-	question := len(messages) - 1
-	for question >= 0 && messages[question].Role != "user" {
-		question--
-	}
-	return question
+	return lastOf(messages, "user")
 }
 
-// compactable reports whether a compaction of messages has something to
-// summarize: a message after the latest marker, before the last question.
-func compactable(messages []domain.Message) bool {
+// compactable reports whether a compact turn of messages has something to
+// summarize after the latest marker: a message before the last question,
+// or a reply when the turn compacts the latest exchange too.
+func compactable(messages []domain.Message, latestToo bool) bool {
+	if latestToo {
+		return lastOf(messages, "assistant") > domain.LatestCompaction(messages)
+	}
 	return lastQuestion(messages) > domain.LatestCompaction(messages)+1
 }
 
-// compactChat carries out a compact turn, whose prompt fills what a turn's
-// would besides the chat.
+// compactChat carries out a compact turn: up to the chat's last reply when
+// it compacts the latest exchange too, or else as a turn whose prompt fills
+// what a turn's would besides the chat.
 func (eng *Engine) compactChat(ctx context.Context, r *Run, req *Request) error {
+	if r.turn.CompactLatest {
+		return eng.compactBefore(ctx, r, req, lastOf(req.messages, "assistant")+1)
+	}
 	return eng.compact(ctx, r, req, fixedCost(req, req.webSearch, api.Raw(req.rendered)))
 }
 
@@ -103,12 +133,24 @@ func (eng *Engine) compact(ctx context.Context, r *Run, req *Request, reserved i
 		shown = question
 	}
 	kept := keptFrom(req, latest, question, shown, min(max(recentTokens, req.limit()*recentLimitShareTenths/10), room*recentShareTenths/10))
+	return eng.compactBefore(ctx, r, req, kept)
+}
+
+// compactBefore summarizes the messages of req from its latest marker on,
+// up to the one at kept, into a marker there, and reads the chat into req
+// from that marker on. A marker with no message after it ends the chat.
+func (eng *Engine) compactBefore(ctx context.Context, r *Run, req *Request, kept int) error {
+	messages := req.messages
+	latest := domain.LatestCompaction(messages)
 	earlier := ""
 	if latest >= 0 {
 		earlier = messages[latest].Content
 	}
 	marker := domain.Message{ID: "msg_" + api.Token(), Role: domain.CompactionRole}
-	before := messages[kept].ID
+	before := ""
+	if kept < len(messages) {
+		before = messages[kept].ID
+	}
 	r.out.emit(domain.CompactionStart{MessageID: marker.ID, BeforeMessageID: before})
 	started := api.Now()
 	var result summarize.Result
@@ -148,7 +190,7 @@ func (eng *Engine) compact(ctx context.Context, r *Run, req *Request, reserved i
 	req.messages = slices.Insert(slices.Clone(messages), kept, marker)
 	req.render()
 	req.remind()
-	r.compacted = &compaction{marker: marker, beforeID: before, usage: req.usage}
+	r.compacted = &compaction{marker: marker, beforeID: before, afterID: messages[kept-1].ID, usage: req.usage}
 	view := domain.ViewMessage(&marker)
 	r.out.emit(domain.CompactionEnd{MessageID: marker.ID, BeforeMessageID: before, Outcome: domain.CompactionCompleted, Marker: &view})
 	eng.Live.mu.Lock()

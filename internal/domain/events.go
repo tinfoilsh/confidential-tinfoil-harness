@@ -113,15 +113,15 @@ type ActivityPatch struct {
 }
 
 // CompactionStart opens a compaction marker, placed before the question it
-// precedes, while its summary is written.
+// precedes, or at the end of the chat when it names none, while its summary
+// is written.
 type CompactionStart struct {
 	MessageID       string `json:"messageId"`
 	BeforeMessageID string `json:"beforeMessageId"`
 }
 
-// CompactionEnd closes a compaction marker, before the question its
-// CompactionStart named: completed with the marker, or failed, when it is
-// not kept.
+// CompactionEnd closes a compaction marker, where its CompactionStart placed
+// it: completed with the marker, or failed, when it is not kept.
 type CompactionEnd struct {
 	MessageID       string       `json:"messageId"`
 	BeforeMessageID string       `json:"beforeMessageId"`
