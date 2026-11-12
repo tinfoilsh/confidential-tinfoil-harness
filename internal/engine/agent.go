@@ -111,6 +111,9 @@ func (eng *Engine) loop(ctx context.Context, out *Stream, req *Request, m *infer
 		}
 		conversation = append(conversation, replied(out, req, answer, calls))
 		conversation = append(conversation, execute(ctx, out, set, calls)...)
+		if set.failure != nil {
+			return set.failure
+		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -280,6 +283,9 @@ func Invoke(ctx context.Context, out *Stream, set *Toolset, call ToolCall) (mess
 	}()
 	if call.Name == domain.BrowserTool && set.browser != nil {
 		result, err := set.browser.call(ctx, out, call)
+		if errors.Is(err, context.DeadlineExceeded) {
+			set.failure = err
+		}
 		if err != nil {
 			result = BrowserResult{Text: string(api.Raw(api.Object{"error": api.AsError(err).Message}))}
 		}

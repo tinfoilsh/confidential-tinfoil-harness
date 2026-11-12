@@ -115,7 +115,7 @@ func (b *browserSession) call(ctx context.Context, out *Stream, call ToolCall) (
 		}
 		b.mu.Unlock()
 	}()
-	out.emit(domain.BrowserToolRequest{ExecutionID: pending.id, ToolCallID: call.ID, ExecutorID: b.access.ExecutorID, Action: action})
+	out.emit(domain.BrowserToolRequest{ExecutionID: pending.id, ToolCallID: call.ID, ExecutorID: b.access.ExecutorID, ExpiresAt: api.Now().Add(browserResultTimeout).Format(time.RFC3339Nano), Action: action})
 	timer := time.NewTimer(browserResultTimeout)
 	defer timer.Stop()
 	select {
@@ -124,7 +124,7 @@ func (b *browserSession) call(ctx context.Context, out *Stream, call ToolCall) (
 	case <-ctx.Done():
 		return BrowserResult{}, ctx.Err()
 	case <-timer.C:
-		return BrowserResult{}, api.Err(408, "REQUEST_TIMEOUT", "The browser did not return an action result")
+		return BrowserResult{}, context.DeadlineExceeded
 	}
 }
 

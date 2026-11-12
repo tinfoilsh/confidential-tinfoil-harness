@@ -1900,10 +1900,11 @@ components:
         executionId identifies the operation across stream reconnections.
         Every replay is reconciled against the executor's local journal.
       type: object
-      required: [type, executionId, toolCallId, executorId, operation]
+      required: [type, executionId, toolCallId, executorId, expiresAt, operation]
       properties:
         type: {const: BROWSER_TOOL_REQUEST}
         timestamp: {$ref: "#/components/schemas/Timestamp"}
+        expiresAt: {type: string, format: date-time, description: "The executor refuses dispatch after this deadline, including after a delayed review or stream replay."}
         executionId: {type: string}
         toolCallId: {type: string}
         executorId: {type: string}

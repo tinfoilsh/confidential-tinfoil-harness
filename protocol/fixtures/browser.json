@@ -143,6 +143,7 @@
         "executionId": "00000000-0000-4000-8000-000000000006",
         "toolCallId": "read",
         "executorId": "00000000-0000-4000-8000-000000000007",
+        "expiresAt": "2026-01-01T00:00:00Z",
         "operation": {
           "action": "read",
           "tabId": 1
@@ -170,6 +171,7 @@
         "executionId": "00000000-0000-4000-8000-000000000009",
         "toolCallId": "click",
         "executorId": "00000000-0000-4000-8000-000000000007",
+        "expiresAt": "2026-01-01T00:00:00Z",
         "operation": {
           "action": "click",
           "tabId": 1,

@@ -19,6 +19,7 @@ type BrowserToolRequest struct {
 	ExecutionID string        `json:"executionId"`
 	ToolCallID  string        `json:"toolCallId"`
 	ExecutorID  string        `json:"executorId"`
+	ExpiresAt   string        `json:"expiresAt"`
 	Action      BrowserAction `json:"operation"`
 }
 
