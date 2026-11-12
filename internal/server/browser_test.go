@@ -1,8 +1,12 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"image"
+	"image/jpeg"
 	"strings"
 	"testing"
 	"time"
@@ -157,5 +161,49 @@ func TestBrowserAccessOnlyOnExplicitLocalTurns(t *testing.T) {
 	features := api.Obj(api.Obj(api.Parsed(postRoute(h, "/v1/session", api.Object{}, "alice").Body.Bytes()))["features"])
 	if features["browserTools"] != true {
 		t.Fatalf("browser protocol not advertised: %v", features)
+	}
+}
+
+func TestBrowserScreenshotReachesVisionWithoutEnteringHistory(t *testing.T) {
+	sent := make(chan []any, 1)
+	h, _, _ := testChatHarness(t, toolTurns(toolCallChunk(0, "screen", domain.BrowserTool, `{"action":"screenshot","tabId":1}`), sent))
+	h.models.Catalog.Get().Definition("kimi-k3")["multimodal"] = true
+	run, err := h.engine.AcceptTurn(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), auth.ContentKey{}, requestOf[engine.TurnRequest](browserInput()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer run.Log.Frames.Detach()
+	request := awaitBrowser(t, run.Log, 1)
+	var encoded bytes.Buffer
+	if err := jpeg.Encode(&encoded, image.NewRGBA(image.Rect(0, 0, 2, 2)), nil); err != nil {
+		t.Fatal(err)
+	}
+	screenshot := base64.StdEncoding.EncodeToString(encoded.Bytes())
+	input := browserReply(run, request, "Current viewport")
+	api.Obj(input["result"])["image"] = "not-base64"
+	if w := postRoute(h, "/v1/threads/browser/result", input, "alice"); w.Code != 400 {
+		t.Fatalf("invalid screenshot accepted: %s", w.Body)
+	}
+	api.Obj(input["result"])["image"] = screenshot
+	if w := postRoute(h, "/v1/threads/browser/result", input, "alice"); w.Code != 200 {
+		t.Fatalf("screenshot refused: %s", w.Body)
+	}
+	awaitFrame(t, run.Log, "RUN_FINISHED")
+	<-run.Finished
+	messages := <-sent
+	found := false
+	for _, message := range messages {
+		for _, part := range api.Arr(api.Obj(message)["content"]) {
+			if api.Obj(api.Obj(part)["image_url"])["url"] == "data:image/jpeg;base64,"+screenshot {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("vision model did not receive the screenshot: %s", api.Raw(messages))
+	}
+	w := postRoute(h, "/v1/threads/follow", api.Object{"threadId": run.Thread.ID, "runId": run.Log.ID}, "alice")
+	if w.Code != 200 || strings.Contains(w.Body.String(), screenshot) || !strings.Contains(w.Body.String(), "Current viewport") {
+		t.Fatalf("screenshot history was not text-only: %s", w.Body)
 	}
 }

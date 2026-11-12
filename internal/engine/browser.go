@@ -87,14 +87,17 @@ func newBrowserSession(access *BrowserAccess) *browserSession {
 }
 
 func (b *browserSession) call(ctx context.Context, out *Stream, call ToolCall) (BrowserResult, error) {
+	if len(call.Args) > maxBrowserText {
+		return BrowserResult{}, api.Err(413, "PAYLOAD_TOO_LARGE", "The browser action is too large")
+	}
+	if !json.Valid([]byte(call.Args)) {
+		return BrowserResult{}, api.Err(400, "BAD_REQUEST", "Invalid browser action")
+	}
 	var action domain.BrowserAction
 	decoder := json.NewDecoder(bytes.NewBufferString(call.Args))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&action); err != nil || !slices.Contains([]string{"tabs", "read", "screenshot", "click", "hover", "fill", "select", "press", "scroll", "navigate", "back", "forward", "open", "switch", "close", "wait"}, action.Action) {
 		return BrowserResult{}, api.Err(400, "BAD_REQUEST", "Invalid browser action")
-	}
-	if len(call.Args) > maxBrowserText {
-		return BrowserResult{}, api.Err(413, "PAYLOAD_TOO_LARGE", "The browser action is too large")
 	}
 	if err := ctx.Err(); err != nil {
 		return BrowserResult{}, err
