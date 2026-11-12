@@ -59,6 +59,9 @@ const (
 )
 
 type Toolset struct {
+	browser *browserSession
+	vision  bool
+	images  []json.RawMessage
 	Widgets map[string]domain.Widget
 	Local   func(context.Context, ToolCall) (any, error)
 	search  *session // nil unless the run searches the web

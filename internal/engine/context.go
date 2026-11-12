@@ -25,6 +25,7 @@ import (
 )
 
 type Request struct {
+	browser                    *browserSession
 	compact                    func(context.Context, int) error // compacts the chat, once, when its prompt would not fit
 	params                     api.Object
 	System, widgetHint, policy string
@@ -287,6 +288,10 @@ func (eng *Engine) BuildRequest(thread *domain.Thread, profile *domain.Profile, 
 		req.instruction += "\n\n" + askInstruction
 	}
 	req.System = systemPrompt(c, thread, profile, project, documents, display, zone, options.Locale)
+	if in.Browser != nil {
+		req.System += "\n\n" + domain.BrowserInstructions
+		req.rendered = append(req.rendered, domain.BrowserDeclaration())
+	}
 	req.window, req.policy = window, policy
 	req.piiCheck = domain.ValueOr(options.PIICheck, domain.ValueOr(profile.PIICheckEnabled, true))
 	// Turning web search off in the settings leaves each chat's own setting.
