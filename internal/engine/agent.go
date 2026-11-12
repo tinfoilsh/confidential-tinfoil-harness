@@ -260,6 +260,10 @@ func execute(ctx context.Context, out *Stream, set *Toolset, calls []ToolCall) [
 	if set.browser != nil {
 		set.images = nil
 		for i, call := range calls {
+			if set.failure != nil || ctx.Err() != nil {
+				messages[i] = answered(call.ID, `{"error":"not executed"}`)
+				continue
+			}
 			messages[i] = Invoke(ctx, out, set, call)
 		}
 		return append(messages, set.images...)
@@ -283,7 +287,7 @@ func Invoke(ctx context.Context, out *Stream, set *Toolset, call ToolCall) (mess
 	}()
 	if call.Name == domain.BrowserTool && set.browser != nil {
 		result, err := set.browser.call(ctx, out, call)
-		if errors.Is(err, context.DeadlineExceeded) {
+		if err != nil && api.AsError(err).Code == browserTimeoutCode {
 			set.failure = err
 		}
 		if err != nil {
@@ -293,7 +297,7 @@ func Invoke(ctx context.Context, out *Stream, set *Toolset, call ToolCall) (mess
 		if result.Image != "" && set.vision {
 			set.images = append(set.images, browserImage(result.Image))
 		}
-		return answered(call.ID, result.Text)
+		return answered(call.ID, clip(result.Text, MaxToolOutput))
 	}
 	// A widget is drawn by the caller from TOOL_CALL_ARGS; the model just needs a result.
 	if !set.searches(call.Name) {

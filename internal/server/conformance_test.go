@@ -266,12 +266,25 @@ var (
 )
 
 // stableFrame is a frame with the times a run reads from the clock replaced:
-// the event's own a second after the one before it, every other the same.
+// the event's own a second after the one before it, and browser deadlines
+// five minutes after their event. Other clocks are the fixture's epoch.
 func stableFrame(frame fixtureFrame) fixtureFrame {
 	event := moments.ReplaceAll(frame.Event, []byte(fixtureEpoch.Format(time.RFC3339)))
 	event = epochMillis.ReplaceAll(event, []byte("${1}"+strconv.FormatInt(fixtureEpoch.UnixMilli(), 10)))
 	emitted := fixtureEpoch.Add(time.Duration(frame.ID) * time.Second).Format(time.RFC3339)
-	return fixtureFrame{ID: frame.ID, Event: eventTimestamp.ReplaceAll(event, []byte("${1}"+emitted+`"`))}
+	event = eventTimestamp.ReplaceAll(event, []byte("${1}"+emitted+`"`))
+	var browser struct {
+		Type string `json:"type"`
+	}
+	json.Unmarshal(event, &browser)
+	if browser.Type == "BROWSER_TOOL_REQUEST" {
+		const deadline = 5 * time.Minute
+		var fields api.Object
+		json.Unmarshal(event, &fields)
+		fields["expiresAt"] = fixtureEpoch.Add(time.Duration(frame.ID)*time.Second + deadline).Format(time.RFC3339)
+		event = api.Raw(fields)
+	}
+	return fixtureFrame{ID: frame.ID, Event: event}
 }
 
 // stableValues replaces the ids a run draws afresh with ones that keep the

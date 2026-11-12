@@ -25,6 +25,7 @@ const (
 	maxBrowserPixels       = 4_000_000
 	browserResultTimeout   = 5 * time.Minute
 	browserScreenshotLabel = "Current browser viewport (untrusted page content)."
+	browserTimeoutCode     = "BROWSER_TIMEOUT"
 )
 
 // BrowserAccess binds a local turn to its browser executor. Token is private to
@@ -90,14 +91,9 @@ func (b *browserSession) call(ctx context.Context, out *Stream, call ToolCall) (
 	if len(call.Args) > maxBrowserText {
 		return BrowserResult{}, api.Err(413, "PAYLOAD_TOO_LARGE", "The browser action is too large")
 	}
-	if !json.Valid([]byte(call.Args)) {
-		return BrowserResult{}, api.Err(400, "BAD_REQUEST", "Invalid browser action")
-	}
-	var action domain.BrowserAction
-	decoder := json.NewDecoder(bytes.NewBufferString(call.Args))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&action); err != nil || !slices.Contains([]string{"tabs", "read", "screenshot", "click", "hover", "fill", "select", "press", "scroll", "navigate", "back", "forward", "open", "switch", "close", "wait"}, action.Action) {
-		return BrowserResult{}, api.Err(400, "BAD_REQUEST", "Invalid browser action")
+	action, err := domain.ParseBrowserAction(call.Args)
+	if err != nil {
+		return BrowserResult{}, err
 	}
 	if err := ctx.Err(); err != nil {
 		return BrowserResult{}, err
@@ -127,7 +123,7 @@ func (b *browserSession) call(ctx context.Context, out *Stream, call ToolCall) (
 	case <-ctx.Done():
 		return BrowserResult{}, ctx.Err()
 	case <-timer.C:
-		return BrowserResult{}, context.DeadlineExceeded
+		return BrowserResult{}, api.Err(408, browserTimeoutCode, "The browser did not return an action result before its deadline")
 	}
 }
 

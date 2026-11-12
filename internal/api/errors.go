@@ -45,6 +45,7 @@ var Actions = map[string]string{
 	"ATTACHMENT_UNSUPPORTED":  ActionRevise,
 	"ATTACHMENTS_UNAVAILABLE": ActionRetry,
 	"BAD_REQUEST":             ActionStop,
+	"BROWSER_TIMEOUT":         ActionStop,
 	"CHAT_FLAGGED":            ActionStop,
 	"COMPACTION_FAILED":       ActionRetry,
 	"CONTEXT_TOO_LARGE":       ActionRevise,

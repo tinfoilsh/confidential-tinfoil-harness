@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/jpeg"
 	"strings"
@@ -85,6 +86,11 @@ func TestBrowserToolsRoundTripAndReplay(t *testing.T) {
 	if w := postRoute(h, "/v1/threads/browser/result", result, "bob"); w.Code != 404 {
 		t.Fatalf("another account submitted a result: %d", w.Code)
 	}
+	result["executorId"] = uuid.NewString()
+	if w := postRoute(h, "/v1/threads/browser/result", result, "alice"); w.Code != 403 {
+		t.Fatalf("another executor used the correct token: %d", w.Code)
+	}
+	result["executorId"] = first.ExecutorID
 	result["token"] = strings.Repeat("0", len(browserTestToken))
 	if w := postRoute(h, "/v1/threads/browser/result", result, "alice"); w.Code != 403 {
 		t.Fatalf("another executor submitted a result: %d", w.Code)
@@ -205,5 +211,52 @@ func TestBrowserScreenshotReachesVisionWithoutEnteringHistory(t *testing.T) {
 	w := postRoute(h, "/v1/threads/follow", api.Object{"threadId": run.Thread.ID, "runId": run.Log.ID}, "alice")
 	if w.Code != 200 || strings.Contains(w.Body.String(), screenshot) || !strings.Contains(w.Body.String(), "Current viewport") {
 		t.Fatalf("screenshot history was not text-only: %s", w.Body)
+	}
+}
+
+func TestBrowserActionBudgetStopsAtForty(t *testing.T) {
+	const limit = 40
+	var chunks strings.Builder
+	for index := range limit + 1 {
+		chunks.WriteString(toolCallChunk(index, fmt.Sprintf("read-%d", index), domain.BrowserTool, `{"action":"read","tabId":1}`))
+	}
+	sent := make(chan []any, 1)
+	h, _, _ := testChatHarness(t, toolTurns(chunks.String(), sent))
+	run, err := h.engine.AcceptTurn(context.Background(), &auth.Principal{ID: "alice", JWT: "clerk-alice"}, chatCredential("alice"), auth.ContentKey{}, requestOf[engine.TurnRequest](browserInput()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer run.Log.Frames.Detach()
+	for index := range limit {
+		request := awaitBrowser(t, run.Log, index+1)
+		if request.ToolCallID != fmt.Sprintf("read-%d", index) {
+			t.Fatalf("wrong action at %d: %+v", index, request)
+		}
+		if w := postRoute(h, "/v1/threads/browser/result", browserReply(run, request, "Page observed"), "alice"); w.Code != 200 {
+			t.Fatalf("action %d refused: %s", index, w.Body)
+		}
+	}
+	awaitFrame(t, run.Log, "RUN_FINISHED")
+	<-run.Finished
+	messages := <-sent
+	if toolMessage(messages, "read-39") != "Page observed" || !strings.Contains(toolMessage(messages, "read-40"), "budget is exhausted") {
+		t.Fatalf("wrong action boundary: %s", api.Raw(messages))
+	}
+}
+
+func TestBrowserParameterSchemaRejectsInvalidActionsBeforeDispatch(t *testing.T) {
+	sent := make(chan []any, 1)
+	chunks := toolCallChunk(0, "bad-key", domain.BrowserTool, `{"action":"press","tabId":1,"ref":"input","key":"Foo"}`) + toolCallChunk(1, "no-ref", domain.BrowserTool, `{"action":"fill","tabId":1,"text":"example"}`)
+	h, _, _ := testChatHarness(t, toolTurns(chunks, sent))
+	w := postRoute(h, "/v1/threads/turn", browserInput(), "alice")
+	events := eventsIn(t, w)
+	if eventOfType(events, "BROWSER_TOOL_REQUEST") != nil {
+		t.Fatalf("dispatched invalid arguments: %s", w.Body)
+	}
+	messages := <-sent
+	for _, call := range []string{"bad-key", "no-ref"} {
+		if !strings.Contains(toolMessage(messages, call), "parameter schema") {
+			t.Fatalf("the model was not told to correct %s: %s", call, api.Raw(messages))
+		}
 	}
 }
