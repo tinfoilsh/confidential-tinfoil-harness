@@ -913,11 +913,11 @@ func TestASessionOffersCompactionOnlyWithItsModel(t *testing.T) {
 		return session.Features
 	}
 	h.engine.Summaries = summarize.New(summarizerFunc(nil), &h.models.Catalog, "kimi-k3", longSummaryModel)
-	if features := offered(); features["compaction"] || features["manualCompaction"] {
+	if features := offered(); features["compaction"] || features["manualCompaction"] || features["compactLatest"] {
 		t.Fatalf("a session offered compaction on a model the catalog does not list: %v", features)
 	}
 	h.compactWith(nil)
-	if features := offered(); !features["compaction"] || !features["manualCompaction"] {
+	if features := offered(); !features["compaction"] || !features["manualCompaction"] || !features["compactLatest"] {
 		t.Fatalf("a session did not offer compaction on a model the catalog lists: %v", features)
 	}
 }
