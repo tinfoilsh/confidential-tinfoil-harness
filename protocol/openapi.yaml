@@ -1874,6 +1874,9 @@ components:
         url: {type: string}
         key: {type: string}
         direction: {type: string}
+        screenshotId: {type: string, description: "The fresh screenshot whose pixels a coordinate action uses."}
+        x: {type: number, minimum: 0}
+        y: {type: number, minimum: 0}
 
     BrowserResult:
       type: object
