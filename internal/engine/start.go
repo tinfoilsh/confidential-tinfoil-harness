@@ -247,6 +247,7 @@ func (eng *Engine) launch(ctx context.Context, r *Run) error {
 	row, request, model, titleText := plan.row, plan.request, plan.model, plan.titleText
 	r.screening, r.retryTarget, r.turn = eng.screening(request), plan.retryTarget, plan.turn
 	request.cacheScope = cacheScope(p, s.ID, r.input.Options.CacheSecret)
+	request.browser = r.browser
 	request.searchBilled = r.credential.APIKey
 	request.compact = func(ctx context.Context, reserved int) error { return eng.compact(ctx, r, request, reserved) }
 	// A continuation streams into the reply it extends, which RUN_STARTED names.

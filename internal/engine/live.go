@@ -186,6 +186,7 @@ type Run struct {
 	screening                *screening
 	compacted                *compaction // what the run's compaction left, once it compacted
 	researched               bool        // the run started a research, which its reply records
+	browser                  *browserSession
 
 	// yielded marks an active run stopped so a queued turn starts now.
 	yielded bool

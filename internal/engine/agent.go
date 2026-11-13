@@ -54,6 +54,7 @@ func (eng *Engine) loop(ctx context.Context, out *Stream, req *Request, m *infer
 		set.Widgets[w.Name] = w
 	}
 	set.Local = eng.widgetResult
+	set.browser, set.vision = req.browser, req.vision
 
 	defs, err := offer(set, req.rendered)
 	if err != nil {
@@ -66,10 +67,14 @@ func (eng *Engine) loop(ctx context.Context, out *Stream, req *Request, m *infer
 	}
 	// The run's own exchange follows the history it starts from.
 	history := len(conversation)
+	maxTurns := MaxTurns
+	if req.browser != nil {
+		maxTurns = maxBrowserActions
+	}
 	for turn := 1; ; turn++ {
 		// Past the cap the model answers from what it has, with no tools to call.
 		tools := defs
-		if turn > MaxTurns {
+		if turn > maxTurns {
 			tools = nil
 			conversation = append(conversation, api.Raw(api.Object{"role": "system", "content": FinalAnswerInstruction}))
 		}
@@ -98,11 +103,20 @@ func (eng *Engine) loop(ctx context.Context, out *Stream, req *Request, m *infer
 		if len(calls) == 0 {
 			return nil
 		}
-		if turn > MaxTurns {
-			return api.Err(502, "MAX_TURNS", fmt.Sprintf("The model called tools for %d turns without answering", MaxTurns))
+		if turn > maxTurns {
+			return api.Err(502, "MAX_TURNS", fmt.Sprintf("The model called tools for %d turns without answering", maxTurns))
+		}
+		if req.browser != nil {
+			conversation = append(conversation[:history], clearBrowserImages(conversation[history:])...)
 		}
 		conversation = append(conversation, replied(out, req, answer, calls))
 		conversation = append(conversation, execute(ctx, out, set, calls)...)
+		if set.failure != nil {
+			return set.failure
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 	}
 }
 
@@ -243,6 +257,17 @@ func offer(set *Toolset, rendered []json.RawMessage) (json.RawMessage, error) {
 
 func execute(ctx context.Context, out *Stream, set *Toolset, calls []ToolCall) []json.RawMessage {
 	messages := make([]json.RawMessage, len(calls))
+	if set.browser != nil {
+		set.images = nil
+		for i, call := range calls {
+			if set.failure != nil || ctx.Err() != nil {
+				messages[i] = answered(call.ID, `{"error":"not executed"}`)
+				continue
+			}
+			messages[i] = Invoke(ctx, out, set, call)
+		}
+		return append(messages, set.images...)
+	}
 	var wg sync.WaitGroup
 	for i, call := range calls {
 		wg.Go(func() { messages[i] = Invoke(ctx, out, set, call) })
@@ -260,6 +285,20 @@ func Invoke(ctx context.Context, out *Stream, set *Toolset, call ToolCall) (mess
 			message = answered(call.ID, string(failure))
 		}
 	}()
+	if call.Name == domain.BrowserTool && set.browser != nil {
+		result, err := set.browser.call(ctx, out, call)
+		if err != nil && api.AsError(err).Code == browserTimeoutCode {
+			set.failure = err
+		}
+		if err != nil {
+			result = BrowserResult{Text: string(api.Raw(api.Object{"error": api.AsError(err).Message}))}
+		}
+		out.emit(domain.ToolCallResult{MessageID: "msg_" + api.Token(), ToolCallID: call.ID, Role: "tool", Content: api.Raw(api.Object{"text": result.Text})})
+		if result.Image != "" && set.vision {
+			set.images = append(set.images, browserImage(result.Image))
+		}
+		return answered(call.ID, clip(result.Text, MaxToolOutput))
+	}
 	// A widget is drawn by the caller from TOOL_CALL_ARGS; the model just needs a result.
 	if !set.searches(call.Name) {
 		w, ok := set.Widgets[call.Name]

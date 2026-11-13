@@ -55,6 +55,7 @@ type TurnRequest struct {
 	ToolCallID      string               `json:"toolCallId,omitempty"`
 	Attachments     []attach.Sent        `json:"attachments,omitzero"`
 	Widgets         []string             `json:"widgets,omitzero"`
+	Browser         *BrowserAccess       `json:"browser,omitempty"`
 	// CompactLatest has a compaction on request summarize the chat's latest
 	// exchange too, for a client that shows a marker at the end of a chat.
 	CompactLatest bool        `json:"compactLatest,omitempty"`
@@ -113,6 +114,14 @@ func (in *TurnRequest) Validate() error {
 	}
 	if in.CompactLatest && !slices.Contains(compactingKinds, in.Kind) {
 		return api.Err(400, "BAD_REQUEST", "Only a compaction compacts the latest exchange")
+	}
+	if in.Browser != nil {
+		if !in.Local || in.Kind != "send" || in.Options.Research {
+			return api.Err(400, "BAD_REQUEST", "Browser actions require a local send turn without research")
+		}
+		if _, err := uuid.Parse(in.Browser.ExecutorID); err != nil || !cacheSecretPattern.MatchString(in.Browser.Token) {
+			return api.Err(400, "BAD_REQUEST", "Browser access requires an executor UUID and a 256-bit token")
+		}
 	}
 	return in.PresetID.Check("presetId")
 }
