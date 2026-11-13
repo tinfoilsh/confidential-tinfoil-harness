@@ -85,7 +85,9 @@ func (at *Service) HandleSpeech(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, api.Err(503, "TOOL_UNAVAILABLE", "Speech is unavailable"))
 		return
 	}
-	ctx := auth.WithCallerKey(r.Context(), string(credential.Key))
+	// A reading asks for its pieces as it plays, so a long one outlasts the
+	// chat token it started with.
+	ctx := auth.WithCaller(r.Context(), at.Store.ChatAccess(at.Auth, p, credential))
 	// A reading counts as one request, as a run does: its pieces report
 	// usage under it, and only the first is billed.
 	reading := "speech_" + api.Token()

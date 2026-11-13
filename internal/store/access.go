@@ -11,10 +11,10 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane"
 )
 
-// ChatAccess is the chat access a run's calls carry. A subscriber's chat
-// token is renewed by the control plane for as long as the run lasts, as the
-// user its client's session proved; a free key or an API key is carried as
-// it is.
+// ChatAccess is the chat access the calls of a run, or of a reply read
+// aloud, carry. A subscriber's chat token is renewed by the control plane
+// for as long as the run or the reading lasts, as the user its client's
+// session proved; a free key or an API key is carried as it is.
 func (s *Store) ChatAccess(authenticator *auth.Authenticator, p *auth.Principal, credential auth.Credential) *auth.Access {
 	if !credential.FirstParty {
 		return auth.NewAccess(credential, nil)
@@ -33,9 +33,10 @@ func (s *Store) ChatAccess(authenticator *auth.Authenticator, p *auth.Principal,
 	})
 }
 
-// accessRefused is why a run's chat access was not renewed, which the run
-// ends saying. Only an account that may no longer chat is told to stop: an
-// answer the control plane could not give is worth another try.
+// accessRefused is why chat access was not renewed, which the run or the
+// reading it was for ends saying. Only an account that may no longer chat is
+// told to stop: an answer the control plane could not give is worth another
+// try.
 func accessRefused(err error) *api.Error {
 	slog.Warn("chat access was not renewed", "error", err)
 	var refused *controlplane.Error

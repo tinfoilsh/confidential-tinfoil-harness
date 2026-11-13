@@ -1437,7 +1437,7 @@ components:
       type: apiKey
       in: header
       name: X-Tinfoil-Inference-Key
-      description: The chat access the client minted from the control plane, which the harness checks against the identity before it reads the body. A run started with a subscriber's chat token outlasts it. The harness has the control plane renew the token for as long as the run lasts, so a client mints chat access for the requests it sends and never for a run in progress.
+      description: The chat access the client minted from the control plane, which the harness checks against the identity before it reads the body. A run started with a subscriber's chat token outlasts it, as does a reply read aloud. The harness has the control plane renew the token for as long as the run or the reading lasts, so a client mints chat access for the requests it sends and never for a run or a reading in progress.
   responses:
 
     Error:
