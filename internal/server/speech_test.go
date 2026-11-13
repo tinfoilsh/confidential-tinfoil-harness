@@ -436,6 +436,60 @@ func TestSpeechThatFailsPartwayEndsIncomplete(t *testing.T) {
 	}
 }
 
+// A reading outlasts the chat token it started with. The speech service
+// takes that token for the first piece only, as when it expires while the
+// reply is read, and a piece it refuses is asked for again with the token
+// the control plane renews it into, so the reply is read to its end.
+func TestAReadingOutlastsTheChatTokenItStartedWith(t *testing.T) {
+	held, renewed := chatTokenOf("alice"), mintChatToken("alice", nil)
+	var mu sync.Mutex
+	var spoken []string
+	h := routerHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Input string `json:"input"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		presented := r.Header.Get("Authorization")
+		if presented != "Bearer "+renewed && (presented != "Bearer "+held || !strings.HasPrefix(body.Input, "Sentence 1 ")) {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		mu.Lock()
+		spoken = append(spoken, body.Input)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "audio/pcm")
+		io.WriteString(w, "<"+body.Input+">")
+	})
+	asked := renewing(h.store.Rows.(*memoryRows), func() (string, int) { return renewed, 0 })
+	server := httptest.NewServer(h.routes())
+	t.Cleanup(server.Close)
+	var long strings.Builder
+	for i := 1; i <= 12; i++ {
+		fmt.Fprintf(&long, "Sentence %d walks through the plan in enough detail to fill a piece. ", i)
+	}
+	req, _ := http.NewRequest("POST", server.URL+"/v1/speech", bytes.NewReader(api.Raw(api.Object{"text": long.String()})))
+	signIn(req, "alice")
+	resp, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	audio, err := io.ReadAll(resp.Body)
+	mu.Lock()
+	defer mu.Unlock()
+	slices.SortFunc(spoken, func(a, b string) int { return cmp.Compare(leadingNumber(a), leadingNumber(b)) })
+	inOrder := ""
+	for _, piece := range spoken {
+		inOrder += "<" + piece + ">"
+	}
+	if err != nil || resp.StatusCode != 200 || len(spoken) < 2 || strings.Join(spoken, " ") != strings.TrimSpace(long.String()) || string(audio) != inOrder {
+		t.Fatalf("HTTP %d read %d pieces as %q and ended with %v", resp.StatusCode, len(spoken), audio, err)
+	}
+	if got := asked(); !reflect.DeepEqual(got, []renewal{{"alice", held}}) {
+		t.Fatalf("the control plane was asked for %d renewals, not one of the reading's own token for its user", len(got))
+	}
+}
+
 // leadingNumber is the number a test sentence starts with.
 func leadingNumber(piece string) int {
 	n, _ := strconv.Atoi(strings.Fields(piece)[1])

@@ -212,7 +212,7 @@ func (eng *Engine) admit(ctx context.Context, p *auth.Principal, credential auth
 	r.Log.stop = stop
 	// The user message a turn adds is named by the client's request.
 	r.stopped, r.input, r.received, r.Principal, r.key, r.messageID, r.credential, r.assembler = stopped, &clean, api.Timestamp(), p, key, r.nonce, credential, domain.NewMessageAssembler()
-	r.access = eng.access(p, credential)
+	r.access = eng.Store.ChatAccess(eng.Auth, p, credential)
 	r.browser = newBrowserSession(in.Browser)
 	if keyless {
 		clear(r.key[:])
