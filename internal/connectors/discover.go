@@ -170,7 +170,9 @@ func (c *Client) protectedResource(ctx context.Context, server string, challenge
 		if err != nil || !found || len(prm.AuthorizationServers) == 0 {
 			continue
 		}
-		if prm.Resource != "" && !covers(prm.Resource, server) {
+		// Tokens for the resource go to server alone, so it must be at the
+		// resource's origin; servers name the resource at various paths.
+		if prm.Resource != "" && !sameOrigin(prm.Resource, server) {
 			return nil, errUnsupported("The server's metadata names another resource")
 		}
 		if _, err := ServerURL(prm.AuthorizationServers[0]); err != nil {
@@ -191,7 +193,9 @@ func (c *Client) authServer(ctx context.Context, issuer string) (*authServer, er
 		if err != nil || !found || as.AuthorizationEndpoint == "" || as.TokenEndpoint == "" {
 			continue
 		}
-		if strings.TrimSuffix(as.Issuer, "/") != strings.TrimSuffix(issuer, "/") {
+		// Some servers name themselves under another path of the address
+		// their metadata is at; one at another origin is someone else.
+		if !sameOrigin(as.Issuer, issuer) {
 			return nil, errUnsupported("The authorization server's metadata names another issuer")
 		}
 		if !slices.Contains(as.CodeChallengeMethodsSupported, pkceMethod) {
@@ -253,15 +257,19 @@ func origin(address string) string {
 	return u.Scheme + "://" + u.Host
 }
 
-// covers is whether resource names server: the same origin, at server's
-// path or a path above it.
-func covers(resource, server string) bool {
-	r, err1 := url.Parse(resource)
-	s, err2 := url.Parse(server)
-	if err1 != nil || err2 != nil || !strings.EqualFold(r.Scheme, s.Scheme) || !strings.EqualFold(r.Host, s.Host) {
+// sameOrigin is whether two addresses are at the same scheme, host and
+// port, a port left out being the scheme's own.
+func sameOrigin(a, b string) bool {
+	x, err1 := url.Parse(a)
+	y, err2 := url.Parse(b)
+	if err1 != nil || err2 != nil || x.Host == "" {
 		return false
 	}
-	base := strings.TrimSuffix(r.EscapedPath(), "/")
-	path := s.EscapedPath()
-	return base == "" || path == base || strings.HasPrefix(path, base+"/")
+	port := func(u *url.URL) string {
+		if p := u.Port(); p != "" {
+			return p
+		}
+		return map[string]string{"https": "443", "http": "80"}[strings.ToLower(u.Scheme)]
+	}
+	return strings.EqualFold(x.Scheme, y.Scheme) && strings.EqualFold(x.Hostname(), y.Hostname()) && port(x) == port(y)
 }

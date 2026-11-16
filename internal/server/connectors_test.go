@@ -596,3 +596,19 @@ func TestAnApprovedConnectorCallShowsTheChatTheHarnessKeeps(t *testing.T) {
 	kept := storedChat(t, rows, key, run.Thread.ID)
 	conformance(t, "connector-approval", "A reply that calls a connected app's tool, which waits for the user to approve it, then answers from what the tool returned.", framesOf(t, w.Body.Bytes()), &kept)
 }
+
+func TestAnIssuerNamedUnderAnotherPathOfItsOriginSignsUsersIn(t *testing.T) {
+	f := serveConnector(t, &fakeConnector{signIn: true, edit: func(m api.Object) { m["issuer"] = connectorIssuer + "/oauth" }})
+	h, _, key := connectorHarness(t, nil, f)
+	added := connectorRoute(t, h, key, "/v1/connectors/add", api.Object{"name": "Fake", "url": connectorURL})
+	code, state := f.consent(t, api.Str(added["authorizationUrl"]), registeredClient)
+	answer := api.Object{"key": keyBase64(key), "id": api.Obj(added["connector"])["id"], "code": code, "state": state, "iss": connectorIssuer}
+	if w := postRoute(h, "/v1/connectors/complete", answer, "alice"); w.Code != 400 || f.issued != 0 {
+		t.Fatalf("a sign-in back from the address rather than the issuer: HTTP %d, %d tokens issued", w.Code, f.issued)
+	}
+	answer["iss"] = connectorIssuer + "/oauth"
+	w := postRoute(h, "/v1/connectors/complete", answer, "alice")
+	if w.Code != 200 || api.Obj(api.Obj(api.Parsed(w.Body.Bytes()))["connector"])["status"] != domain.ConnectorConnected {
+		t.Fatalf("complete: HTTP %d %s", w.Code, w.Body)
+	}
+}
