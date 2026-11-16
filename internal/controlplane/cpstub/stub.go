@@ -172,18 +172,22 @@ func New() *Store {
 	s.mux.HandleFunc("PUT /api/sync/blob/chat/{id}", s.idempotent(s.handlePutBlob("chat")))
 	s.mux.HandleFunc("PUT /api/sync/blob/profile", s.idempotent(s.handlePutBlob("profile")))
 	s.mux.HandleFunc("PUT /api/sync/blob/project/{id}", s.idempotent(s.handlePutBlob("project")))
+	s.mux.HandleFunc("PUT /api/sync/blob/connector/{id}", s.idempotent(s.handlePutBlob("connector")))
 	s.mux.HandleFunc("PUT /api/sync/blob/project_document/{pid}/{did}", s.idempotent(s.handlePutBlob("project_document")))
 	s.mux.HandleFunc("GET /api/sync/blob/chat/{id}", s.handleGetBlob("chat"))
 	s.mux.HandleFunc("GET /api/sync/blob/profile", s.handleGetBlob("profile"))
 	s.mux.HandleFunc("GET /api/sync/blob/project/{id}", s.handleGetBlob("project"))
+	s.mux.HandleFunc("GET /api/sync/blob/connector/{id}", s.handleGetBlob("connector"))
 	s.mux.HandleFunc("GET /api/sync/blob/project_document/{pid}/{did}", s.handleGetBlob("project_document"))
 	s.mux.HandleFunc("HEAD /api/sync/blob/chat/{id}", s.handleHeadBlob("chat"))
 	s.mux.HandleFunc("HEAD /api/sync/blob/profile", s.handleHeadBlob("profile"))
 	s.mux.HandleFunc("HEAD /api/sync/blob/project/{id}", s.handleHeadBlob("project"))
+	s.mux.HandleFunc("HEAD /api/sync/blob/connector/{id}", s.handleHeadBlob("connector"))
 	s.mux.HandleFunc("HEAD /api/sync/blob/project_document/{pid}/{did}", s.handleHeadBlob("project_document"))
 	s.mux.HandleFunc("DELETE /api/sync/blob/chat/{id}", s.idempotent(s.handleDeleteBlob("chat")))
 	s.mux.HandleFunc("DELETE /api/sync/blob/profile", s.idempotent(s.handleDeleteBlob("profile")))
 	s.mux.HandleFunc("DELETE /api/sync/blob/project/{id}", s.idempotent(s.handleDeleteBlob("project")))
+	s.mux.HandleFunc("DELETE /api/sync/blob/connector/{id}", s.idempotent(s.handleDeleteBlob("connector")))
 	s.mux.HandleFunc("DELETE /api/sync/blob/project_document/{pid}/{did}", s.idempotent(s.handleDeleteBlob("project_document")))
 	s.mux.HandleFunc("DELETE "+controlplane.DeleteAllProjectsPath, s.idempotent(s.handleDeleteAllProjects))
 	s.mux.HandleFunc("POST "+controlplane.RewrapPath, s.idempotent(s.handleRewrap))
@@ -708,7 +712,7 @@ func (s *Store) handleNeedsMigration(w http.ResponseWriter, r *http.Request) {
 	}
 	scope := r.URL.Query().Get("scope")
 	switch scope {
-	case "chat", "profile", "project", "project_document":
+	case "chat", "profile", "project", "project_document", "connector":
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "BAD_REQUEST", "error": "invalid scope"})
 		return

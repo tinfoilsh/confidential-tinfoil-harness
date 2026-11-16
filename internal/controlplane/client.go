@@ -344,6 +344,8 @@ func PathFor(scope, id string) (string, error) {
 		return "/api/sync/blob/profile", nil
 	case "project":
 		return "/api/sync/blob/project/" + url.PathEscape(id), nil
+	case "connector":
+		return "/api/sync/blob/connector/" + url.PathEscape(id), nil
 	case "project_document":
 		parent, doc, ok := splitProjectDocID(id)
 		if !ok {

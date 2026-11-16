@@ -38,7 +38,7 @@ const (
 
 // resealScopes is every scope the control plane holds rows of, in the
 // order they are resealed.
-var resealScopes = []seal.Scope{seal.ScopeProfile, seal.ScopeChat, seal.ScopeProject, seal.ScopeProjectDocument}
+var resealScopes = []seal.Scope{seal.ScopeProfile, seal.ScopeChat, seal.ScopeProject, seal.ScopeProjectDocument, seal.ScopeConnector}
 
 // ResealReport is where a reseal stands: the rows resealed so far, the rows
 // still to try, and the rows no given key opens.

@@ -107,6 +107,9 @@ func (g *grantScope) permitsPull(key auth.ContentKey, scope string, ids []string
 			if !g.ownsDocument(id) {
 				return false
 			}
+		case "connector":
+			// A run calls the user's connectors and keeps their tokens
+			// current.
 		default:
 			return false
 		}
@@ -123,7 +126,8 @@ func (g *grantScope) permitsPush(key auth.ContentKey, scope string, row *domain.
 	}
 	// The grant owns the chat, including its metadata. ProjectID limits
 	// context reads; the user can move the chat while a reply is running.
-	return g.Operation == "" && scope == "chat" && row.ID == g.ChatID
+	// A run also stores the tokens its connectors refresh.
+	return g.Operation == "" && (scope == "chat" && row.ID == g.ChatID || scope == "connector")
 }
 
 // permitsPutAttachment is whether the grant may store an attachment under
@@ -133,10 +137,12 @@ func (g *grantScope) permitsPutAttachment(chatID string) bool {
 }
 
 // permitsList is whether the grant may list a scope's rows, or those of a
-// project: an export lists anything, a run only its project's documents.
+// project: an export lists anything, a run only its project's documents
+// and the user's connectors.
 func (g *grantScope) permitsList(scope, project string) bool {
 	if !g.allows(opList) {
 		return false
 	}
-	return g.Operation == "export" || scope == "project_document" && project != "" && project == g.ProjectID
+	return g.Operation == "export" || scope == "project_document" && project != "" && project == g.ProjectID ||
+		g.Operation == "" && scope == "connector" && project == ""
 }

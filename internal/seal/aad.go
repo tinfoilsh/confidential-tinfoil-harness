@@ -32,11 +32,12 @@ const (
 	ScopeProfile         Scope = "profile"
 	ScopeProject         Scope = "project"
 	ScopeProjectDocument Scope = "project_document"
+	ScopeConnector       Scope = "connector"
 )
 
 func (s Scope) Valid() bool {
 	switch s {
-	case ScopeChat, ScopeProfile, ScopeProject, ScopeProjectDocument:
+	case ScopeChat, ScopeProfile, ScopeProject, ScopeProjectDocument, ScopeConnector:
 		return true
 	}
 	return false
