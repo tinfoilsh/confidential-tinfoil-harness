@@ -31,6 +31,7 @@ func (h *harness) apiRoutes() []routeSpec {
 		{"/v1/projects/list", false, true, decoded(h.listProjects)}, {"/v1/projects/get", false, true, decoded(h.getProject)},
 		{"/v1/projects/create", false, true, decoded(h.createProject)}, {"/v1/projects/update", false, true, decoded(h.updateProject)},
 		{"/v1/projects/delete", false, true, decoded(h.deleteProject)}, {"/v1/projects/documents/delete", false, true, decoded(h.deleteDocument)},
+		{"/v1/projects/artifacts", false, true, decoded(h.listArtifacts)}, {"/v1/projects/artifacts/get", false, true, decoded(h.getArtifact)},
 		{"/v1/shares/open", true, false, decoded(h.archives.OpenShare)},
 		{"/v1/import/status", false, false, decoded(h.archives.ImportStatus)},
 		{"/v1/projects/delete-all", false, true, h.deleteAllProjects},
@@ -563,6 +564,37 @@ func (h *harness) deleteAllProjects(ctx context.Context, p *auth.Principal, key 
 
 func (h *harness) deleteDocument(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *projectDocumentRequest) (any, error) {
 	return struct{}{}, h.store.RemoveRow(ctx, p, key, "project_document", in.ProjectID+"/"+in.DocumentID)
+}
+
+// listArtifacts lists the artifacts the replies in a project's chats drew.
+func (h *harness) listArtifacts(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *projectArtifactsRequest) (any, error) {
+	if _, err := h.store.LoadProject(ctx, p, key, in.ProjectID); err != nil {
+		return nil, err
+	}
+	artifacts, err := h.store.ProjectArtifacts(ctx, p, key, in.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	return struct {
+		Artifacts []domain.ProjectArtifact `json:"artifacts"`
+	}{artifacts}, nil
+}
+
+// getArtifact is one artifact of a project's chat, with the arguments its
+// reply drew it with.
+func (h *harness) getArtifact(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *artifactRequest) (any, error) {
+	row, err := h.store.LoadThread(ctx, p, key, in.ThreadID)
+	if err != nil {
+		return nil, err
+	}
+	artifact, arguments, found := row.Artifact(in.ToolCallID)
+	if !found || domain.ValueOr(row.ProjectID, "") != in.ProjectID {
+		return nil, api.Err(404, "THREAD_NOT_FOUND", "The artifact was not found")
+	}
+	return struct {
+		Artifact  domain.ProjectArtifact `json:"artifact"`
+		Arguments string                 `json:"arguments"`
+	}{artifact, arguments}, nil
 }
 func (h *harness) searchThreads(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *searchRequest) (any, error) {
 	ids, indexing, err := h.search.Query(ctx, p, key, in.Query, in.Limit)

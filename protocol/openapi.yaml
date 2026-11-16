@@ -1047,6 +1047,75 @@ paths:
               schema: {type: string, contentMediaType: application/octet-stream}
         default: {$ref: "#/components/responses/Error"}
 
+  /v1/projects/artifacts:
+    post:
+      operationId: projectArtifactsList
+      summary: List a project's artifacts
+      tags: [projects]
+      description: >-
+        Lists the artifacts the replies in the project's chats drew, newest
+        first: each render_artifact_preview call whose arguments a client
+        draws, in a message the chat shows. They are read from the chats, so
+        a chat deleted, moved out of the project or changed takes its
+        artifacts with it. The list holds no artifact's source, which
+        /v1/projects/artifacts/get returns.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key, projectId]
+              properties:
+                key: {type: string, description: "The account's content key, base64."}
+                projectId: {$ref: "#/components/schemas/Identifier"}
+      responses:
+        "200":
+          description: The project's artifacts.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [artifacts]
+                properties:
+                  artifacts: {type: array, items: {$ref: "#/components/schemas/ProjectArtifact"}}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/projects/artifacts/get:
+    post:
+      operationId: projectArtifactGet
+      summary: Open a project's artifact
+      tags: [projects]
+      description: >-
+        Returns an artifact of the project's chat with the arguments its reply
+        drew it with, which a client draws as it draws the call in the chat.
+        An artifact of a chat outside the project is refused with
+        THREAD_NOT_FOUND.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key, projectId, threadId, toolCallId]
+              properties:
+                key: {type: string, description: "The account's content key, base64."}
+                projectId: {$ref: "#/components/schemas/Identifier"}
+                threadId: {$ref: "#/components/schemas/Identifier"}
+                toolCallId: {type: string}
+      responses:
+        "200":
+          description: The artifact and its arguments.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [artifact, arguments]
+                properties:
+                  artifact: {$ref: "#/components/schemas/ProjectArtifact"}
+                  arguments: {type: string, description: "The call's arguments as JSON, as the chat's timeline holds them."}
+        default: {$ref: "#/components/responses/Error"}
+
   /v1/projects/documents/delete:
     post:
       operationId: projectDocumentDelete
@@ -3023,6 +3092,23 @@ components:
         hasFile: {type: boolean, description: "Whether the uploaded file is kept, which /v1/projects/documents/download returns. A document stored before files were kept, or restored from a backup, has only its text."}
         createdAt: {$ref: "#/components/schemas/Timestamp"}
         updatedAt: {$ref: "#/components/schemas/Timestamp"}
+
+    ProjectArtifact:
+      description: An artifact a reply in a project's chat drew, without its source.
+      type: object
+      required: [threadId, threadTitle, messageId, toolCallId, title, sourceType, createdAt]
+      properties:
+        threadId: {type: string}
+        threadTitle: {type: string}
+        messageId: {type: string, description: "The reply that drew it."}
+        toolCallId: {type: string, description: "The call that drew it, as the reply's timeline names it."}
+        title: {type: string, description: "Empty when the call gave none."}
+        sourceType:
+          description: The kind of source the artifact shows. A client shows one of a kind it does not know as a generic artifact.
+          anyOf:
+            - {type: string, enum: [url, html, markdown]}
+            - {type: string}
+        createdAt: {type: string, description: "When the reply was written, as the message records it."}
 
     # --- Keys -----------------------------------------------------------------
 

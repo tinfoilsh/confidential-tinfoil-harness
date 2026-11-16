@@ -345,6 +345,77 @@ func TestProjectDocumentsKeepTheFileTheyWereReadFrom(t *testing.T) {
 	}
 }
 
+// A project lists the artifacts its chats' replies drew, newest first: the
+// calls a client draws, in chats of the project alone. Listing again opens
+// no unchanged chat, and a chat changed since takes its old artifacts with
+// it. An artifact opens with the arguments its reply drew it with, and only
+// through the project its chat is in.
+func TestAProjectListsTheArtifactsItsChatsDrew(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	p := &auth.Principal{ID: "alice"}
+	trip := "trip"
+	rows.rows[rowMapKey(p, "project", trip)] = domain.StoredRow{ID: trip, ETag: "1", Data: api.Raw(api.Object{"name": "Trip"})}
+	chat := func(id, etag, project string, blocks ...any) {
+		data := api.Object{"id": id, "title": "Chat " + id, "titleState": "manual", "model": "auto", "presetId": nil, "pinned": false, "webSearchEnabled": false, "recordVersion": domain.RecordVersion,
+			"messages": []any{api.Object{"id": "q", "role": "user", "createdAt": "2026-03-01T00:00:00Z", "content": "Draw it"},
+				api.Object{"id": "a-" + id, "role": "assistant", "createdAt": "2026-03-0" + id[1:] + "T00:00:00Z", "content": "", "timeline": blocks}}}
+		row := domain.StoredRow{ID: id, ETag: etag, Data: api.Raw(data)}
+		if project != "" {
+			row.Project, row.ProjectSet = &project, true
+		}
+		rows.rows[rowMapKey(p, "chat", id)] = row
+	}
+	draw := func(id, args string) api.Object {
+		return api.Object{"id": "b-" + id, "type": "tool_call", "toolCallId": id, "name": domain.ArtifactWidget, "arguments": args, "complete": true}
+	}
+	packing := `{"title":"Packing list","source":{"type":"markdown","markdown":"- boots"}}`
+	chat("c2", "1", trip, draw("packing", packing), draw("broken", `{"title":"No source"}`), api.Object{"id": "b-search", "type": "tool_call", "toolCallId": "search", "name": "web_search", "arguments": `{"query":"boots"}`})
+	chat("c3", "1", trip, draw("map", `{"title":"Map","source":{"type":"html","html":"<p>map</p>"}}`))
+	chat("c4", "1", "", draw("elsewhere", `{"title":"Elsewhere","source":{"type":"url","url":"https://example.com"}}`))
+	list := func() []domain.ProjectArtifact {
+		t.Helper()
+		w := postRoute(h, "/v1/projects/artifacts", api.Object{"key": keyBase64(key), "projectId": trip}, "alice")
+		var listed struct {
+			Artifacts []domain.ProjectArtifact `json:"artifacts"`
+		}
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &listed) != nil {
+			t.Fatalf("list: HTTP %d %s", w.Code, w.Body)
+		}
+		return listed.Artifacts
+	}
+	want := []domain.ProjectArtifact{
+		{ThreadID: "c3", ThreadTitle: "Chat c3", MessageID: "a-c3", ToolCallID: "map", Title: "Map", SourceType: "html", CreatedAt: "2026-03-03T00:00:00Z"},
+		{ThreadID: "c2", ThreadTitle: "Chat c2", MessageID: "a-c2", ToolCallID: "packing", Title: "Packing list", SourceType: "markdown", CreatedAt: "2026-03-02T00:00:00Z"},
+	}
+	if got := list(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("artifacts = %+v, want %+v", got, want)
+	}
+	opened := rows.loads["chat"]
+	if got := list(); !reflect.DeepEqual(got, want) || rows.loads["chat"] != opened {
+		t.Fatalf("listing again opened %d chats: %+v", rows.loads["chat"]-opened, got)
+	}
+	chat("c3", "2", trip)
+	if got := list(); !reflect.DeepEqual(got, want[1:]) {
+		t.Fatalf("after the chat changed, artifacts = %+v", got)
+	}
+
+	open := func(thread, call string) *httptest.ResponseRecorder {
+		return postRoute(h, "/v1/projects/artifacts/get", api.Object{"key": keyBase64(key), "projectId": trip, "threadId": thread, "toolCallId": call}, "alice")
+	}
+	var one struct {
+		Artifact  domain.ProjectArtifact `json:"artifact"`
+		Arguments string                 `json:"arguments"`
+	}
+	if w := open("c2", "packing"); w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &one) != nil || one.Arguments != packing || one.Artifact != want[1] {
+		t.Fatalf("open: HTTP %d %s", w.Code, w.Body)
+	}
+	for _, refused := range [][2]string{{"c4", "elsewhere"}, {"c2", "broken"}} {
+		if w := open(refused[0], refused[1]); w.Code != 404 {
+			t.Errorf("opening %s/%s through the project: HTTP %d %s", refused[0], refused[1], w.Code, w.Body)
+		}
+	}
+}
+
 // Listing again opens no chat that is unchanged, and reads the favorites
 // once: a favorite the page lists is not opened again, and one another
 // client marked in the profile alone still shows.

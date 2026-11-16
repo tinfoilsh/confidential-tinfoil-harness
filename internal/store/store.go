@@ -34,6 +34,8 @@ type Store struct {
 
 	summariesOnce sync.Once
 	summaries     *expirable.LRU[summaryKey, keptSummary]
+	artifactsOnce sync.Once
+	artifacts     *expirable.LRU[summaryKey, keptArtifacts]
 }
 
 // SearchResetter drops what is held for a caller's search index once the
