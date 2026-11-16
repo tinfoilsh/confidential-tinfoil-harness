@@ -345,12 +345,12 @@ func TestProjectDocumentsKeepTheFileTheyWereReadFrom(t *testing.T) {
 	}
 }
 
-// A project lists the artifacts its chats' replies drew, newest first: the
-// calls a client draws, in chats of the project alone. Listing again opens
-// no unchanged chat, and a chat changed since takes its old artifacts with
-// it. An artifact opens with the arguments its reply drew it with, and only
-// through the project its chat is in.
-func TestAProjectListsTheArtifactsItsChatsDrew(t *testing.T) {
+// The artifacts list holds the artifacts the replies in the stored chats
+// drew, or in a project's: the calls a client draws, each chat's newest
+// first. Listing again opens no unchanged chat, and a chat changed since
+// takes its old artifacts with it. An artifact opens with the arguments its
+// reply drew it with.
+func TestTheArtifactsListHoldsWhatTheChatsDrew(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	p := &auth.Principal{ID: "alice"}
 	trip := "trip"
@@ -369,50 +369,59 @@ func TestAProjectListsTheArtifactsItsChatsDrew(t *testing.T) {
 		return api.Object{"id": "b-" + id, "type": "tool_call", "toolCallId": id, "name": domain.ArtifactWidget, "arguments": args, "complete": true}
 	}
 	packing := `{"title":"Packing list","source":{"type":"markdown","markdown":"- boots"}}`
-	chat("c2", "1", trip, draw("packing", packing), draw("broken", `{"title":"No source"}`), api.Object{"id": "b-search", "type": "tool_call", "toolCallId": "search", "name": "web_search", "arguments": `{"query":"boots"}`})
+	chat("c2", "1", trip, draw("packing", packing), draw("broken", `{"title":"No source"}`), api.Object{"id": "b-search", "type": "tool_call", "toolCallId": "search", "name": "web_search", "arguments": `{"query":"boots"}`},
+		draw("route", `{"title":"Route","source":{"type":"url","url":"https://example.com/route"}}`))
 	chat("c3", "1", trip, draw("map", `{"title":"Map","source":{"type":"html","html":"<p>map</p>"}}`))
 	chat("c4", "1", "", draw("elsewhere", `{"title":"Elsewhere","source":{"type":"url","url":"https://example.com"}}`))
-	list := func() []domain.ProjectArtifact {
+	// The chats come in the order their list shows them, which the stand-in
+	// store does not keep, so the artifacts are compared chat by chat.
+	list := func(project string) []domain.Artifact {
 		t.Helper()
-		w := postRoute(h, "/v1/projects/artifacts", api.Object{"key": keyBase64(key), "projectId": trip}, "alice")
-		var listed struct {
-			Artifacts []domain.ProjectArtifact `json:"artifacts"`
+		in := api.Object{"key": keyBase64(key)}
+		if project != "" {
+			in["projectId"] = project
 		}
-		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &listed) != nil {
+		w := postRoute(h, "/v1/artifacts/list", in, "alice")
+		var listed struct {
+			Artifacts  []domain.Artifact `json:"artifacts"`
+			NextCursor string            `json:"nextCursor"`
+		}
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &listed) != nil || listed.NextCursor != "" {
 			t.Fatalf("list: HTTP %d %s", w.Code, w.Body)
 		}
+		slices.SortStableFunc(listed.Artifacts, func(a, b domain.Artifact) int { return strings.Compare(a.ThreadID, b.ThreadID) })
 		return listed.Artifacts
 	}
-	want := []domain.ProjectArtifact{
-		{ThreadID: "c3", ThreadTitle: "Chat c3", MessageID: "a-c3", ToolCallID: "map", Title: "Map", SourceType: "html", CreatedAt: "2026-03-03T00:00:00Z"},
-		{ThreadID: "c2", ThreadTitle: "Chat c2", MessageID: "a-c2", ToolCallID: "packing", Title: "Packing list", SourceType: "markdown", CreatedAt: "2026-03-02T00:00:00Z"},
+	want := []domain.Artifact{
+		{ThreadID: "c2", ThreadTitle: "Chat c2", ProjectID: &trip, MessageID: "a-c2", ToolCallID: "route", Title: "Route", SourceType: "url", CreatedAt: "2026-03-02T00:00:00Z"},
+		{ThreadID: "c2", ThreadTitle: "Chat c2", ProjectID: &trip, MessageID: "a-c2", ToolCallID: "packing", Title: "Packing list", SourceType: "markdown", CreatedAt: "2026-03-02T00:00:00Z"},
+		{ThreadID: "c3", ThreadTitle: "Chat c3", ProjectID: &trip, MessageID: "a-c3", ToolCallID: "map", Title: "Map", SourceType: "html", CreatedAt: "2026-03-03T00:00:00Z"},
+		{ThreadID: "c4", ThreadTitle: "Chat c4", MessageID: "a-c4", ToolCallID: "elsewhere", Title: "Elsewhere", SourceType: "url", CreatedAt: "2026-03-04T00:00:00Z"},
 	}
-	if got := list(); !reflect.DeepEqual(got, want) {
+	if got := list(""); !reflect.DeepEqual(got, want) {
 		t.Fatalf("artifacts = %+v, want %+v", got, want)
 	}
 	opened := rows.loads["chat"]
-	if got := list(); !reflect.DeepEqual(got, want) || rows.loads["chat"] != opened {
-		t.Fatalf("listing again opened %d chats: %+v", rows.loads["chat"]-opened, got)
+	if got := list(trip); !reflect.DeepEqual(got, want[:3]) || rows.loads["chat"] != opened {
+		t.Fatalf("the project's artifacts, opening %d chats again: %+v", rows.loads["chat"]-opened, got)
 	}
 	chat("c3", "2", trip)
-	if got := list(); !reflect.DeepEqual(got, want[1:]) {
+	if got := list(trip); !reflect.DeepEqual(got, want[:2]) {
 		t.Fatalf("after the chat changed, artifacts = %+v", got)
 	}
 
 	open := func(thread, call string) *httptest.ResponseRecorder {
-		return postRoute(h, "/v1/projects/artifacts/get", api.Object{"key": keyBase64(key), "projectId": trip, "threadId": thread, "toolCallId": call}, "alice")
+		return postRoute(h, "/v1/artifacts/get", api.Object{"key": keyBase64(key), "threadId": thread, "toolCallId": call}, "alice")
 	}
 	var one struct {
-		Artifact  domain.ProjectArtifact `json:"artifact"`
-		Arguments string                 `json:"arguments"`
+		Artifact  domain.Artifact `json:"artifact"`
+		Arguments string          `json:"arguments"`
 	}
-	if w := open("c2", "packing"); w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &one) != nil || one.Arguments != packing || one.Artifact != want[1] {
+	if w := open("c2", "packing"); w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &one) != nil || one.Arguments != packing || !reflect.DeepEqual(one.Artifact, want[1]) {
 		t.Fatalf("open: HTTP %d %s", w.Code, w.Body)
 	}
-	for _, refused := range [][2]string{{"c4", "elsewhere"}, {"c2", "broken"}} {
-		if w := open(refused[0], refused[1]); w.Code != 404 {
-			t.Errorf("opening %s/%s through the project: HTTP %d %s", refused[0], refused[1], w.Code, w.Body)
-		}
+	if w := open("c2", "broken"); w.Code != 404 {
+		t.Errorf("opening an artifact no client draws: HTTP %d %s", w.Code, w.Body)
 	}
 }
 

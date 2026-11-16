@@ -1,35 +1,40 @@
 package domain
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"slices"
+)
 
-// ProjectArtifact is an artifact a reply in a project's chat showed: where it
-// is, and what its card shows, without its source.
-type ProjectArtifact struct {
-	ThreadID    string `json:"threadId"`
-	ThreadTitle string `json:"threadTitle"`
-	MessageID   string `json:"messageId"`
-	ToolCallID  string `json:"toolCallId"`
-	Title       string `json:"title"`
-	SourceType  string `json:"sourceType"`
-	CreatedAt   string `json:"createdAt"`
+// Artifact is an artifact a reply in a chat showed: where it is, and what
+// its card shows, without its source.
+type Artifact struct {
+	ThreadID    string  `json:"threadId"`
+	ThreadTitle string  `json:"threadTitle"`
+	ProjectID   *string `json:"projectId"`
+	MessageID   string  `json:"messageId"`
+	ToolCallID  string  `json:"toolCallId"`
+	Title       string  `json:"title"`
+	SourceType  string  `json:"sourceType"`
+	CreatedAt   string  `json:"createdAt"`
 }
 
-// Artifacts are the artifacts the replies a chat shows drew, oldest first.
-func (t *Thread) Artifacts() []ProjectArtifact {
-	artifacts := []ProjectArtifact{}
-	t.eachArtifact(func(artifact ProjectArtifact, _ string) bool {
+// Artifacts are the artifacts the replies a chat shows drew, newest first.
+func (t *Thread) Artifacts() []Artifact {
+	artifacts := []Artifact{}
+	t.eachArtifact(func(artifact Artifact, _ string) bool {
 		artifacts = append(artifacts, artifact)
 		return true
 	})
+	slices.Reverse(artifacts)
 	return artifacts
 }
 
 // Artifact is the artifact a chat's reply drew in the call toolCallID, and
 // the arguments it was drawn with.
-func (t *Thread) Artifact(toolCallID string) (ProjectArtifact, string, bool) {
-	var found ProjectArtifact
+func (t *Thread) Artifact(toolCallID string) (Artifact, string, bool) {
+	var found Artifact
 	var arguments string
-	t.eachArtifact(func(artifact ProjectArtifact, args string) bool {
+	t.eachArtifact(func(artifact Artifact, args string) bool {
 		if artifact.ToolCallID != toolCallID {
 			return true
 		}
@@ -40,9 +45,9 @@ func (t *Thread) Artifact(toolCallID string) (ProjectArtifact, string, bool) {
 }
 
 // eachArtifact visits each artifact call of the replies a chat shows whose
-// arguments the widget draws, as its client would draw it, until visit
-// returns false.
-func (t *Thread) eachArtifact(visit func(artifact ProjectArtifact, arguments string) bool) {
+// arguments the widget draws, as its client would draw it, oldest first,
+// until visit returns false.
+func (t *Thread) eachArtifact(visit func(artifact Artifact, arguments string) bool) {
 	var widget *Widget
 	for _, w := range WidgetCatalog() {
 		if w.Name == ArtifactWidget {
@@ -67,7 +72,7 @@ func (t *Thread) eachArtifact(visit func(artifact ProjectArtifact, arguments str
 				} `json:"source"`
 			}
 			json.Unmarshal([]byte(b.Arguments), &args)
-			artifact := ProjectArtifact{ThreadID: t.ID, ThreadTitle: t.Title, MessageID: m.ID, ToolCallID: b.ToolCallID, Title: args.Title, SourceType: args.Source.Type, CreatedAt: m.CreatedAt}
+			artifact := Artifact{ThreadID: t.ID, ThreadTitle: t.Title, ProjectID: t.ProjectID, MessageID: m.ID, ToolCallID: b.ToolCallID, Title: args.Title, SourceType: args.Source.Type, CreatedAt: m.CreatedAt}
 			if !visit(artifact, b.Arguments) {
 				return
 			}
