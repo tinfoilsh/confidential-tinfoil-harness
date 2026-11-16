@@ -4,6 +4,8 @@ Tinfoil's chat harness is the enclave that runs conversations for [Tinfoil Chat]
 
 The harness fetches remote chat images so image hosts see its network address instead of the user's. It returns bounded PNG copies and does not cache the images.
 
+Users can connect remote MCP servers, whose tools their stored chats' replies call. The harness signs in to them on the user's behalf and seals their tokens under the account's content key, so they never leave the enclave unsealed. It reaches these servers only at public HTTPS addresses, and asks the user before a reply calls a tool they did not allow outright.
+
 ## Development
 
 Go 1.27.2 or later is required.
@@ -31,6 +33,7 @@ Anonymous chat works only from a deployed harness, because Tinfoil validates `fr
 - `SUMMARY_MODEL`: required; the model that writes chat titles and reasoning labels
 - `LONG_SUMMARY_MODEL`: required; the model that summarizes a chat's older messages when its prompt outgrows the chat model's window
 - `CONTEXT_DEV_API_KEY`: required secret for reading link previews through [context.dev](https://docs.context.dev), which needs zero data retention enabled for its organization; site favicons come from DuckDuckGo by host
+- `CONNECTOR_CLIENT_ID` and `CONNECTOR_REDIRECT_URL`: the client metadata document the harness registers with users' connectors under, and the web app page users come back to after signing in to one; connectors are off without both
 - `SAFEGUARDS_URL`: the [safeguards](https://github.com/tinfoilsh/confidential-safeguards) sidecar that classifies completed first-party and API-key chats
 
 A chat model is offered when Tinfoil's model catalog lists it with a context window, and the system prompt names it as the catalog does. Turns reach it through the router, which verifies the replica serving it.

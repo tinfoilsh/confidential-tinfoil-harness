@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/connectors"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 )
@@ -66,6 +67,12 @@ type Toolset struct {
 	Widgets map[string]domain.Widget
 	Local   func(context.Context, ToolCall) (any, error)
 	search  *session // nil unless the run searches the web
+	// apps are the connectors' tools the run offers, by the name the model
+	// calls them by, and appDefs their declarations.
+	apps      map[string]*appTool
+	appDefs   []json.RawMessage
+	sessions  []*connectors.Session
+	approvals *approvalGate
 	// searchBilled has the run's caller pay for its web search, as an API
 	// request's caller does: once, since the search service bills a run's
 	// calls as one session.
@@ -99,6 +106,9 @@ type session struct {
 
 func openTools(ctx context.Context, req *Request, model string, progress func(string, string, float64)) (*Toolset, error) {
 	set := &Toolset{searchBilled: req.searchBilled}
+	if req.apps != nil {
+		openApps(ctx, set, req, progress)
+	}
 	if !req.webSearch {
 		return set, nil
 	}
@@ -220,6 +230,9 @@ func (t *Toolset) call(ctx context.Context, name, progress string, args json.Raw
 func (t *Toolset) close() {
 	if t.search != nil {
 		t.search.mcp.Close()
+	}
+	for _, s := range t.sessions {
+		s.Close()
 	}
 }
 

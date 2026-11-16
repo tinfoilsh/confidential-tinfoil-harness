@@ -246,6 +246,9 @@ func (eng *Engine) launch(ctx context.Context, r *Run) error {
 	request.cacheScope = cacheScope(p, s.ID, r.input.Options.CacheSecret)
 	request.browser = r.browser
 	request.searchBilled = r.credential.APIKey
+	if eng.offersApps(r, request) {
+		request.apps = eng.apps(ctx, r, p)
+	}
 	request.compact = func(ctx context.Context, reserved int) error { return eng.compact(ctx, r, request, reserved) }
 	// A continuation streams into the reply it extends, which RUN_STARTED names.
 	if r.turn.Kind == "continue" {
@@ -265,6 +268,9 @@ func (eng *Engine) launch(ctx context.Context, r *Run) error {
 	}
 	snapshot := fittedSnapshot(shown.Messages, shown.HasOlder)
 	r.row, r.running = row, true
+	if request.apps != nil {
+		r.approvals = request.apps.approvals
+	}
 	if len(snapshot.Messages) > 0 {
 		r.firstShown = snapshot.Messages[0].ID
 	}

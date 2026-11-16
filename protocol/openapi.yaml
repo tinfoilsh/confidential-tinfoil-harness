@@ -114,6 +114,8 @@ tags:
     description: The account's settings.
   - name: projects
     description: Projects and their documents.
+  - name: connectors
+    description: The remote MCP servers an account connects, whose tools its chats call.
   - name: keys
     description: The account's content key and its passkey bundles, as the control plane keeps them.
   - name: attachments
@@ -234,6 +236,37 @@ paths:
       responses:
         "200":
           description: The result was accepted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accepted]
+                properties:
+                  accepted: {const: true}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/threads/approve:
+    post:
+      operationId: approve
+      summary: Answer a call that waits for approval
+      tags: [runs]
+      description: |
+        A call to a connector's tool that the user asked to approve waits for
+        their answer: its display's connector.approval is pending, with the id
+        the answer names and the time it expires. Approving runs the call;
+        declining it, or not answering in time, tells the model the user did
+        not let it run. The same answer sent again is accepted; a different
+        one, or an answer to a call not waiting, is refused with
+        REVISION_CONFLICT.
+      parameters: [{$ref: "#/components/parameters/HarnessInstance"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ApprovalInput"}
+      responses:
+        "200":
+          description: The answer was accepted.
           content:
             application/json:
               schema:
@@ -1028,6 +1061,152 @@ paths:
         "200": {$ref: "#/components/responses/Empty"}
         default: {$ref: "#/components/responses/Error"}
 
+  /v1/connectors/list:
+    post:
+      operationId: connectorsList
+      summary: List the account's connectors
+      tags: [connectors]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/Keyed"}
+      responses:
+        "200":
+          description: The account's connectors, the oldest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [connectors]
+                properties:
+                  connectors: {type: array, items: {$ref: "#/components/schemas/Connector"}}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/connectors/add:
+    post:
+      operationId: connectorsAdd
+      summary: Connect a server
+      tags: [connectors]
+      description: |
+        Connects the MCP server at url. A server that needs no sign-in is
+        connected with its tools. One that does is added signed out, with the
+        page the client sends the user to: the harness registers itself with
+        the server's authorization server, by its client metadata document
+        where the server reads one and dynamically otherwise, and keeps the
+        sign-in pending until the user comes back to the client's callback
+        with the code and state the client sends to connectors/complete.
+        A server that signs in only clients registered in advance is refused
+        with CONNECTOR_UNSUPPORTED, and one that does not answer as an MCP
+        server with CONNECTOR_UNREACHABLE.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, url]
+              properties:
+                key: {type: string, description: "The account's content key, base64."}
+                name: {type: string, description: "1 to 64 characters."}
+                url: {type: string, description: "A public HTTPS address on the standard port."}
+      responses:
+        "200": {$ref: "#/components/responses/ConnectorAnswer"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/connectors/authorize:
+    post:
+      operationId: connectorsAuthorize
+      summary: Sign in to a connector again
+      tags: [connectors]
+      description: Starts a new sign-in to the connector, whose tokens stay until the sign-in replaces them. A server that no longer asks for one is connected without it, and no page is returned.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/KeyedId"}
+      responses:
+        "200": {$ref: "#/components/responses/ConnectorAnswer"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/connectors/complete:
+    post:
+      operationId: connectorsComplete
+      summary: Finish signing in to a connector
+      tags: [connectors]
+      description: Sends what the user came back from the sign-in page with, the code, the state and the issuer when the authorization server names one. The harness checks the state against the sign-in pending, trades the code for tokens, which never leave the enclave, and lists the server's tools. A mismatched, expired or refused sign-in is refused with CONNECTOR_SIGN_IN_FAILED.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id, code, state]
+              properties:
+                key: {type: string, description: "The account's content key, base64."}
+                id: {$ref: "#/components/schemas/Identifier"}
+                code: {type: string}
+                state: {type: string}
+                iss: {type: string}
+      responses:
+        "200": {$ref: "#/components/responses/ConnectorAnswer"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/connectors/update:
+    post:
+      operationId: connectorsUpdate
+      summary: Change a connector's name, whether chats use it, and what its tools may do
+      tags: [connectors]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                key: {type: string, description: "The account's content key, base64."}
+                id: {$ref: "#/components/schemas/Identifier"}
+                name: {type: string}
+                enabled: {type: boolean}
+                tools:
+                  description: A permission for each tool named. A tool the connector no longer offers is refused with REVISION_CONFLICT.
+                  type: object
+                  additionalProperties: {$ref: "#/components/schemas/ToolPermission"}
+      responses:
+        "200": {$ref: "#/components/responses/ConnectorAnswer"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/connectors/refresh:
+    post:
+      operationId: connectorsRefresh
+      summary: List a connector's tools again
+      tags: [connectors]
+      description: Lists the tools the server offers now, keeping the permissions given to those it offered before. A connector whose authorization server no longer accepts its tokens is refused with CONNECTOR_SIGNED_OUT.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/KeyedId"}
+      responses:
+        "200": {$ref: "#/components/responses/ConnectorAnswer"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/connectors/delete:
+    post:
+      operationId: connectorsDelete
+      summary: Remove a connector
+      tags: [connectors]
+      description: Removes the connector and asks its authorization server to revoke its tokens.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/KeyedId"}
+      responses:
+        "200": {$ref: "#/components/responses/Empty"}
+        default: {$ref: "#/components/responses/Error"}
+
   /v1/keys/current:
     post:
       operationId: keysCurrent
@@ -1517,6 +1696,17 @@ components:
       content:
         application/json:
           schema: {$ref: "#/components/schemas/Project"}
+
+    ConnectorAnswer:
+      description: The connector, and the page that signs the user in to it when it needs that.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [connector]
+            properties:
+              connector: {$ref: "#/components/schemas/Connector"}
+              authorizationUrl: {type: string, description: "The authorization server's page the client sends the user to. Present only while a sign-in the route started is pending."}
   schemas:
 
     # --- Common ---------------------------------------------------------------
@@ -1640,6 +1830,12 @@ components:
             - BROWSER_TIMEOUT
             - CHAT_FLAGGED
             - COMPACTION_FAILED
+            - CONNECTOR_LIMIT
+            - CONNECTOR_NOT_FOUND
+            - CONNECTOR_SIGN_IN_FAILED
+            - CONNECTOR_SIGNED_OUT
+            - CONNECTOR_UNREACHABLE
+            - CONNECTOR_UNSUPPORTED
             - CONTEXT_TOO_LARGE
             - CREDENTIAL_REQUIRED
             - IMPORT_INVALID
@@ -1717,7 +1913,7 @@ components:
         composer: {$ref: "#/components/schemas/Composer"}
         presets: {type: array, items: {$ref: "#/components/schemas/Preset"}}
         features:
-          description: Optional behaviors this harness offers. A client acts on a feature only when it is true here. compaction is true while a chat whose prompt would outgrow its model's window is compacted rather than refused. manualCompaction is true while a turn of kind compact compacts a chat on request. compactLatest is true while such a turn summarizes the chat's latest exchange too when it sends compactLatest. research is true while this caller may send a turn with options.research, which only a subscriber may. partialThread is true while a client may send a device chat from its latest compaction marker on, as ThreadInput describes.
+          description: Optional behaviors this harness offers. A client acts on a feature only when it is true here. compaction is true while a chat whose prompt would outgrow its model's window is compacted rather than refused. manualCompaction is true while a turn of kind compact compacts a chat on request. compactLatest is true while such a turn summarizes the chat's latest exchange too when it sends compactLatest. research is true while this caller may send a turn with options.research, which only a subscriber may. partialThread is true while a client may send a device chat from its latest compaction marker on, as ThreadInput describes. connectors is true while this caller may connect servers, whose tools a stored chat's replies call.
           type: object
           additionalProperties: {type: boolean}
 
@@ -2577,7 +2773,7 @@ components:
         invalidArguments: {type: boolean, description: "The widget's current declaration refuses the call's arguments, so the client offers to regenerate them."}
 
     ToolDisplay:
-      description: What a web search or page fetch shows, kept current while it runs.
+      description: What a web search, page fetch or call to a connector's tool shows, kept current while it runs. An ACTIVITY_DELTA's display replaces the call's.
       type: object
       required: [status, sources]
       properties:
@@ -2597,6 +2793,77 @@ components:
               url: {type: string}
               title: {type: string}
               snippet: {type: string}
+        connector: {$ref: "#/components/schemas/ConnectorCall"}
+
+    ConnectorCall:
+      description: The connector a call reached, the tool's name on its server, and the user's approval when the call needs one.
+      type: object
+      required: [id, name, url, tool]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        url: {type: string}
+        tool: {type: string}
+        title: {type: string}
+        approval: {$ref: "#/components/schemas/ToolApproval"}
+
+    ToolApproval:
+      description: The user's answer to a call that needs it. A pending approval names the id threads/approve answers it under and when it expires; the call waits until then.
+      type: object
+      required: [status]
+      properties:
+        id: {type: string}
+        status:
+          description: A client shows a status it does not know as declined.
+          anyOf:
+            - {type: string, enum: [pending, approved, declined, expired]}
+            - {type: string}
+        expiresAt: {type: string, format: date-time}
+
+    ToolPermission:
+      description: What a connector's tool may do in a chat. A client shows a permission it does not know as ask.
+      anyOf:
+        - {type: string, enum: [allow, ask, "off"]}
+        - {type: string}
+
+    Connector:
+      description: A server the account connected, without anything it signs in with, which never leaves the enclave.
+      type: object
+      required: [id, name, url, enabled, status, signIn, createdAt, updatedAt, tools]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        url: {type: string}
+        enabled: {type: boolean, description: "Whether chats call its tools."}
+        status:
+          description: Whether its tools can be called, or the user must sign in first. A client shows a status it does not know as signedOut.
+          anyOf:
+            - {type: string, enum: [connected, signedOut]}
+            - {type: string}
+        signIn: {type: boolean, description: "Whether the server asks the user to sign in."}
+        createdAt: {type: string}
+        updatedAt: {type: string}
+        tools:
+          type: array
+          items:
+            type: object
+            required: [name, permission]
+            properties:
+              name: {type: string}
+              title: {type: string}
+              description: {type: string}
+              readOnly: {type: boolean, description: "The server says the tool changes nothing."}
+              permission: {$ref: "#/components/schemas/ToolPermission"}
+
+    ApprovalInput:
+      type: object
+      required: [threadId, runId, approvalId, approved]
+      properties:
+        key: {type: string, description: "The account's content key, base64."}
+        threadId: {$ref: "#/components/schemas/Identifier"}
+        runId: {type: string}
+        approvalId: {type: string}
+        approved: {type: boolean}
 
     Annotation:
       description: A reply's citation of a page.

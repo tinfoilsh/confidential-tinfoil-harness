@@ -157,6 +157,8 @@ type ToolDisplay struct {
 	URL     string          `json:"url,omitempty"`
 	Status  string          `json:"status"`
 	Sources []DisplaySource `json:"sources"`
+	// Connector is the connected server a call reached.
+	Connector *ConnectorCall `json:"connector,omitempty"`
 }
 
 type DisplaySource struct {

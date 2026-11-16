@@ -48,6 +48,10 @@ containers:
       # Summarizes a chat's older messages when its prompt outgrows the chat
       # model's window, reading them in parts that fit its own.
       - LONG_SUMMARY_MODEL: "glm-5-3"
+      # Users sign in to the servers they connect through the client this
+      # metadata document names, and come back to the web app's callback.
+      - CONNECTOR_CLIENT_ID: "https://chat.tinfoil.sh/oauth/client-metadata.json"
+      - CONNECTOR_REDIRECT_URL: "https://chat.tinfoil.sh/connectors/callback"
     secrets:
       - USAGE_CONTEXT_SECRET
       # The control plane's service secret for its storage API, which the

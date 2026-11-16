@@ -43,6 +43,10 @@ type Request struct {
 	webSearch, piiCheck        bool
 	searchBilled               bool // the caller pays for the run's web search, as an API request's caller does
 	research                   bool // the turn researches its question on the web before it answers
+	// apps are the user's connectors the run offers the tools of, and
+	// appsHint what the system prompt says of those it opened.
+	apps     *runApps
+	appsHint string
 	// Groups are the history the model reads: each message after the chat's
 	// latest compaction marker, the first carrying the marker's summary.
 	// history is every message but the markers, as the safeguards classify
@@ -542,6 +546,9 @@ func (req *Request) system(searching bool) string {
 	system := req.System
 	if instructions := req.toolInstructions(searching); instructions != "" {
 		system += "\n\n" + instructions
+	}
+	if req.appsHint != "" {
+		system += "\n\n" + req.appsHint
 	}
 	if req.widgetHint != "" {
 		system += "\n\n" + req.widgetHint

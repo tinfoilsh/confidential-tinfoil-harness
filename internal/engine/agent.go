@@ -242,12 +242,14 @@ func body(req *Request, conversation []json.RawMessage, defs json.RawMessage) ([
 	return json.Marshal(payload)
 }
 
-// Search tools come first, so a caller's turns keep hitting the prompt cache.
+// Search tools come first, then the connectors', so a caller's turns keep
+// hitting the prompt cache.
 func offer(set *Toolset, rendered []json.RawMessage) (json.RawMessage, error) {
 	var defs []json.RawMessage
 	if set.search != nil {
 		defs = append(defs, set.search.defs...)
 	}
+	defs = append(defs, set.appDefs...)
 	defs = append(defs, rendered...)
 	if len(defs) == 0 {
 		return nil, nil
@@ -298,6 +300,9 @@ func Invoke(ctx context.Context, out *Stream, set *Toolset, call ToolCall) (mess
 			set.images = append(set.images, browserImage(result.Image))
 		}
 		return answered(call.ID, clip(result.Text, MaxToolOutput))
+	}
+	if tool := set.apps[call.Name]; tool != nil {
+		return callApp(ctx, out, set, tool, call)
 	}
 	// A widget is drawn by the caller from TOOL_CALL_ARGS; the model just needs a result.
 	if !set.searches(call.Name) {
