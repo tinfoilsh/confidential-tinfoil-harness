@@ -23,6 +23,28 @@ type ProjectDocument struct {
 	ThumbnailBase64 string `json:"thumbnailBase64,omitempty"`
 	CreatedAt       string `json:"createdAt,omitempty"`
 	UpdatedAt       string `json:"updatedAt,omitempty"`
+	// File is where the uploaded file the text was read from is kept. A
+	// document stored before files were kept, or by an import, has none.
+	// Its key never leaves the enclave.
+	File *DocumentFile `json:"-"`
+}
+
+// DocumentFile is a document's uploaded file as buckets holds it: the
+// object's id, and the key it is sealed under, base64.
+type DocumentFile struct {
+	ID  string `json:"id"`
+	Key string `json:"key"`
+}
+
+// DocumentView is a document as its client reads it, which says whether its
+// file can be downloaded.
+type DocumentView struct {
+	ProjectDocument
+	HasFile bool `json:"hasFile"`
+}
+
+func (d ProjectDocument) View() DocumentView {
+	return DocumentView{ProjectDocument: d, HasFile: d.File != nil}
 }
 
 // StoredProject and StoredDocument are the rows this harness writes. A row
@@ -35,6 +57,7 @@ type StoredProject struct {
 
 type StoredDocument struct {
 	ProjectDocument
+	File          *DocumentFile `json:"file,omitempty"`
 	RecordVersion int           `json:"recordVersion"`
 	ImportedFrom  *ImportOrigin `json:"_restore,omitempty"`
 }

@@ -2,7 +2,8 @@
 // API as the harness uses it: sealed blobs with their revisions and
 // metadata, the key registry with its passkey bundles, the legacy
 // attachments and the attachment index with the purges, pending writes
-// and orphans its maintenance reclaims, chat activity, the rows left to
+// and orphans its maintenance reclaims, project documents' files, chat
+// activity, the rows left to
 // reseal with their cooldowns, the search index's publication with the
 // objects retired from it, the imports reported ended, and the answers
 // to changes made under an idempotency key, which a retry gets again.
@@ -45,6 +46,15 @@ type Blob struct {
 	// AttachmentRefs is the attachments a chat's last write said it
 	// still names; nil when the write did not say.
 	AttachmentRefs []string
+	// DocumentFile is the file a project document's writes last named;
+	// empty when none did.
+	DocumentFile string
+}
+
+// DocumentFile is a project document's file the control plane knows of:
+// whose it is, and the document it was registered for.
+type DocumentFile struct {
+	Owner, ProjectID, DocumentID string
 }
 
 // ActivityBackfill is one request to record a chat's activity time.
@@ -72,6 +82,11 @@ type Store struct {
 	GoneAttachments   map[string]bool   // attachment ids already moved to buckets
 	AttachmentIndex   map[string]string // attachment id to chat id
 	AttachmentOwners  map[string]string // attachment id to the user it was registered for
+	// DocumentFiles are the project documents' files registered, by id. A
+	// purge reclaims each its document does not name, at once: the stub
+	// keeps no grace for a registration whose document is still to be
+	// written.
+	DocumentFiles map[string]DocumentFile
 	// AttachmentPurges are the attachments dropped from the index whose
 	// bytes are still to be deleted, in order; a claim leases a batch of
 	// them under a token, and an ack under that token drops them.
@@ -154,6 +169,7 @@ func New() *Store {
 		Bundles:                         map[string]map[string]controlplane.CurrentKeyBundle{},
 		AttachmentIndex:                 map[string]string{},
 		AttachmentOwners:                map[string]string{},
+		DocumentFiles:                   map[string]DocumentFile{},
 		MigrationFailures:               map[string]int{},
 		PutBlobFailures:                 map[string]int{},
 		ListStatusFailures:              map[string]int{},
@@ -204,6 +220,7 @@ func New() *Store {
 	s.mux.HandleFunc("POST /api/sync/attachment-index/{aid}", s.handleRegisterAttachmentIndex)
 	s.mux.HandleFunc("DELETE /api/sync/attachment-index/{aid}", s.handleDeleteAttachmentIndex)
 	s.mux.HandleFunc("GET /api/sync/attachment-owner/{aid}", s.handleAttachmentOwner)
+	s.mux.HandleFunc("POST "+controlplane.DocumentFilesPath+"{fid}", s.handleRegisterDocumentFile)
 	s.mux.HandleFunc("POST /api/sync/pending-attachments/{aid}", s.handleReservePendingAttachment)
 	s.mux.HandleFunc("POST /api/sync/pending-attachments/sweep", s.handleSweepPendingAttachments)
 	s.mux.HandleFunc("DELETE /api/sync/orphan-attachments", s.handleOrphanAttachments)
@@ -437,6 +454,20 @@ func (s *Store) handlePutBlob(scope string) http.HandlerFunc {
 			stored.AttachmentRefs = []string{}
 			if refs[0] != "" {
 				stored.AttachmentRefs = strings.Split(refs[0], ",")
+			}
+		}
+		if scope == "project_document" {
+			// A write that does not name a file keeps the one named before.
+			if blob != nil {
+				stored.DocumentFile = blob.DocumentFile
+			}
+			if file, sent := r.Header[controlplane.HeaderDocumentFile]; sent {
+				named := DocumentFile{r.Header.Get(controlplane.HeaderClerkUserID), r.PathValue("pid"), r.PathValue("did")}
+				if file[0] != "" && s.DocumentFiles[file[0]] != named {
+					writeJSON(w, http.StatusConflict, map[string]any{"code": controlplane.StatusMissingAttachment, "missing_attachments": []string{file[0]}})
+					return
+				}
+				stored.DocumentFile = file[0]
 			}
 		}
 		s.Blobs[key] = stored
@@ -1233,6 +1264,40 @@ func (s *Store) handleAttachmentOwner(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"clerk_user_id": owner})
 }
 
+// handleRegisterDocumentFile records a file as about to be written for a
+// project document of the user the request names. It refuses an id a
+// chat's attachment holds, one queued for purging, and one registered for
+// another document; registering the same again is a retry.
+func (s *Store) handleRegisterDocumentFile(w http.ResponseWriter, r *http.Request) {
+	fid := r.PathValue("fid")
+	var body struct {
+		ProjectID  string `json:"project_id"`
+		DocumentID string `json:"document_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ProjectID == "" || body.DocumentID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	file := DocumentFile{r.Header.Get(controlplane.HeaderClerkUserID), body.ProjectID, body.DocumentID}
+	if slices.ContainsFunc(s.AttachmentPurges, func(purge controlplane.AttachmentPurge) bool { return purge.AttachmentID == fid }) {
+		writeJSON(w, http.StatusConflict, map[string]string{"code": controlplane.StatusAttachmentPurgeInProgress})
+		return
+	}
+	if registered, ok := s.DocumentFiles[fid]; ok && registered != file || s.AttachmentIndex[fid] != "" {
+		writeJSON(w, http.StatusConflict, map[string]string{"code": "CONFLICT"})
+		return
+	}
+	s.DocumentFiles[fid] = file
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// namedByDocument is whether a registered file is the one its document's
+// row names.
+func (s *Store) namedByDocument(fid string, file DocumentFile) bool {
+	blob := s.Blobs[Key("project_document", file.ProjectID+"/"+file.DocumentID)]
+	return blob != nil && blob.DocumentFile == fid
+}
+
 // The pending-write ledger accepts every reservation, except of an id
 // whose earlier copy is queued for purging or being purged.
 func (s *Store) handleReservePendingAttachment(w http.ResponseWriter, r *http.Request) {
@@ -1311,6 +1376,8 @@ func batchSize(w http.ResponseWriter, r *http.Request, fallback, most int) (int,
 // handlePurgeAttachments moves the index entries no chat names any more
 // into the purge queue, up to the batch size: those whose chat is gone,
 // and those a chat's last write left out of the attachments it names.
+// Then it moves the documents' files no document names, which name no
+// chat.
 func (s *Store) handlePurgeAttachments(w http.ResponseWriter, r *http.Request) {
 	batch, ok := batchSize(w, r, defaultPurgeBatch, maxPurgeBatch)
 	if !ok {
@@ -1329,6 +1396,18 @@ func (s *Store) handlePurgeAttachments(w http.ResponseWriter, r *http.Request) {
 		s.AttachmentPurges = append(s.AttachmentPurges, controlplane.AttachmentPurge{AttachmentID: aid, ClerkUserID: s.AttachmentOwners[aid], ChatID: chat})
 		delete(s.AttachmentIndex, aid)
 		delete(s.AttachmentOwners, aid)
+		queued++
+	}
+	for _, fid := range slices.Sorted(maps.Keys(s.DocumentFiles)) {
+		if queued == batch {
+			break
+		}
+		file := s.DocumentFiles[fid]
+		if s.namedByDocument(fid, file) {
+			continue
+		}
+		s.AttachmentPurges = append(s.AttachmentPurges, controlplane.AttachmentPurge{AttachmentID: fid, ClerkUserID: file.Owner})
+		delete(s.DocumentFiles, fid)
 		queued++
 	}
 	writeJSON(w, http.StatusOK, map[string]int{"queued": queued})

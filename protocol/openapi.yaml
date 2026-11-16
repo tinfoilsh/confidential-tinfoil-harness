@@ -65,7 +65,10 @@ info:
       name; the next version names it. A version 2 chat's reply may also hold
       research, which a harness that does not name it leaves out when it
       writes the chat back, reading the reply with its steps; the next
-      version names it.
+      version names it. A version 2 project document row may also hold
+      file, where the uploaded file is kept, which a harness that does not
+      name it leaves out when it writes the row back; the next version
+      names it.
       A harness reads a version before it writes it. A member of a stored row it
       does not name is read past, since other clients of the same rows write
       members of their own; the harness leaves such members out when it
@@ -987,8 +990,14 @@ paths:
   /v1/projects/documents/upload:
     post:
       operationId: projectDocumentUpload
-      summary: Add a document to a project
+      summary: Add a document to a project, or replace one
       tags: [projects]
+      description: >-
+        Reads a file's text into a document of the project, and keeps the
+        file itself, which /v1/projects/documents/download returns. With
+        documentId, the upload is a new version of that document: it keeps
+        the document's id and createdAt, and takes the new file's name, type,
+        size and text. The key, projectId and documentId come before the file.
       requestBody:
         required: true
         content:
@@ -999,6 +1008,7 @@ paths:
               properties:
                 file: {type: string, contentMediaType: application/octet-stream}
                 projectId: {type: string}
+                documentId: {type: string, description: "The document the upload replaces. Absent for a new document."}
                 key: {type: string, description: "The account's content key, base64."}
       responses:
         "200":
@@ -1006,6 +1016,35 @@ paths:
           content:
             application/json:
               schema: {$ref: "#/components/schemas/ProjectDocument"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/projects/documents/download:
+    post:
+      operationId: projectDocumentDownload
+      summary: Download a document's file
+      tags: [projects]
+      description: >-
+        Returns the file a document was read from, as it was uploaded. The
+        client names and types it from the document. A document without
+        hasFile, stored before files were kept, is refused with
+        THREAD_NOT_FOUND.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key, projectId, documentId]
+              properties:
+                key: {type: string, description: "The account's content key, base64."}
+                projectId: {$ref: "#/components/schemas/Identifier"}
+                documentId: {$ref: "#/components/schemas/Identifier"}
+      responses:
+        "200":
+          description: The document's file.
+          content:
+            application/octet-stream:
+              schema: {type: string, contentMediaType: application/octet-stream}
         default: {$ref: "#/components/responses/Error"}
 
   /v1/projects/documents/delete:
@@ -2981,6 +3020,7 @@ components:
         sizeBytes: {type: integer}
         content: {type: string}
         thumbnailBase64: {type: string}
+        hasFile: {type: boolean, description: "Whether the uploaded file is kept, which /v1/projects/documents/download returns. A document stored before files were kept, or restored from a backup, has only its text."}
         createdAt: {$ref: "#/components/schemas/Timestamp"}
         updatedAt: {$ref: "#/components/schemas/Timestamp"}
 

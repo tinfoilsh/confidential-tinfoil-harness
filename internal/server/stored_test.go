@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
@@ -281,6 +282,66 @@ func TestADocumentTheKeyCannotOpenIsNeverLeftOutUnsaid(t *testing.T) {
 	left := archives.BackupOmission{Kind: "project_document", SourceID: "map", ParentSourceID: trip, Category: "invalid", Reason: "row_unreadable"}
 	if manifest.Counts.ProjectDocuments != 1 || notes.Filename != "notes.md" || !reflect.DeepEqual(manifest.Omissions, []archives.BackupOmission{left}) {
 		t.Errorf("backup: %+v, notes %+v", manifest, notes)
+	}
+}
+
+// A project document keeps the file it was read from, which downloads byte
+// for byte, and an upload naming a document is a new version of it: the
+// same document, added when it was, with the new file's name, text and
+// file. A document stored before files were kept has only its text.
+func TestProjectDocumentsKeepTheFileTheyWereReadFrom(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	p := &auth.Principal{ID: "alice"}
+	trip := "trip"
+	rows.rows[rowMapKey(p, "project", trip)] = domain.StoredRow{ID: trip, ETag: "1", Data: api.Raw(api.Object{"name": "Trip"})}
+	upload := func(name string, data []byte, replaced string) (domain.DocumentView, int) {
+		t.Helper()
+		fields := map[string]string{"key": keyBase64(key), "projectId": trip}
+		if replaced != "" {
+			fields["documentId"] = replaced
+		}
+		w := uploadRoute(h, "/v1/projects/documents/upload", name, data, fields, "alice")
+		var doc domain.DocumentView
+		json.Unmarshal(w.Body.Bytes(), &doc)
+		return doc, w.Code
+	}
+	download := func(id string) *httptest.ResponseRecorder {
+		return postRoute(h, "/v1/projects/documents/download", api.Object{"key": keyBase64(key), "projectId": trip, "documentId": id}, "alice")
+	}
+
+	// The text reads what is not UTF-8 as U+FFFD; the file keeps it.
+	notes := []byte("Pack light \xff")
+	added, code := upload("notes.txt", notes, "")
+	if code != 200 || !added.HasFile || added.Content != "Pack light \uFFFD" {
+		t.Fatalf("upload: HTTP %d %+v", code, added)
+	}
+	if w := download(added.ID); w.Code != 200 || !bytes.Equal(w.Body.Bytes(), notes) {
+		t.Fatalf("download: HTTP %d %q", w.Code, w.Body.Bytes())
+	}
+
+	replaced, code := upload("packing.md", []byte("Bring boots"), added.ID)
+	if code != 200 || replaced.ID != added.ID || replaced.CreatedAt != added.CreatedAt || replaced.Filename != "packing.md" || replaced.Content != "Bring boots" || !replaced.HasFile {
+		t.Fatalf("new version: HTTP %d %+v, first %+v", code, replaced, added)
+	}
+	var project struct {
+		Documents []domain.DocumentView `json:"documents"`
+	}
+	if w := postRoute(h, "/v1/projects/get", api.Object{"key": keyBase64(key), "id": trip}, "alice"); json.Unmarshal(w.Body.Bytes(), &project) != nil || len(project.Documents) != 1 || project.Documents[0].Content != "Bring boots" {
+		t.Fatalf("project: HTTP %d %s", w.Code, w.Body)
+	}
+	if w := download(added.ID); w.Code != 200 || w.Body.String() != "Bring boots" {
+		t.Fatalf("download of the new version: HTTP %d %q", w.Code, w.Body.Bytes())
+	}
+
+	// A new version of a document that is not there stores nothing.
+	stored := attachmentsStored(rows)
+	if _, code := upload("ghost.md", []byte("Boo"), "missing"); code != 404 || attachmentsStored(rows) != stored {
+		t.Fatalf("a new version of a missing document: HTTP %d, %d files stored, was %d", code, attachmentsStored(rows), stored)
+	}
+
+	rows.rows[rowMapKey(p, "project_document", trip+"/old")] = domain.StoredRow{ID: trip + "/old", ETag: "1", Data: api.Raw(api.Object{"filename": "old.txt", "contentType": "text/plain", "sizeBytes": 3, "content": "old"}), Project: &trip, ProjectSet: true}
+	if w := download("old"); w.Code != 404 {
+		t.Fatalf("a document without its file: HTTP %d %s", w.Code, w.Body)
 	}
 }
 

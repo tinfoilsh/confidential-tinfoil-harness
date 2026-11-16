@@ -519,10 +519,14 @@ func (h *harness) getProject(ctx context.Context, p *auth.Principal, key auth.Co
 	if err != nil {
 		return nil, err
 	}
+	views := make([]domain.DocumentView, len(docs))
+	for i, doc := range docs {
+		views[i] = doc.View()
+	}
 	return struct {
 		domain.Project
-		Documents []domain.ProjectDocument `json:"documents"`
-	}{project, docs}, nil
+		Documents []domain.DocumentView `json:"documents"`
+	}{project, views}, nil
 }
 func (h *harness) createProject(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *projectRequest) (any, error) {
 	if strings.TrimSpace(domain.ValueOr(in.Name, "")) == "" {

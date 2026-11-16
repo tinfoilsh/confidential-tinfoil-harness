@@ -79,6 +79,20 @@ func (in *attachmentRequest) Validate() error {
 	return nil
 }
 
+// documentFileRequest downloads the file a project's document keeps.
+type documentFileRequest struct {
+	api.KeyRequest
+	ProjectID  string `json:"projectId"`
+	DocumentID string `json:"documentId"`
+}
+
+func (in *documentFileRequest) Validate() error {
+	if err := api.RequireID("projectId", in.ProjectID); err != nil {
+		return err
+	}
+	return api.RequireID("documentId", in.DocumentID)
+}
+
 // Sent is an upload's descriptor as a turn sends it back, or the
 // id alone of an attachment the thread already holds.
 type Sent struct {

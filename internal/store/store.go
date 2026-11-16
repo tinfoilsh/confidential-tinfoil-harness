@@ -466,10 +466,21 @@ type documentCopy struct {
 	err error
 }
 
-// CreateProjectDocument stores a new document under its project.
-func (s *Store) CreateProjectDocument(ctx context.Context, p *auth.Principal, key auth.ContentKey, doc domain.ProjectDocument) (domain.ProjectDocument, error) {
+// ProjectDocument is one document of a project.
+func (s *Store) ProjectDocument(ctx context.Context, p *auth.Principal, key auth.ContentKey, projectID, documentID string) (domain.ProjectDocument, error) {
+	row, err := s.Rows.Load(ctx, p, key, "project_document", projectID+"/"+documentID)
+	if err != nil {
+		return domain.ProjectDocument{}, err
+	}
+	return domain.ReadProjectDocument(row, projectID)
+}
+
+// SaveProjectDocument stores a document under its project: a new one, or
+// with replace, a new version of one stored, which keeps its id and when it
+// was added.
+func (s *Store) SaveProjectDocument(ctx context.Context, p *auth.Principal, key auth.ContentKey, doc domain.ProjectDocument, replace bool) (domain.ProjectDocument, error) {
 	id := doc.ProjectID + "/" + doc.ID
-	err := s.CommitRow(ctx, p, key, "project_document", id, true, func(row *domain.StoredRow, exists bool) error {
+	err := s.CommitRow(ctx, p, key, "project_document", id, !replace, func(row *domain.StoredRow, exists bool) error {
 		row.Project, row.ProjectSet = &doc.ProjectID, true
 		doc.CreatedAt = api.Timestamp()
 		var origin *domain.ImportOrigin
@@ -482,7 +493,7 @@ func (s *Store) CreateProjectDocument(ctx context.Context, p *auth.Principal, ke
 			origin = domain.ReadImportOrigin(row)
 		}
 		doc.UpdatedAt = api.Timestamp()
-		row.Data, row.Project, row.ProjectSet = api.Raw(domain.StoredDocument{ProjectDocument: doc, RecordVersion: domain.RecordVersion, ImportedFrom: origin}), &doc.ProjectID, true
+		row.Data, row.Project, row.ProjectSet = api.Raw(domain.StoredDocument{ProjectDocument: doc, File: doc.File, RecordVersion: domain.RecordVersion, ImportedFrom: origin}), &doc.ProjectID, true
 		return nil
 	})
 	return doc, err
@@ -499,7 +510,7 @@ func (s *Store) AuthorizeArchive(ctx context.Context, p *auth.Principal, keyByte
 		return err
 	}
 	defer clear(key[:])
-	grant, err := s.Rows.AuthorizeStorage(ctx, p, key, operation, "")
+	grant, err := s.Rows.AuthorizeStorage(ctx, p, key, operation, "", "")
 	if err != nil {
 		return err
 	}

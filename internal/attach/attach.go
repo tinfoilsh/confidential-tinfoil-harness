@@ -220,7 +220,7 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 					api.Respond(w, nil, err)
 					return
 				}
-				p.Grant, err = at.Store.Rows.AuthorizeStorage(r.Context(), p, key, "project-upload", fields["projectId"])
+				p.Grant, err = at.Store.Rows.AuthorizeStorage(r.Context(), p, key, "project-upload", fields["projectId"], fields["documentId"])
 				if err != nil {
 					api.Respond(w, nil, err)
 					return
@@ -289,6 +289,21 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 			api.Respond(w, nil, err)
 			return
 		}
+		// A document named is replaced by the upload, as a new version. Its
+		// id is granted with the file, so it comes before the file.
+		documentID, replace := fields["documentId"], fields["documentId"] != ""
+		if documentID != p.Grant.DocumentID {
+			api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "documentId must come before the file"))
+			return
+		}
+		if replace {
+			if _, err := at.Store.ProjectDocument(ctx, p, key, projectID, documentID); err != nil {
+				api.Respond(w, nil, err)
+				return
+			}
+		} else {
+			documentID = domain.RowID()
+		}
 		if descriptor.IsImage() {
 			descriptor.TextContent, err = at.describeImage(ctx, descriptor.Base64)
 			if err != nil {
@@ -300,8 +315,13 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 			api.Respond(w, nil, api.Err(415, "ATTACHMENT_UNSUPPORTED", "Project documents require extracted text"))
 			return
 		}
-		doc, err := at.Store.CreateProjectDocument(ctx, p, key, domain.ProjectDocument{ID: domain.RowID(), ProjectID: projectID, Filename: filename, ContentType: descriptor.MimeType, SizeBytes: len(file), Content: descriptor.TextContent})
-		api.Respond(w, doc, err)
+		kept, err := at.Store.PutDocumentFile(ctx, p, projectID, documentID, file)
+		if err != nil {
+			api.Respond(w, nil, err)
+			return
+		}
+		doc, err := at.Store.SaveProjectDocument(ctx, p, key, domain.ProjectDocument{ID: documentID, ProjectID: projectID, Filename: filename, ContentType: descriptor.MimeType, SizeBytes: len(file), Content: descriptor.TextContent, File: kept}, replace)
+		api.Respond(w, doc.View(), err)
 		return
 	}
 }
@@ -699,6 +719,57 @@ func (at *Service) HandleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 	}
 	// EHBP seals the body but not the headers, so the response names neither
 	// the file nor its type; the client reads both from the chat it holds.
+	w.Header().Set("Content-Type", OpaqueContentType)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Write(data)
+}
+
+// HandleDocumentDownload sends the file a project's document was read from,
+// as it was uploaded.
+func (at *Service) HandleDocumentDownload(w http.ResponseWriter, r *http.Request) {
+	p, err := at.Auth.Caller(r, false)
+	if err != nil {
+		api.Respond(w, nil, err)
+		return
+	}
+	body, err := api.ReadBody(w, r, api.MaxRequestBody)
+	defer clear(body)
+	if err != nil {
+		api.Respond(w, nil, err)
+		return
+	}
+	var in documentFileRequest
+	defer in.ClearKey()
+	if err := api.DecodeBody(body, &in); err != nil {
+		api.Respond(w, nil, err)
+		return
+	}
+	if err := in.Validate(); err != nil {
+		api.Respond(w, nil, err)
+		return
+	}
+	key, err := auth.DecodeContentKey(in.Key)
+	in.ClearKey()
+	if err != nil {
+		api.Respond(w, nil, err)
+		return
+	}
+	defer clear(key[:])
+	doc, err := at.Store.ProjectDocument(r.Context(), p, key, in.ProjectID, in.DocumentID)
+	clear(key[:])
+	if err != nil {
+		api.Respond(w, nil, err)
+		return
+	}
+	data, err := at.Store.DocumentFile(r.Context(), p, &doc)
+	if err != nil {
+		api.Respond(w, nil, err)
+		return
+	}
+	defer clear(data)
+	// As with an attachment, the client reads the file's name and type
+	// from the document it holds.
 	w.Header().Set("Content-Type", OpaqueContentType)
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")

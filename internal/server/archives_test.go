@@ -1188,8 +1188,8 @@ type pagedRows struct {
 	later           func()
 }
 
-func (s *pagedRows) AuthorizeStorage(_ context.Context, _ *auth.Principal, _ auth.ContentKey, operation, project string) (*auth.StorageGrant, error) {
-	return &auth.StorageGrant{Operation: operation, ProjectID: project, ExpiresAt: api.Now().Add(s.lifetime)}, nil
+func (s *pagedRows) AuthorizeStorage(_ context.Context, _ *auth.Principal, _ auth.ContentKey, operation, project, document string) (*auth.StorageGrant, error) {
+	return &auth.StorageGrant{Operation: operation, ProjectID: project, DocumentID: document, ExpiresAt: api.Now().Add(s.lifetime)}, nil
 }
 
 func (s *pagedRows) List(ctx context.Context, p *auth.Principal, key auth.ContentKey, scope, cursor, project string, limit int) (store.Page, error) {

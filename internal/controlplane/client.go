@@ -81,6 +81,7 @@ const (
 	HeaderProjectID           = "X-Project-Id"
 	HeaderProjectIDSet        = "X-Project-Id-Set"
 	HeaderAttachmentRefs      = "X-Attachment-Refs"
+	HeaderDocumentFile        = "X-Document-File"
 	HeaderActivityAt          = "X-Activity-At"
 	HeaderUpdatedAt           = "X-Updated-At"
 	HeaderETag                = "ETag"
@@ -231,6 +232,12 @@ type PutBlobRequest struct {
 	// index rows are live and purge the rest. Nil means "do not send
 	// the header", which is only correct for non-chat scopes.
 	AttachmentRefs []string
+	// DocumentFile names, on a project document's write, the file the
+	// document's plaintext keeps, or is empty when it keeps none. Sent as
+	// X-Document-File, it tells the controlplane which registered file to
+	// keep under the document; the others are reclaimed. Nil means "do
+	// not send the header", which is only correct for other scopes.
+	DocumentFile *string
 	// ActivityAt is the chat's last conversation activity derived from
 	// the plaintext, sent as X-Activity-At. Nil omits the header, which
 	// makes the controlplane order the row by its write time.
@@ -425,6 +432,9 @@ func (c *Client) putBlobOnce(ctx context.Context, req PutBlobRequest) (*PutBlobR
 	}
 	if req.AttachmentRefs != nil {
 		httpReq.Header.Set(HeaderAttachmentRefs, strings.Join(req.AttachmentRefs, ","))
+	}
+	if req.DocumentFile != nil {
+		httpReq.Header.Set(HeaderDocumentFile, *req.DocumentFile)
 	}
 	if req.ActivityAt != nil {
 		httpReq.Header.Set(HeaderActivityAt, req.ActivityAt.UTC().Format(time.RFC3339Nano))
@@ -1369,6 +1379,45 @@ func (c *Client) RegisterAttachmentIndex(ctx context.Context, jwt, clerkUserID, 
 	)
 }
 
+// DocumentFilesPath is where the controlplane registers a project
+// document's file, by the file's id.
+const DocumentFilesPath = "/api/sync/project-document-files/"
+
+// RegisterDocumentFile tells the controlplane a file is about to be
+// written to buckets for a project document, before its bytes are. It
+// keeps the file while the document's latest write names it, through
+// X-Document-File, and reclaims it otherwise, so a file whose document is
+// never written, or no longer names it, leaves buckets.
+func (c *Client) RegisterDocumentFile(ctx context.Context, jwt, clerkUserID, fileID, projectID, documentID string) error {
+	if fileID == "" || projectID == "" || documentID == "" {
+		return fmt.Errorf("controlplane: a file, project and document id are required")
+	}
+	body, err := json.Marshal(struct {
+		ProjectID  string `json:"project_id"`
+		DocumentID string `json:"document_id"`
+	}{projectID, documentID})
+	if err != nil {
+		return err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+DocumentFilesPath+url.PathEscape(fileID), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	c.addAuth(httpReq, jwt, clerkUserID)
+	httpReq.Header.Set(HeaderContentType, "application/json")
+	resp, err := c.doRequest(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return parseError(resp.StatusCode, raw)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
+}
+
 // ImportOutcomeStatus tells the controlplane whether an import job
 // finished or stopped early so it can pick the matching email.
 type ImportOutcomeStatus string
@@ -1787,6 +1836,8 @@ func (c *Client) AckSearchIndexDeletions(ctx context.Context, claimToken string,
 	return nil
 }
 
+// AttachmentPurge is a buckets object to delete: a chat's attachment, or a
+// project document's file, which names no chat.
 type AttachmentPurge struct {
 	AttachmentID string `json:"attachment_id"`
 	ClerkUserID  string `json:"clerk_user_id"`
