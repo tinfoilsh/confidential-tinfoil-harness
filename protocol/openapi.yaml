@@ -1825,7 +1825,7 @@ components:
         composer: {$ref: "#/components/schemas/Composer"}
         presets: {type: array, items: {$ref: "#/components/schemas/Preset"}}
         features:
-          description: Optional behaviors this harness offers. A client acts on a feature only when it is true here. compaction is true while a chat whose prompt would outgrow its model's window is compacted rather than refused. manualCompaction is true while a turn of kind compact compacts a chat on request. compactLatest is true while such a turn summarizes the chat's latest exchange too when it sends compactLatest. research is true while this caller may send a turn with options.research, which only a subscriber may. partialThread is true while a client may send a device chat from its latest compaction marker on, as ThreadInput describes.
+          description: Optional behaviors this harness offers. A client acts on a feature only when it is true here. compaction is true while a chat whose prompt would outgrow its model's window is compacted rather than refused. manualCompaction is true while a turn of kind compact compacts a chat on request. compactLatest is true while such a turn summarizes the chat's latest exchange too when it sends compactLatest. research is true while this caller may send a turn with options.research, which only a subscriber may. partialThread is true while a client may send a device chat from its latest compaction marker on, as ThreadInput describes. documentVersions is true while a project document upload that names a documentId replaces that document. projectArtifacts is true while /v1/projects/artifacts and /v1/projects/artifacts/get list and open a project's artifacts.
           type: object
           additionalProperties: {type: boolean}
 
