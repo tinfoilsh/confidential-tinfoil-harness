@@ -264,6 +264,7 @@ func (h *harness) completeConnector(ctx context.Context, p *auth.Principal, key 
 }
 
 func (h *harness) updateConnector(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *connectorUpdateRequest) (any, error) {
+	defer clear(key[:])
 	saved, err := h.store.MutateConnector(ctx, p, key, in.ID, false, func(c *domain.Connector, _ bool) error {
 		if in.Name != nil {
 			c.Name = *in.Name

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"slices"
 	"strings"
@@ -76,6 +77,7 @@ func (eng *Engine) offersApps(r *Run, req *Request) bool {
 func (eng *Engine) apps(ctx context.Context, r *Run, p *auth.Principal) *runApps {
 	found, err := eng.Store.Connectors(ctx, p, r.key)
 	if err != nil {
+		slog.Warn("a reply goes on without the user's connectors, which could not be read", "error", err)
 		return nil
 	}
 	usable := slices.DeleteFunc(found, func(c domain.Connector) bool { return !c.Usable() })
