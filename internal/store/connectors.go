@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
@@ -31,8 +32,12 @@ func (s *Store) Connectors(ctx context.Context, p *auth.Principal, key auth.Cont
 	if err != nil {
 		return nil, err
 	}
+	created := func(c domain.Connector) time.Time {
+		at, _ := time.Parse(time.RFC3339Nano, c.CreatedAt)
+		return at
+	}
 	slices.SortFunc(found, func(a, b domain.Connector) int {
-		return cmp.Or(cmp.Compare(a.CreatedAt, b.CreatedAt), cmp.Compare(a.ID, b.ID))
+		return cmp.Or(created(a).Compare(created(b)), cmp.Compare(a.ID, b.ID))
 	})
 	return found, nil
 }
