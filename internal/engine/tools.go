@@ -116,6 +116,7 @@ func openTools(ctx context.Context, req *Request, model string, progress func(st
 	header.Set("X-Tinfoil-Tool-PII-Check", strconv.FormatBool(req.piiCheck))
 	opened, err := webSearch.dial(ctx, header, progress)
 	if err != nil {
+		set.close()
 		return nil, fmt.Errorf("webSearch: %w", err)
 	}
 	set.search = opened
