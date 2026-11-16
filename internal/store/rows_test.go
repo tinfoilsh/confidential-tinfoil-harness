@@ -370,7 +370,8 @@ func TestChatPushReportsItsAttachmentsAndActivity(t *testing.T) {
 	chat := `{"id":"chat-refs","createdAt":"2026-01-01T00:00:00.000Z","messages":[` +
 		`{"role":"user","content":"a","timestamp":"2026-01-01T00:00:00.000Z","attachments":[` +
 		`{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","type":"image","encryptionKey":"` + key + `"},` +
-		`{"id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","type":"document","fileSize":1.5,"key":"` + key + `"},` +
+		`{"id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","type":"document","fileSize":1.5,"key":"` + key + `",` +
+		`"original":{"id":"cccccccccccccccccccccccccccccccccccc","encryptionKey":"` + key + `","storageThreadId":"chat-refs"}},` +
 		`{"id":"local-only","type":"image","base64":"AQID"}]},` +
 		`{"role":"assistant","content":"b","timestamp":"2026-02-03T04:05:06.789Z","attachments":[` +
 		`{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","type":"image","encryptionKey":"` + key + `"}]}]}`
@@ -380,8 +381,8 @@ func TestChatPushReportsItsAttachmentsAndActivity(t *testing.T) {
 	h.push(t, "project", "project-1", chat)
 
 	stored := h.stored("chat", "chat-refs")
-	if want := []string{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}; !reflect.DeepEqual(stored.AttachmentRefs, want) {
-		t.Fatalf("attachment refs = %v, want the uploaded attachments once each: %v", stored.AttachmentRefs, want)
+	if want := []string{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "cccccccccccccccccccccccccccccccccccc"}; !reflect.DeepEqual(stored.AttachmentRefs, want) {
+		t.Fatalf("attachment refs = %v, want the uploaded attachments and files once each: %v", stored.AttachmentRefs, want)
 	}
 	if want := time.Date(2026, 2, 3, 4, 5, 6, 789_000_000, time.UTC); stored.ActivityAt == nil || !stored.ActivityAt.Equal(want) {
 		t.Fatalf("activity = %v, want the newest message's %s", stored.ActivityAt, want)

@@ -229,10 +229,23 @@ type Attachment struct {
 	// Key is the control plane key of an image stored before buckets existed.
 	Key             string `json:"key,omitempty"`
 	StorageThreadID string `json:"storageThreadId,omitempty"`
+	// Original is the file as it was uploaded, kept beside the copy models
+	// read: the PDF a document's text came from, an image at full size, or
+	// the recording a transcript came from.
+	Original *OriginalFile `json:"original,omitempty"`
 
 	// inferenceMimeType is the type of the copy a model reads, set while a
 	// turn's prompt is built.
 	InferenceMimeType string `json:"-"`
+}
+
+// OriginalFile is an attachment's uploaded file as buckets keeps it under a
+// chat: its id, the key that opens it, base64, and the chat it is stored
+// under.
+type OriginalFile struct {
+	ID              string `json:"id"`
+	EncryptionKey   string `json:"encryptionKey"`
+	StorageThreadID string `json:"storageThreadId"`
 }
 
 // DocumentPage is a converted document page. Its fields are in the order

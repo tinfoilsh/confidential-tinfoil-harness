@@ -117,6 +117,13 @@ func (eng *Engine) prepareTurn(ctx context.Context, r *Run, p *auth.Principal, c
 	if err != nil {
 		return nil, err
 	}
+	// A device chat keeps no server keys, so no upload's file kept in the
+	// cloud.
+	if s.local {
+		for i := range attachments {
+			attachments[i].Original = nil
+		}
+	}
 	if err := applyTurn(t, turn, r.messageID, attachments); err != nil {
 		return nil, err
 	}

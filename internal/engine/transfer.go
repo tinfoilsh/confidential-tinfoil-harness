@@ -18,7 +18,9 @@ import (
 
 // ThreadTranscript is a stored chat in the form the device keeps: every
 // attachment's content inline and no server bookkeeping. It refuses when any
-// attachment cannot be read, so moving the chat never loses content.
+// attachment cannot be read, so moving the chat never loses content. The
+// files attachments were uploaded as stay with the cloud copy, so the
+// device copy names none.
 func (eng *Engine) ThreadTranscript(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *api.ThreadRequest) (any, error) {
 	eng.Live.mu.Lock()
 	live := eng.Live.threads[liveKey(p, in.ThreadID)]
@@ -36,6 +38,7 @@ func (eng *Engine) ThreadTranscript(ctx context.Context, p *auth.Principal, key 
 	}
 	missing := 0
 	err = row.EachAttachment(func(a *domain.Attachment) error {
+		a.Original = nil
 		if a.StorageKey() == "" {
 			return nil
 		}

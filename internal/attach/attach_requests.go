@@ -67,6 +67,9 @@ type attachmentRequest struct {
 	MimeType    string                `json:"mimeType"`
 	TextContent string                `json:"textContent"`
 	Pages       []domain.DocumentPage `json:"pages"`
+	// Original asks for the file as it was uploaded: of the attachment a
+	// stored chat names, or the one a share names by its id and key.
+	Original bool `json:"original"`
 }
 
 func (in *attachmentRequest) Validate() error {
@@ -106,6 +109,8 @@ type Sent struct {
 	Description string                `json:"description,omitempty"`
 	Pages       []domain.DocumentPage `json:"pages,omitempty"`
 	Base64      string                `json:"base64,omitempty"`
+	// Original is where the upload kept the file as it was uploaded.
+	Original *domain.OriginalFile `json:"original,omitempty"`
 }
 
 func (a *Sent) Validate() error {
@@ -114,6 +119,9 @@ func (a *Sent) Validate() error {
 	}
 	if a.Kind != "" && !slices.Contains(domain.AttachmentKinds, a.Kind) {
 		return api.Err(400, "BAD_REQUEST", "An attachment kind must be image, document, or audio")
+	}
+	if o := a.Original; o != nil && (!domain.EnclaveAttachmentID.MatchString(o.ID) || o.EncryptionKey == "" || api.RequireID("original.storageThreadId", o.StorageThreadID) != nil) {
+		return api.Err(400, "BAD_REQUEST", "An original must name the file an upload kept")
 	}
 	if a.whole() {
 		return a.fitsUpload()

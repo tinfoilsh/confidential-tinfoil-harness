@@ -125,22 +125,22 @@ func Window(row *ThreadRow, before string, limit int) ThreadWindow {
 // MessageView is a message as a client shows it: a question's text or a
 // reply's timeline, and its attachments without their content.
 type MessageView struct {
-	ID               string          `json:"id"`
-	Role             string          `json:"role"`
-	CreatedAt        string          `json:"createdAt"`
-	Quote            string          `json:"quote,omitempty"`
-	Model            string          `json:"model,omitempty"`
-	ModelDisplayName string          `json:"modelDisplayName,omitempty"`
-	IsError          *bool           `json:"isError,omitempty"`
-	IsInterrupted    *bool           `json:"isInterrupted,omitempty"`
-	Usage            json.RawMessage `json:"usage,omitempty"`
-	Annotations      []Annotation    `json:"annotations,omitzero"`
-	Timeline         []Block         `json:"timeline,omitzero"`
-	Content          *string         `json:"content,omitempty"`
-	Attachments      []Attachment    `json:"attachments,omitempty"`
-	Answers          []WidgetAnswers `json:"answers,omitzero"`
-	Compaction       *Compaction     `json:"compaction,omitempty"`
-	Research         *Research       `json:"research,omitempty"`
+	ID               string           `json:"id"`
+	Role             string           `json:"role"`
+	CreatedAt        string           `json:"createdAt"`
+	Quote            string           `json:"quote,omitempty"`
+	Model            string           `json:"model,omitempty"`
+	ModelDisplayName string           `json:"modelDisplayName,omitempty"`
+	IsError          *bool            `json:"isError,omitempty"`
+	IsInterrupted    *bool            `json:"isInterrupted,omitempty"`
+	Usage            json.RawMessage  `json:"usage,omitempty"`
+	Annotations      []Annotation     `json:"annotations,omitzero"`
+	Timeline         []Block          `json:"timeline,omitzero"`
+	Content          *string          `json:"content,omitempty"`
+	Attachments      []AttachmentView `json:"attachments,omitempty"`
+	Answers          []WidgetAnswers  `json:"answers,omitzero"`
+	Compaction       *Compaction      `json:"compaction,omitempty"`
+	Research         *Research        `json:"research,omitempty"`
 }
 
 func ViewMessage(m *Message) MessageView {
@@ -160,11 +160,18 @@ func ViewMessage(m *Message) MessageView {
 	return view
 }
 
-// ViewAttachment is an attachment as a client lists it: its metadata,
+// AttachmentView is an attachment as a client lists it: its metadata,
 // thumbnail and any text it holds inline, without its blob's key or its
-// bytes. A text-only model reads an image through its description.
-func ViewAttachment(a *Attachment) Attachment {
-	return Attachment{ID: a.ID, Kind: a.Kind, FileName: a.FileName, MimeType: a.MimeType, Size: a.Size, Thumbnail: a.Thumbnail, TextContent: a.TextContent, Description: a.Description}
+// bytes, and whether its uploaded file is kept, which the client downloads.
+type AttachmentView struct {
+	Attachment
+	HasOriginal bool `json:"hasOriginal,omitempty"`
+}
+
+// ViewAttachment is an attachment as a client lists it. A text-only model
+// reads an image through its description.
+func ViewAttachment(a *Attachment) AttachmentView {
+	return AttachmentView{Attachment: Attachment{ID: a.ID, Kind: a.Kind, FileName: a.FileName, MimeType: a.MimeType, Size: a.Size, Thumbnail: a.Thumbnail, TextContent: a.TextContent, Description: a.Description}, HasOriginal: a.Original != nil}
 }
 
 // DeviceTranscript is a stored chat as its device keeps it, without the
@@ -179,8 +186,8 @@ type DeviceTranscript struct {
 }
 
 // SharePayload is what a share link opens, sealed under its key: each
-// attachment's thumbnail or text, and the key of its blob, which buckets keeps
-// for the share.
+// attachment's thumbnail or text, and the keys of its blob and its uploaded
+// file, which buckets keeps for the share.
 type SharePayload struct {
 	V         int            `json:"v"`
 	Title     string         `json:"title"`
@@ -215,8 +222,17 @@ type SharedMessage struct {
 }
 
 type SharedAttachment struct {
-	Attachment
+	AttachmentView
 	AttKey *string `json:"attKey"`
+	// Original names the uploaded file by the id and key that read it.
+	Original *SharedOriginal `json:"original,omitempty"`
+}
+
+// SharedOriginal is a shared attachment's uploaded file, which its reader
+// downloads with its id and key.
+type SharedOriginal struct {
+	ID     string `json:"id"`
+	AttKey string `json:"attKey"`
 }
 
 // StatePatch is one change a run makes to its client's state.

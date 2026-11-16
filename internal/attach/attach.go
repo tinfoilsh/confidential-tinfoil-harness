@@ -270,10 +270,18 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, auth.WithQuota(p, cred.Limit, err))
 		return
 	}
-	// An upload is only converted. Its client sends the descriptor back with
-	// the turn that attaches it, and that turn stores it with the chat.
+	// An upload is converted, and its client sends the descriptor back with
+	// the turn that attaches it, which stores it with the chat. For a cloud
+	// chat, the upload keeps the file as it was uploaded under that chat
+	// now, which the descriptor names.
 	if r.URL.Path == "/v1/attachments/upload" {
 		descriptor.ID = "att_" + api.Token()
+		if fields["threadId"] != "" || keyField != nil {
+			if descriptor.Original, err = at.keepOriginal(r.Context(), p, keyField, fields["threadId"], descriptor.ID, file); err != nil {
+				api.Respond(w, nil, err)
+				return
+			}
+		}
 		api.Respond(w, struct {
 			Attachment domain.Attachment `json:"attachment"`
 		}{descriptor}, nil)
@@ -326,6 +334,28 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// keepOriginal stores an upload's file as it was uploaded under the cloud
+// chat it is for. The chat's push that names it keeps it; one never pushed,
+// or that no longer names it, the control plane reclaims.
+func (at *Service) keepOriginal(ctx context.Context, p *auth.Principal, keyField []byte, threadID, uploadID string, file []byte) (*domain.OriginalFile, error) {
+	if p.Anonymous {
+		return nil, auth.ErrAnonymousCloud
+	}
+	if err := api.RequireID("threadId", threadID); err != nil {
+		return nil, err
+	}
+	key, err := auth.DecodeBase64Key(keyField)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(key[:])
+	id, fileKey, err := at.Store.PutAttachment(ctx, p, key, threadID, "original/"+uploadID, file)
+	if err != nil {
+		return nil, err
+	}
+	return &domain.OriginalFile{ID: id, EncryptionKey: fileKey, StorageThreadID: threadID}, nil
+}
+
 var errUnsupportedType = api.Err(415, "ATTACHMENT_UNSUPPORTED", "Unsupported file type")
 
 // fitsUpload refuses a descriptor no upload makes: one of a file uploads do
@@ -357,7 +387,7 @@ func (d *Sent) fitsUpload() error {
 // stores: an upload's descriptor, and an image's bytes no larger than the
 // copy an upload makes for models.
 func (d *Sent) stored() (domain.Attachment, error) {
-	a := domain.Attachment{ID: d.ID, Kind: d.Kind, FileName: d.FileName, MimeType: d.MimeType, Size: d.Size, Thumbnail: domain.ValueOr(d.Thumbnail, ""), TextContent: d.TextContent, Description: d.Description, Pages: d.Pages, Base64: d.Base64}
+	a := domain.Attachment{ID: d.ID, Kind: d.Kind, FileName: d.FileName, MimeType: d.MimeType, Size: d.Size, Thumbnail: domain.ValueOr(d.Thumbnail, ""), TextContent: d.TextContent, Description: d.Description, Pages: d.Pages, Base64: d.Base64, Original: d.Original}
 	if !a.IsImage() {
 		return a, nil
 	}
@@ -618,8 +648,9 @@ func (at *Service) transcribe(ctx context.Context, filename string, data []byte)
 	return string(b), nil
 }
 
-// attachment finds an attachment of the named thread for its client to download.
-func (at *Service) attachment(ctx context.Context, p *auth.Principal, key auth.ContentKey, id, threadID string) (*domain.Attachment, []byte, error) {
+// attachment finds an attachment of the named thread for its client to
+// download: its content, or with original, the file as it was uploaded.
+func (at *Service) attachment(ctx context.Context, p *auth.Principal, key auth.ContentKey, id, threadID string, original bool) (*domain.Attachment, []byte, error) {
 	if p.Anonymous {
 		return nil, nil, api.Err(404, "THREAD_NOT_FOUND", "The attachment was not found")
 	}
@@ -636,6 +667,13 @@ func (at *Service) attachment(ctx context.Context, p *auth.Principal, key auth.C
 	}
 	if descriptor == nil {
 		return nil, nil, api.Err(404, "THREAD_NOT_FOUND", "The attachment was not found")
+	}
+	if original {
+		if descriptor.Original == nil {
+			return nil, nil, api.Err(404, "THREAD_NOT_FOUND", "The attachment's uploaded file is not kept")
+		}
+		b, err := at.Store.GetAttachment(ctx, p, descriptor.Original.ID, descriptor.Original.EncryptionKey)
+		return descriptor, b, err
 	}
 	b, err := at.Bytes(ctx, p, descriptor)
 	return descriptor, b, err
@@ -697,7 +735,7 @@ func (at *Service) HandleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer clear(key[:])
-		descriptor, data, err = at.attachment(r.Context(), p, key, in.ID, in.ThreadID)
+		descriptor, data, err = at.attachment(r.Context(), p, key, in.ID, in.ThreadID, in.Original)
 		clear(key[:])
 	}
 	if err != nil {
@@ -705,7 +743,8 @@ func (at *Service) HandleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer clear(data)
-	if documentRequest(descriptor, data) {
+	// An uploaded file is sent as it was uploaded.
+	if !in.Original && documentRequest(descriptor, data) {
 		// A stored document keeps its extracted content, not the uploaded file.
 		content := Content(descriptor)
 		if content.empty() {

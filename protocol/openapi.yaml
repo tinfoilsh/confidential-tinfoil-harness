@@ -65,7 +65,10 @@ info:
       name; the next version names it. A version 2 chat's reply may also hold
       research, which a harness that does not name it leaves out when it
       writes the chat back, reading the reply with its steps; the next
-      version names it. A version 2 project document row may also hold
+      version names it. A version 2 chat's attachment may also hold
+      original, where the file it was uploaded as is kept, which a harness
+      that does not name it leaves out when it writes the chat back; the
+      next version names it. A version 2 project document row may also hold
       file, where the uploaded file is kept, which a harness that does not
       name it leaves out when it writes the row back; the next version
       names it.
@@ -1266,7 +1269,15 @@ paths:
       operationId: attachmentUpload
       summary: Convert a file into an attachment
       tags: [attachments]
-      description: Converts a file into the attachment a turn sends. The harness keeps nothing of it.
+      description: >-
+        Converts a file into the attachment a turn sends. For a stored chat,
+        the client sends the content key and the chat's id, and the harness
+        keeps the file as it was uploaded under that chat, which the
+        attachment's original names; the turn that attaches it sends the
+        original back, and the chat keeps it while it names the attachment.
+        A file uploaded for a chat the client never sends a turn to is
+        deleted within the hour. Without them, as for a device chat or a
+        signed-out caller, the harness keeps nothing of the file.
       requestBody:
         required: true
         content:
@@ -1276,6 +1287,8 @@ paths:
               required: [file]
               properties:
                 file: {type: string, contentMediaType: application/octet-stream}
+                key: {type: string, description: "The account's content key, base64. Only for a stored chat."}
+                threadId: {type: string, description: "The stored chat the attachment is for, which may not exist yet."}
       responses:
         "200":
           description: The attachment.
@@ -2091,6 +2104,7 @@ components:
         description: {type: string}
         pages: {type: array, items: {$ref: "#/components/schemas/DocumentPage"}}
         base64: {type: string}
+        original: {$ref: "#/components/schemas/OriginalFile"}
 
     FollowInput:
       type: object
@@ -2744,6 +2758,7 @@ components:
         thumbnail: {type: string}
         textContent: {type: string}
         description: {type: string}
+        hasOriginal: {type: boolean, description: "Whether the file is kept as it was uploaded, which /v1/attachments/get returns with original. Absent for an attachment stored before files were kept."}
 
     Attachment:
       description: An attachment as an upload returns it and a device chat keeps it.
@@ -2761,6 +2776,16 @@ components:
         pages: {type: array, items: {$ref: "#/components/schemas/DocumentPage"}}
         base64: {type: string, description: "The copy of an image models read."}
         originalBase64: {type: string, description: "An imported image's original, only in an import's lines. A client keeps it apart from the chat."}
+        original: {$ref: "#/components/schemas/OriginalFile"}
+
+    OriginalFile:
+      description: Where an upload kept the file as it was uploaded, under the stored chat it was uploaded for. A turn sends it back as the upload returned it.
+      type: object
+      required: [id, encryptionKey, storageThreadId]
+      properties:
+        id: {type: string}
+        encryptionKey: {type: string}
+        storageThreadId: {type: string}
 
     DocumentPage:
       type: object
@@ -2934,6 +2959,14 @@ components:
                     textContent: {type: string}
                     description: {type: string}
                     attKey: {type: [string, "null"]}
+                    hasOriginal: {type: boolean}
+                    original:
+                      description: The file as it was uploaded, which /v1/attachments/get-public returns with original.
+                      type: object
+                      required: [id, attKey]
+                      properties:
+                        id: {type: string}
+                        attKey: {type: string}
 
     AttachmentRequest:
       description: An attachment of a stored chat, or one a share names by the key its link carries.
@@ -2950,6 +2983,7 @@ components:
         mimeType: {type: string}
         textContent: {type: string}
         pages: {type: array, items: {$ref: "#/components/schemas/DocumentPage"}}
+        original: {type: boolean, description: "Asks for the file as it was uploaded: of the attachment a stored chat names by id, or, for a share, the original that id and attKey name."}
 
     # --- Profile --------------------------------------------------------------
 

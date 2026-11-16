@@ -86,7 +86,41 @@ func Unreachable(err error) bool {
 // inline in the given copy, which is the one a prompt is built from.
 func (at *Service) PlaceAttachments(ctx context.Context, p *auth.Principal, key auth.ContentKey, threadID string, t *domain.Thread) error {
 	defer clear(key[:])
-	return t.EachAttachment(func(a *domain.Attachment) error { return at.placeAttachment(ctx, p, key, threadID, a) })
+	return t.EachAttachment(func(a *domain.Attachment) error {
+		if err := at.placeAttachment(ctx, p, key, threadID, a); err != nil {
+			return err
+		}
+		return at.placeOriginal(ctx, p, key, threadID, a)
+	})
+}
+
+// placeOriginal copies an attachment's uploaded file under the thread when
+// it is kept under another, as a fork's or one uploaded for another chat
+// is. One that can no longer be read is let go, and the attachment keeps
+// its content.
+func (at *Service) placeOriginal(ctx context.Context, p *auth.Principal, key auth.ContentKey, threadID string, a *domain.Attachment) error {
+	defer clear(key[:])
+	o := a.Original
+	if o == nil || domain.EnclaveAttachmentID.MatchString(o.ID) && o.StorageThreadID == threadID {
+		return nil
+	}
+	data, err := at.Store.GetAttachment(ctx, p, o.ID, o.EncryptionKey)
+	if Unreachable(err) {
+		a.Original = nil
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer clear(data)
+	id, fileKey, err := at.Store.PutAttachment(ctx, p, key, threadID, "original/"+a.ID, data)
+	if err != nil {
+		return err
+	}
+	// Copies of the thread share the original, so it is replaced, never
+	// changed in place.
+	a.Original = &domain.OriginalFile{ID: id, EncryptionKey: fileKey, StorageThreadID: threadID}
+	return nil
 }
 
 func (at *Service) placeAttachment(ctx context.Context, p *auth.Principal, key auth.ContentKey, threadID string, a *domain.Attachment) error {
@@ -192,6 +226,12 @@ func (at *Service) InflateDocument(ctx context.Context, p *auth.Principal, a *do
 func (at *Service) RepairAttachments(ctx context.Context, p *auth.Principal, key auth.ContentKey, t *domain.Thread, missing []string) error {
 	defer clear(key[:])
 	return t.EachAttachment(func(a *domain.Attachment) error {
+		if o := a.Original; o != nil && slices.Contains(missing, o.ID) {
+			a.Original = &domain.OriginalFile{ID: o.ID, EncryptionKey: o.EncryptionKey, StorageThreadID: "elsewhere"}
+			if err := at.placeOriginal(ctx, p, key, t.ID, a); err != nil {
+				return err
+			}
+		}
 		if !slices.Contains(missing, a.ID) {
 			return nil
 		}
