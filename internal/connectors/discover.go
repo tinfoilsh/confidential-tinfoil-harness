@@ -68,16 +68,17 @@ type authServer struct {
 
 // Inspect finds how server takes its requests: it opens a session without
 // credentials, and when the server refuses it, reads which authorization
-// server the user signs in through, as the MCP authorization spec says.
+// server the user signs in through, as the MCP authorization spec says. A
+// server that opens a session for anyone but names an authorization server
+// in its metadata asks for a sign-in before its tools run, so the user signs
+// in to it too.
 func (c *Client) Inspect(ctx context.Context, server string) (*Inspection, error) {
 	status, challenge, err := c.probe(ctx, server)
 	if err != nil {
 		return nil, errUnreachable()
 	}
-	switch {
-	case status >= 200 && status < 300:
-		return &Inspection{}, nil
-	case status != http.StatusUnauthorized && (status != http.StatusForbidden || challenge == nil):
+	open := status >= 200 && status < 300
+	if !open && status != http.StatusUnauthorized && (status != http.StatusForbidden || challenge == nil) {
 		return nil, errUnreachable()
 	}
 	resource, issuer, scopes := server, origin(server), []string(nil)
@@ -85,6 +86,9 @@ func (c *Client) Inspect(ctx context.Context, server string) (*Inspection, error
 		scopes = strings.Fields(challenge.Params["scope"])
 	}
 	prm, err := c.protectedResource(ctx, server, challenge)
+	if open && (err != nil || prm == nil) {
+		return &Inspection{}, nil
+	}
 	if err != nil {
 		return nil, err
 	}

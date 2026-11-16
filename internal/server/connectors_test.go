@@ -39,8 +39,11 @@ const (
 // read-only lookup and a create_page that changes things, which with signIn
 // refuses callers without a token its authorization server issued.
 type fakeConnector struct {
-	server           *httptest.Server
-	signIn           bool
+	server *httptest.Server
+	signIn bool
+	// openSessions has a server that signs callers in still open sessions
+	// and list its tools for anyone, refusing only calls.
+	openSessions     bool
 	metadataDocument bool
 	// edit changes the authorization server's metadata, as a server the
 	// harness cannot sign in to publishes it.
@@ -92,7 +95,7 @@ func serveConnector(t *testing.T, f *fakeConnector) *fakeConnector {
 	f.server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Host + r.URL.Path {
 		case "mcp.example.test/mcp":
-			if f.signIn && !f.admits(r) {
+			if f.signIn && !f.admits(r) && (!f.openSessions || calls(r)) {
 				w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+resourceMetadata+`", scope="pages"`)
 				w.WriteHeader(http.StatusUnauthorized)
 				return
@@ -152,6 +155,17 @@ func writeJSON(w http.ResponseWriter, v any) {
 // errorCode is the code of the error a route answered with.
 func errorCode(w *httptest.ResponseRecorder) any {
 	return api.Obj(api.Obj(api.Parsed(w.Body.Bytes()))["error"])["code"]
+}
+
+// calls is whether a request to the MCP server calls a tool.
+func calls(r *http.Request) bool {
+	body, _ := io.ReadAll(r.Body)
+	r.Body = io.NopCloser(strings.NewReader(string(body)))
+	var request struct {
+		Method string `json:"method"`
+	}
+	json.Unmarshal(body, &request)
+	return request.Method == "tools/call"
 }
 
 func (f *fakeConnector) admits(r *http.Request) bool {
@@ -332,6 +346,15 @@ func TestSigningInToAConnectorKeepsItsTokensInTheEnclave(t *testing.T) {
 	}
 	if again := postRoute(h, "/v1/connectors/complete", api.Object{"key": keyBase64(key), "id": id, "code": code, "state": state}, "alice"); again.Code != 400 || f.issued != 1 {
 		t.Fatalf("a finished sign-in completed again: HTTP %d, %d tokens issued", again.Code, f.issued)
+	}
+}
+
+func TestAServerThatListsToolsForAnyoneButNamesAnAuthorizationServerSignsUsersIn(t *testing.T) {
+	f := serveConnector(t, &fakeConnector{signIn: true, openSessions: true})
+	h, _, key := connectorHarness(t, nil, f)
+	added := connectorRoute(t, h, key, "/v1/connectors/add", api.Object{"name": "Fake", "url": connectorURL})
+	if api.Obj(added["connector"])["status"] != domain.ConnectorSignedOut || added["authorizationUrl"] == nil {
+		t.Fatalf("added %v, want a sign-in before its tools are called", added)
 	}
 }
 
