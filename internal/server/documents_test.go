@@ -9,6 +9,8 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"image"
+	"image/jpeg"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -284,8 +286,12 @@ func TestASharedPhotoDownloadsItsSourceNotItsPreview(t *testing.T) {
 	h, _, key := testChatHarness(t, nil)
 	h.models.Offer.Get()[0].Vision = true
 	h.models.Catalog.Get().Models[0]["multimodal"] = true
-	source := pngFixture(t, 400, 200, 150)
-	upload := uploadRoute(h, "/v1/attachments/upload", "preview.png", pngFixture(t, 16, 8, 110), map[string]string{"key": keyBase64(key)}, "alice", originalPart{"source.png", source})
+	var original bytes.Buffer
+	if err := jpeg.Encode(&original, image.NewGray(image.Rect(0, 0, 400, 200)), nil); err != nil {
+		t.Fatal(err)
+	}
+	source := original.Bytes()
+	upload := uploadRoute(h, "/v1/attachments/upload", "preview.png", pngFixture(t, 16, 8, 110), map[string]string{"key": keyBase64(key)}, "alice", originalPart{"source.jpg", source})
 	var descriptor struct{ Attachment domain.Attachment }
 	if upload.Code != 200 || json.Unmarshal(upload.Body.Bytes(), &descriptor) != nil || descriptor.Attachment.Original == nil {
 		t.Fatalf("photo upload: HTTP %d", upload.Code)
@@ -303,7 +309,7 @@ func TestASharedPhotoDownloadsItsSourceNotItsPreview(t *testing.T) {
 		t.Fatalf("open photo share: HTTP %d", w.Code)
 	}
 	a := shared.Messages[0].Attachments[0]
-	if a.Original == nil || a.OriginalFileName != "source.png" || a.OriginalMimeType != "image/png" {
+	if a.Original == nil || a.OriginalFileName != "source.jpg" || a.OriginalMimeType != "image/jpeg" {
 		t.Fatal("the opened share does not identify the source photo")
 	}
 	download := postRoute(h, "/v1/attachments/get-public", api.Object{"id": a.Original.ID, "attKey": a.Original.AttKey, "original": true}, "")
