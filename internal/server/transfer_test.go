@@ -64,6 +64,13 @@ func TestTranscriptRefusesToLoseContent(t *testing.T) {
 	if w := postRoute(h, "/v1/threads/transcript", api.Object{"key": keyBase64(key), "threadId": "gone"}, "alice"); w.Code != 409 || !strings.Contains(w.Body.String(), "ATTACHMENTS_UNAVAILABLE") {
 		t.Fatalf("a chat with an unreadable attachment moved: %d %s", w.Code, w.Body.String())
 	}
+	file, fileKey := seedAttachment(rows, "alice", "cloud", []byte("original bytes"))
+	storedThread(rows, "alice", "cloud", api.Object{"id": "doc", "type": "document", "fileName": "notes.pdf", "textContent": "notes", "original": api.Object{"id": file, "encryptionKey": fileKey, "storageThreadId": "cloud"}})
+	w := postRoute(h, "/v1/threads/transcript", api.Object{"key": keyBase64(key), "threadId": "cloud"}, "alice")
+	refusal := api.Obj(api.Obj(api.Parsed(w.Body.Bytes()))["error"])
+	if w.Code != 409 || refusal["code"] != "ATTACHMENTS_UNAVAILABLE" || refusal["action"] != api.ActionStop {
+		t.Fatalf("a chat whose original cannot follow it to the device: %d %s", w.Code, w.Body)
+	}
 }
 
 func TestTranscriptWaitsForALiveReply(t *testing.T) {
