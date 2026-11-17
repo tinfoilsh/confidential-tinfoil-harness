@@ -278,6 +278,40 @@ func TestAStoredChatKeepsEachFileAsItWasUploaded(t *testing.T) {
 	}
 }
 
+// An image may have a different file name, encoding and dimensions from
+// its preview. Copying it into the chat and into a share preserves all three.
+func TestASharedPhotoDownloadsItsSourceNotItsPreview(t *testing.T) {
+	h, _, key := testChatHarness(t, nil)
+	h.models.Offer.Get()[0].Vision = true
+	h.models.Catalog.Get().Models[0]["multimodal"] = true
+	source := pngFixture(t, 400, 200, 150)
+	upload := uploadRoute(h, "/v1/attachments/upload", "preview.png", pngFixture(t, 16, 8, 110), map[string]string{"key": keyBase64(key)}, "alice", originalPart{"source.png", source})
+	var descriptor struct{ Attachment domain.Attachment }
+	if upload.Code != 200 || json.Unmarshal(upload.Body.Bytes(), &descriptor) != nil || descriptor.Attachment.Original == nil {
+		t.Fatalf("photo upload: HTTP %d", upload.Code)
+	}
+	in := sendInput(key)
+	in["attachments"] = []any{descriptor.Attachment}
+	finishedRun(t, h, "/v1/threads/turn", in)
+	fakeShares(t, h)
+	id := in["threadId"]
+	link := postRoute(h, "/v1/threads/share", api.Object{"key": keyBase64(key), "threadId": id}, "alice")
+	_, fragment, _ := strings.Cut(api.Str(api.Obj(api.Parsed(link.Body.Bytes()))["url"]), "#")
+	w := postRoute(h, "/v1/shares/open", api.Object{"shareId": id, "fragment": fragment}, "")
+	var shared domain.SharedThread
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &shared) != nil || len(shared.Messages) == 0 || len(shared.Messages[0].Attachments) != 1 {
+		t.Fatalf("open photo share: HTTP %d", w.Code)
+	}
+	a := shared.Messages[0].Attachments[0]
+	if a.Original == nil || a.OriginalFileName != "source.png" || a.OriginalMimeType != "image/png" {
+		t.Fatal("the opened share does not identify the source photo")
+	}
+	download := postRoute(h, "/v1/attachments/get-public", api.Object{"id": a.Original.ID, "attKey": a.Original.AttKey, "original": true}, "")
+	if download.Code != 200 || !bytes.Equal(download.Body.Bytes(), source) {
+		t.Fatalf("the source photo was not preserved: HTTP %d", download.Code)
+	}
+}
+
 func storedThread(rows *memoryRows, user, id string, attachments ...api.Object) {
 	values := []any{}
 	for _, a := range attachments {

@@ -86,7 +86,7 @@ func (h *harness) session(ctx context.Context, p *auth.Principal, _ auth.Content
 		ProfileDefaults: domain.DefaultProfile(),
 		Composer:        attach.Composer(),
 		Presets:         presets,
-		Features:        map[string]bool{"browserTools": true, "webSearch": engine.WebSearchReady(), "transcription": h.models.ServiceReady("router"), "speech": h.models.ServiceReady("router"), "promptPresetEdits": true, "promptPresetUpdates": true, "partialThread": true, "imageOriginals": true, "documentVersions": true, "artifacts": true, "compaction": h.engine.Summaries.Ready(summarize.Compaction), "manualCompaction": h.engine.Summaries.Ready(summarize.Compaction), "compactLatest": h.engine.Summaries.Ready(summarize.Compaction), "research": engine.WebSearchReady() && h.engine.Summaries.Ready(summarize.ResearchNotes) && !p.Anonymous && credential.FirstParty},
+		Features:        map[string]bool{"browserTools": true, "webSearch": engine.WebSearchReady(), "transcription": h.models.ServiceReady("router"), "speech": h.models.ServiceReady("router"), "promptPresetEdits": true, "promptPresetUpdates": true, "partialThread": true, "imageOriginals": !p.Anonymous, "documentVersions": true, "artifacts": true, "compaction": h.engine.Summaries.Ready(summarize.Compaction), "manualCompaction": h.engine.Summaries.Ready(summarize.Compaction), "compactLatest": h.engine.Summaries.Ready(summarize.Compaction), "research": engine.WebSearchReady() && h.engine.Summaries.Ready(summarize.ResearchNotes) && !p.Anonymous && credential.FirstParty},
 	}, nil
 }
 
