@@ -393,6 +393,14 @@ func TestConnectorsRefuseWhatTheyCannotSignInTo(t *testing.T) {
 	}
 }
 
+// connectorInput is the first turn of a new chat from a client that shows
+// connector calls and answers their approvals.
+func connectorInput(key auth.ContentKey) api.Object {
+	in := sendInput(key)
+	api.Obj(in["options"])["connectors"] = true
+	return in
+}
+
 // connectorTurn answers the first model turn by calling a tool, and every
 // later one with a plain answer; it reports the tools the first was offered
 // and what each later one read.
@@ -429,7 +437,7 @@ func TestAReplyCallsAConnectorsToolsTheUserLeftOn(t *testing.T) {
 	if w := postRoute(h, "/v1/connectors/update", api.Object{"key": keyBase64(key), "id": id, "tools": api.Object{"delete_everything": domain.ToolAllow}}, "alice"); w.Code != 409 {
 		t.Fatalf("a permission for a tool the server does not offer: HTTP %d", w.Code)
 	}
-	events := finishedRun(t, h, "/v1/threads/turn", sendInput(key))
+	events := finishedRun(t, h, "/v1/threads/turn", connectorInput(key))
 	if names := <-offered; !slices.Equal(names, []string{"fake__lookup"}) {
 		t.Fatalf("the model was offered %v, want the lookup the user left on alone", names)
 	}
@@ -450,6 +458,20 @@ func TestAReplyCallsAConnectorsToolsTheUserLeftOn(t *testing.T) {
 	block := mustRead(domain.ReadThreadRow(row)).Messages[1].Timeline[0]
 	if d := block.Display; d == nil || d.Status != "completed" || d.Connector == nil || d.Connector.ID != id || d.Connector.Name != "Fake" || d.Connector.Tool != "lookup" || d.Connector.Approval != nil {
 		t.Fatalf("the chat keeps the call as %+v", block)
+	}
+}
+
+func TestATurnFromAClientThatDoesNotAskForConnectorsCallsNone(t *testing.T) {
+	f := serveConnector(t, &fakeConnector{signIn: true})
+	offered, sent := make(chan []string, 1), make(chan []any, 1)
+	h, _, key := connectorHarness(t, connectorTurn("fake__create_page", `{"title":"Plans"}`, offered, sent), f)
+	connect(t, h, key, f)
+	finishedRun(t, h, "/v1/threads/turn", sendInput(key))
+	if names := <-offered; len(names) != 0 {
+		t.Fatalf("a client that cannot show connector calls had the model offered %v", names)
+	}
+	if calls := f.called(); len(calls) != 0 {
+		t.Fatalf("the server was called with %+v", calls)
 	}
 }
 
@@ -489,7 +511,7 @@ func TestACallThatNeedsApprovalRunsOnlyOnceTheUserApproves(t *testing.T) {
 			h, rows, key := connectorHarness(t, connectorTurn("fake__create_page", `{"title":"Plans"}`, make(chan []string, 1), sent), f)
 			id := connect(t, h, key, f)
 			p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
-			run, err := h.engine.AcceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[engine.TurnRequest](sendInput(key)))
+			run, err := h.engine.AcceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[engine.TurnRequest](connectorInput(key)))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -541,7 +563,7 @@ func TestARunKeepsTheTokensItRefreshes(t *testing.T) {
 	if _, err := h.store.MutateConnector(context.Background(), &auth.Principal{ID: "alice"}, key, id, false, expire); err != nil {
 		t.Fatal(err)
 	}
-	finishedRun(t, h, "/v1/threads/turn", sendInput(key))
+	finishedRun(t, h, "/v1/threads/turn", connectorInput(key))
 	if read := toolMessage(<-sent, "app-call"); read != "found cats" {
 		t.Fatalf("the model read %q", read)
 	}
@@ -568,7 +590,7 @@ func TestARefusedRefreshSignsTheConnectorOut(t *testing.T) {
 	if _, err := h.store.MutateConnector(context.Background(), &auth.Principal{ID: "alice"}, key, id, false, expire); err != nil {
 		t.Fatal(err)
 	}
-	finishedRun(t, h, "/v1/threads/turn", sendInput(key))
+	finishedRun(t, h, "/v1/threads/turn", connectorInput(key))
 	if names := <-offered; len(names) != 0 {
 		t.Fatalf("the model was offered %v from a connector signed out", names)
 	}
@@ -598,7 +620,7 @@ func TestAnApprovedConnectorCallShowsTheChatTheHarnessKeeps(t *testing.T) {
 	h, rows, key := connectorHarness(t, toolTurns(toolCallChunk(0, "app-call", "fake__create_page", `{"title":"Plans"}`), nil), f)
 	connect(t, h, key, f)
 	p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
-	run, err := h.engine.AcceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[engine.TurnRequest](sendInput(key)))
+	run, err := h.engine.AcceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[engine.TurnRequest](connectorInput(key)))
 	if err != nil {
 		t.Fatal(err)
 	}

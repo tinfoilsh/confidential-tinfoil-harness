@@ -66,9 +66,10 @@ type appTool struct {
 
 // offersApps is whether a run offers the tools of the user's connectors: a
 // stored chat's reply to its signed-in user, which neither researches nor
-// operates their browser.
+// operates their browser, sent by a client that asks for them, as one that
+// cannot show an approval must not leave a call waiting for one.
 func (eng *Engine) offersApps(r *Run, req *Request) bool {
-	return eng.Connectors != nil && !r.Thread.local && !r.Thread.keyless && r.credential.FirstParty &&
+	return eng.Connectors != nil && r.input.Options.Connectors && !r.Thread.local && !r.Thread.keyless && r.credential.FirstParty &&
 		r.browser == nil && !req.research && slices.Contains(connectorKinds, r.turn.Kind)
 }
 
