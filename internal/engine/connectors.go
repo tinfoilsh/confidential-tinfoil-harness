@@ -220,15 +220,24 @@ func appsHint(reached, unreached, crowded []string) string {
 
 var unsafeName = regexp.MustCompile(`[^a-z0-9_]+`)
 
+// unnamedPrefix names the tools of a connector whose name holds none of the
+// characters a tool's name may, and goes before a name that would make them
+// read as widgets.
+const unnamedPrefix = "app"
+
 // toolPrefix names a connector's tools: its name, in the characters a tool's
-// name may hold.
+// name may hold. A connector named as widgets are is named as an app first,
+// so its tools' calls and results are not taken for a widget's.
 func toolPrefix(name string) string {
 	prefix := strings.Trim(unsafeName.ReplaceAllString(strings.ToLower(name), "_"), "_")
+	if strings.HasPrefix(prefix+"_", domain.WidgetPrefix) {
+		prefix = unnamedPrefix + "_" + prefix
+	}
 	if len(prefix) > maxToolPrefix {
 		prefix = strings.Trim(prefix[:maxToolPrefix], "_")
 	}
 	if prefix == "" {
-		prefix = "app"
+		prefix = unnamedPrefix
 	}
 	return prefix
 }

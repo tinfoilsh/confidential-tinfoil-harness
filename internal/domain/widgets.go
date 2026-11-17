@@ -21,6 +21,10 @@ const MaxWidgetRetries = 2
 // panel.
 const ArtifactWidget = "render_artifact_preview"
 
+// WidgetPrefix starts every widget's name, and no other tool's: the harness
+// and its clients tell a widget's call by it.
+const WidgetPrefix = "render_"
+
 // WidgetArguments is what a widget call is drawn and validated with: repaired,
 // then canonical.
 func WidgetArguments(raw string) string {

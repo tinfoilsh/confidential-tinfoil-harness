@@ -490,6 +490,28 @@ func connectorTurn(call, args string, offered chan<- []string, sent chan<- []any
 	}
 }
 
+// A tool whose name starts as a widget's does is handled as one: what it
+// returned is not read back to the model in later turns. A connector named
+// that way has its tools offered under another name.
+func TestAConnectorNamedAsWidgetsAreIsNotTakenForOne(t *testing.T) {
+	f := serveConnector(t, &fakeConnector{})
+	offered, sent := make(chan []string, 1), make(chan []any, 1)
+	h, _, key := connectorHarness(t, connectorTurn("app_render__lookup", `{"query":"cats"}`, offered, sent), f)
+	id := connect(t, h, key, f)
+	connectorRoute(t, h, key, "/v1/connectors/update", api.Object{"id": id, "name": "Render"})
+	finishedRun(t, h, "/v1/threads/turn", connectorInput(key))
+	names := <-offered
+	if !slices.Contains(names, "app_render__lookup") || slices.ContainsFunc(names, func(name string) bool { return strings.HasPrefix(name, domain.WidgetPrefix) }) {
+		t.Fatalf("the model was offered %v, want no tool named as a widget", names)
+	}
+	if calls := f.called(); len(calls) != 1 || calls[0].name != "lookup" {
+		t.Fatalf("the server was called with %+v", calls)
+	}
+	if read := toolMessage(<-sent, "app-call"); read != "found cats" {
+		t.Fatalf("the model read %q", read)
+	}
+}
+
 func TestAReplyCallsAConnectorsToolsTheUserLeftOn(t *testing.T) {
 	f := serveConnector(t, &fakeConnector{signIn: true})
 	offered, sent := make(chan []string, 1), make(chan []any, 1)
