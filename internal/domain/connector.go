@@ -2,6 +2,7 @@ package domain
 
 import (
 	"encoding/json"
+	"slices"
 	"time"
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
@@ -167,6 +168,28 @@ func (t *ConnectorTool) permissionNow(readOnly bool) string {
 		return ToolAsk
 	}
 	return t.Permission
+}
+
+// SeeTools has the connector list the tools its server offers a reply as
+// they are now, so its user sees them and can choose what each may do, and
+// reports whether that changed what it lists. A tool it did not list asks
+// first, and is listed while the connector lists fewer than limit; one whose
+// server no longer says the same of whether it only reads is listed as it
+// is. The tools the server no longer offers stay as their user left them,
+// until the settings list its tools again.
+func (c *Connector) SeeTools(live []ConnectorTool, limit int) bool {
+	changed := false
+	for _, offered := range live {
+		i := slices.IndexFunc(c.Tools, func(t ConnectorTool) bool { return t.Name == offered.Name })
+		switch {
+		case i < 0 && len(c.Tools) < limit:
+			offered.Permission = ToolAsk
+			c.Tools, changed = append(c.Tools, offered), true
+		case i >= 0 && c.Tools[i].ReadOnly != offered.ReadOnly:
+			c.Tools[i].Permission, c.Tools[i].ReadOnly, changed = c.Tools[i].permissionNow(offered.ReadOnly), offered.ReadOnly, true
+		}
+	}
+	return changed
 }
 
 // MergeTools are the tools a server offers now, with the permissions the

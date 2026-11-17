@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -707,13 +708,19 @@ func TestAnIssuerNamedUnderAnotherPathOfItsOriginSignsUsersIn(t *testing.T) {
 	}
 }
 
+// A reply asks before it runs a tool as its user never allowed it, and has
+// the connector list the tool as it is, so they can allow it from then on.
 func TestAToolTheUserNeverAllowedAsItIsNowAsksFirst(t *testing.T) {
 	for name, tc := range map[string]struct {
 		tool, args string
-		kept       func(*domain.Connector)
+		// readOnly is what the server says of the tool.
+		readOnly bool
+		kept     func(*domain.Connector)
+		// unstored has storage keep nothing of what the reply sees.
+		unstored bool
 	}{
 		// The user allowed create_page while its server said it only read.
-		"allowed while it only read": {"create_page", `{"title":"Plans"}`, func(c *domain.Connector) {
+		"allowed while it only read": {tool: "create_page", args: `{"title":"Plans"}`, kept: func(c *domain.Connector) {
 			for i := range c.Tools {
 				if c.Tools[i].Name == "create_page" {
 					c.Tools[i].ReadOnly, c.Tools[i].Permission = true, domain.ToolAllow
@@ -722,28 +729,81 @@ func TestAToolTheUserNeverAllowedAsItIsNowAsksFirst(t *testing.T) {
 		}},
 		// The server offers lookup since the connector last listed its tools,
 		// so the user has never seen it, though its server says it only reads.
-		"never listed": {"lookup", `{"query":"cats"}`, func(c *domain.Connector) {
-			c.Tools = slices.DeleteFunc(c.Tools, func(t domain.ConnectorTool) bool { return t.Name == "lookup" })
-		}},
+		"never listed":             {tool: "lookup", args: `{"query":"cats"}`, readOnly: true, kept: unlisted("lookup")},
+		"never listed, nor stored": {tool: "lookup", args: `{"query":"cats"}`, readOnly: true, kept: unlisted("lookup"), unstored: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := serveConnector(t, &fakeConnector{})
-			h, _, key := connectorHarness(t, toolTurns(toolCallChunk(0, "app-call", "fake__"+tc.tool, tc.args), nil), f)
+			var turns atomic.Int32
+			h, rows, key := connectorHarness(t, func(w http.ResponseWriter, _ *http.Request) {
+				// Each reply's first model turn calls the tool.
+				if turns.Add(1)%2 == 1 {
+					io.WriteString(w, toolCallChunk(0, "app-call", "fake__"+tc.tool, tc.args)+"data: [DONE]\n\n")
+					return
+				}
+				io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n")
+			}, f)
 			id := connect(t, h, key, f)
 			changeConnector(t, h, key, id, tc.kept)
-			p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
-			run, err := h.engine.AcceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[engine.TurnRequest](connectorInput(key)))
-			if err != nil {
-				t.Fatal(err)
+			if tc.unstored {
+				rows.mu.Lock()
+				rows.refuse = func(row *domain.StoredRow) error {
+					if row.ID == id {
+						return api.Err(502, "UPSTREAM_REFUSED", "storage is unavailable")
+					}
+					return nil
+				}
+				rows.mu.Unlock()
 			}
-			defer run.Log.Frames.Detach()
+			reply := func() *engine.Run {
+				t.Helper()
+				p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
+				run, err := h.engine.AcceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[engine.TurnRequest](connectorInput(key)))
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(run.Log.Frames.Detach)
+				return run
+			}
+			run := reply()
 			approval := awaitApproval(t, run.Log)
 			if calls := f.called(); len(calls) != 0 {
 				t.Fatalf("the tool ran before the user answered: %+v", calls)
 			}
-			postRoute(h, "/v1/threads/approve", api.Object{"key": keyBase64(key), "threadId": run.Thread.ID, "runId": run.Log.ID, "approvalId": approval, "approved": false}, "alice")
-			<-run.Finished
+			answer := func(approved bool) {
+				postRoute(h, "/v1/threads/approve", api.Object{"key": keyBase64(key), "threadId": run.Thread.ID, "runId": run.Log.ID, "approvalId": approval, "approved": approved}, "alice")
+				<-run.Finished
+			}
+			if tc.unstored {
+				answer(false)
+				return
+			}
+			stored := storedConnector(t, h, key, id)
+			listed := slices.IndexFunc(stored.Tools, func(tool domain.ConnectorTool) bool { return tool.Name == tc.tool })
+			if listed < 0 || stored.Tools[listed].Permission != domain.ToolAsk || stored.Tools[listed].ReadOnly != tc.readOnly {
+				t.Fatalf("the connector lists %+v, want %s as it is, asking first", stored.Tools, tc.tool)
+			}
+			// The user allows the tool for good as they approve the call.
+			connectorRoute(t, h, key, "/v1/connectors/update", api.Object{"id": id, "tools": api.Object{tc.tool: domain.ToolAllow}})
+			answer(true)
+			again := reply()
+			select {
+			case <-again.Finished:
+			case <-time.After(5 * time.Second):
+				t.Fatal("a reply asked again about a tool its user allowed")
+			}
+			if calls := f.called(); len(calls) != 2 {
+				t.Fatalf("the tool ran %d times, want once approved and once allowed", len(calls))
+			}
 		})
+	}
+}
+
+// unlisted has a connector no longer list a tool, as one its server has
+// offered only since.
+func unlisted(name string) func(*domain.Connector) {
+	return func(c *domain.Connector) {
+		c.Tools = slices.DeleteFunc(c.Tools, func(t domain.ConnectorTool) bool { return t.Name == name })
 	}
 }
 

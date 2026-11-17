@@ -65,7 +65,10 @@ type runApps struct {
 	// current is a connector as the account keeps it now. The run reads it
 	// before each call, so what the user turned off or removed since the
 	// reply began, on any device, no longer runs.
-	current   func(ctx context.Context, id string) (domain.Connector, error)
+	current func(ctx context.Context, id string) (domain.Connector, error)
+	// see has a connector list the tools its server offers the run as they
+	// are now.
+	see       func(ctx context.Context, id string, live []domain.ConnectorTool)
 	approvals *approvalGate
 }
 
@@ -116,6 +119,13 @@ func (eng *Engine) apps(ctx context.Context, r *Run, p *auth.Principal) *runApps
 			defer clear(key[:])
 			return eng.Store.LoadConnector(ctx, p, key, id)
 		},
+		see: func(ctx context.Context, id string, live []domain.ConnectorTool) {
+			key := key()
+			defer clear(key[:])
+			if err := eng.Store.SeeConnectorTools(ctx, p, key, id, live, connectors.MaxTools); err != nil {
+				slog.Warn("a connector does not list the tools its server offers now", "error", err)
+			}
+		},
 	}
 }
 
@@ -129,8 +139,14 @@ func openApps(ctx context.Context, set *Toolset, req *Request, progress connecto
 	for i := range apps.connectors {
 		opening.Go(func() {
 			c := &apps.connectors[i]
-			if s, err := apps.client.Open(ctx, c, apps.stored(c.ID), progress); err == nil {
-				sessions[i] = s
+			s, err := apps.client.Open(ctx, c, apps.stored(c.ID), progress)
+			if err != nil {
+				return
+			}
+			sessions[i] = s
+			// The user sees in the connector what the run asks them about.
+			if live := s.Listed(); c.SeeTools(live, connectors.MaxTools) {
+				apps.see(ctx, c.ID, live)
 			}
 		})
 	}

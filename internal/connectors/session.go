@@ -16,8 +16,8 @@ import (
 )
 
 const (
-	// maxTools bounds the tools a connector offers.
-	maxTools = 200
+	// MaxTools bounds the tools a connector offers, and lists.
+	MaxTools = 200
 	// The longest title and description of a tool the settings show.
 	maxToolTitle       = 200
 	maxToolDescription = 1024
@@ -91,7 +91,7 @@ func (c *Client) Open(ctx context.Context, conn *domain.Connector, creds Credent
 				opened.Close()
 				return err
 			}
-			if len(s.Tools) == maxTools {
+			if len(s.Tools) == MaxTools {
 				break
 			}
 			s.Tools = append(s.Tools, tool)
@@ -131,6 +131,12 @@ func (c *Client) Tools(ctx context.Context, conn *domain.Connector, creds Creden
 		return nil, err
 	}
 	defer s.Close()
+	return s.Listed(), nil
+}
+
+// Listed are the tools the server offers on the session, as a connector
+// lists them, each with its permission until the user chooses one.
+func (s *Session) Listed() []domain.ConnectorTool {
 	tools := make([]domain.ConnectorTool, 0, len(s.Tools))
 	for _, t := range s.Tools {
 		readOnly := ReadOnly(t)
@@ -142,7 +148,7 @@ func (c *Client) Tools(ctx context.Context, conn *domain.Connector, creds Creden
 			Permission:  domain.DefaultPermission(readOnly),
 		})
 	}
-	return tools, nil
+	return tools
 }
 
 // ReadOnly is whether the server says the tool changes nothing.

@@ -91,9 +91,9 @@ const refreshLease = 45 * time.Second
 
 var (
 	errSignedInAgain = errors.New("the connector was signed in again")
-	// errNotClaimed leaves a connector as stored when a session's claim
-	// finds its refresh held or its tokens changed.
-	errNotClaimed = errors.New("the refresh was not claimed")
+	// errUnchanged leaves a connector as stored when a change finds nothing
+	// to store.
+	errUnchanged = errors.New("the connector is unchanged")
 )
 
 // ClaimConnectorRefresh claims the refresh of a connector's tokens for a
@@ -119,12 +119,27 @@ func (s *Store) ClaimConnectorRefresh(ctx context.Context, p *auth.Principal, ke
 			c.Auth.Refreshing = api.Now().Add(refreshLease).UTC().Format(time.RFC3339Nano)
 			return nil
 		}
-		return errNotClaimed
+		return errUnchanged
 	})
-	if errors.Is(err, errNotClaimed) {
+	if errors.Is(err, errUnchanged) {
 		err = nil
 	}
 	return stored, claim, err
+}
+
+// SeeConnectorTools has a connector list the tools its server offers a
+// reply as they are now, no more than limit of them.
+func (s *Store) SeeConnectorTools(ctx context.Context, p *auth.Principal, key auth.ContentKey, id string, live []domain.ConnectorTool, limit int) error {
+	_, err := s.MutateConnector(ctx, p, key, id, false, func(c *domain.Connector, _ bool) error {
+		if !c.SeeTools(live, limit) {
+			return errUnchanged
+		}
+		return nil
+	})
+	if errors.Is(err, errUnchanged) {
+		return nil
+	}
+	return err
 }
 
 // KeepConnectorTokens applies change to a connector's sign-in as stored
