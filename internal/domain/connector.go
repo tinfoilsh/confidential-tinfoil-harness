@@ -146,25 +146,36 @@ func (c *Connector) Signed() bool {
 // Usable is whether a chat may call the connector's tools.
 func (c *Connector) Usable() bool { return c.Enabled && c.Signed() }
 
-// Permission is what the user lets a tool do: what they chose, or for a
-// tool they never saw, run it when the server says it only reads, and ask
-// first otherwise.
+// Permission is what the user lets a tool do now, given whether its server
+// says it only reads: the permission the connector keeps for it, or to ask
+// first for a tool the connector has never listed, which the user has not
+// seen.
 func (c *Connector) Permission(name string, readOnly bool) string {
 	for _, t := range c.Tools {
 		if t.Name == name {
-			return t.Permission
+			return t.permissionNow(readOnly)
 		}
 	}
-	return DefaultPermission(readOnly)
+	return ToolAsk
+}
+
+// permissionNow is the tool's permission given whether its server says now
+// that it only reads. A tool allowed while it only read asks first once it
+// no longer does: the user allowed a tool that changed nothing.
+func (t *ConnectorTool) permissionNow(readOnly bool) string {
+	if t.Permission == ToolAllow && t.ReadOnly && !readOnly {
+		return ToolAsk
+	}
+	return t.Permission
 }
 
 // MergeTools are the tools a server offers now, with the permissions the
-// user gave those it offered before.
+// connector keeps for those it offered before.
 func MergeTools(stored, live []ConnectorTool) []ConnectorTool {
 	for i := range live {
 		for _, kept := range stored {
 			if kept.Name == live[i].Name {
-				live[i].Permission = kept.Permission
+				live[i].Permission = kept.permissionNow(live[i].ReadOnly)
 			}
 		}
 	}

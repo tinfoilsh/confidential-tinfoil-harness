@@ -698,6 +698,46 @@ func TestAnIssuerNamedUnderAnotherPathOfItsOriginSignsUsersIn(t *testing.T) {
 	}
 }
 
+func TestAToolTheUserNeverAllowedAsItIsNowAsksFirst(t *testing.T) {
+	for name, tc := range map[string]struct {
+		tool, args string
+		kept       func(*domain.Connector)
+	}{
+		// The user allowed create_page while its server said it only read.
+		"allowed while it only read": {"create_page", `{"title":"Plans"}`, func(c *domain.Connector) {
+			for i := range c.Tools {
+				if c.Tools[i].Name == "create_page" {
+					c.Tools[i].ReadOnly, c.Tools[i].Permission = true, domain.ToolAllow
+				}
+			}
+		}},
+		// The server offers lookup since the connector last listed its tools,
+		// so the user has never seen it, though its server says it only reads.
+		"never listed": {"lookup", `{"query":"cats"}`, func(c *domain.Connector) {
+			c.Tools = slices.DeleteFunc(c.Tools, func(t domain.ConnectorTool) bool { return t.Name == "lookup" })
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := serveConnector(t, &fakeConnector{})
+			h, _, key := connectorHarness(t, toolTurns(toolCallChunk(0, "app-call", "fake__"+tc.tool, tc.args), nil), f)
+			id := connect(t, h, key, f)
+			changeConnector(t, h, key, id, tc.kept)
+			p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
+			run, err := h.engine.AcceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[engine.TurnRequest](connectorInput(key)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer run.Log.Frames.Detach()
+			approval := awaitApproval(t, run.Log)
+			if calls := f.called(); len(calls) != 0 {
+				t.Fatalf("the tool ran before the user answered: %+v", calls)
+			}
+			postRoute(h, "/v1/threads/approve", api.Object{"key": keyBase64(key), "threadId": run.Thread.ID, "runId": run.Log.ID, "approvalId": approval, "approved": false}, "alice")
+			<-run.Finished
+		})
+	}
+}
+
 // Two sessions that find a connector's token expired at once refresh it
 // once: a server that rotates refresh tokens refuses one used twice, and
 // may revoke every token it issued for it.
