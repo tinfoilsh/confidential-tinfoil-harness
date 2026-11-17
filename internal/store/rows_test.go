@@ -581,6 +581,9 @@ func TestAnOperationsGrantCoversWhatItIsFor(t *testing.T) {
 			t.Errorf("replacing %s under a grant for project/doc: %v", id, err)
 		}
 	}
+	if _, err := h.rows.Push(ctx, &replace, h.key, "project_document", &domain.StoredRow{ID: "project/new", Data: []byte(`{}`), Project: &project, ProjectSet: true}, "replace-create"); !errors.Is(err, errRunScope) {
+		t.Errorf("a replacement of project/doc created another document: %v", err)
+	}
 
 	export, imported := *h.p, *h.p
 	export.Grant, _ = h.rows.AuthorizeStorage(ctx, h.p, h.key, "export", "", "")

@@ -120,7 +120,7 @@ func (g *grantScope) permitsPush(key auth.ContentKey, scope string, row *domain.
 		return false
 	}
 	if g.Operation == "project-upload" {
-		return scope == "project_document" && g.ownsDocument(row.ID) && (row.ETag == "" || g.replaces(row.ID)) && row.Project != nil && *row.Project == g.ProjectID
+		return scope == "project_document" && g.ownsDocument(row.ID) && (g.replaces(row.ID) || g.DocumentID == "" && row.ETag == "") && row.Project != nil && *row.Project == g.ProjectID
 	}
 	// The grant owns the chat, including its metadata. ProjectID limits
 	// context reads; the user can move the chat while a reply is running.
