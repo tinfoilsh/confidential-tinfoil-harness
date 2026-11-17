@@ -185,7 +185,7 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, auth.WithQuota(p, cred.Limit, err))
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxTextBytes+(1<<20))
+	r.Body = http.MaxBytesReader(w, r.Body, int64(max(maxTextBytes, 2*ImageUploads.MaxBytes))+(1<<20))
 	reader, err := r.MultipartReader()
 	if err != nil {
 		api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "Expected multipart form data"))
@@ -196,7 +196,9 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	defer clear(key[:])
 	var keyField []byte
 	defer func() { clear(keyField) }()
-	var file []byte
+	var file, original []byte
+	defer func() { clear(file); clear(original) }()
+	var originalName string
 	filename := ""
 	for count := 0; ; count++ {
 		part, err := reader.NextPart()
@@ -232,6 +234,23 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 				api.Respond(w, nil, api.Err(413, "ATTACHMENT_TOO_LARGE", "The upload exceeds the size limit"))
 				return
 			}
+		} else if part.FormName() == "original" {
+			// Clients that transcode a photo send its input after the model copy.
+			if originalName != "" || part.FileName() == "" || !ImageUploads.accepts(filename) || p.Anonymous ||
+				!(r.URL.Path == "/v1/projects/documents/upload" || r.URL.Path == "/v1/attachments/upload" && len(keyField) > 0) {
+				api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "An original must follow a signed-in image upload"))
+				return
+			}
+			originalName = filepath.Base(part.FileName())
+			original, err = io.ReadAll(io.LimitReader(part, int64(ImageUploads.MaxBytes)+1))
+			if err != nil || len(original) > ImageUploads.MaxBytes {
+				api.Respond(w, nil, api.Err(413, "ATTACHMENT_TOO_LARGE", "The original image exceeds the size limit"))
+				return
+			}
+			if len(original) == 0 {
+				api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "A nonempty original is required"))
+				return
+			}
 		} else {
 			value, err := api.ReadWipeable(io.LimitReader(part, MaxFormField+1))
 			if err != nil || len(value) > MaxFormField {
@@ -254,7 +273,6 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 		part.Close()
 	}
-	defer clear(file)
 	if filename == "" || len(file) == 0 {
 		api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "A nonempty file is required"))
 		return
@@ -270,6 +288,14 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, auth.WithQuota(p, cred.Limit, err))
 		return
 	}
+	source, sourceName, sourceType := file, filename, descriptor.MimeType
+	if original != nil {
+		source, sourceName = original, originalName
+		sourceType = http.DetectContentType(source)
+		if sourceType == OpaqueContentType {
+			sourceType = cmp.Or(mime.TypeByExtension(filepath.Ext(sourceName)), OpaqueContentType)
+		}
+	}
 	// An upload is converted, and its client sends the descriptor back with
 	// the turn that attaches it, which stores it with the chat. With the
 	// content key, as for a cloud chat, the upload keeps the file as it was
@@ -277,9 +303,12 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/v1/attachments/upload" {
 		descriptor.ID = "att_" + api.Token()
 		if len(keyField) > 0 {
-			if descriptor.Original, err = at.keepOriginal(r.Context(), p, keyField, descriptor.ID, file); err != nil {
+			if descriptor.Original, err = at.keepOriginal(r.Context(), p, keyField, descriptor.ID, source); err != nil {
 				api.Respond(w, nil, err)
 				return
+			}
+			if original != nil {
+				descriptor.Original.FileName, descriptor.Original.MimeType = sourceName, sourceType
 			}
 		}
 		api.Respond(w, struct {
@@ -323,12 +352,12 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 			api.Respond(w, nil, api.Err(415, "ATTACHMENT_UNSUPPORTED", "Project documents require extracted text"))
 			return
 		}
-		kept, err := at.Store.PutDocumentFile(ctx, p, projectID, documentID, file)
+		kept, err := at.Store.PutDocumentFile(ctx, p, projectID, documentID, source)
 		if err != nil {
 			api.Respond(w, nil, err)
 			return
 		}
-		doc, err := at.Store.SaveProjectDocument(ctx, p, key, domain.ProjectDocument{ID: documentID, ProjectID: projectID, Filename: filename, ContentType: descriptor.MimeType, SizeBytes: len(file), Content: descriptor.TextContent, File: kept}, replace)
+		doc, err := at.Store.SaveProjectDocument(ctx, p, key, domain.ProjectDocument{ID: documentID, ProjectID: projectID, Filename: sourceName, ContentType: sourceType, SizeBytes: len(source), Content: descriptor.TextContent, File: kept}, replace)
 		api.Respond(w, doc.View(), err)
 		return
 	}

@@ -96,8 +96,7 @@ func (at *Service) PlaceAttachments(ctx context.Context, p *auth.Principal, key 
 
 // placeOriginal copies an attachment's uploaded file under the thread when
 // it is kept elsewhere: where its upload filed it, or under the chat a fork
-// was made from. One that can no longer be read is let go, and the
-// attachment keeps its content.
+// was made from.
 func (at *Service) placeOriginal(ctx context.Context, p *auth.Principal, key auth.ContentKey, threadID string, a *domain.Attachment) error {
 	defer clear(key[:])
 	o := a.Original
@@ -105,11 +104,10 @@ func (at *Service) placeOriginal(ctx context.Context, p *auth.Principal, key aut
 		return nil
 	}
 	data, err := at.Store.GetAttachment(ctx, p, o.ID, o.EncryptionKey)
-	if Unreachable(err) {
-		a.Original = nil
-		return nil
-	}
 	if err != nil {
+		if Unreachable(err) {
+			return errOriginalMissing
+		}
 		return err
 	}
 	defer clear(data)
@@ -119,9 +117,13 @@ func (at *Service) placeOriginal(ctx context.Context, p *auth.Principal, key aut
 	}
 	// Copies of the thread share the original, so it is replaced, never
 	// changed in place.
-	a.Original = &domain.OriginalFile{ID: id, EncryptionKey: fileKey, StorageThreadID: threadID}
+	copied := *o
+	copied.ID, copied.EncryptionKey, copied.StorageThreadID = id, fileKey, threadID
+	a.Original = &copied
 	return nil
 }
+
+var errOriginalMissing = api.Err(409, "ATTACHMENTS_UNAVAILABLE", "The original upload is no longer available. Attach the file again.").WithAction(api.ActionRevise)
 
 func (at *Service) placeAttachment(ctx context.Context, p *auth.Principal, key auth.ContentKey, threadID string, a *domain.Attachment) error {
 	defer clear(key[:])
@@ -227,8 +229,14 @@ func (at *Service) RepairAttachments(ctx context.Context, p *auth.Principal, key
 	defer clear(key[:])
 	return t.EachAttachment(func(a *domain.Attachment) error {
 		if o := a.Original; o != nil && slices.Contains(missing, o.ID) {
-			a.Original = &domain.OriginalFile{ID: o.ID, EncryptionKey: o.EncryptionKey, StorageThreadID: "elsewhere"}
-			if err := at.placeOriginal(ctx, p, key, t.ID, a); err != nil {
+			other := *o
+			other.StorageThreadID = "elsewhere"
+			a.Original = &other
+			if err := at.placeOriginal(ctx, p, key, t.ID, a); err == errOriginalMissing {
+				// This chat was already saved; a missing historical file
+				// must not prevent the user from continuing the chat.
+				a.Original = nil
+			} else if err != nil {
 				return err
 			}
 		}

@@ -138,10 +138,15 @@ func TestAProjectImageBecomesContextForItsChats(t *testing.T) {
 	if err := png.Encode(&encodedImage, image.NewRGBA(image.Rect(0, 0, 20, 10))); err != nil {
 		t.Fatal(err)
 	}
-	w := uploadRoute(h, "/v1/projects/documents/upload", "plan.png", encodedImage.Bytes(), map[string]string{"key": keyBase64(key), "projectId": "plan"}, "alice")
+	photo := originalPart{"source.png", append(bytes.Clone(encodedImage.Bytes()), []byte("original photo metadata")...)}
+	w := uploadRoute(h, "/v1/projects/documents/upload", "preview.png", encodedImage.Bytes(), map[string]string{"key": keyBase64(key), "projectId": "plan"}, "alice", photo)
 	var document domain.ProjectDocument
 	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &document) != nil || document.Content != "A red plan with three labeled rooms." {
 		t.Fatalf("project image: %d %s", w.Code, w.Body.String())
+	}
+	download := postRoute(h, "/v1/projects/documents/download", api.Object{"key": keyBase64(key), "projectId": "plan", "documentId": document.ID}, "alice")
+	if document.Filename != photo.name || document.SizeBytes != len(photo.data) || !bytes.Equal(download.Body.Bytes(), photo.data) {
+		t.Fatalf("download did not preserve the source photo: %s, %d bytes", document.Filename, download.Body.Len())
 	}
 	in := sendInput(key)
 	in["projectId"] = "plan"

@@ -165,13 +165,19 @@ func ViewMessage(m *Message) MessageView {
 // bytes, and whether its uploaded file is kept, which the client downloads.
 type AttachmentView struct {
 	Attachment
-	HasOriginal bool `json:"hasOriginal,omitempty"`
+	HasOriginal      bool   `json:"hasOriginal,omitempty"`
+	OriginalFileName string `json:"originalFileName,omitempty"`
+	OriginalMimeType string `json:"originalMimeType,omitempty"`
 }
 
 // ViewAttachment is an attachment as a client lists it. A text-only model
 // reads an image through its description.
 func ViewAttachment(a *Attachment) AttachmentView {
-	return AttachmentView{Attachment: Attachment{ID: a.ID, Kind: a.Kind, FileName: a.FileName, MimeType: a.MimeType, Size: a.Size, Thumbnail: a.Thumbnail, TextContent: a.TextContent, Description: a.Description}, HasOriginal: a.Original != nil}
+	view := AttachmentView{Attachment: Attachment{ID: a.ID, Kind: a.Kind, FileName: a.FileName, MimeType: a.MimeType, Size: a.Size, Thumbnail: a.Thumbnail, TextContent: a.TextContent, Description: a.Description}, HasOriginal: a.Original != nil}
+	if a.Original != nil {
+		view.OriginalFileName, view.OriginalMimeType = a.Original.FileName, a.Original.MimeType
+	}
+	return view
 }
 
 // DeviceTranscript is a stored chat as its device keeps it, without the

@@ -246,6 +246,8 @@ type OriginalFile struct {
 	ID              string `json:"id"`
 	EncryptionKey   string `json:"encryptionKey"`
 	StorageThreadID string `json:"storageThreadId"`
+	FileName        string `json:"fileName,omitempty"`
+	MimeType        string `json:"mimeType,omitempty"`
 }
 
 // DocumentPage is a converted document page. Its fields are in the order
