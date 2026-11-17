@@ -490,10 +490,11 @@ func connectorTurn(call, args string, offered chan<- []string, sent chan<- []any
 	}
 }
 
-// A tool whose name starts as a widget's does is handled as one: what it
-// returned is not read back to the model in later turns. A connector named
-// that way has its tools offered under another name.
-func TestAConnectorNamedAsWidgetsAreIsNotTakenForOne(t *testing.T) {
+// The harness and its clients take any tool whose name starts as a widget's
+// does for a widget, whose result is not read back to the model. A
+// connector named that way has its tools offered under another name, so
+// that theirs is.
+func TestAConnectorNamedLikeAWidgetIsNotTakenForOne(t *testing.T) {
 	f := serveConnector(t, &fakeConnector{})
 	offered, sent := make(chan []string, 1), make(chan []any, 1)
 	h, _, key := connectorHarness(t, connectorTurn("app_render__lookup", `{"query":"cats"}`, offered, sent), f)
