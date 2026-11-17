@@ -34,6 +34,7 @@ func (eng *Engine) finishRun(r *Run, runErr error) {
 	r.out.framePending()
 	messages := r.assembler.Messages()
 	spend, sources, reply, truncated := r.out.spend, r.out.sources, r.out.replyID, r.out.truncated
+	appUsage := r.out.appUsage
 	r.out.Observe, r.out.folding, r.out.activities, r.out.sources = nil, false, nil, nil
 	if r.out.thoughts != nil {
 		r.out.thoughts.close()
@@ -74,6 +75,10 @@ func (eng *Engine) finishRun(r *Run, runErr error) {
 	var unreplaced error
 	commit := func(t *domain.Thread) error {
 		unreplaced = nil
+		// The chat's usage was counted before the run knew its apps' tools.
+		if appUsage != nil {
+			t.ContextUsage = appUsage
+		}
 		// The run's compaction is kept before the first question it kept, or
 		// after the reply it summarized last, even when the reply then
 		// failed, unless that message is gone.

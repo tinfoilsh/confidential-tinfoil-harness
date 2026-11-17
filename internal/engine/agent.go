@@ -62,8 +62,23 @@ func (eng *Engine) loop(ctx context.Context, out *Stream, req *Request, m *infer
 	}
 	searching := set.search != nil
 	conversation, err := fitted(ctx, req, searching, defs)
+	// A conversation that leaves the apps' tools no room, even once it is
+	// compacted, is answered without them: the turn was admitted before the
+	// run knew what its apps offer.
+	if err != nil && len(set.appDefs) > 0 && api.AsError(err).Code == "CONTEXT_TOO_LARGE" {
+		withoutApps(set, req)
+		if defs, err = offer(set, req.rendered); err != nil {
+			return fmt.Errorf("tools: %w", err)
+		}
+		conversation, err = fitted(ctx, req, searching, defs)
+	}
 	if err != nil {
 		return err
+	}
+	if req.apps != nil {
+		out.mu.Lock()
+		out.appUsage = req.usage
+		out.mu.Unlock()
 	}
 	// The run's own exchange follows the history it starts from.
 	history := len(conversation)

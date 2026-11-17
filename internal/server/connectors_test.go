@@ -53,6 +53,9 @@ type fakeConnector struct {
 	// noRefreshToken has the authorization server issue access tokens
 	// alone, which its user renews by signing in again.
 	noRefreshToken bool
+	// longTool has the server offer one more tool, notes, whose description
+	// fills about this many tokens of a prompt.
+	longTool int
 	// refreshing, when set, receives each refresh as it reaches the token
 	// endpoint, which then waits for held to close before it answers.
 	refreshing chan struct{}
@@ -96,6 +99,12 @@ func serveConnector(t *testing.T, f *fakeConnector) *fakeConnector {
 			record(req)
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "created " + in.Title}}}, nil, nil
 		})
+		if f.longTool > 0 {
+			mcp.AddTool(s, &mcp.Tool{Name: "notes", Description: strings.Repeat(" note", f.longTool), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}}, func(_ context.Context, req *mcp.CallToolRequest, _ lookupArgs) (*mcp.CallToolResult, any, error) {
+				record(req)
+				return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "noted"}}}, nil, nil
+			})
+		}
 		return s
 	}, &mcp.StreamableHTTPOptions{Stateless: true, DisableLocalhostProtection: true})
 	resourceMetadata := "https://mcp.example.test/.well-known/oauth-protected-resource/mcp"
@@ -900,5 +909,35 @@ func TestAConnectorWhoseTokenCannotBeRenewedIsSignedOut(t *testing.T) {
 				t.Fatalf("the connector lists as %v, want its user asked to sign in again", status)
 			}
 		})
+	}
+}
+
+// A turn is admitted before its run knows what its apps offer. One whose
+// question leaves their tools no room is answered without them.
+func TestAQuestionThatLeavesAppsNoRoomIsAnsweredWithoutThem(t *testing.T) {
+	f := serveConnector(t, &fakeConnector{longTool: 1200})
+	offered := make(chan []string, 1)
+	h, _, key := connectorHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		var body api.Object
+		json.NewDecoder(r.Body).Decode(&body)
+		names := []string{}
+		for _, tool := range api.Arr(body["tools"]) {
+			names = append(names, api.Str(api.Obj(api.Obj(tool)["function"])["name"]))
+		}
+		offered <- names
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"answered\"}}]}\n\ndata: [DONE]\n\n")
+	}, f)
+	connect(t, h, key, f)
+	in := connectorInput(key)
+	in["content"] = strings.Repeat(" word", 5600)
+	finishedRun(t, h, "/v1/threads/turn", in)
+	if names := <-offered; len(names) != 0 {
+		t.Fatalf("the model was offered %v with a question that leaves them no room", names)
+	}
+	in = connectorInput(key)
+	in["content"] = "a short question"
+	finishedRun(t, h, "/v1/threads/turn", in)
+	if names := <-offered; !slices.Contains(names, "fake__notes") {
+		t.Fatalf("the model was offered %v with a short question, want the tool that fits", names)
 	}
 }

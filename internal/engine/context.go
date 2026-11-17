@@ -47,6 +47,9 @@ type Request struct {
 	// appsHint what the system prompt says of those it opened.
 	apps     *runApps
 	appsHint string
+	// appTokens is what the declarations of the apps' tools fill of the
+	// prompt.
+	appTokens int
 	// Groups are the history the model reads: each message after the chat's
 	// latest compaction marker, the first carrying the marker's summary.
 	// history is every message but the markers, as the safeguards classify
@@ -685,7 +688,10 @@ func requestContextUsage(req *Request) *domain.ContextUsage {
 	if instructions := req.toolInstructions(req.webSearch); instructions != "" {
 		system += "\n\n" + instructions
 	}
-	used := inference.Tokens(system) + inference.Tokens(string(api.Raw(req.rendered))) + messageTokens(req.reminder) + 8
+	if req.appsHint != "" {
+		system += "\n\n" + req.appsHint
+	}
+	used := inference.Tokens(system) + inference.Tokens(string(api.Raw(req.rendered))) + req.appTokens + messageTokens(req.reminder) + 8
 	for _, cost := range req.groupCosts() {
 		used += cost
 	}
