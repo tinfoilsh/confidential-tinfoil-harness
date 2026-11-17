@@ -74,7 +74,11 @@ func (ar *Service) ShareThread(ctx context.Context, p *auth.Principal, _ auth.Co
 		shared := domain.ShareMessage{Role: m.Role, Content: m.Content, Timestamp: domain.Millis(m.CreatedAt), Timeline: domain.CheckedWidgets(m.Timeline), ModelDisplayName: m.ModelDisplayName, IsError: m.IsError, Quote: m.Quote, Annotations: m.Annotations, Answers: m.Answers}
 		for _, a := range m.Attachments {
 			view := domain.ViewAttachment(&a).Attachment
-			view.EncryptionKey, view.Original = a.EncryptionKey, a.Original
+			view.EncryptionKey = a.EncryptionKey
+			// A device chat keeps no uploaded files in the cloud.
+			if !in.Local {
+				view.Original = a.Original
+			}
 			shared.Attachments = append(shared.Attachments, view)
 		}
 		payload.Messages = append(payload.Messages, shared)
