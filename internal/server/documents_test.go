@@ -250,8 +250,9 @@ func TestAStoredChatKeepsEachFileAsItWasUploaded(t *testing.T) {
 
 	w = postRoute(h, "/v1/threads/fork", api.Object{"key": keyBase64(key), "threadId": thread, "messageId": held(thread).ID}, "alice")
 	fork := api.Str(api.Obj(api.Parsed(w.Body.Bytes()))["id"])
-	if copied := held(fork).Attachments[0].Original; copied == nil || copied.StorageThreadID != fork || rows.indexedUnder(copied.ID) != fork {
-		t.Fatalf("the fork keeps %+v", copied)
+	source := held(thread).Attachments[0].Original
+	if copied := held(fork).Attachments[0].Original; copied == nil || copied.ID == source.ID || copied.StorageThreadID != fork || rows.indexedUnder(copied.ID) != fork || rows.indexedUnder(source.ID) != thread {
+		t.Fatalf("the fork keeps %+v, the chat %+v", copied, source)
 	}
 	if w := get(fork, true); !bytes.Equal(w.Body.Bytes(), notes) {
 		t.Fatalf("the fork's copy: HTTP %d %q", w.Code, w.Body.Bytes())
