@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
@@ -59,12 +60,17 @@ func (s *Store) Artifacts(ctx context.Context, p *auth.Principal, key auth.Conte
 				stale = append(stale, row.ID)
 			}
 		}
-		rows, _, err := s.Rows.Pull(ctx, p, key, "chat", stale)
+		rows, failed, err := s.Rows.Pull(ctx, p, key, "chat", stale)
 		if err != nil {
 			return nil, "", err
 		}
+		for _, failure := range failed {
+			if errors.Is(failure, ErrRowNotFetched) {
+				return nil, "", failure
+			}
+		}
 		for i := range rows {
-			if row, err := domain.ReadThreadRow(&rows[i]); err == nil {
+			if row, err := domain.ReadThreadRow(&rows[i]); err == nil && (projectID == "" || domain.ValueOr(row.ProjectID, "") == projectID) {
 				found[row.ID] = row.Artifacts()
 				kept.Add(summaryKey{p.Scope(), kid, row.ID}, keptArtifacts{row.ETag, found[row.ID]})
 			}

@@ -406,6 +406,12 @@ func TestTheArtifactsListHoldsWhatTheChatsDrew(t *testing.T) {
 		t.Fatalf("the project's artifacts, opening %d chats again: %+v", rows.loads["chat"]-opened, got)
 	}
 	chat("c3", "2", trip)
+	rows.unfetched = "c3"
+	unavailable := postRoute(h, "/v1/artifacts/list", api.Object{"key": keyBase64(key), "projectId": trip}, "alice")
+	if response := api.Obj(api.Obj(api.Parsed(unavailable.Body.Bytes()))["error"]); unavailable.Code != http.StatusBadGateway || response["code"] != "UPSTREAM_REFUSED" {
+		t.Fatalf("listing a page storage could not read: HTTP %d %s", unavailable.Code, unavailable.Body)
+	}
+	rows.unfetched = ""
 	if got := list(trip); !reflect.DeepEqual(got, want[:2]) {
 		t.Fatalf("after the chat changed, artifacts = %+v", got)
 	}
