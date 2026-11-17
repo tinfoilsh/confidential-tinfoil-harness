@@ -39,6 +39,12 @@ const (
 	appToolShare = 4
 	declined     = "The user declined this action. Do not try to do it another way; ask the user what they want instead."
 	expired      = "The user did not answer the request to approve this action, so it did not run."
+	// withdrawn is what the model reads of a call to a tool the user turned
+	// off, or whose app they turned off or removed, since the reply began.
+	withdrawn = "The user turned this app or tool off, so the action did not run. Do not try to do it another way."
+	// unconfirmed is what it reads when the harness cannot read whether
+	// they did.
+	unconfirmed = "The app's settings could not be read, so the action did not run."
 )
 
 // connectorKinds are the turns whose runs call connectors: those that answer
@@ -52,7 +58,11 @@ type runApps struct {
 	connectors []domain.Connector
 	// stored is a connector's sign-in as the account keeps it, which the
 	// run's session refreshes and keeps.
-	stored    func(id string) connectors.Credentials
+	stored func(id string) connectors.Credentials
+	// current is a connector as the account keeps it now. The run reads it
+	// before each call, so what the user turned off or removed since the
+	// reply began, on any device, no longer runs.
+	current   func(ctx context.Context, id string) (domain.Connector, error)
 	approvals *approvalGate
 }
 
@@ -62,8 +72,10 @@ type appTool struct {
 	connector *domain.Connector
 	remote    string
 	title     string
-	ask       bool
-	schemas   map[string]*jsonschema.Schema
+	// readOnly is whether the server says, on the run's session, that the
+	// tool changes nothing.
+	readOnly bool
+	schemas  map[string]*jsonschema.Schema
 }
 
 // offersApps is whether a run offers the tools of the user's connectors: a
@@ -96,6 +108,11 @@ func (eng *Engine) apps(ctx context.Context, r *Run, p *auth.Principal) *runApps
 		stored: func(id string) connectors.Credentials {
 			return connectors.Stored{Store: eng.Store, Principal: p, Key: key, ID: id}
 		},
+		current: func(ctx context.Context, id string) (domain.Connector, error) {
+			key := key()
+			defer clear(key[:])
+			return eng.Store.LoadConnector(ctx, p, key, id)
+		},
 	}
 }
 
@@ -115,7 +132,7 @@ func openApps(ctx context.Context, set *Toolset, req *Request, progress connecto
 		})
 	}
 	opening.Wait()
-	set.apps, set.approvals = map[string]*appTool{}, apps.approvals
+	set.apps, set.approvals, set.currentApp = map[string]*appTool{}, apps.approvals, apps.current
 	room := req.limit() / appToolShare
 	var reached, unreached, crowded []string
 	for i, s := range sessions {
@@ -129,8 +146,8 @@ func openApps(ctx context.Context, set *Toolset, req *Request, progress connecto
 		schemas := domain.SchemaLookup(s.Tools)
 		prefix := toolPrefix(c.Name)
 		for _, t := range s.Tools {
-			permission := c.Permission(t.Name, connectors.ReadOnly(t))
-			if permission == domain.ToolOff {
+			readOnly := connectors.ReadOnly(t)
+			if c.Permission(t.Name, readOnly) == domain.ToolOff {
 				continue
 			}
 			name := offeredName(prefix, t.Name, set)
@@ -146,7 +163,7 @@ func openApps(ctx context.Context, set *Toolset, req *Request, progress connecto
 				continue
 			}
 			room -= cost
-			set.apps[name] = &appTool{session: s, connector: c, remote: t.Name, title: connectors.Title(t), ask: permission == domain.ToolAsk, schemas: schemas}
+			set.apps[name] = &appTool{session: s, connector: c, remote: t.Name, title: connectors.Title(t), readOnly: readOnly, schemas: schemas}
 			set.appDefs = append(set.appDefs, def)
 		}
 	}
@@ -215,8 +232,9 @@ func toolDeclaration(name, app string, t *mcp.Tool) (json.RawMessage, error) {
 		"name": name, "description": "[" + app + "] " + t.Description, "parameters": json.RawMessage(schema)}})
 }
 
-// callApp carries out a call to a connector's tool: once the user approves
-// it, when it needs that.
+// callApp carries out a call to a connector's tool, as the account's
+// settings let it at the time of the call: once the user approves it, when
+// it needs that, and not at all once they have turned it off.
 func callApp(ctx context.Context, out *Stream, set *Toolset, tool *appTool, call ToolCall) json.RawMessage {
 	shown := domain.ConnectorCall{ID: tool.connector.ID, Name: tool.connector.Name, URL: tool.connector.URL, Tool: tool.remote, Title: tool.title}
 	display := func(status string, approval *domain.ToolApproval) *domain.ToolDisplay {
@@ -226,21 +244,39 @@ func callApp(ctx context.Context, out *Stream, set *Toolset, tool *appTool, call
 	}
 	activity := domain.ActivityPrefix + call.ID
 	var approval *domain.ToolApproval
+	// refuse ends a call that does not run. The model reads why; the client
+	// is shown that it failed, or how the user answered when that is why.
+	refuse := func(reason string) json.RawMessage {
+		shown := json.RawMessage(domain.ToolError)
+		if approval != nil && approval.Status != domain.ApprovalApproved {
+			shown = api.Raw(api.Object{"error": approval.Status})
+		}
+		out.emit(domain.ToolCallResult{MessageID: "msg_" + api.Token(), ToolCallID: call.ID, Role: "tool", Content: shown, Display: display("failed", approval)})
+		return answered(call.ID, string(api.Raw(api.Object{"error": reason})))
+	}
 	out.emit(domain.ActivitySnapshot{MessageID: activity, ActivityType: activityTool, Content: domain.ToolActivity{ToolCallID: call.ID, Tool: call.Name, Output: []string{}}, Display: display("running", nil)})
-	if tool.ask {
+	permission, reason := set.appPermission(ctx, tool)
+	if permission == domain.ToolOff {
+		return refuse(reason)
+	}
+	if permission == domain.ToolAsk {
 		id, deadline := uuid.NewString(), api.Now().Add(approvalTimeout)
+		// The approval takes its answer from the moment a client can see it.
+		answer := set.approvals.open(id)
 		out.emit(domain.ActivityDelta{MessageID: activity, ActivityType: activityTool, Patch: []domain.ActivityPatch{},
 			Display: display("running", &domain.ToolApproval{ID: id, Status: domain.ApprovalPending, ExpiresAt: deadline.UTC().Format(time.RFC3339Nano)})})
-		status := set.approvals.wait(ctx, id)
+		status := set.approvals.wait(ctx, id, answer)
 		approval = &domain.ToolApproval{Status: status}
+		if status == domain.ApprovalExpired {
+			return refuse(expired)
+		}
 		if status != domain.ApprovalApproved {
-			reason := declined
-			if status == domain.ApprovalExpired {
-				reason = expired
-			}
-			failure := api.Raw(api.Object{"error": status})
-			out.emit(domain.ToolCallResult{MessageID: "msg_" + api.Token(), ToolCallID: call.ID, Role: "tool", Content: failure, Display: display("failed", approval)})
-			return answered(call.ID, string(api.Raw(api.Object{"error": reason})))
+			return refuse(declined)
+		}
+		// The user may have turned the tool off, or removed its app, while
+		// the call waited for them.
+		if permission, reason = set.appPermission(ctx, tool); permission == domain.ToolOff {
+			return refuse(reason)
 		}
 		out.emit(domain.ActivityDelta{MessageID: activity, ActivityType: activityTool, Patch: []domain.ActivityPatch{}, Display: display("running", approval)})
 	}
@@ -248,11 +284,25 @@ func callApp(ctx context.Context, out *Stream, set *Toolset, tool *appTool, call
 	if err != nil {
 		// The model reads the failure and can retry; the caller learns only
 		// that the call failed.
-		out.emit(domain.ToolCallResult{MessageID: "msg_" + api.Token(), ToolCallID: call.ID, Role: "tool", Content: json.RawMessage(domain.ToolError), Display: display("failed", approval)})
-		return answered(call.ID, string(api.Raw(api.Object{"error": err.Error()})))
+		return refuse(err.Error())
 	}
 	out.emit(domain.ToolCallResult{MessageID: "msg_" + api.Token(), ToolCallID: call.ID, Role: "tool", Content: api.Raw(domain.NormalizeToolResult(call.Name, call.Args, content)), Display: display("completed", approval)})
 	return answered(call.ID, clip(content, MaxToolOutput))
+}
+
+// appPermission is what the account lets a tool do now, read from its
+// connector as stored: off, with what the model is told, for a connector
+// the user removed, turned off or is signed out of, or one the harness
+// cannot read.
+func (t *Toolset) appPermission(ctx context.Context, tool *appTool) (permission, reason string) {
+	current, err := t.currentApp(ctx, tool.connector.ID)
+	if err != nil && api.AsError(err).Code != "CONNECTOR_NOT_FOUND" {
+		return domain.ToolOff, unconfirmed
+	}
+	if err != nil || !current.Usable() {
+		return domain.ToolOff, withdrawn
+	}
+	return current.Permission(tool.remote, tool.readOnly), withdrawn
 }
 
 func callTool(ctx context.Context, tool *appTool, call ToolCall) (string, error) {
@@ -283,13 +333,18 @@ type approvalGate struct {
 	answered map[string]bool
 }
 
-// wait waits for the user's answer to approval id, until the run ends or
-// the approval expires.
-func (g *approvalGate) wait(ctx context.Context, id string) string {
+// open has approval id take the user's answer from now on.
+func (g *approvalGate) open(id string) chan bool {
 	answer := make(chan bool, 1)
 	g.mu.Lock()
 	g.pending[id] = answer
 	g.mu.Unlock()
+	return answer
+}
+
+// wait waits for the user's answer to approval id, until the run ends or
+// the approval expires.
+func (g *approvalGate) wait(ctx context.Context, id string, answer chan bool) string {
 	timer := time.NewTimer(approvalTimeout)
 	defer timer.Stop()
 	select {

@@ -73,6 +73,8 @@ type Toolset struct {
 	appDefs   []json.RawMessage
 	sessions  []*connectors.Session
 	approvals *approvalGate
+	// currentApp is a connector as the account keeps it now.
+	currentApp func(ctx context.Context, id string) (domain.Connector, error)
 	// searchBilled has the run's caller pay for its web search, as an API
 	// request's caller does: once, since the search service bills a run's
 	// calls as one session.

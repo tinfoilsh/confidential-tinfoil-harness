@@ -738,6 +738,48 @@ func TestAToolTheUserNeverAllowedAsItIsNowAsksFirst(t *testing.T) {
 	}
 }
 
+func TestACallDoesNotRunOnceItsUserTurnsItOff(t *testing.T) {
+	for name, turnOff := range map[string]func(t *testing.T, h *harness, key auth.ContentKey, id string){
+		"the connector is removed": func(t *testing.T, h *harness, key auth.ContentKey, id string) {
+			connectorRoute(t, h, key, "/v1/connectors/delete", api.Object{"id": id})
+		},
+		"the connector is turned off": func(t *testing.T, h *harness, key auth.ContentKey, id string) {
+			connectorRoute(t, h, key, "/v1/connectors/update", api.Object{"id": id, "enabled": false})
+		},
+		"the tool is turned off": func(t *testing.T, h *harness, key auth.ContentKey, id string) {
+			connectorRoute(t, h, key, "/v1/connectors/update", api.Object{"id": id, "tools": api.Object{"create_page": domain.ToolOff}})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := serveConnector(t, &fakeConnector{})
+			sent := make(chan []any, 1)
+			h, _, key := connectorHarness(t, toolTurns(toolCallChunk(0, "app-call", "fake__create_page", `{"title":"Plans"}`), sent), f)
+			id := connect(t, h, key, f)
+			p := &auth.Principal{ID: "alice", JWT: "clerk-alice"}
+			run, err := h.engine.AcceptTurn(context.Background(), p, chatCredential("alice"), key, requestOf[engine.TurnRequest](connectorInput(key)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer run.Log.Frames.Detach()
+			approval := awaitApproval(t, run.Log)
+			// The user turns it off, as from another tab, and then approves
+			// the call that was waiting.
+			turnOff(t, h, key, id)
+			if w := postRoute(h, "/v1/threads/approve", api.Object{"key": keyBase64(key), "threadId": run.Thread.ID, "runId": run.Log.ID, "approvalId": approval, "approved": true}, "alice"); w.Code != 200 {
+				t.Fatalf("answer refused: HTTP %d %s", w.Code, w.Body)
+			}
+			awaitFrame(t, run.Log, "RUN_FINISHED")
+			<-run.Finished
+			if calls := f.called(); len(calls) != 0 {
+				t.Fatalf("the server was called after its user turned it off: %+v", calls)
+			}
+			if read := toolMessage(<-sent, "app-call"); !strings.Contains(read, "turned this app or tool off") {
+				t.Fatalf("the model read %q", read)
+			}
+		})
+	}
+}
+
 // Two sessions that find a connector's token expired at once refresh it
 // once: a server that rotates refresh tokens refuses one used twice, and
 // may revoke every token it issued for it.
