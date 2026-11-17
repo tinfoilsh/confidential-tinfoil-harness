@@ -318,7 +318,9 @@ func (k *keptSource) refresh() (*oauth2.Token, error) {
 	}
 	if err != nil {
 		// The tokens are as they were; another session may try.
-		k.creds.Save(k.ctx, used, func(*domain.ConnectorAuth) {})
+		if err := k.creds.Save(k.ctx, used, func(*domain.ConnectorAuth) {}); err != nil {
+			slog.Warn("a connector's refresh stays claimed until its lease ends", "error", err)
+		}
 		return nil, err
 	}
 	keep(&k.auth, token)

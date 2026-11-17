@@ -313,6 +313,7 @@ func callApp(ctx context.Context, out *Stream, set *Toolset, tool *appTool, call
 func (t *Toolset) appPermission(ctx context.Context, tool *appTool) (permission, reason string) {
 	current, err := t.currentApp(ctx, tool.connector.ID)
 	if err != nil && api.AsError(err).Code != "CONNECTOR_NOT_FOUND" {
+		slog.Warn("a call did not run, as its connector could not be read", "error", err)
 		return domain.ToolOff, unconfirmed
 	}
 	if err != nil || !current.Usable() {
