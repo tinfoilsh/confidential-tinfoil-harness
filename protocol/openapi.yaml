@@ -1273,13 +1273,13 @@ paths:
       tags: [attachments]
       description: >-
         Converts a file into the attachment a turn sends. For a stored chat,
-        the client sends the content key and the chat's id, and the harness
-        keeps the file as it was uploaded under that chat, which the
-        attachment's original names; the turn that attaches it sends the
-        original back, and the chat keeps it while it names the attachment.
-        A file uploaded for a chat the client never sends a turn to is
-        deleted within the hour. Without them, as for a device chat or a
-        signed-out caller, the harness keeps nothing of the file.
+        the client sends the content key, and the harness keeps the file as
+        it was uploaded, which the attachment's original names. The turn
+        that attaches it sends the original back, and its chat keeps the file
+        while it names the attachment. A file no turn attaches within an
+        hour of its upload is deleted, and a turn that attaches it later
+        keeps the attachment without it. Without the key, as for a device
+        chat or a signed-out caller, the harness keeps nothing of the file.
       requestBody:
         required: true
         content:
@@ -1290,7 +1290,6 @@ paths:
               properties:
                 file: {type: string, contentMediaType: application/octet-stream}
                 key: {type: string, description: "The account's content key, base64. Only for a stored chat."}
-                threadId: {type: string, description: "The stored chat the attachment is for, which may not exist yet."}
       responses:
         "200":
           description: The attachment.
@@ -2781,7 +2780,7 @@ components:
         original: {$ref: "#/components/schemas/OriginalFile"}
 
     OriginalFile:
-      description: Where an upload kept the file as it was uploaded, under the stored chat it was uploaded for. A turn sends it back as the upload returned it.
+      description: Where an upload kept the file as it was uploaded. A turn sends it back as the upload returned it.
       type: object
       required: [id, encryptionKey, storageThreadId]
       properties:

@@ -271,13 +271,13 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// An upload is converted, and its client sends the descriptor back with
-	// the turn that attaches it, which stores it with the chat. For a cloud
-	// chat, the upload keeps the file as it was uploaded under that chat
-	// now, which the descriptor names.
+	// the turn that attaches it, which stores it with the chat. With the
+	// content key, as for a cloud chat, the upload keeps the file as it was
+	// uploaded until that turn, which the descriptor names.
 	if r.URL.Path == "/v1/attachments/upload" {
 		descriptor.ID = "att_" + api.Token()
-		if fields["threadId"] != "" || keyField != nil {
-			if descriptor.Original, err = at.keepOriginal(r.Context(), p, keyField, fields["threadId"], descriptor.ID, file); err != nil {
+		if len(keyField) > 0 {
+			if descriptor.Original, err = at.keepOriginal(r.Context(), p, keyField, descriptor.ID, file); err != nil {
 				api.Respond(w, nil, err)
 				return
 			}
@@ -334,26 +334,25 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// keepOriginal stores an upload's file as it was uploaded under the cloud
-// chat it is for. The chat's push that names it keeps it; one never pushed,
-// or that no longer names it, the control plane reclaims.
-func (at *Service) keepOriginal(ctx context.Context, p *auth.Principal, keyField []byte, threadID, uploadID string, file []byte) (*domain.OriginalFile, error) {
+// keepOriginal stores an upload's file as it was uploaded, filed under an
+// id no chat has. The turn that attaches it copies it under its chat, and
+// the control plane drops what is filed under no chat within the hour, so
+// neither a file never sent nor the copy a turn was made from stays.
+func (at *Service) keepOriginal(ctx context.Context, p *auth.Principal, keyField []byte, uploadID string, file []byte) (*domain.OriginalFile, error) {
 	if p.Anonymous {
 		return nil, auth.ErrAnonymousCloud
-	}
-	if err := api.RequireID("threadId", threadID); err != nil {
-		return nil, err
 	}
 	key, err := auth.DecodeBase64Key(keyField)
 	if err != nil {
 		return nil, err
 	}
 	defer clear(key[:])
-	id, fileKey, err := at.Store.PutAttachment(ctx, p, key, threadID, "original/"+uploadID, file)
+	staged := domain.RowID()
+	id, fileKey, err := at.Store.PutAttachment(ctx, p, key, staged, "original/"+uploadID, file)
 	if err != nil {
 		return nil, err
 	}
-	return &domain.OriginalFile{ID: id, EncryptionKey: fileKey, StorageThreadID: threadID}, nil
+	return &domain.OriginalFile{ID: id, EncryptionKey: fileKey, StorageThreadID: staged}, nil
 }
 
 var errUnsupportedType = api.Err(415, "ATTACHMENT_UNSUPPORTED", "Unsupported file type")

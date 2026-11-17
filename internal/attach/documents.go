@@ -95,9 +95,9 @@ func (at *Service) PlaceAttachments(ctx context.Context, p *auth.Principal, key 
 }
 
 // placeOriginal copies an attachment's uploaded file under the thread when
-// it is kept under another, as a fork's or one uploaded for another chat
-// is. One that can no longer be read is let go, and the attachment keeps
-// its content.
+// it is kept elsewhere: where its upload filed it, or under the chat a fork
+// was made from. One that can no longer be read is let go, and the
+// attachment keeps its content.
 func (at *Service) placeOriginal(ctx context.Context, p *auth.Principal, key auth.ContentKey, threadID string, a *domain.Attachment) error {
 	defer clear(key[:])
 	o := a.Original

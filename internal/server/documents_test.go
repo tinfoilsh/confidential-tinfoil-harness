@@ -212,17 +212,20 @@ func TestAStoredChatKeepsEachFileAsItWasUploaded(t *testing.T) {
 	h, rows, key := testChatHarness(t, nil)
 	alice := &auth.Principal{ID: "alice"}
 	notes := []byte("remember the blue door \xff")
-	thread := domain.RowID()
-	upload := uploadRoute(h, "/v1/attachments/upload", "notes.txt", notes, map[string]string{"key": keyBase64(key), "threadId": thread}, "alice")
+	upload := uploadRoute(h, "/v1/attachments/upload", "notes.txt", notes, map[string]string{"key": keyBase64(key)}, "alice")
 	var body struct {
 		Attachment api.Object `json:"attachment"`
 	}
 	json.Unmarshal(upload.Body.Bytes(), &body)
-	if kept := api.Obj(body.Attachment["original"]); upload.Code != 200 || kept["storageThreadId"] != thread || rows.indexedUnder(api.Str(kept["id"])) != thread {
-		t.Fatalf("upload: HTTP %d %s", upload.Code, upload.Body)
-	}
 	in := sendInput(key)
-	in["threadId"], in["attachments"] = thread, []any{body.Attachment}
+	thread := api.Str(in["threadId"])
+	// Until a turn attaches it, the file is filed under no chat, which the
+	// control plane's sweep of such files takes.
+	staged := api.Obj(body.Attachment["original"])
+	if filed := rows.indexedUnder(api.Str(staged["id"])); upload.Code != 200 || filed == "" || filed == thread || staged["storageThreadId"] != filed {
+		t.Fatalf("upload: HTTP %d %s, filed under %q", upload.Code, upload.Body, filed)
+	}
+	in["attachments"] = []any{body.Attachment}
 	finishedRun(t, h, "/v1/threads/turn", in)
 
 	held := func(chat string) domain.Message {
@@ -235,6 +238,10 @@ func TestAStoredChatKeepsEachFileAsItWasUploaded(t *testing.T) {
 	}
 	get := func(chat string, original bool) *httptest.ResponseRecorder {
 		return postRoute(h, "/v1/attachments/get", api.Object{"key": keyBase64(key), "id": held(chat).Attachments[0].ID, "threadId": chat, "original": original}, "alice")
+	}
+	// The turn's run copies the file under its chat.
+	if kept := held(thread).Attachments[0].Original; kept == nil || kept.ID == staged["id"] || kept.StorageThreadID != thread || rows.indexedUnder(kept.ID) != thread {
+		t.Fatalf("the chat keeps %+v", kept)
 	}
 	if w := get(thread, true); w.Code != 200 || !bytes.Equal(w.Body.Bytes(), notes) {
 		t.Fatalf("the uploaded file: HTTP %d %q", w.Code, w.Body.Bytes())
