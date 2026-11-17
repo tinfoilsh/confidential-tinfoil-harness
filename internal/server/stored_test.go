@@ -411,7 +411,7 @@ func TestTheArtifactsListHoldsWhatTheChatsDrew(t *testing.T) {
 	}
 
 	open := func(thread, call string) *httptest.ResponseRecorder {
-		return postRoute(h, "/v1/artifacts/get", api.Object{"key": keyBase64(key), "threadId": thread, "toolCallId": call}, "alice")
+		return postRoute(h, "/v1/artifacts/get", api.Object{"key": keyBase64(key), "threadId": thread, "messageId": "a-" + thread, "toolCallId": call}, "alice")
 	}
 	var one struct {
 		Artifact  domain.Artifact `json:"artifact"`
@@ -422,6 +422,17 @@ func TestTheArtifactsListHoldsWhatTheChatsDrew(t *testing.T) {
 	}
 	if w := open("c2", "broken"); w.Code != 404 {
 		t.Errorf("opening an artifact no client draws: HTTP %d %s", w.Code, w.Body)
+	}
+	// A model may name calls in different replies alike; each reply's opens.
+	later := `{"title":"Later","source":{"type":"markdown","markdown":"later"}}`
+	row := rows.rows[rowMapKey(p, "chat", "c2")]
+	editRow(&row, func(data api.Object) {
+		data["messages"] = append(api.Arr(data["messages"]), api.Object{"id": "a-later", "role": "assistant", "createdAt": "2026-03-09T00:00:00Z", "content": "", "timeline": []any{draw("packing", later)}})
+	})
+	rows.rows[rowMapKey(p, "chat", "c2")] = row
+	w := postRoute(h, "/v1/artifacts/get", api.Object{"key": keyBase64(key), "threadId": "c2", "messageId": "a-later", "toolCallId": "packing"}, "alice")
+	if json.Unmarshal(w.Body.Bytes(), &one) != nil || one.Arguments != later {
+		t.Fatalf("open the later reply's artifact: HTTP %d %s", w.Code, w.Body)
 	}
 }
 

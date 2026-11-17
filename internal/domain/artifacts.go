@@ -29,13 +29,14 @@ func (t *Thread) Artifacts() []Artifact {
 	return artifacts
 }
 
-// Artifact is the artifact a chat's reply drew in the call toolCallID, and
-// the arguments it was drawn with.
-func (t *Thread) Artifact(toolCallID string) (Artifact, string, bool) {
+// Artifact is the artifact the chat's reply messageID drew in the call
+// toolCallID, and the arguments it was drawn with. A model may name calls
+// in different replies alike, so the reply names it too.
+func (t *Thread) Artifact(messageID, toolCallID string) (Artifact, string, bool) {
 	var found Artifact
 	var arguments string
 	t.eachArtifact(func(artifact Artifact, args string) bool {
-		if artifact.ToolCallID != toolCallID {
+		if artifact.MessageID != messageID || artifact.ToolCallID != toolCallID {
 			return true
 		}
 		found, arguments = artifact, args

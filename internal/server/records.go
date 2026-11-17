@@ -591,7 +591,7 @@ func (h *harness) getArtifact(ctx context.Context, p *auth.Principal, key auth.C
 	if err != nil {
 		return nil, err
 	}
-	artifact, arguments, found := row.Artifact(in.ToolCallID)
+	artifact, arguments, found := row.Artifact(in.MessageID, in.ToolCallID)
 	if !found {
 		return nil, api.Err(404, "THREAD_NOT_FOUND", "The artifact was not found")
 	}

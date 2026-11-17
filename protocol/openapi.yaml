@@ -1117,18 +1117,20 @@ paths:
       summary: Open an artifact
       tags: [artifacts]
       description: >-
-        Returns an artifact of a stored chat with the arguments its reply drew
-        it with, which a client draws as it draws the call in the chat.
+        Returns an artifact of a stored chat, named by its reply and call, with
+        the arguments the reply drew it with, which a client draws as it draws
+        the call in the chat.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [key, threadId, toolCallId]
+              required: [key, threadId, messageId, toolCallId]
               properties:
                 key: {type: string, description: "The account's content key, base64."}
                 threadId: {$ref: "#/components/schemas/Identifier"}
+                messageId: {$ref: "#/components/schemas/Identifier"}
                 toolCallId: {type: string}
       responses:
         "200":
