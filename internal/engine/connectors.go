@@ -50,8 +50,10 @@ var connectorKinds = []string{"send", "edit", "regenerate", "continue", "retry"}
 type runApps struct {
 	client     *connectors.Client
 	connectors []domain.Connector
-	save       func(id string) connectors.Saver
-	approvals  *approvalGate
+	// stored is a connector's sign-in as the account keeps it, which the
+	// run's session refreshes and keeps.
+	stored    func(id string) connectors.Credentials
+	approvals *approvalGate
 }
 
 // appTool is a connector's tool as a run offers it.
@@ -85,16 +87,14 @@ func (eng *Engine) apps(ctx context.Context, r *Run, p *auth.Principal) *runApps
 	if len(usable) == 0 {
 		return nil
 	}
+	// The run holds the content key until it ends, after its sessions close.
+	key := func() auth.ContentKey { return r.key }
 	return &runApps{
 		client:     eng.Connectors,
 		connectors: usable,
 		approvals:  &approvalGate{pending: map[string]chan bool{}, answered: map[string]bool{}},
-		save: func(id string) connectors.Saver {
-			return func(ctx context.Context, used string, change func(*domain.ConnectorAuth)) error {
-				key := r.key
-				defer clear(key[:])
-				return eng.Store.KeepConnectorTokens(ctx, p, key, id, used, change)
-			}
+		stored: func(id string) connectors.Credentials {
+			return connectors.Stored{Store: eng.Store, Principal: p, Key: key, ID: id}
 		},
 	}
 }
@@ -109,7 +109,7 @@ func openApps(ctx context.Context, set *Toolset, req *Request, progress connecto
 	for i := range apps.connectors {
 		opening.Go(func() {
 			c := &apps.connectors[i]
-			if s, err := apps.client.Open(ctx, c, apps.save(c.ID), progress); err == nil {
+			if s, err := apps.client.Open(ctx, c, apps.stored(c.ID), progress); err == nil {
 				sessions[i] = s
 			}
 		})

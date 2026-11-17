@@ -67,6 +67,31 @@ type ConnectorAuth struct {
 	RefreshToken     string   `json:"refreshToken,omitempty"`
 	TokenType        string   `json:"tokenType,omitempty"`
 	Expiry           string   `json:"expiry,omitempty"`
+	// Refreshing is until when one session holds the refresh of these
+	// tokens, so no other presents the same refresh token meanwhile: a
+	// server that rotates refresh tokens may revoke them all when one is
+	// used twice.
+	Refreshing string `json:"refreshing,omitempty"`
+}
+
+// RefreshClaim is what became of a session's claim to refresh a connector's
+// tokens.
+type RefreshClaim int
+
+const (
+	// RefreshClaimed: the session holds the refresh until its lease ends.
+	RefreshClaimed RefreshClaim = iota
+	// RefreshBusy: another session holds it.
+	RefreshBusy
+	// RefreshChanged: the stored tokens are no longer the ones the session
+	// holds, which it takes in their place.
+	RefreshChanged
+)
+
+// RefreshHeld is whether a session holds the refresh of the tokens now.
+func (a *ConnectorAuth) RefreshHeld() bool {
+	until, err := time.Parse(time.RFC3339Nano, a.Refreshing)
+	return err == nil && api.Now().Before(until)
 }
 
 // ConnectorPending is a sign-in the user has started and not finished, and

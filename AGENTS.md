@@ -26,7 +26,7 @@ Use these instead of building new fakes:
 - `cloudImportHarness` and `importEnded`: a harness whose test key is the registered one, as a cloud import requires, and an import job waited for and read back as its client polls it.
 - `archiveRoute`, `importOf` and the archives in `internal/server/testdata`: multipart archive requests, an import's NDJSON lines, backups and exports written by the web app's own code (`web-*`, `tinfoil-export.zip`), and small exports in ChatGPT's and Claude's formats (`chatgpt-export.zip`, `claude-export.zip`, `claude-projects.json`).
 - `routerHarness`, `serveWebsearch`, `toolTurns`, `screenedBy`: the model router, the websearch enclave, a scripted tool turn, and the safeguards sidecar.
-- `serveConnector`, `connectorHarness`, `connect`, `awaitApproval`: a remote MCP server and its authorization server at public names, a harness that reaches them, a connector added and signed in to, and a call waiting for the user's approval.
+- `serveConnector`, `connectorHarness`, `connect`, `awaitApproval`, `changeConnector`, `expireToken`: a remote MCP server and its authorization server at public names, a harness that reaches them, a connector added and signed in to, a call waiting for the user's approval, and a connector changed as stored or left with an expired token.
 
 ## Patterns that were removed
 

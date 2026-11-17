@@ -50,6 +50,13 @@ type fakeConnector struct {
 	edit func(api.Object)
 	// refuse has the token endpoint refuse every refresh.
 	refuse bool
+	// noRefreshToken has the authorization server issue access tokens
+	// alone, which its user renews by signing in again.
+	noRefreshToken bool
+	// refreshing, when set, receives each refresh as it reaches the token
+	// endpoint, which then waits for held to close before it answers.
+	refreshing chan struct{}
+	held       chan struct{}
 
 	mu         sync.Mutex
 	registered int
@@ -180,6 +187,10 @@ func (f *fakeConnector) admits(r *http.Request) bool {
 // tokens that replace the ones before.
 func (f *fakeConnector) token(w http.ResponseWriter, r *http.Request) {
 	r.ParseForm()
+	if r.Form.Get("grant_type") == "refresh_token" && f.refreshing != nil {
+		f.refreshing <- struct{}{}
+		<-f.held
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	refuse := func() {
@@ -196,7 +207,7 @@ func (f *fakeConnector) token(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	case "refresh_token":
-		if f.refuse || r.Form.Get("refresh_token") != f.refresh {
+		if f.refuse || r.Form.Get("refresh_token") != f.refresh || r.Form.Get("resource") != connectorURL {
 			refuse()
 			return
 		}
@@ -208,8 +219,27 @@ func (f *fakeConnector) token(w http.ResponseWriter, r *http.Request) {
 	f.issued++
 	access := fmt.Sprintf("access-%d", f.issued)
 	f.access = map[string]bool{access: true}
-	f.refresh = fmt.Sprintf("refresh-%d", f.issued)
-	writeJSON(w, api.Object{"access_token": access, "refresh_token": f.refresh, "token_type": "Bearer", "expires_in": 3600})
+	issued := api.Object{"access_token": access, "token_type": "Bearer", "expires_in": 3600}
+	if !f.noRefreshToken {
+		f.refresh = fmt.Sprintf("refresh-%d", f.issued)
+		issued["refresh_token"] = f.refresh
+	}
+	writeJSON(w, issued)
+}
+
+// revoke has the server refuse every token it issued, as once its user
+// revokes the harness's access.
+func (f *fakeConnector) revoke() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.access = map[string]bool{}
+}
+
+// refreshed is how many refreshes the token endpoint granted.
+func (f *fakeConnector) refreshed() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.refreshes
 }
 
 // consent is the user at the authorization server's page: it checks the page
@@ -277,6 +307,28 @@ func connect(t *testing.T, h *harness, key auth.ContentKey, f *fakeConnector) st
 		connectorRoute(t, h, key, "/v1/connectors/complete", api.Object{"id": id, "code": code, "state": state})
 	}
 	return id
+}
+
+// changeConnector changes a connector as stored, as time or another device
+// would.
+func changeConnector(t *testing.T, h *harness, key auth.ContentKey, id string, change func(*domain.Connector)) {
+	t.Helper()
+	_, err := h.store.MutateConnector(context.Background(), &auth.Principal{ID: "alice"}, key, id, false, func(c *domain.Connector, _ bool) error {
+		change(c)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// expireToken has a connector's access token expire, so its next session
+// refreshes it.
+func expireToken(t *testing.T, h *harness, key auth.ContentKey, id string) {
+	t.Helper()
+	changeConnector(t, h, key, id, func(c *domain.Connector) {
+		c.Auth.Expiry = api.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano)
+	})
 }
 
 func storedConnector(t *testing.T, h *harness, key auth.ContentKey, id string) domain.Connector {
@@ -556,13 +608,7 @@ func TestARunKeepsTheTokensItRefreshes(t *testing.T) {
 	sent := make(chan []any, 1)
 	h, _, key := connectorHarness(t, connectorTurn("fake__lookup", `{"query":"cats"}`, make(chan []string, 1), sent), f)
 	id := connect(t, h, key, f)
-	expire := func(c *domain.Connector, _ bool) error {
-		c.Auth.Expiry = api.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano)
-		return nil
-	}
-	if _, err := h.store.MutateConnector(context.Background(), &auth.Principal{ID: "alice"}, key, id, false, expire); err != nil {
-		t.Fatal(err)
-	}
+	expireToken(t, h, key, id)
 	finishedRun(t, h, "/v1/threads/turn", connectorInput(key))
 	if read := toolMessage(<-sent, "app-call"); read != "found cats" {
 		t.Fatalf("the model read %q", read)
@@ -583,13 +629,7 @@ func TestARefusedRefreshSignsTheConnectorOut(t *testing.T) {
 	f.mu.Lock()
 	f.refuse = true
 	f.mu.Unlock()
-	expire := func(c *domain.Connector, _ bool) error {
-		c.Auth.Expiry = api.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano)
-		return nil
-	}
-	if _, err := h.store.MutateConnector(context.Background(), &auth.Principal{ID: "alice"}, key, id, false, expire); err != nil {
-		t.Fatal(err)
-	}
+	expireToken(t, h, key, id)
 	finishedRun(t, h, "/v1/threads/turn", connectorInput(key))
 	if names := <-offered; len(names) != 0 {
 		t.Fatalf("the model was offered %v from a connector signed out", names)
@@ -655,5 +695,128 @@ func TestAnIssuerNamedUnderAnotherPathOfItsOriginSignsUsersIn(t *testing.T) {
 	w := postRoute(h, "/v1/connectors/complete", answer, "alice")
 	if w.Code != 200 || api.Obj(api.Obj(api.Parsed(w.Body.Bytes()))["connector"])["status"] != domain.ConnectorConnected {
 		t.Fatalf("complete: HTTP %d %s", w.Code, w.Body)
+	}
+}
+
+// Two sessions that find a connector's token expired at once refresh it
+// once: a server that rotates refresh tokens refuses one used twice, and
+// may revoke every token it issued for it.
+func TestSessionsRefreshAnExpiredTokenOnce(t *testing.T) {
+	f := serveConnector(t, &fakeConnector{signIn: true})
+	h, rows, key := connectorHarness(t, nil, f)
+	id := connect(t, h, key, f)
+	expireToken(t, h, key, id)
+	f.refreshing, f.held = make(chan struct{}, 2), make(chan struct{})
+	release := sync.OnceFunc(func() { close(f.held) })
+	defer release()
+	refresh := func() chan *httptest.ResponseRecorder {
+		done := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			done <- postRoute(h, "/v1/connectors/refresh", api.Object{"key": keyBase64(key), "id": id}, "alice")
+		}()
+		return done
+	}
+	first := refresh()
+	<-f.refreshing
+	// The second session reads the connector, then its tokens as it claims
+	// their refresh, which the first holds.
+	loads := make(chan struct{}, 2)
+	rows.mu.Lock()
+	rows.loaded = func(scope string) {
+		if scope != "connector" {
+			return
+		}
+		// The rows are locked while they tell of a load, so this never
+		// waits for the test to hear of it.
+		select {
+		case loads <- struct{}{}:
+		default:
+		}
+	}
+	rows.mu.Unlock()
+	second := refresh()
+	for range 2 {
+		select {
+		case <-loads:
+		case <-f.refreshing:
+			t.Fatal("a second session presented the refresh token the first was using")
+		case <-time.After(5 * time.Second):
+			t.Fatal("the second session never read the connector")
+		}
+	}
+	release()
+	for _, done := range []chan *httptest.ResponseRecorder{first, second} {
+		w := <-done
+		if answer := api.Obj(api.Obj(api.Parsed(w.Body.Bytes()))["connector"]); w.Code != 200 || answer["status"] != domain.ConnectorConnected {
+			t.Fatalf("refresh: HTTP %d %s", w.Code, w.Body)
+		}
+	}
+	if stored := storedConnector(t, h, key, id); f.refreshed() != 1 || stored.Auth.RefreshToken != "refresh-2" || stored.Auth.RefreshHeld() {
+		t.Fatalf("stored %+v after %d refreshes, want one refresh, kept, and its claim ended", stored.Auth, f.refreshed())
+	}
+}
+
+func TestRefreshedTokensAreKeptOnceStoringThemSucceeds(t *testing.T) {
+	f := serveConnector(t, &fakeConnector{signIn: true})
+	sent := make(chan []any, 1)
+	h, rows, key := connectorHarness(t, connectorTurn("fake__lookup", `{"query":"cats"}`, make(chan []string, 1), sent), f)
+	id := connect(t, h, key, f)
+	expireToken(t, h, key, id)
+	// Storage refuses the refreshed tokens the first time they are stored.
+	refused := 0
+	rows.refuse = func(row *domain.StoredRow) error {
+		if strings.Contains(string(row.Data), "refresh-2") && refused == 0 {
+			refused++
+			return api.Err(502, "UPSTREAM_REFUSED", "storage is unavailable")
+		}
+		return nil
+	}
+	finishedRun(t, h, "/v1/threads/turn", connectorInput(key))
+	if read := toolMessage(<-sent, "app-call"); read != "found cats" {
+		t.Fatalf("the model read %q", read)
+	}
+	if stored := storedConnector(t, h, key, id); refused != 1 || stored.Auth.RefreshToken != "refresh-2" || stored.Auth.AccessToken != "access-2" {
+		t.Fatalf("stored %+v after %d refused writes, want the only tokens the server still takes", stored.Auth, refused)
+	}
+}
+
+func TestAServerThatRefusesAnUnexpiredTokenIsAskedAgainWithANewOne(t *testing.T) {
+	f := serveConnector(t, &fakeConnector{signIn: true})
+	sent := make(chan []any, 1)
+	h, _, key := connectorHarness(t, connectorTurn("fake__lookup", `{"query":"cats"}`, make(chan []string, 1), sent), f)
+	id := connect(t, h, key, f)
+	f.revoke()
+	finishedRun(t, h, "/v1/threads/turn", connectorInput(key))
+	if read := toolMessage(<-sent, "app-call"); read != "found cats" {
+		t.Fatalf("the model read %q", read)
+	}
+	if stored := storedConnector(t, h, key, id); f.refreshed() != 1 || stored.Auth.AccessToken != "access-2" {
+		t.Fatalf("stored %+v after %d refreshes, want the token renewed once", stored.Auth, f.refreshed())
+	}
+}
+
+func TestAConnectorWhoseTokenCannotBeRenewedIsSignedOut(t *testing.T) {
+	for name, lose := range map[string]func(t *testing.T, h *harness, key auth.ContentKey, f *fakeConnector, id string){
+		"its server refuses the token": func(_ *testing.T, _ *harness, _ auth.ContentKey, f *fakeConnector, _ string) {
+			f.revoke()
+		},
+		"the token expired": func(t *testing.T, h *harness, key auth.ContentKey, _ *fakeConnector, id string) {
+			expireToken(t, h, key, id)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := serveConnector(t, &fakeConnector{signIn: true, noRefreshToken: true})
+			h, _, key := connectorHarness(t, nil, f)
+			id := connect(t, h, key, f)
+			lose(t, h, key, f, id)
+			w := postRoute(h, "/v1/connectors/refresh", api.Object{"key": keyBase64(key), "id": id}, "alice")
+			if w.Code != 409 || errorCode(w) != "CONNECTOR_SIGNED_OUT" {
+				t.Fatalf("refresh: HTTP %d %s", w.Code, w.Body)
+			}
+			listed := connectorRoute(t, h, key, "/v1/connectors/list", api.Object{})
+			if status := api.Obj(api.Arr(listed["connectors"])[0])["status"]; status != domain.ConnectorSignedOut {
+				t.Fatalf("the connector lists as %v, want its user asked to sign in again", status)
+			}
+		})
 	}
 }

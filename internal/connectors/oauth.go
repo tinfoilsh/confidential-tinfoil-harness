@@ -2,11 +2,13 @@ package connectors
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -144,9 +146,10 @@ func (c *Client) Complete(ctx context.Context, pending *domain.ConnectorPending,
 	if issuer != "" && strings.TrimSuffix(issuer, "/") != strings.TrimSuffix(a.Issuer, "/") || issuer == "" && a.IssuerInResponse {
 		return nil, errSignIn("The sign-in came back from another authorization server")
 	}
-	ctx, cancel := context.WithTimeout(context.WithValue(ctx, oauth2.HTTPClient, c.http.direct), requestTimeout)
+	client := &http.Client{Transport: withResource{inner: c.http.direct.Transport, resource: a.Resource}, CheckRedirect: c.http.direct.CheckRedirect}
+	ctx, cancel := context.WithTimeout(context.WithValue(ctx, oauth2.HTTPClient, client), requestTimeout)
 	defer cancel()
-	token, err := c.config(&a).Exchange(ctx, code, oauth2.VerifierOption(pending.Verifier), oauth2.SetAuthURLParam("resource", a.Resource))
+	token, err := c.config(&a).Exchange(ctx, code, oauth2.VerifierOption(pending.Verifier))
 	if err != nil {
 		return nil, errSignIn("The authorization server refused the sign-in")
 	}
@@ -187,55 +190,229 @@ func Forget(a *domain.ConnectorAuth) {
 	a.AccessToken, a.RefreshToken, a.TokenType, a.Expiry = "", "", "", ""
 }
 
-// Saver keeps the tokens a session refreshed for the runs after it: it
-// applies change to the connector's sign-in as stored now, unless the user
-// signed in again since the refresh token used was issued.
-type Saver func(ctx context.Context, used string, change func(*domain.ConnectorAuth)) error
+// Credentials is where a session reads and keeps a connector's sign-in as
+// stored, which other sessions of the same connector share: other replies,
+// on this instance of the harness or another.
+type Credentials interface {
+	// Claim claims the refresh of the tokens the session holds, and returns
+	// the tokens as stored. Only the session that holds the claim presents
+	// the refresh token; one that finds the tokens changed takes them
+	// instead.
+	Claim(ctx context.Context, held *domain.ConnectorAuth) (domain.ConnectorAuth, domain.RefreshClaim, error)
+	// Save applies change to the stored sign-in and ends the session's
+	// claim, unless the user signed in again since the refresh token used
+	// was issued.
+	Save(ctx context.Context, used string, change func(*domain.ConnectorAuth)) error
+}
 
 // ErrSignedOut is a connector whose authorization server no longer accepts
 // what it signs in with, until the user signs in again.
 var ErrSignedOut = errors.New("the connector is signed out")
 
-// keptSource is a session's access token, refreshed when it expires and
-// saved once refreshed, so a rotated refresh token is not lost.
+const (
+	// refreshPoll is how often a session looks again at tokens another
+	// session is refreshing, and refreshWait how long it does before it
+	// gives up: a little longer than a refresh may take.
+	refreshPoll = 500 * time.Millisecond
+	refreshWait = requestTimeout + 5*time.Second
+	// flushTimeout bounds a closing session's last try at keeping tokens it
+	// refreshed.
+	flushTimeout = 10 * time.Second
+)
+
+// errRefreshing is a connector whose tokens another session has been
+// refreshing for longer than a session waits.
+var errRefreshing = errors.New("the connector's tokens are being refreshed")
+
+// keptSource is a session's access token, refreshed when it expires, by
+// one session at a time, and kept once refreshed, so a rotated refresh
+// token is not lost.
 type keptSource struct {
 	ctx    context.Context
 	client *http.Client
-	mu     sync.Mutex
-	config *oauth2.Config
-	auth   domain.ConnectorAuth
-	save   Saver
+	// config is the authorization server of the tokens the session holds,
+	// which change when it takes those of a later sign-in.
+	config func(*domain.ConnectorAuth) *oauth2.Config
+	creds  Credentials
+
+	mu   sync.Mutex
+	auth domain.ConnectorAuth
+	// unsaved is what a refresh changed that the session could not keep,
+	// with the refresh token it used, which it tries to keep again until it
+	// closes.
+	unsaved     func(*domain.ConnectorAuth)
+	unsavedUsed string
 }
 
 func (k *keptSource) Token() (*oauth2.Token, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	current := &oauth2.Token{AccessToken: k.auth.AccessToken, TokenType: k.auth.TokenType, Expiry: k.auth.TokenExpiry()}
-	if current.Valid() {
-		return current, nil
+	k.flush(k.ctx)
+	return k.token("")
+}
+
+// renew is a token in place of one the server refused though it had not
+// expired, as one revoked.
+func (k *keptSource) renew() error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	_, err := k.token(k.auth.AccessToken)
+	return err
+}
+
+// held is the access token the session holds, if it is good: neither
+// expired nor the one refused.
+func (k *keptSource) held(refused string) *oauth2.Token {
+	t := &oauth2.Token{AccessToken: k.auth.AccessToken, TokenType: k.auth.TokenType, Expiry: k.auth.TokenExpiry()}
+	if !t.Valid() || t.AccessToken == refused {
+		return nil
 	}
-	if k.auth.RefreshToken == "" {
-		return nil, ErrSignedOut
-	}
-	used := k.auth.RefreshToken
-	ctx, cancel := context.WithTimeout(context.WithValue(k.ctx, oauth2.HTTPClient, k.client), requestTimeout)
+	return t
+}
+
+// token is the session's access token, refreshed unless it is good. The
+// session refreshes it only while it holds the claim to; while another
+// session does, it waits for that session's tokens.
+func (k *keptSource) token(refused string) (*oauth2.Token, error) {
+	waiting, cancel := context.WithTimeout(k.ctx, refreshWait)
 	defer cancel()
-	token, err := k.config.TokenSource(ctx, &oauth2.Token{RefreshToken: used}).Token()
-	var refused *oauth2.RetrieveError
-	if errors.As(err, &refused) && refused.ErrorCode == "invalid_grant" {
+	for {
+		if t := k.held(refused); t != nil {
+			return t, nil
+		}
+		if k.auth.RefreshToken == "" {
+			return nil, ErrSignedOut
+		}
+		stored, claim, err := k.creds.Claim(k.ctx, &k.auth)
+		if err != nil {
+			return nil, err
+		}
+		if claim == domain.RefreshClaimed {
+			return k.refresh()
+		}
+		if claim == domain.RefreshChanged {
+			k.auth = stored
+			continue
+		}
+		select {
+		case <-waiting.Done():
+			return nil, cmp.Or(k.ctx.Err(), errRefreshing)
+		case <-time.After(refreshPoll):
+		}
+	}
+}
+
+// refresh trades the session's refresh token for new tokens, which it
+// keeps. It holds the claim to.
+func (k *keptSource) refresh() (*oauth2.Token, error) {
+	used := k.auth.RefreshToken
+	client := &http.Client{Transport: withResource{inner: k.client.Transport, resource: k.auth.Resource}, CheckRedirect: k.client.CheckRedirect}
+	ctx, cancel := context.WithTimeout(context.WithValue(k.ctx, oauth2.HTTPClient, client), requestTimeout)
+	defer cancel()
+	token, err := k.config(&k.auth).TokenSource(ctx, &oauth2.Token{RefreshToken: used}).Token()
+	var refusal *oauth2.RetrieveError
+	if errors.As(err, &refusal) && refusal.ErrorCode == "invalid_grant" {
 		Forget(&k.auth)
-		k.save(k.ctx, used, Forget)
+		k.keep(used, Forget)
 		return nil, ErrSignedOut
 	}
 	if err != nil {
+		// The tokens are as they were; another session may try.
+		k.creds.Save(k.ctx, used, func(*domain.ConnectorAuth) {})
 		return nil, err
 	}
 	keep(&k.auth, token)
 	refreshed := k.auth
-	k.save(k.ctx, used, func(a *domain.ConnectorAuth) {
+	k.keep(used, func(a *domain.ConnectorAuth) {
 		a.AccessToken, a.RefreshToken, a.TokenType, a.Expiry = refreshed.AccessToken, refreshed.RefreshToken, refreshed.TokenType, refreshed.Expiry
 	})
 	return token, nil
+}
+
+// keep stores what a refresh changed. The session goes on with its tokens
+// when it cannot, and tries again with its next request and as it closes:
+// the refresh token it used is spent, so what it holds is all that signs
+// the connector in.
+func (k *keptSource) keep(used string, change func(*domain.ConnectorAuth)) {
+	if err := k.creds.Save(k.ctx, used, change); err != nil {
+		k.unsaved, k.unsavedUsed = change, used
+		slog.Warn("a connector's refreshed tokens are not stored yet", "error", err)
+	}
+}
+
+// flush tries again to keep what a refresh changed and the session could
+// not.
+func (k *keptSource) flush(ctx context.Context) {
+	if k.unsaved != nil && k.creds.Save(ctx, k.unsavedUsed, k.unsaved) == nil {
+		k.unsaved = nil
+	}
+}
+
+// signOut forgets tokens the session cannot use or renew, as stored too, so
+// the connector shows that its user must sign in again. Tokens stored since
+// are those of a later sign-in, and stay.
+func (k *keptSource) signOut() {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	held := k.auth
+	if held.AccessToken == "" && held.RefreshToken == "" {
+		return
+	}
+	Forget(&k.auth)
+	k.keep(held.RefreshToken, func(a *domain.ConnectorAuth) {
+		if a.AccessToken == held.AccessToken {
+			Forget(a)
+		}
+	})
+}
+
+// close makes the session's last try at keeping tokens it refreshed, which
+// the request that ends it does not cut short.
+func (k *keptSource) close() {
+	if k == nil {
+		return
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.unsaved == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(k.ctx), flushTimeout)
+	defer cancel()
+	if k.flush(ctx); k.unsaved != nil {
+		slog.Error("a connector's refreshed tokens were lost; its user signs in again")
+	}
+}
+
+// withResource names the MCP server a token is for in each token request,
+// as the MCP authorization spec requires of refreshes too, which x/oauth2
+// has no parameter for.
+type withResource struct {
+	inner    http.RoundTripper
+	resource string
+}
+
+func (w withResource) RoundTrip(r *http.Request) (*http.Response, error) {
+	if w.resource == "" || r.Method != http.MethodPost || r.Body == nil || r.Header.Get("Content-Type") != "application/x-www-form-urlencoded" {
+		return w.inner.RoundTrip(r)
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxMetadataBytes))
+	r.Body.Close()
+	if err != nil {
+		return nil, err
+	}
+	form, err := url.ParseQuery(string(body))
+	if err != nil {
+		return nil, err
+	}
+	if form.Get("resource") == "" {
+		form.Set("resource", w.resource)
+	}
+	encoded := form.Encode()
+	r = r.Clone(r.Context())
+	r.Body, r.ContentLength = io.NopCloser(strings.NewReader(encoded)), int64(len(encoded))
+	r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(strings.NewReader(encoded)), nil }
+	return w.inner.RoundTrip(r)
 }
 
 // Revoke asks a's authorization server to revoke what it signs in with

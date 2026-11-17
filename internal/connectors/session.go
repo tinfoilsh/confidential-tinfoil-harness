@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -27,24 +28,47 @@ const (
 // Session is a connection to a connector's server, and the tools the server
 // offers on it.
 type Session struct {
-	mcp   *mcp.ClientSession
-	Tools []*mcp.Tool
+	mcp    *mcp.ClientSession
+	source *keptSource // nil for a server that asks for no sign-in
+	Tools  []*mcp.Tool
 }
 
 // Progress reports a call's progress, under the token the call named.
 type Progress func(token, message string, done float64)
 
-// Open connects to the connector's server, signing in with its tokens and
-// refreshing them through save, and lists the server's tools. The session
-// lasts until it is closed or ctx ends.
-func (c *Client) Open(ctx context.Context, conn *domain.Connector, save Saver, progress Progress) (*Session, error) {
+// refusals notes whether the server refused a request's credentials.
+type refusals struct {
+	inner   http.RoundTripper
+	refused atomic.Bool
+}
+
+func (t *refusals) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, err := t.inner.RoundTrip(r)
+	if err == nil && resp.StatusCode == http.StatusUnauthorized {
+		t.refused.Store(true)
+	}
+	return resp, err
+}
+
+// Open connects to the connector's server, signing in with its tokens, which
+// it refreshes and keeps through creds, and lists the server's tools. A
+// server that refuses a token that has not expired, as one its user revoked,
+// is asked again with a new one; a connector whose token it cannot renew is
+// signed out. The session lasts until it is closed or ctx ends.
+func (c *Client) Open(ctx context.Context, conn *domain.Connector, creds Credentials, progress Progress) (*Session, error) {
+	s := &Session{}
 	client := c.http.direct
+	seen := &refusals{inner: c.http.direct.Transport}
 	if conn.Auth != nil {
-		source := &keptSource{ctx: ctx, client: c.http.direct, config: c.config(conn.Auth), auth: *conn.Auth, save: save}
-		if _, err := source.Token(); err != nil {
+		s.source = &keptSource{ctx: ctx, client: c.http.direct, config: c.config, auth: *conn.Auth, creds: creds}
+		if _, err := s.source.Token(); err != nil {
+			if errors.Is(err, ErrSignedOut) {
+				s.source.signOut()
+			}
+			s.source.close()
 			return nil, err
 		}
-		client = &http.Client{Transport: &oauth2.Transport{Source: source, Base: c.http.direct.Transport}, CheckRedirect: c.http.direct.CheckRedirect}
+		client = &http.Client{Transport: &oauth2.Transport{Source: s.source, Base: seen}, CheckRedirect: c.http.direct.CheckRedirect}
 	}
 	options := &mcp.ClientOptions{}
 	if progress != nil {
@@ -55,34 +79,54 @@ func (c *Client) Open(ctx context.Context, conn *domain.Connector, save Saver, p
 	}
 	opening, cancel := context.WithTimeout(ctx, openTimeout)
 	defer cancel()
-	opened, err := mcp.NewClient(&mcp.Implementation{Name: clientName, Version: clientVersion}, options).Connect(opening,
-		&mcp.StreamableClientTransport{Endpoint: conn.URL, HTTPClient: client, DisableStandaloneSSE: true}, nil)
+	connect := func() error {
+		opened, err := mcp.NewClient(&mcp.Implementation{Name: clientName, Version: clientVersion}, options).Connect(opening,
+			&mcp.StreamableClientTransport{Endpoint: conn.URL, HTTPClient: client, DisableStandaloneSSE: true}, nil)
+		if err != nil {
+			return err
+		}
+		s.mcp, s.Tools = opened, nil
+		for tool, err := range opened.Tools(opening, nil) {
+			if err != nil {
+				opened.Close()
+				return err
+			}
+			if len(s.Tools) == maxTools {
+				break
+			}
+			s.Tools = append(s.Tools, tool)
+		}
+		return nil
+	}
+	err := connect()
+	if err != nil && s.source != nil && seen.refused.Load() {
+		if err = s.source.renew(); err == nil {
+			seen.refused.Store(false)
+			err = connect()
+		} else if errors.Is(err, ErrSignedOut) {
+			s.source.signOut()
+		}
+	}
 	if err != nil {
+		s.source.close()
 		if errors.Is(err, ErrSignedOut) {
 			return nil, ErrSignedOut
 		}
 		return nil, errUnreachable()
 	}
-	s := &Session{mcp: opened}
-	for tool, err := range opened.Tools(opening, nil) {
-		if err != nil {
-			opened.Close()
-			return nil, errUnreachable()
-		}
-		if len(s.Tools) == maxTools {
-			break
-		}
-		s.Tools = append(s.Tools, tool)
-	}
 	return s, nil
 }
 
-func (s *Session) Close() { s.mcp.Close() }
+// Close ends the session, once it has kept any tokens it refreshed.
+func (s *Session) Close() {
+	s.source.close()
+	s.mcp.Close()
+}
 
 // Tools lists the tools the connector's server offers, as the settings show
 // them.
-func (c *Client) Tools(ctx context.Context, conn *domain.Connector, save Saver) ([]domain.ConnectorTool, error) {
-	s, err := c.Open(ctx, conn, save, nil)
+func (c *Client) Tools(ctx context.Context, conn *domain.Connector, creds Credentials) ([]domain.ConnectorTool, error) {
+	s, err := c.Open(ctx, conn, creds, nil)
 	if err != nil {
 		return nil, err
 	}

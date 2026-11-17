@@ -84,17 +84,60 @@ func (s *Store) MutateConnector(ctx context.Context, p *auth.Principal, key auth
 	return connector, err
 }
 
-var errSignedInAgain = errors.New("the connector was signed in again")
+// refreshLease is how long a session holds the refresh of a connector's
+// tokens: longer than the refresh may take, so the session is done, or has
+// given up, before another takes its place.
+const refreshLease = 45 * time.Second
+
+var (
+	errSignedInAgain = errors.New("the connector was signed in again")
+	// errNotClaimed leaves a connector as stored when a session's claim
+	// finds its refresh held or its tokens changed.
+	errNotClaimed = errors.New("the refresh was not claimed")
+)
+
+// ClaimConnectorRefresh claims the refresh of a connector's tokens for a
+// session that holds them as held, and returns the tokens as stored. The
+// claim is a write at the row's revision, so of the sessions that claim at
+// once, on this instance or another, one holds it; the others find it busy,
+// and once it is done find the tokens changed.
+func (s *Store) ClaimConnectorRefresh(ctx context.Context, p *auth.Principal, key auth.ContentKey, id string, held *domain.ConnectorAuth) (domain.ConnectorAuth, domain.RefreshClaim, error) {
+	var stored domain.ConnectorAuth
+	var claim domain.RefreshClaim
+	_, err := s.MutateConnector(ctx, p, key, id, false, func(c *domain.Connector, _ bool) error {
+		stored = domain.ConnectorAuth{}
+		if c.Auth != nil {
+			stored = *c.Auth
+		}
+		switch {
+		case c.Auth == nil || stored.RefreshToken != held.RefreshToken || stored.AccessToken != held.AccessToken:
+			claim = domain.RefreshChanged
+		case stored.RefreshHeld():
+			claim = domain.RefreshBusy
+		default:
+			claim = domain.RefreshClaimed
+			c.Auth.Refreshing = api.Now().Add(refreshLease).UTC().Format(time.RFC3339Nano)
+			return nil
+		}
+		return errNotClaimed
+	})
+	if errors.Is(err, errNotClaimed) {
+		err = nil
+	}
+	return stored, claim, err
+}
 
 // KeepConnectorTokens applies change to a connector's sign-in as stored
-// now, unless the user signed in again since used, the refresh token the
-// change replaces, was issued: the tokens of that sign-in are newer.
+// now and ends the refresh that made it, unless the user signed in again
+// since used, the refresh token the change replaces, was issued: the tokens
+// of that sign-in are newer.
 func (s *Store) KeepConnectorTokens(ctx context.Context, p *auth.Principal, key auth.ContentKey, id, used string, change func(*domain.ConnectorAuth)) error {
 	_, err := s.MutateConnector(ctx, p, key, id, false, func(c *domain.Connector, _ bool) error {
 		if c.Auth == nil || c.Auth.RefreshToken != used {
 			return errSignedInAgain
 		}
 		change(c.Auth)
+		c.Auth.Refreshing = ""
 		return nil
 	})
 	if errors.Is(err, errSignedInAgain) {

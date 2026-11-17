@@ -109,12 +109,10 @@ func (h *harness) connectorClient() (*connectors.Client, error) {
 	return h.connectors, nil
 }
 
-// keepTokens is where a session the route opens keeps the tokens it
-// refreshes, under the key the route holds while it runs.
-func (h *harness) keepTokens(p *auth.Principal, key *auth.ContentKey, id string) connectors.Saver {
-	return func(ctx context.Context, used string, change func(*domain.ConnectorAuth)) error {
-		return h.store.KeepConnectorTokens(ctx, p, *key, id, used, change)
-	}
+// stored is a connector's sign-in as a session the route opens reads and
+// keeps it, under the key the route holds while it runs.
+func (h *harness) stored(p *auth.Principal, key *auth.ContentKey, id string) connectors.Stored {
+	return connectors.Stored{Store: h.store, Principal: p, Key: func() auth.ContentKey { return *key }, ID: id}
 }
 
 func (h *harness) listConnectors(ctx context.Context, p *auth.Principal, key auth.ContentKey, _ json.RawMessage) (any, error) {
@@ -243,10 +241,7 @@ func (h *harness) completeConnector(ctx context.Context, p *auth.Principal, key 
 	// A server that lists no tools now keeps those the connector had; the
 	// settings can list them again.
 	signedIn := domain.Connector{ID: conn.ID, URL: conn.URL, Auth: signed}
-	tools, listErr := client.Tools(ctx, &signedIn, func(_ context.Context, _ string, change func(*domain.ConnectorAuth)) error {
-		change(signed)
-		return nil
-	})
+	tools, listErr := client.Tools(ctx, &signedIn, connectors.Unstored{Auth: signed})
 	saved, err := h.store.MutateConnector(ctx, p, key, conn.ID, false, func(c *domain.Connector, _ bool) error {
 		if c.Pending == nil || c.Pending.State != state {
 			return api.Err(409, "REVISION_CONFLICT", "Another sign-in replaced this one")
@@ -301,7 +296,7 @@ func (h *harness) refreshConnector(ctx context.Context, p *auth.Principal, key a
 	if !conn.Signed() {
 		return nil, errConnectorSignedOut()
 	}
-	tools, err := client.Tools(ctx, &conn, h.keepTokens(p, &key, conn.ID))
+	tools, err := client.Tools(ctx, &conn, h.stored(p, &key, conn.ID))
 	if errors.Is(err, connectors.ErrSignedOut) {
 		return nil, errConnectorSignedOut()
 	}
