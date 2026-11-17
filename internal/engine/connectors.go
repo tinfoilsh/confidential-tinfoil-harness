@@ -66,8 +66,8 @@ type runApps struct {
 	// before each call, so what the user turned off or removed since the
 	// reply began, on any device, no longer runs.
 	current func(ctx context.Context, id string) (domain.Connector, error)
-	// see has a connector list the tools its server offers the run as they
-	// are now.
+	// see has a connector list what its server offers the run that bears on
+	// what its tools may do.
 	see       func(ctx context.Context, id string, live []domain.ConnectorTool)
 	approvals *approvalGate
 }

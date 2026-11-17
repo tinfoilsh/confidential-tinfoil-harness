@@ -127,8 +127,8 @@ func (s *Store) ClaimConnectorRefresh(ctx context.Context, p *auth.Principal, ke
 	return stored, claim, err
 }
 
-// SeeConnectorTools has a connector list the tools its server offers a
-// reply as they are now, no more than limit of them.
+// SeeConnectorTools has a connector list what its server offers a reply
+// that bears on what its tools may do, no more than limit tools in all.
 func (s *Store) SeeConnectorTools(ctx context.Context, p *auth.Principal, key auth.ContentKey, id string, live []domain.ConnectorTool, limit int) error {
 	_, err := s.MutateConnector(ctx, p, key, id, false, func(c *domain.Connector, _ bool) error {
 		if !c.SeeTools(live, limit) {

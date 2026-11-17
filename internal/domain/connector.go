@@ -170,13 +170,13 @@ func (t *ConnectorTool) permissionNow(readOnly bool) string {
 	return t.Permission
 }
 
-// SeeTools has the connector list the tools its server offers a reply as
-// they are now, so its user sees them and can choose what each may do, and
-// reports whether that changed what it lists. A tool it did not list asks
-// first, and is listed while the connector lists fewer than limit; one whose
-// server no longer says the same of whether it only reads is listed as it
-// is. The tools the server no longer offers stay as their user left them,
-// until the settings list its tools again.
+// SeeTools has the connector list what its server offers a reply that bears
+// on what its tools may do, so its user sees it and can choose, and reports
+// whether that changed what it lists. A tool it did not list is listed,
+// asking first, while the connector lists fewer than limit. One whose server
+// no longer says the same of whether it only reads is listed as it says now.
+// What else the connector lists of a tool, and the tools the server no
+// longer offers, stay as they are until the settings list its tools again.
 func (c *Connector) SeeTools(live []ConnectorTool, limit int) bool {
 	changed := false
 	for _, offered := range live {
