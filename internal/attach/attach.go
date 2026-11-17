@@ -198,7 +198,7 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	defer func() { clear(keyField) }()
 	var file, original []byte
 	defer func() { clear(file); clear(original) }()
-	var originalName string
+	var originalName, originalType string
 	filename := ""
 	for count := 0; ; count++ {
 		part, err := reader.NextPart()
@@ -242,6 +242,9 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			originalName = filepath.Base(part.FileName())
+			if kind, _, err := mime.ParseMediaType(part.Header.Get("Content-Type")); err == nil && strings.HasPrefix(kind, "image/") {
+				originalType = kind
+			}
 			original, err = io.ReadAll(io.LimitReader(part, int64(ImageUploads.MaxBytes)+1))
 			if err != nil || len(original) > ImageUploads.MaxBytes {
 				api.Respond(w, nil, api.Err(413, "ATTACHMENT_TOO_LARGE", "The original image exceeds the size limit"))
@@ -293,7 +296,7 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 		source, sourceName = original, originalName
 		sourceType = http.DetectContentType(source)
 		if sourceType == OpaqueContentType {
-			sourceType = cmp.Or(mime.TypeByExtension(filepath.Ext(sourceName)), OpaqueContentType)
+			sourceType = cmp.Or(originalType, mime.TypeByExtension(filepath.Ext(sourceName)), OpaqueContentType)
 		}
 	}
 	// An upload is converted, and its client sends the descriptor back with
