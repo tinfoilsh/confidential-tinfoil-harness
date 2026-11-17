@@ -557,6 +557,9 @@ func (ar *Service) writeBackup(ctx context.Context, p *auth.Principal, key *auth
 				return err
 			}
 			for _, doc := range docs {
+				if doc.File != nil {
+					b.omit(BackupOmission{Kind: "original_file", SourceID: doc.ID, ParentSourceID: project.ID, Category: "unsupported", Reason: "original_not_archived"})
+				}
 				entry := BackupDocument{ID: doc.ID, ProjectID: project.ID, Filename: doc.Filename, ContentType: doc.ContentType, SizeBytes: doc.SizeBytes, ExtractedText: doc.Content, CreatedAt: domain.LooseTime(doc.CreatedAt), UpdatedAt: domain.LooseTime(doc.UpdatedAt)}
 				if err := b.addJSON("project_documents", BackupDocumentPath(project.ID, doc.ID), entry); err != nil {
 					return err
@@ -682,6 +685,9 @@ func backupChat(b *BackupWriter, rel *backupRelationships, kind string, t *domai
 		message := backupMessage{Message: m}
 		for j, a := range m.Attachments {
 			id := fmt.Sprintf("%s/%d/%d", t.ID, i, j)
+			if a.Original != nil {
+				b.omit(BackupOmission{Kind: "original_file", SourceID: id, ParentSourceID: t.ID, Category: "unsupported", Reason: "original_not_archived"})
+			}
 			if !a.IsImage() && !a.HasContent() && a.StorageKey() != "" {
 				if err := document(&a); missing(err) {
 					omit(id, err)
