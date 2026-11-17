@@ -41,7 +41,7 @@ func (h *harness) apiRoutes() []routeSpec {
 }
 
 func (h *harness) changes(ctx context.Context, p *auth.Principal, _ auth.ContentKey, _ json.RawMessage) (any, error) {
-	return h.store.StorageChanges(ctx, p)
+	return h.store.StorageChanges(ctx, p, h.connectors != nil)
 }
 
 // threadOperations change a stored chat or a device chat in one way each.

@@ -18,6 +18,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/connectors"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/controlplane/cpstub"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
@@ -156,7 +157,8 @@ func TestAProjectImageBecomesContextForItsChats(t *testing.T) {
 
 func TestRemoteChangesReadOnlyStorageMetadata(t *testing.T) {
 	h, rows, _ := testChatHarness(t, nil)
-	for _, seeded := range []struct{ scope, id string }{{"chat", "c1"}, {"profile", "profile"}, {"project", "p1"}, {"project_document", "p1/d1"}} {
+	h.connectors = connectors.New(testConnectorClientID, testConnectorRedirect)
+	for _, seeded := range []struct{ scope, id string }{{"chat", "c1"}, {"profile", "profile"}, {"project", "p1"}, {"project_document", "p1/d1"}, {"connector", "a1"}} {
 		rows.cp.SetBlob(seeded.scope, seeded.id, cpstub.Blob{ETag: 1, Body: []byte("sealed")})
 	}
 	read := func() api.Object {
@@ -186,6 +188,11 @@ func TestRemoteChangesReadOnlyStorageMetadata(t *testing.T) {
 	third := read()
 	if third["projects"] == second["projects"] || third["profile"] != second["profile"] || third["chats"] != second["chats"] {
 		t.Fatalf("document changes: %v -> %v", second, third)
+	}
+	revise("connector", "a1")
+	connected := read()
+	if connected["connectors"] == third["connectors"] || connected["projects"] != third["projects"] || connected["profile"] != third["profile"] {
+		t.Fatalf("connector changes: %v -> %v", third, connected)
 	}
 	rows.cp.Mu.Lock()
 	rows.cp.SourceRevision++

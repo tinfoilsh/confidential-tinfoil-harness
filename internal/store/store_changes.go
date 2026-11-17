@@ -31,15 +31,19 @@ type ledgerDelete struct {
 }
 
 // StorageChanges is a token per kind of row: the chats' revision, and a
-// digest of the ledger's edge for the profile and for projects and their
-// documents.
-func (s *Store) StorageChanges(ctx context.Context, p *auth.Principal) (any, error) {
+// digest of the ledger's edge for the profile, for projects and their
+// documents, and, for a harness that keeps connectors, for those.
+func (s *Store) StorageChanges(ctx context.Context, p *auth.Principal, connectors bool) (any, error) {
 	summary, err := s.Controlplane.RevisionSummary(ctx, string(p.JWT), p.ID)
 	if err != nil {
 		return nil, FromControlplane(err)
 	}
 	tokens := map[string]string{"chats": summary.CurrentRevision}
-	for _, scope := range []string{"profile", "project", "project_document"} {
+	scopes := []string{"profile", "project", "project_document"}
+	if connectors {
+		scopes = append(scopes, "connector")
+	}
+	for _, scope := range scopes {
 		direction := "desc"
 		if scope == "profile" {
 			direction = "asc"
@@ -58,8 +62,9 @@ func (s *Store) StorageChanges(ctx context.Context, p *auth.Principal) (any, err
 		tokens[scope] = api.HashHex(api.Raw(ledger))
 	}
 	return struct {
-		Chats    string `json:"chats"`
-		Profile  string `json:"profile"`
-		Projects string `json:"projects"`
-	}{tokens["chats"], tokens["profile"], api.HashHex([]byte(tokens["project"] + tokens["project_document"]))}, nil
+		Chats      string `json:"chats"`
+		Profile    string `json:"profile"`
+		Projects   string `json:"projects"`
+		Connectors string `json:"connectors,omitempty"`
+	}{tokens["chats"], tokens["profile"], api.HashHex([]byte(tokens["project"] + tokens["project_document"])), tokens["connector"]}, nil
 }

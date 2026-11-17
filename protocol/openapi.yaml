@@ -180,7 +180,7 @@ paths:
       operationId: changes
       summary: Read the revisions of stored data
       tags: [session]
-      description: Revisions of the account's stored chats, profile and projects, which change when another device writes them.
+      description: Revisions of the account's stored chats, profile, projects and connectors, which change when another device writes them. A connector's also changes when the harness refreshes its sign-in.
       requestBody:
         content:
           application/json:
@@ -197,6 +197,7 @@ paths:
                   chats: {type: string}
                   profile: {type: string}
                   projects: {type: string}
+                  connectors: {type: string, description: "Absent from a harness that keeps no connectors."}
         default: {$ref: "#/components/responses/Error"}
 
   /v1/threads/turn:
