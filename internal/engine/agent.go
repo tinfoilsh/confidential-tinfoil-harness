@@ -62,8 +62,23 @@ func (eng *Engine) loop(ctx context.Context, out *Stream, req *Request, m *infer
 	}
 	searching := set.search != nil
 	conversation, err := fitted(ctx, req, searching, defs)
+	// A conversation that leaves the apps' tools no room, even once it is
+	// compacted, is answered without them: the turn was admitted before the
+	// run knew what its apps offer.
+	if err != nil && len(set.appDefs) > 0 && api.AsError(err).Code == "CONTEXT_TOO_LARGE" {
+		withoutApps(set, req)
+		if defs, err = offer(set, req.rendered); err != nil {
+			return fmt.Errorf("tools: %w", err)
+		}
+		conversation, err = fitted(ctx, req, searching, defs)
+	}
 	if err != nil {
 		return err
+	}
+	if req.apps != nil {
+		out.mu.Lock()
+		out.appUsage = req.usage
+		out.mu.Unlock()
 	}
 	// The run's own exchange follows the history it starts from.
 	history := len(conversation)
@@ -242,12 +257,14 @@ func body(req *Request, conversation []json.RawMessage, defs json.RawMessage) ([
 	return json.Marshal(payload)
 }
 
-// Search tools come first, so a caller's turns keep hitting the prompt cache.
+// Search tools come first, then the connectors', so a caller's turns keep
+// hitting the prompt cache.
 func offer(set *Toolset, rendered []json.RawMessage) (json.RawMessage, error) {
 	var defs []json.RawMessage
 	if set.search != nil {
 		defs = append(defs, set.search.defs...)
 	}
+	defs = append(defs, set.appDefs...)
 	defs = append(defs, rendered...)
 	if len(defs) == 0 {
 		return nil, nil
@@ -298,6 +315,9 @@ func Invoke(ctx context.Context, out *Stream, set *Toolset, call ToolCall) (mess
 			set.images = append(set.images, browserImage(result.Image))
 		}
 		return answered(call.ID, clip(result.Text, MaxToolOutput))
+	}
+	if tool := set.apps[call.Name]; tool != nil {
+		return callApp(ctx, out, set, tool, call)
 	}
 	// A widget is drawn by the caller from TOOL_CALL_ARGS; the model just needs a result.
 	if !set.searches(call.Name) {

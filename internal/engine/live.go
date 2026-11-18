@@ -8,6 +8,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/api"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/connectors"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/observability"
@@ -29,6 +30,9 @@ type Engine struct {
 	// Memory reads the enclave's memory, which new turns leave a reserve
 	// of; nil admits every turn.
 	Memory Memory
+	// Connectors reaches the servers users connect; nil offers none of
+	// their tools.
+	Connectors *connectors.Client
 }
 
 // liveRuns holds what this instance is executing: each chat's running reply
@@ -187,6 +191,7 @@ type Run struct {
 	compacted                *compaction // what the run's compaction left, once it compacted
 	researched               bool        // the run started a research, which its reply records
 	browser                  *browserSession
+	approvals                *approvalGate // the calls waiting for the user's approval, once the run offers connectors
 
 	// yielded marks an active run stopped so a queued turn starts now.
 	yielded bool

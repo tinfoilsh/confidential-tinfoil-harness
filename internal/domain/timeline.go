@@ -140,6 +140,9 @@ func (a *MessageAssembler) Apply(e Event, at string) {
 		}
 	case ActivityDelta:
 		if call, ok := a.calls[strings.TrimPrefix(e.MessageID, ActivityPrefix)]; ok {
+			if e.Display != nil {
+				call.block().Display = e.Display
+			}
 			for _, op := range e.Patch {
 				if op.Path == "/output/-" {
 					b := call.block()

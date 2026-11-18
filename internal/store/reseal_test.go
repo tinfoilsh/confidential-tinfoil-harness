@@ -63,11 +63,13 @@ func TestResealSealsRowsAnOlderKeyOrNoneSealedUnderTheTarget(t *testing.T) {
 		{"chat", "c1"}:                `{"id":"c1","messages":[]}`,
 		{"project", "p1"}:             `{"name":"House"}`,
 		{"project_document", "p1/d1"}: `{"content":"Context"}`,
+		{"connector", "a1"}:           `{"id":"a1","auth":{"refreshToken":"token"}}`,
 	}
 	h.cp.SetBlob("profile", "profile", cpstub.Blob{ETag: 1, Body: sealLegacyV1(t, old, []byte(rows[[2]string{"profile", "profile"}]))})
 	h.cp.SetBlob("chat", "c1", cpstub.Blob{ETag: 1, KeyID: keyID(old), Body: h.sealV2(t, old, "chat", "c1", rows[[2]string{"chat", "c1"}])})
 	h.cp.SetBlob("project", "p1", cpstub.Blob{ETag: 1, Body: sealLegacyV0(t, h.key, []byte(rows[[2]string{"project", "p1"}]))})
 	h.cp.SetBlob("project_document", "p1/d1", cpstub.Blob{ETag: 1, KeyID: keyID(old), Body: h.sealV2(t, old, "project_document", "p1/d1", rows[[2]string{"project_document", "p1/d1"}])})
+	h.cp.SetBlob("connector", "a1", cpstub.Blob{ETag: 1, KeyID: keyID(old), Body: h.sealV2(t, old, "connector", "a1", rows[[2]string{"connector", "a1"}])})
 	h.push(t, "chat", "c2", `{"id":"c2"}`)
 
 	keys := []auth.ContentKey{old, h.key}
@@ -75,7 +77,7 @@ func TestResealSealsRowsAnOlderKeyOrNoneSealedUnderTheTarget(t *testing.T) {
 	if err != nil || first.Status != jobs.Running && first.Status != jobs.Complete {
 		t.Fatalf("reseal = %+v (%v)", first, err)
 	}
-	if report := h.resealEnded(t, keys, h.key); report != (ResealReport{Status: jobs.Complete, Migrated: 4}) {
+	if report := h.resealEnded(t, keys, h.key); report != (ResealReport{Status: jobs.Complete, Migrated: 5}) {
 		t.Fatalf("report = %+v, want every row of every scope resealed and nothing left", report)
 	}
 	for row, plaintext := range rows {

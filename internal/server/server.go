@@ -15,6 +15,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/archives"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/attach"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
+	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/connectors"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/engine"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/inference"
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/jobs"
@@ -38,6 +39,9 @@ type harness struct {
 	engine       *engine.Engine
 	summaries    *summarize.Service
 	metrics      *observability.Metrics
+	// connectors signs in to and reaches the servers users connect, or is
+	// nil when the harness is not configured to.
+	connectors *connectors.Client
 }
 
 // listenAddr is the shim's upstream port in tinfoil-config.yml, which also
@@ -77,7 +81,14 @@ func Run() {
 	go h.store.RunAttachmentMaintenance(ctx)
 	h.attachments = &attach.Service{Auth: h.auth, Models: h.models, Store: h.store, Pages: h.pages, Images: remoteimage.New()}
 	h.store.Repair = h.attachments
-	h.engine = &engine.Engine{Safeguards: engine.NewSubmitter(os.Getenv("SAFEGUARDS_URL")), Store: h.store, Models: h.models, Attachments: h.attachments, Auth: h.auth, Summaries: h.summaries, Memory: engine.SystemMemory}
+	// Users sign in to their connectors through the client the harness
+	// names by its metadata document, and come back to the web app.
+	if clientID, redirect := os.Getenv("CONNECTOR_CLIENT_ID"), os.Getenv("CONNECTOR_REDIRECT_URL"); clientID != "" && redirect != "" {
+		h.connectors = connectors.New(clientID, redirect)
+	} else {
+		slog.Warn("connectors are off: CONNECTOR_CLIENT_ID and CONNECTOR_REDIRECT_URL are not both set")
+	}
+	h.engine = &engine.Engine{Safeguards: engine.NewSubmitter(os.Getenv("SAFEGUARDS_URL")), Store: h.store, Models: h.models, Attachments: h.attachments, Auth: h.auth, Summaries: h.summaries, Memory: engine.SystemMemory, Connectors: h.connectors}
 	h.metrics = observability.New(h.engine.Live.Stats)
 	h.engine.Metrics = h.metrics
 	if available, total, err := engine.SystemMemory(); err != nil {

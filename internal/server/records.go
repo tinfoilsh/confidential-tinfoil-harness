@@ -36,11 +36,12 @@ func (h *harness) apiRoutes() []routeSpec {
 		{"/v1/projects/delete-all", false, true, h.deleteAllProjects},
 		{"/v1/metadata/favicon", true, false, decoded(h.attachments.Favicon)}, {"/v1/metadata/link", true, false, decoded(h.attachments.LinkPreview)},
 	}
+	routes = append(routes, h.connectorRoutes()...)
 	return append(routes, h.keyRoutes()...)
 }
 
 func (h *harness) changes(ctx context.Context, p *auth.Principal, _ auth.ContentKey, _ json.RawMessage) (any, error) {
-	return h.store.StorageChanges(ctx, p)
+	return h.store.StorageChanges(ctx, p, h.connectors != nil)
 }
 
 // threadOperations change a stored chat or a device chat in one way each.
@@ -55,6 +56,7 @@ func (h *harness) threadOperations() map[string]jsonEndpoint {
 func (h *harness) runOperations() map[string]jsonEndpoint {
 	return map[string]jsonEndpoint{"/v1/threads/cancel": decoded(h.engine.CancelThread),
 		"/v1/threads/browser/result": decoded(h.engine.SubmitBrowserResult),
+		"/v1/threads/approve":        decoded(h.engine.SubmitApproval),
 		"/v1/threads/queue/send":     decoded(h.engine.SendQueued), "/v1/threads/queue/remove": decoded(h.engine.RemoveQueued)}
 }
 
@@ -85,7 +87,7 @@ func (h *harness) session(ctx context.Context, p *auth.Principal, _ auth.Content
 		ProfileDefaults: domain.DefaultProfile(),
 		Composer:        attach.Composer(),
 		Presets:         presets,
-		Features:        map[string]bool{"browserTools": true, "webSearch": engine.WebSearchReady(), "transcription": h.models.ServiceReady("router"), "speech": h.models.ServiceReady("router"), "promptPresetEdits": true, "promptPresetUpdates": true, "partialThread": true, "compaction": h.engine.Summaries.Ready(summarize.Compaction), "manualCompaction": h.engine.Summaries.Ready(summarize.Compaction), "compactLatest": h.engine.Summaries.Ready(summarize.Compaction), "research": engine.WebSearchReady() && h.engine.Summaries.Ready(summarize.ResearchNotes) && !p.Anonymous && credential.FirstParty},
+		Features:        map[string]bool{"browserTools": true, "webSearch": engine.WebSearchReady(), "transcription": h.models.ServiceReady("router"), "speech": h.models.ServiceReady("router"), "promptPresetEdits": true, "promptPresetUpdates": true, "partialThread": true, "compaction": h.engine.Summaries.Ready(summarize.Compaction), "manualCompaction": h.engine.Summaries.Ready(summarize.Compaction), "compactLatest": h.engine.Summaries.Ready(summarize.Compaction), "research": engine.WebSearchReady() && h.engine.Summaries.Ready(summarize.ResearchNotes) && !p.Anonymous && credential.FirstParty, "connectors": h.connectors != nil && !p.Anonymous && credential.FirstParty},
 	}, nil
 }
 

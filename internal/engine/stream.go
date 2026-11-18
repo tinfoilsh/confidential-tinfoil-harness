@@ -25,6 +25,9 @@ type Stream struct {
 	// musing shows what the model writes as its reasoning, as a research's
 	// notes between its calls are, which are not its reply.
 	musing bool
+	// appUsage is what the run's prompt fills of the window once the tools
+	// of its user's apps are counted, which the chat then keeps.
+	appUsage *domain.ContextUsage
 
 	// mu serializes writes against the tool goroutines.
 	mu       sync.Mutex

@@ -457,6 +457,7 @@ func TestARunsGrantCoversItsChatAndItsProjectsContext(t *testing.T) {
 	h.push(t, "project", "project", `{"name":"House"}`)
 	h.push(t, "project_document", "project/doc", `{"content":"Context"}`)
 	h.push(t, "project_document", "other/doc", `{"content":"Not ours"}`)
+	h.push(t, "connector", "app", `{"id":"app","auth":{"refreshToken":"first"}}`)
 	grant, err := h.rows.AuthorizeRun(ctx, h.p, h.key, "target", nil, 3*time.Hour)
 	if err != nil || grant.ChatID != "target" || grant.ProjectID != "project" || grant.KeyID != h.kid || !grant.ExpiresAt.After(api.Now().Add(3*time.Hour-time.Minute)) || grant.ExpiresAt.After(api.Now().Add(3*time.Hour)) {
 		t.Fatalf("grant = %+v (%v), want the stored chat's project under this key for the three hours asked", grant, err)
@@ -475,6 +476,12 @@ func TestARunsGrantCoversItsChatAndItsProjectsContext(t *testing.T) {
 	}
 	if _, err := h.rows.Load(ctx, &run, h.key, "project", "project"); err != nil {
 		t.Fatalf("the run cannot read its project: %v", err)
+	}
+	if apps, err := h.rows.List(ctx, &run, h.key, "connector", "", "", 10); err != nil || len(apps.Rows) != 1 || apps.Rows[0].ID != "app" {
+		t.Fatalf("the run's connectors = %+v (%v), want the user's one connector", apps, err)
+	}
+	if _, err := h.rows.Push(ctx, &run, h.key, "connector", &domain.StoredRow{ID: "app", ETag: "1", Data: []byte(`{"id":"app","auth":{"refreshToken":"rotated"}}`)}, "refresh"); err != nil {
+		t.Fatalf("the run cannot keep the tokens it refreshed: %v", err)
 	}
 	other := randomKey()
 	for name, attempt := range map[string]func() error{
@@ -506,7 +513,8 @@ func TestARunsGrantCoversItsChatAndItsProjectsContext(t *testing.T) {
 			_, err := h.rows.List(ctx, &run, h.key, "project_document", "", "other", 10)
 			return err
 		},
-		"remove its chat": func() error { return h.rows.Remove(ctx, &run, h.key, "chat", "target") },
+		"remove its chat":    func() error { return h.rows.Remove(ctx, &run, h.key, "chat", "target") },
+		"remove a connector": func() error { return h.rows.Remove(ctx, &run, h.key, "connector", "app") },
 	} {
 		if err := attempt(); !errors.Is(err, errRunScope) {
 			t.Errorf("%s: %v, want a refusal of the grant's scope", name, err)
@@ -560,6 +568,9 @@ func TestAnOperationsGrantCoversWhatItIsFor(t *testing.T) {
 	if _, err := h.rows.Push(ctx, &upload, h.key, "chat", &domain.StoredRow{ID: "existing", ETag: "1", Data: []byte(`{}`)}, "escape-chat"); !errors.Is(err, errRunScope) {
 		t.Errorf("a chat push: %v, want a refusal of the grant's scope", err)
 	}
+	if _, err := h.rows.Push(ctx, &upload, h.key, "connector", &domain.StoredRow{ID: "app", Data: []byte(`{}`)}, "escape-connector"); !errors.Is(err, errRunScope) {
+		t.Errorf("a connector push: %v, want a refusal of the grant's scope", err)
+	}
 	if row, err := h.rows.Load(ctx, &upload, h.key, "project_document", "project/doc"); err != nil || row.ETag != etag || !bytes.Equal(row.Data, document.Data) {
 		t.Fatalf("the document was changed, or the upload cannot read it: %+v (%v)", row, err)
 	}
@@ -575,6 +586,9 @@ func TestAnOperationsGrantCoversWhatItIsFor(t *testing.T) {
 	}
 	if _, err := h.rows.Push(ctx, &export, h.key, "chat", &domain.StoredRow{ID: "new", Data: []byte(`{}`)}, "export-write"); !errors.Is(err, errRunScope) {
 		t.Fatalf("an export wrote a chat: %v", err)
+	}
+	if _, err := h.rows.Push(ctx, &export, h.key, "connector", &domain.StoredRow{ID: "app", Data: []byte(`{}`)}, "export-connector"); !errors.Is(err, errRunScope) {
+		t.Fatalf("an export wrote a connector: %v", err)
 	}
 	if _, err := h.rows.Load(ctx, &imported, h.key, "chat", "existing"); !errors.Is(err, errRunScope) {
 		t.Fatalf("an import read a chat: %v", err)

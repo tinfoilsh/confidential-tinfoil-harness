@@ -75,6 +75,9 @@ type turnOptions struct {
 	// Research has the turn research its question on the web at length
 	// before it answers with a report.
 	Research bool `json:"research,omitempty"`
+	// Connectors has the turn offer the tools of the user's connectors, which
+	// only a client that shows their calls and answers their approvals asks.
+	Connectors bool `json:"connectors,omitempty"`
 	// CacheSecret scopes the prompt cache to the client that holds it, as
 	// the Tinfoil SDKs scope theirs: 256 random bits, hex encoded.
 	CacheSecret string `json:"cacheSecret,omitempty"`

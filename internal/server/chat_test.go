@@ -60,6 +60,8 @@ type memoryRows struct {
 	calls     int
 	// loads counts the rows opened, by scope.
 	loads map[string]int
+	// loaded, when set, is told the scope of each row opened.
+	loaded func(scope string)
 	// What the harness stores beside the rows: attachment bytes in bk,
 	// and in cp their index, the legacy attachments and the change ledger.
 	cp *cpstub.Store
@@ -120,6 +122,9 @@ func (s *memoryRows) Load(_ context.Context, p *auth.Principal, key auth.Content
 	defer s.mu.Unlock()
 	s.calls++
 	s.loads[scope]++
+	if s.loaded != nil {
+		s.loaded(scope)
+	}
 	name := rowMapKey(p, scope, id)
 	row, ok := s.rows[name]
 	if !ok {
