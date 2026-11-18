@@ -35,6 +35,7 @@ const (
 	opPutAttachment
 	opGetAttachment
 	opImport
+	opPutDocumentFile
 )
 
 // grantScope is what a storage grant lets its holder do: a run reads and
@@ -48,7 +49,7 @@ func (g *grantScope) allows(op storageOp) bool {
 	}
 	switch g.Operation {
 	case "project-upload":
-		return op == opPull || op == opPush
+		return op == opPull || op == opPush || op == opPutDocumentFile
 	case "import":
 		return op == opImport
 	case "export":
@@ -119,17 +120,29 @@ func (g *grantScope) permitsPush(key auth.ContentKey, scope string, row *domain.
 		return false
 	}
 	if g.Operation == "project-upload" {
-		return scope == "project_document" && g.ownsDocument(row.ID) && row.ETag == "" && row.Project != nil && *row.Project == g.ProjectID
+		return scope == "project_document" && g.ownsDocument(row.ID) && (g.replaces(row.ID) || g.DocumentID == "" && row.ETag == "") && row.Project != nil && *row.Project == g.ProjectID
 	}
 	// The grant owns the chat, including its metadata. ProjectID limits
 	// context reads; the user can move the chat while a reply is running.
 	return g.Operation == "" && scope == "chat" && row.ID == g.ChatID
 }
 
+// replaces is whether id names the document a project upload replaces.
+func (g *grantScope) replaces(id string) bool {
+	return g.DocumentID != "" && id == g.ProjectID+"/"+g.DocumentID
+}
+
 // permitsPutAttachment is whether the grant may store an attachment under
 // chatID: a run's, under its own chat.
 func (g *grantScope) permitsPutAttachment(chatID string) bool {
 	return g.allows(opPutAttachment) && chatID == g.ChatID
+}
+
+// permitsPutDocumentFile is whether the grant may store a file for the
+// document id names: a project upload's, for a new document of its project
+// or the one it replaces.
+func (g *grantScope) permitsPutDocumentFile(id string) bool {
+	return g.allows(opPutDocumentFile) && g.ownsDocument(id) && (g.DocumentID == "" || g.replaces(id))
 }
 
 // permitsList is whether the grant may list a scope's rows, or those of a

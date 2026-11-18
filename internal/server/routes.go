@@ -71,20 +71,21 @@ var contractCheck func(http.Handler) http.Handler
 // handlers are every route the harness serves, by method and path.
 func (h *harness) handlers() map[string]http.HandlerFunc {
 	handlers := map[string]http.HandlerFunc{
-		"POST " + remoteImagePath:            boundedHandler(imageResponseSlots, h.jsonRoute(routeSpec{remoteImagePath, true, false, decoded(h.attachments.Image)})),
-		"GET /healthz":                       func(w http.ResponseWriter, r *http.Request) { api.Respond(w, api.Object{"ok": true}, nil) },
-		"POST /v1/threads/turn":              h.engine.HandleTurn,
-		"POST /v1/threads/import":            h.engine.HandleThreadImport,
-		"POST /v1/threads/follow":            h.engine.HandleFollow,
-		"POST /v1/threads/upgrade":           h.handleUpgrade,
-		"POST /v1/speech":                    h.attachments.HandleSpeech,
-		"POST /v1/attachments/upload":        boundedHandler(uploadSlots, h.attachments.HandleUpload),
-		"POST /v1/projects/documents/upload": boundedHandler(uploadSlots, h.attachments.HandleUpload),
-		"POST /v1/transcriptions":            boundedHandler(uploadSlots, h.attachments.HandleUpload),
-		"POST /v1/import":                    h.archives.HandleImport,
-		"POST /v1/export":                    h.archives.HandleExport,
-		"POST /v1/attachments/get":           h.attachments.HandleAttachmentGet,
-		"POST /v1/attachments/get-public":    h.attachments.HandleAttachmentGet,
+		"POST " + remoteImagePath:              boundedHandler(imageResponseSlots, h.jsonRoute(routeSpec{remoteImagePath, true, false, decoded(h.attachments.Image)})),
+		"GET /healthz":                         func(w http.ResponseWriter, r *http.Request) { api.Respond(w, api.Object{"ok": true}, nil) },
+		"POST /v1/threads/turn":                h.engine.HandleTurn,
+		"POST /v1/threads/import":              h.engine.HandleThreadImport,
+		"POST /v1/threads/follow":              h.engine.HandleFollow,
+		"POST /v1/threads/upgrade":             h.handleUpgrade,
+		"POST /v1/speech":                      h.attachments.HandleSpeech,
+		"POST /v1/attachments/upload":          boundedHandler(uploadSlots, h.attachments.HandleUpload),
+		"POST /v1/projects/documents/upload":   boundedHandler(uploadSlots, h.attachments.HandleUpload),
+		"POST /v1/transcriptions":              boundedHandler(uploadSlots, h.attachments.HandleUpload),
+		"POST /v1/import":                      h.archives.HandleImport,
+		"POST /v1/export":                      h.archives.HandleExport,
+		"POST /v1/attachments/get":             h.attachments.HandleAttachmentGet,
+		"POST /v1/attachments/get-public":      h.attachments.HandleAttachmentGet,
+		"POST /v1/projects/documents/download": h.attachments.HandleDocumentDownload,
 	}
 	add := func(pattern string, handler http.HandlerFunc) {
 		if handlers[pattern] != nil {

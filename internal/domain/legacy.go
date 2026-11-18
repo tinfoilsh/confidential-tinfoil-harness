@@ -672,6 +672,9 @@ func ReadProjectDocument(row *StoredRow, projectID string) (ProjectDocument, err
 			return ProjectDocument{}, err
 		}
 		doc = stored.ProjectDocument
+		if stored.File != nil && stored.File.ID != "" && stored.File.Key != "" {
+			doc.File = stored.File
+		}
 	default:
 		var stored struct {
 			ProjectDocument

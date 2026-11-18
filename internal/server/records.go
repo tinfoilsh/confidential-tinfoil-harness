@@ -31,6 +31,7 @@ func (h *harness) apiRoutes() []routeSpec {
 		{"/v1/projects/list", false, true, decoded(h.listProjects)}, {"/v1/projects/get", false, true, decoded(h.getProject)},
 		{"/v1/projects/create", false, true, decoded(h.createProject)}, {"/v1/projects/update", false, true, decoded(h.updateProject)},
 		{"/v1/projects/delete", false, true, decoded(h.deleteProject)}, {"/v1/projects/documents/delete", false, true, decoded(h.deleteDocument)},
+		{"/v1/artifacts/list", false, true, decoded(h.listArtifacts)}, {"/v1/artifacts/get", false, true, decoded(h.getArtifact)},
 		{"/v1/shares/open", true, false, decoded(h.archives.OpenShare)},
 		{"/v1/import/status", false, false, decoded(h.archives.ImportStatus)},
 		{"/v1/projects/delete-all", false, true, h.deleteAllProjects},
@@ -85,7 +86,7 @@ func (h *harness) session(ctx context.Context, p *auth.Principal, _ auth.Content
 		ProfileDefaults: domain.DefaultProfile(),
 		Composer:        attach.Composer(),
 		Presets:         presets,
-		Features:        map[string]bool{"browserTools": true, "webSearch": engine.WebSearchReady(), "transcription": h.models.ServiceReady("router"), "speech": h.models.ServiceReady("router"), "promptPresetEdits": true, "promptPresetUpdates": true, "partialThread": true, "compaction": h.engine.Summaries.Ready(summarize.Compaction), "manualCompaction": h.engine.Summaries.Ready(summarize.Compaction), "compactLatest": h.engine.Summaries.Ready(summarize.Compaction), "research": engine.WebSearchReady() && h.engine.Summaries.Ready(summarize.ResearchNotes) && !p.Anonymous && credential.FirstParty},
+		Features:        map[string]bool{"browserTools": true, "webSearch": engine.WebSearchReady(), "transcription": h.models.ServiceReady("router"), "speech": h.models.ServiceReady("router"), "promptPresetEdits": true, "promptPresetUpdates": true, "partialThread": true, "imageOriginals": !p.Anonymous, "documentVersions": true, "artifacts": true, "compaction": h.engine.Summaries.Ready(summarize.Compaction), "manualCompaction": h.engine.Summaries.Ready(summarize.Compaction), "compactLatest": h.engine.Summaries.Ready(summarize.Compaction), "research": engine.WebSearchReady() && h.engine.Summaries.Ready(summarize.ResearchNotes) && !p.Anonymous && credential.FirstParty},
 	}, nil
 }
 
@@ -519,10 +520,14 @@ func (h *harness) getProject(ctx context.Context, p *auth.Principal, key auth.Co
 	if err != nil {
 		return nil, err
 	}
+	views := make([]domain.DocumentView, len(docs))
+	for i, doc := range docs {
+		views[i] = doc.View()
+	}
 	return struct {
 		domain.Project
-		Documents []domain.ProjectDocument `json:"documents"`
-	}{project, docs}, nil
+		Documents []domain.DocumentView `json:"documents"`
+	}{project, views}, nil
 }
 func (h *harness) createProject(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *projectRequest) (any, error) {
 	if strings.TrimSpace(domain.ValueOr(in.Name, "")) == "" {
@@ -559,6 +564,41 @@ func (h *harness) deleteAllProjects(ctx context.Context, p *auth.Principal, key 
 
 func (h *harness) deleteDocument(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *projectDocumentRequest) (any, error) {
 	return struct{}{}, h.store.RemoveRow(ctx, p, key, "project_document", in.ProjectID+"/"+in.DocumentID)
+}
+
+// listArtifacts lists a page of the artifacts the replies in the user's
+// stored chats drew, or in a project's.
+func (h *harness) listArtifacts(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *listRequest) (any, error) {
+	if in.ProjectID != "" {
+		if _, err := h.store.LoadProject(ctx, p, key, in.ProjectID); err != nil {
+			return nil, err
+		}
+	}
+	artifacts, next, err := h.store.Artifacts(ctx, p, key, in.ProjectID, in.Cursor)
+	if err != nil {
+		return nil, err
+	}
+	return struct {
+		Artifacts  []domain.Artifact `json:"artifacts"`
+		NextCursor string            `json:"nextCursor"`
+	}{artifacts, next}, nil
+}
+
+// getArtifact is one artifact of a stored chat, with the arguments its reply
+// drew it with.
+func (h *harness) getArtifact(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *artifactRequest) (any, error) {
+	row, err := h.store.LoadThread(ctx, p, key, in.ThreadID)
+	if err != nil {
+		return nil, err
+	}
+	artifact, arguments, found := row.Artifact(in.MessageID, in.ToolCallID)
+	if !found {
+		return nil, api.Err(404, "THREAD_NOT_FOUND", "The artifact was not found")
+	}
+	return struct {
+		Artifact  domain.Artifact `json:"artifact"`
+		Arguments string          `json:"arguments"`
+	}{artifact, arguments}, nil
 }
 func (h *harness) searchThreads(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *searchRequest) (any, error) {
 	ids, indexing, err := h.search.Query(ctx, p, key, in.Query, in.Limit)

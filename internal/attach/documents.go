@@ -86,8 +86,44 @@ func Unreachable(err error) bool {
 // inline in the given copy, which is the one a prompt is built from.
 func (at *Service) PlaceAttachments(ctx context.Context, p *auth.Principal, key auth.ContentKey, threadID string, t *domain.Thread) error {
 	defer clear(key[:])
-	return t.EachAttachment(func(a *domain.Attachment) error { return at.placeAttachment(ctx, p, key, threadID, a) })
+	return t.EachAttachment(func(a *domain.Attachment) error {
+		if err := at.placeAttachment(ctx, p, key, threadID, a); err != nil {
+			return err
+		}
+		return at.placeOriginal(ctx, p, key, threadID, a)
+	})
 }
+
+// placeOriginal copies an attachment's uploaded file under the thread when
+// it is kept elsewhere: where its upload filed it, or under the chat a fork
+// was made from.
+func (at *Service) placeOriginal(ctx context.Context, p *auth.Principal, key auth.ContentKey, threadID string, a *domain.Attachment) error {
+	defer clear(key[:])
+	o := a.Original
+	if o == nil || domain.EnclaveAttachmentID.MatchString(o.ID) && o.StorageThreadID == threadID {
+		return nil
+	}
+	data, err := at.Store.GetAttachment(ctx, p, o.ID, o.EncryptionKey)
+	if err != nil {
+		if Unreachable(err) {
+			return errOriginalMissing
+		}
+		return err
+	}
+	defer clear(data)
+	id, fileKey, err := at.Store.PutAttachment(ctx, p, key, threadID, "original/"+a.ID, data)
+	if err != nil {
+		return err
+	}
+	// Copies of the thread share the original, so it is replaced, never
+	// changed in place.
+	copied := *o
+	copied.ID, copied.EncryptionKey, copied.StorageThreadID = id, fileKey, threadID
+	a.Original = &copied
+	return nil
+}
+
+var errOriginalMissing = api.Err(409, "ATTACHMENTS_UNAVAILABLE", "The original upload is no longer available. Attach the file again.").WithAction(api.ActionRevise)
 
 func (at *Service) placeAttachment(ctx context.Context, p *auth.Principal, key auth.ContentKey, threadID string, a *domain.Attachment) error {
 	defer clear(key[:])
@@ -192,6 +228,18 @@ func (at *Service) InflateDocument(ctx context.Context, p *auth.Principal, a *do
 func (at *Service) RepairAttachments(ctx context.Context, p *auth.Principal, key auth.ContentKey, t *domain.Thread, missing []string) error {
 	defer clear(key[:])
 	return t.EachAttachment(func(a *domain.Attachment) error {
+		if o := a.Original; o != nil && slices.Contains(missing, o.ID) {
+			other := *o
+			other.StorageThreadID = "elsewhere"
+			a.Original = &other
+			if err := at.placeOriginal(ctx, p, key, t.ID, a); err == errOriginalMissing {
+				// This chat was already saved; a missing historical file
+				// must not prevent the user from continuing the chat.
+				a.Original = nil
+			} else if err != nil {
+				return err
+			}
+		}
 		if !slices.Contains(missing, a.ID) {
 			return nil
 		}

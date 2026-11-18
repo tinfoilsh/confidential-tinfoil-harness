@@ -9,6 +9,9 @@ type StorageGrant struct {
 	Operation string // "" for a chat's run; "import", "export" or "project-upload"
 	ChatID    string
 	ProjectID string
-	KeyID     string // hex id of the content key, as seal.KeyIDHex gives it
-	ExpiresAt time.Time
+	// DocumentID is the document a project upload replaces; empty for one
+	// that adds a document.
+	DocumentID string
+	KeyID      string // hex id of the content key, as seal.KeyIDHex gives it
+	ExpiresAt  time.Time
 }

@@ -14,12 +14,12 @@ import (
 const maxAttachmentRefsPerChat = 500
 
 // chatAttachmentRefs is the distinct ids of the stored attachments a chat
-// names: every attachment carrying a server key. One without a key was
-// never uploaded, so has no index row to keep alive. Only the fields
-// liveness needs are read, so a chat field of an unexpected type cannot
-// hide a live attachment. A plaintext without that shape returns nil: its
-// references are unknown, and the control plane keeps every blob under
-// the chat.
+// names: every attachment carrying a server key, and every uploaded file
+// an attachment keeps. One without a key was never uploaded, so has no
+// index row to keep alive. Only the fields liveness needs are read, so a
+// chat field of an unexpected type cannot hide a live attachment. A
+// plaintext without that shape returns nil: its references are unknown,
+// and the control plane keeps every blob under the chat.
 func chatAttachmentRefs(plaintext []byte) []string {
 	var chat struct {
 		Messages []struct {
@@ -31,17 +31,26 @@ func chatAttachmentRefs(plaintext []byte) []string {
 	}
 	refs := []string{}
 	seen := make(map[string]struct{})
+	add := func(id string) {
+		if _, dup := seen[id]; dup {
+			return
+		}
+		seen[id] = struct{}{}
+		refs = append(refs, id)
+	}
 	for _, message := range chat.Messages {
 		for _, attachment := range message.Attachments {
 			var id string
-			if json.Unmarshal(attachment["id"], &id) != nil || id == "" || attachmentServerKey(attachment) == "" {
-				continue
+			if json.Unmarshal(attachment["id"], &id) == nil && id != "" && attachmentServerKey(attachment) != "" {
+				add(id)
 			}
-			if _, dup := seen[id]; dup {
-				continue
+			var original struct {
+				ID            string `json:"id"`
+				EncryptionKey string `json:"encryptionKey"`
 			}
-			seen[id] = struct{}{}
-			refs = append(refs, id)
+			if json.Unmarshal(attachment["original"], &original) == nil && original.ID != "" && original.EncryptionKey != "" {
+				add(original.ID)
+			}
 		}
 	}
 	return refs

@@ -99,8 +99,8 @@ func (s *memoryRows) AuthorizeRun(_ context.Context, _ *auth.Principal, _ auth.C
 	return &auth.StorageGrant{ChatID: id, ProjectID: domain.ValueOr(project, ""), ExpiresAt: api.Now().Add(lifetime)}, nil
 }
 
-func (s *memoryRows) AuthorizeStorage(_ context.Context, p *auth.Principal, _ auth.ContentKey, operation, project string) (*auth.StorageGrant, error) {
-	return &auth.StorageGrant{Operation: operation, ProjectID: project, ExpiresAt: api.Now().Add(time.Hour)}, nil
+func (s *memoryRows) AuthorizeStorage(_ context.Context, p *auth.Principal, _ auth.ContentKey, operation, project, document string) (*auth.StorageGrant, error) {
+	return &auth.StorageGrant{Operation: operation, ProjectID: project, DocumentID: document, ExpiresAt: api.Now().Add(time.Hour)}, nil
 }
 
 func randomKey() auth.ContentKey { var k auth.ContentKey; rand.Read(k[:]); return k }

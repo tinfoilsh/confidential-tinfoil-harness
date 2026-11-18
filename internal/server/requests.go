@@ -183,6 +183,27 @@ func (in *projectDocumentRequest) Validate() error {
 	return api.RequireID("documentId", in.DocumentID)
 }
 
+// artifactRequest names one artifact: the chat it is in, and the reply and
+// call that drew it.
+type artifactRequest struct {
+	ThreadID   string `json:"threadId"`
+	MessageID  string `json:"messageId"`
+	ToolCallID string `json:"toolCallId"`
+}
+
+func (in *artifactRequest) Validate() error {
+	if err := api.RequireID("threadId", in.ThreadID); err != nil {
+		return err
+	}
+	if err := api.RequireID("messageId", in.MessageID); err != nil {
+		return err
+	}
+	if in.ToolCallID == "" {
+		return api.Err(400, "BAD_REQUEST", "toolCallId is required")
+	}
+	return nil
+}
+
 type upgradeRequest struct {
 	Threads *[]json.RawMessage `json:"threads"`
 }

@@ -46,7 +46,7 @@ type ChatIndexer interface {
 // test's stand-in for it.
 type RowStore interface {
 	AuthorizeRun(context.Context, *auth.Principal, auth.ContentKey, string, *string, time.Duration) (*auth.StorageGrant, error)
-	AuthorizeStorage(context.Context, *auth.Principal, auth.ContentKey, string, string) (*auth.StorageGrant, error)
+	AuthorizeStorage(context.Context, *auth.Principal, auth.ContentKey, string, string, string) (*auth.StorageGrant, error)
 	Load(context.Context, *auth.Principal, auth.ContentKey, string, string) (*domain.StoredRow, error)
 	Pull(context.Context, *auth.Principal, auth.ContentKey, string, []string) ([]domain.StoredRow, map[string]error, error)
 	List(context.Context, *auth.Principal, auth.ContentKey, string, string, string, int) (Page, error)
@@ -143,19 +143,20 @@ func (r *Rows) AuthorizeRun(ctx context.Context, p *auth.Principal, key auth.Con
 }
 
 // AuthorizeStorage grants an operation its rows: an import's writes, an
-// export's reads, or a project upload's documents.
-func (r *Rows) AuthorizeStorage(ctx context.Context, p *auth.Principal, key auth.ContentKey, operation, projectID string) (*auth.StorageGrant, error) {
+// export's reads, or a project upload's documents, which may replace the
+// one document it names.
+func (r *Rows) AuthorizeStorage(ctx context.Context, p *auth.Principal, key auth.ContentKey, operation, projectID, documentID string) (*auth.StorageGrant, error) {
 	defer clear(key[:])
 	switch operation {
 	case "import", "export":
 	case "project-upload":
-		if !runIDValid(projectID) {
-			return nil, api.Err(400, "BAD_REQUEST", "invalid project id")
+		if !runIDValid(projectID) || documentID != "" && !runIDValid(documentID) {
+			return nil, api.Err(400, "BAD_REQUEST", "invalid project or document id")
 		}
 	default:
 		return nil, api.Err(400, "BAD_REQUEST", "invalid storage operation")
 	}
-	return &auth.StorageGrant{Operation: operation, ProjectID: projectID, KeyID: keyID(key), ExpiresAt: api.Now().Add(grantLifetime)}, nil
+	return &auth.StorageGrant{Operation: operation, ProjectID: projectID, DocumentID: documentID, KeyID: keyID(key), ExpiresAt: api.Now().Add(grantLifetime)}, nil
 }
 
 // Push seals a row under key and writes it at the revision it was read at,
@@ -225,6 +226,12 @@ func (r *Rows) Push(ctx context.Context, p *auth.Principal, key auth.ContentKey,
 		if at, ok := chatActivityAt(row.Data); ok {
 			req.ActivityAt = &at
 		}
+	}
+	if scope == "project_document" {
+		// The file the document keeps tells the control plane which of
+		// those registered under it to keep.
+		file := documentFileRef(row.Data)
+		req.DocumentFile = &file
 	}
 	resp, err := r.Controlplane.PutBlob(ctx, req)
 	if err != nil {

@@ -73,8 +73,12 @@ func (ar *Service) ShareThread(ctx context.Context, p *auth.Principal, _ auth.Co
 		}
 		shared := domain.ShareMessage{Role: m.Role, Content: m.Content, Timestamp: domain.Millis(m.CreatedAt), Timeline: domain.CheckedWidgets(m.Timeline), ModelDisplayName: m.ModelDisplayName, IsError: m.IsError, Quote: m.Quote, Annotations: m.Annotations, Answers: m.Answers}
 		for _, a := range m.Attachments {
-			view := domain.ViewAttachment(&a)
+			view := domain.ViewAttachment(&a).Attachment
 			view.EncryptionKey = a.EncryptionKey
+			// A device chat keeps no uploaded files in the cloud.
+			if !in.Local {
+				view.Original = a.Original
+			}
 			shared.Attachments = append(shared.Attachments, view)
 		}
 		payload.Messages = append(payload.Messages, shared)
@@ -157,7 +161,11 @@ func SharedThreadView(id string, payload []byte) (domain.SharedThread, error) {
 		m := &t.Messages[i]
 		view := domain.SharedMessage{MessageView: domain.ViewMessage(m)}
 		for j, a := range view.MessageView.Attachments {
-			view.Attachments = append(view.Attachments, domain.SharedAttachment{Attachment: a, AttKey: domain.Present(m.Attachments[j].EncryptionKey)})
+			shared := domain.SharedAttachment{AttachmentView: a, AttKey: domain.Present(m.Attachments[j].EncryptionKey)}
+			if o := m.Attachments[j].Original; o != nil {
+				shared.Original = &domain.SharedOriginal{ID: o.ID, AttKey: o.EncryptionKey}
+			}
+			view.Attachments = append(view.Attachments, shared)
 		}
 		shared.Messages = append(shared.Messages, view)
 	}
@@ -549,6 +557,9 @@ func (ar *Service) writeBackup(ctx context.Context, p *auth.Principal, key *auth
 				return err
 			}
 			for _, doc := range docs {
+				if doc.File != nil {
+					b.omit(BackupOmission{Kind: "original_file", SourceID: doc.ID, ParentSourceID: project.ID, Category: "unsupported", Reason: "original_not_archived"})
+				}
 				entry := BackupDocument{ID: doc.ID, ProjectID: project.ID, Filename: doc.Filename, ContentType: doc.ContentType, SizeBytes: doc.SizeBytes, ExtractedText: doc.Content, CreatedAt: domain.LooseTime(doc.CreatedAt), UpdatedAt: domain.LooseTime(doc.UpdatedAt)}
 				if err := b.addJSON("project_documents", BackupDocumentPath(project.ID, doc.ID), entry); err != nil {
 					return err
@@ -674,6 +685,9 @@ func backupChat(b *BackupWriter, rel *backupRelationships, kind string, t *domai
 		message := backupMessage{Message: m}
 		for j, a := range m.Attachments {
 			id := fmt.Sprintf("%s/%d/%d", t.ID, i, j)
+			if a.Original != nil {
+				b.omit(BackupOmission{Kind: "original_file", SourceID: id, ParentSourceID: t.ID, Category: "unsupported", Reason: "original_not_archived"})
+			}
 			if !a.IsImage() && !a.HasContent() && a.StorageKey() != "" {
 				if err := document(&a); missing(err) {
 					omit(id, err)
@@ -683,7 +697,7 @@ func backupChat(b *BackupWriter, rel *backupRelationships, kind string, t *domai
 				}
 			}
 			attachment := backupAttachment{Attachment: a}
-			attachment.Base64, attachment.EncryptionKey, attachment.Key, attachment.StorageThreadID, attachment.Attachment.Pages = "", "", "", "", nil
+			attachment.Base64, attachment.EncryptionKey, attachment.Key, attachment.StorageThreadID, attachment.Attachment.Pages, attachment.Original = "", "", "", "", nil, nil
 			if a.IsImage() {
 				data, err := image(&a)
 				if missing(err) {

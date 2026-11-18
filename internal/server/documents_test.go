@@ -9,6 +9,8 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"image"
+	"image/jpeg"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -201,6 +203,118 @@ func TestStoredUploadIsOffloadedUnderItsThread(t *testing.T) {
 	kept := mustRead(domain.ReadThreadRow(row)).Messages[0].Attachments[0]
 	if kept.ID != stored["id"] || kept.EncryptionKey != stored["encryptionKey"] || attachmentsStored(rows) != 1 {
 		t.Fatalf("the edit did not keep the stored attachment: %+v after %d blobs", kept, attachmentsStored(rows))
+	}
+}
+
+// A stored chat's upload keeps the file as it was uploaded, under the chat
+// it is for, beside the content models read: the chat names it, its client
+// is told it is kept and downloads it byte for byte, a fork keeps a copy of
+// its own, and a share's reader downloads it with the key the share names.
+func TestAStoredChatKeepsEachFileAsItWasUploaded(t *testing.T) {
+	h, rows, key := testChatHarness(t, nil)
+	alice := &auth.Principal{ID: "alice"}
+	notes := []byte("remember the blue door \xff")
+	upload := uploadRoute(h, "/v1/attachments/upload", "notes.txt", notes, map[string]string{"key": keyBase64(key)}, "alice")
+	var body struct {
+		Attachment api.Object `json:"attachment"`
+	}
+	json.Unmarshal(upload.Body.Bytes(), &body)
+	in := sendInput(key)
+	thread := api.Str(in["threadId"])
+	// Until a turn attaches it, the file is filed under no chat, which the
+	// control plane's sweep of such files takes.
+	staged := api.Obj(body.Attachment["original"])
+	if filed := rows.indexedUnder(api.Str(staged["id"])); upload.Code != 200 || filed == "" || filed == thread || staged["storageThreadId"] != filed {
+		t.Fatalf("upload: HTTP %d %s, filed under %q", upload.Code, upload.Body, filed)
+	}
+	in["attachments"] = []any{body.Attachment}
+	finishedRun(t, h, "/v1/threads/turn", in)
+
+	held := func(chat string) domain.Message {
+		t.Helper()
+		row, err := rows.Load(context.Background(), alice, key, "chat", chat)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return mustRead(domain.ReadThreadRow(row)).Messages[0]
+	}
+	get := func(chat string, original bool) *httptest.ResponseRecorder {
+		return postRoute(h, "/v1/attachments/get", api.Object{"key": keyBase64(key), "id": held(chat).Attachments[0].ID, "threadId": chat, "original": original}, "alice")
+	}
+	// The turn's run copies the file under its chat.
+	if kept := held(thread).Attachments[0].Original; kept == nil || kept.ID == staged["id"] || kept.StorageThreadID != thread || rows.indexedUnder(kept.ID) != thread {
+		t.Fatalf("the chat keeps %+v", kept)
+	}
+	if w := get(thread, true); w.Code != 200 || !bytes.Equal(w.Body.Bytes(), notes) {
+		t.Fatalf("the uploaded file: HTTP %d %q", w.Code, w.Body.Bytes())
+	}
+	if w := get(thread, false); w.Code != 200 || w.Body.String() != "remember the blue door \uFFFD" {
+		t.Fatalf("the content models read: HTTP %d %q", w.Code, w.Body.Bytes())
+	}
+	w := postRoute(h, "/v1/threads/get", api.Object{"key": keyBase64(key), "id": thread}, "alice")
+	shown := api.Obj(api.Arr(api.Obj(api.Arr(api.Obj(api.Parsed(w.Body.Bytes()))["messages"])[0])["attachments"])[0])
+	if shown["hasOriginal"] != true || shown["original"] != nil {
+		t.Fatalf("the chat shows its attachment as %v", shown)
+	}
+
+	w = postRoute(h, "/v1/threads/fork", api.Object{"key": keyBase64(key), "threadId": thread, "messageId": held(thread).ID}, "alice")
+	fork := api.Str(api.Obj(api.Parsed(w.Body.Bytes()))["id"])
+	source := held(thread).Attachments[0].Original
+	if copied := held(fork).Attachments[0].Original; copied == nil || copied.ID == source.ID || copied.StorageThreadID != fork || rows.indexedUnder(copied.ID) != fork || rows.indexedUnder(source.ID) != thread {
+		t.Fatalf("the fork keeps %+v, the chat %+v", copied, source)
+	}
+	if w := get(fork, true); !bytes.Equal(w.Body.Bytes(), notes) {
+		t.Fatalf("the fork's copy: HTTP %d %q", w.Code, w.Body.Bytes())
+	}
+
+	fakeShares(t, h)
+	w = postRoute(h, "/v1/threads/share", api.Object{"key": keyBase64(key), "threadId": thread}, "alice")
+	_, fragment, _ := strings.Cut(api.Str(api.Obj(api.Parsed(w.Body.Bytes()))["url"]), "#")
+	var opened domain.SharedThread
+	if w := postRoute(h, "/v1/shares/open", api.Object{"shareId": thread, "fragment": fragment}, ""); json.Unmarshal(w.Body.Bytes(), &opened) != nil || len(opened.Messages) == 0 || len(opened.Messages[0].Attachments) != 1 || opened.Messages[0].Attachments[0].Original == nil {
+		t.Fatalf("open the share: HTTP %d %s", w.Code, w.Body)
+	}
+	shared := opened.Messages[0].Attachments[0].Original
+	if w := postRoute(h, "/v1/attachments/get-public", api.Object{"id": shared.ID, "attKey": shared.AttKey, "original": true}, ""); w.Code != 200 || !bytes.Equal(w.Body.Bytes(), notes) {
+		t.Fatalf("the share's file: HTTP %d %q", w.Code, w.Body.Bytes())
+	}
+}
+
+// An image may have a different file name, encoding and dimensions from
+// its preview. Copying it into the chat and into a share preserves all three.
+func TestASharedPhotoDownloadsItsSourceNotItsPreview(t *testing.T) {
+	h, _, key := testChatHarness(t, nil)
+	h.models.Offer.Get()[0].Vision = true
+	h.models.Catalog.Get().Models[0]["multimodal"] = true
+	var original bytes.Buffer
+	if err := jpeg.Encode(&original, image.NewGray(image.Rect(0, 0, 400, 200)), nil); err != nil {
+		t.Fatal(err)
+	}
+	source := original.Bytes()
+	upload := uploadRoute(h, "/v1/attachments/upload", "preview.png", pngFixture(t, 16, 8, 110), map[string]string{"key": keyBase64(key)}, "alice", originalPart{"source.jpg", source})
+	var descriptor struct{ Attachment domain.Attachment }
+	if upload.Code != 200 || json.Unmarshal(upload.Body.Bytes(), &descriptor) != nil || descriptor.Attachment.Original == nil {
+		t.Fatalf("photo upload: HTTP %d", upload.Code)
+	}
+	in := sendInput(key)
+	in["attachments"] = []any{descriptor.Attachment}
+	finishedRun(t, h, "/v1/threads/turn", in)
+	fakeShares(t, h)
+	id := in["threadId"]
+	link := postRoute(h, "/v1/threads/share", api.Object{"key": keyBase64(key), "threadId": id}, "alice")
+	_, fragment, _ := strings.Cut(api.Str(api.Obj(api.Parsed(link.Body.Bytes()))["url"]), "#")
+	w := postRoute(h, "/v1/shares/open", api.Object{"shareId": id, "fragment": fragment}, "")
+	var shared domain.SharedThread
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &shared) != nil || len(shared.Messages) == 0 || len(shared.Messages[0].Attachments) != 1 {
+		t.Fatalf("open photo share: HTTP %d", w.Code)
+	}
+	a := shared.Messages[0].Attachments[0]
+	if a.Original == nil || a.OriginalFileName != "source.jpg" || a.OriginalMimeType != "image/jpeg" {
+		t.Fatal("the opened share does not identify the source photo")
+	}
+	download := postRoute(h, "/v1/attachments/get-public", api.Object{"id": a.Original.ID, "attKey": a.Original.AttKey, "original": true}, "")
+	if download.Code != 200 || !bytes.Equal(download.Body.Bytes(), source) {
+		t.Fatalf("the source photo was not preserved: HTTP %d", download.Code)
 	}
 }
 

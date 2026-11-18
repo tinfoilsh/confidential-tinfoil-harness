@@ -185,7 +185,7 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, auth.WithQuota(p, cred.Limit, err))
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxTextBytes+(1<<20))
+	r.Body = http.MaxBytesReader(w, r.Body, int64(max(maxTextBytes, 2*ImageUploads.MaxBytes))+(1<<20))
 	reader, err := r.MultipartReader()
 	if err != nil {
 		api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "Expected multipart form data"))
@@ -196,7 +196,9 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	defer clear(key[:])
 	var keyField []byte
 	defer func() { clear(keyField) }()
-	var file []byte
+	var file, original []byte
+	defer func() { clear(file); clear(original) }()
+	var originalName, originalType string
 	filename := ""
 	for count := 0; ; count++ {
 		part, err := reader.NextPart()
@@ -220,7 +222,7 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 					api.Respond(w, nil, err)
 					return
 				}
-				p.Grant, err = at.Store.Rows.AuthorizeStorage(r.Context(), p, key, "project-upload", fields["projectId"])
+				p.Grant, err = at.Store.Rows.AuthorizeStorage(r.Context(), p, key, "project-upload", fields["projectId"], fields["documentId"])
 				if err != nil {
 					api.Respond(w, nil, err)
 					return
@@ -230,6 +232,26 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 			file, err = io.ReadAll(io.LimitReader(part, maxTextBytes+1))
 			if err != nil || len(file) > maxTextBytes {
 				api.Respond(w, nil, api.Err(413, "ATTACHMENT_TOO_LARGE", "The upload exceeds the size limit"))
+				return
+			}
+		} else if part.FormName() == "original" {
+			// Clients that transcode a photo send its input after the model copy.
+			if originalName != "" || part.FileName() == "" || !ImageUploads.accepts(filename) || p.Anonymous ||
+				!(r.URL.Path == "/v1/projects/documents/upload" || r.URL.Path == "/v1/attachments/upload" && len(keyField) > 0) {
+				api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "An original must follow a signed-in image upload"))
+				return
+			}
+			originalName = filepath.Base(part.FileName())
+			if kind, _, err := mime.ParseMediaType(part.Header.Get("Content-Type")); err == nil && strings.HasPrefix(kind, "image/") {
+				originalType = kind
+			}
+			original, err = io.ReadAll(io.LimitReader(part, int64(ImageUploads.MaxBytes)+1))
+			if err != nil || len(original) > ImageUploads.MaxBytes {
+				api.Respond(w, nil, api.Err(413, "ATTACHMENT_TOO_LARGE", "The original image exceeds the size limit"))
+				return
+			}
+			if len(original) == 0 {
+				api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "A nonempty original is required"))
 				return
 			}
 		} else {
@@ -254,7 +276,6 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 		part.Close()
 	}
-	defer clear(file)
 	if filename == "" || len(file) == 0 {
 		api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "A nonempty file is required"))
 		return
@@ -270,10 +291,29 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, auth.WithQuota(p, cred.Limit, err))
 		return
 	}
-	// An upload is only converted. Its client sends the descriptor back with
-	// the turn that attaches it, and that turn stores it with the chat.
+	source, sourceName, sourceType := file, filename, descriptor.MimeType
+	if original != nil {
+		source, sourceName = original, originalName
+		sourceType = http.DetectContentType(source)
+		if sourceType == OpaqueContentType {
+			sourceType = cmp.Or(originalType, mime.TypeByExtension(filepath.Ext(sourceName)), OpaqueContentType)
+		}
+	}
+	// An upload is converted, and its client sends the descriptor back with
+	// the turn that attaches it, which stores it with the chat. With the
+	// content key, as for a cloud chat, the upload keeps the file as it was
+	// uploaded until that turn, which the descriptor names.
 	if r.URL.Path == "/v1/attachments/upload" {
 		descriptor.ID = "att_" + api.Token()
+		if len(keyField) > 0 {
+			if descriptor.Original, err = at.keepOriginal(r.Context(), p, keyField, descriptor.ID, source); err != nil {
+				api.Respond(w, nil, err)
+				return
+			}
+			if original != nil {
+				descriptor.Original.FileName, descriptor.Original.MimeType = sourceName, sourceType
+			}
+		}
 		api.Respond(w, struct {
 			Attachment domain.Attachment `json:"attachment"`
 		}{descriptor}, nil)
@@ -289,6 +329,21 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 			api.Respond(w, nil, err)
 			return
 		}
+		// A document named is replaced by the upload, as a new version. Its
+		// id is granted with the file, so it comes before the file.
+		documentID, replace := fields["documentId"], fields["documentId"] != ""
+		if documentID != p.Grant.DocumentID {
+			api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "documentId must come before the file"))
+			return
+		}
+		if replace {
+			if _, err := at.Store.ProjectDocument(ctx, p, key, projectID, documentID); err != nil {
+				api.Respond(w, nil, err)
+				return
+			}
+		} else {
+			documentID = domain.RowID()
+		}
 		if descriptor.IsImage() {
 			descriptor.TextContent, err = at.describeImage(ctx, descriptor.Base64)
 			if err != nil {
@@ -300,10 +355,36 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 			api.Respond(w, nil, api.Err(415, "ATTACHMENT_UNSUPPORTED", "Project documents require extracted text"))
 			return
 		}
-		doc, err := at.Store.CreateProjectDocument(ctx, p, key, domain.ProjectDocument{ID: domain.RowID(), ProjectID: projectID, Filename: filename, ContentType: descriptor.MimeType, SizeBytes: len(file), Content: descriptor.TextContent})
-		api.Respond(w, doc, err)
+		kept, err := at.Store.PutDocumentFile(ctx, p, projectID, documentID, source)
+		if err != nil {
+			api.Respond(w, nil, err)
+			return
+		}
+		doc, err := at.Store.SaveProjectDocument(ctx, p, key, domain.ProjectDocument{ID: documentID, ProjectID: projectID, Filename: sourceName, ContentType: sourceType, SizeBytes: len(source), Content: descriptor.TextContent, File: kept}, replace)
+		api.Respond(w, doc.View(), err)
 		return
 	}
+}
+
+// keepOriginal stores an upload's file as it was uploaded, filed under an
+// id no chat has. The turn that attaches it copies it under its chat, and
+// the control plane drops what is filed under no chat within the hour, so
+// neither a file never sent nor the copy a turn was made from stays.
+func (at *Service) keepOriginal(ctx context.Context, p *auth.Principal, keyField []byte, uploadID string, file []byte) (*domain.OriginalFile, error) {
+	if p.Anonymous {
+		return nil, auth.ErrAnonymousCloud
+	}
+	key, err := auth.DecodeBase64Key(keyField)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(key[:])
+	staged := domain.RowID()
+	id, fileKey, err := at.Store.PutAttachment(ctx, p, key, staged, "original/"+uploadID, file)
+	if err != nil {
+		return nil, err
+	}
+	return &domain.OriginalFile{ID: id, EncryptionKey: fileKey, StorageThreadID: staged}, nil
 }
 
 var errUnsupportedType = api.Err(415, "ATTACHMENT_UNSUPPORTED", "Unsupported file type")
@@ -337,7 +418,7 @@ func (d *Sent) fitsUpload() error {
 // stores: an upload's descriptor, and an image's bytes no larger than the
 // copy an upload makes for models.
 func (d *Sent) stored() (domain.Attachment, error) {
-	a := domain.Attachment{ID: d.ID, Kind: d.Kind, FileName: d.FileName, MimeType: d.MimeType, Size: d.Size, Thumbnail: domain.ValueOr(d.Thumbnail, ""), TextContent: d.TextContent, Description: d.Description, Pages: d.Pages, Base64: d.Base64}
+	a := domain.Attachment{ID: d.ID, Kind: d.Kind, FileName: d.FileName, MimeType: d.MimeType, Size: d.Size, Thumbnail: domain.ValueOr(d.Thumbnail, ""), TextContent: d.TextContent, Description: d.Description, Pages: d.Pages, Base64: d.Base64, Original: d.Original}
 	if !a.IsImage() {
 		return a, nil
 	}
@@ -598,8 +679,9 @@ func (at *Service) transcribe(ctx context.Context, filename string, data []byte)
 	return string(b), nil
 }
 
-// attachment finds an attachment of the named thread for its client to download.
-func (at *Service) attachment(ctx context.Context, p *auth.Principal, key auth.ContentKey, id, threadID string) (*domain.Attachment, []byte, error) {
+// attachment finds an attachment of the named thread for its client to
+// download: its content, or with original, the file as it was uploaded.
+func (at *Service) attachment(ctx context.Context, p *auth.Principal, key auth.ContentKey, id, threadID string, original bool) (*domain.Attachment, []byte, error) {
 	if p.Anonymous {
 		return nil, nil, api.Err(404, "THREAD_NOT_FOUND", "The attachment was not found")
 	}
@@ -616,6 +698,13 @@ func (at *Service) attachment(ctx context.Context, p *auth.Principal, key auth.C
 	}
 	if descriptor == nil {
 		return nil, nil, api.Err(404, "THREAD_NOT_FOUND", "The attachment was not found")
+	}
+	if original {
+		if descriptor.Original == nil {
+			return nil, nil, api.Err(404, "THREAD_NOT_FOUND", "The attachment's uploaded file is not kept")
+		}
+		b, err := at.Store.GetAttachment(ctx, p, descriptor.Original.ID, descriptor.Original.EncryptionKey)
+		return descriptor, b, err
 	}
 	b, err := at.Bytes(ctx, p, descriptor)
 	return descriptor, b, err
@@ -677,7 +766,7 @@ func (at *Service) HandleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer clear(key[:])
-		descriptor, data, err = at.attachment(r.Context(), p, key, in.ID, in.ThreadID)
+		descriptor, data, err = at.attachment(r.Context(), p, key, in.ID, in.ThreadID, in.Original)
 		clear(key[:])
 	}
 	if err != nil {
@@ -685,7 +774,8 @@ func (at *Service) HandleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer clear(data)
-	if documentRequest(descriptor, data) {
+	// An uploaded file is sent as it was uploaded.
+	if !in.Original && documentRequest(descriptor, data) {
 		// A stored document keeps its extracted content, not the uploaded file.
 		content := Content(descriptor)
 		if content.empty() {
@@ -699,6 +789,57 @@ func (at *Service) HandleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 	}
 	// EHBP seals the body but not the headers, so the response names neither
 	// the file nor its type; the client reads both from the chat it holds.
+	w.Header().Set("Content-Type", OpaqueContentType)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Write(data)
+}
+
+// HandleDocumentDownload sends the file a project's document was read from,
+// as it was uploaded.
+func (at *Service) HandleDocumentDownload(w http.ResponseWriter, r *http.Request) {
+	p, err := at.Auth.Caller(r, false)
+	if err != nil {
+		api.Respond(w, nil, err)
+		return
+	}
+	body, err := api.ReadBody(w, r, api.MaxRequestBody)
+	defer clear(body)
+	if err != nil {
+		api.Respond(w, nil, err)
+		return
+	}
+	var in documentFileRequest
+	defer in.ClearKey()
+	if err := api.DecodeBody(body, &in); err != nil {
+		api.Respond(w, nil, err)
+		return
+	}
+	if err := in.Validate(); err != nil {
+		api.Respond(w, nil, err)
+		return
+	}
+	key, err := auth.DecodeContentKey(in.Key)
+	in.ClearKey()
+	if err != nil {
+		api.Respond(w, nil, err)
+		return
+	}
+	defer clear(key[:])
+	doc, err := at.Store.ProjectDocument(r.Context(), p, key, in.ProjectID, in.DocumentID)
+	clear(key[:])
+	if err != nil {
+		api.Respond(w, nil, err)
+		return
+	}
+	data, err := at.Store.DocumentFile(r.Context(), p, &doc)
+	if err != nil {
+		api.Respond(w, nil, err)
+		return
+	}
+	defer clear(data)
+	// As with an attachment, the client reads the file's name and type
+	// from the document it holds.
 	w.Header().Set("Content-Type", OpaqueContentType)
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")

@@ -76,7 +76,12 @@ func TestServiceRefusalsKeepTheirRetryDelay(t *testing.T) {
 	}
 }
 
-func uploadRoute(h *harness, path, filename string, data []byte, fields map[string]string, user string) *httptest.ResponseRecorder {
+type originalPart struct {
+	name string
+	data []byte
+}
+
+func uploadRoute(h *harness, path, filename string, data []byte, fields map[string]string, user string, originals ...originalPart) *httptest.ResponseRecorder {
 	var body bytes.Buffer
 	form := multipart.NewWriter(&body)
 	for name, value := range fields {
@@ -84,6 +89,10 @@ func uploadRoute(h *harness, path, filename string, data []byte, fields map[stri
 	}
 	part, _ := form.CreateFormFile("file", filename)
 	part.Write(data)
+	for _, original := range originals {
+		part, _ := form.CreateFormFile("original", original.name)
+		part.Write(original.data)
+	}
 	form.Close()
 	r := httptest.NewRequest("POST", path, &body)
 	r.Header.Set("Content-Type", form.FormDataContentType())

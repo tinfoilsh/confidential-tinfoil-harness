@@ -370,7 +370,8 @@ func TestChatPushReportsItsAttachmentsAndActivity(t *testing.T) {
 	chat := `{"id":"chat-refs","createdAt":"2026-01-01T00:00:00.000Z","messages":[` +
 		`{"role":"user","content":"a","timestamp":"2026-01-01T00:00:00.000Z","attachments":[` +
 		`{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","type":"image","encryptionKey":"` + key + `"},` +
-		`{"id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","type":"document","fileSize":1.5,"key":"` + key + `"},` +
+		`{"id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","type":"document","fileSize":1.5,"key":"` + key + `",` +
+		`"original":{"id":"cccccccccccccccccccccccccccccccccccc","encryptionKey":"` + key + `","storageThreadId":"chat-refs"}},` +
 		`{"id":"local-only","type":"image","base64":"AQID"}]},` +
 		`{"role":"assistant","content":"b","timestamp":"2026-02-03T04:05:06.789Z","attachments":[` +
 		`{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","type":"image","encryptionKey":"` + key + `"}]}]}`
@@ -380,8 +381,8 @@ func TestChatPushReportsItsAttachmentsAndActivity(t *testing.T) {
 	h.push(t, "project", "project-1", chat)
 
 	stored := h.stored("chat", "chat-refs")
-	if want := []string{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}; !reflect.DeepEqual(stored.AttachmentRefs, want) {
-		t.Fatalf("attachment refs = %v, want the uploaded attachments once each: %v", stored.AttachmentRefs, want)
+	if want := []string{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "cccccccccccccccccccccccccccccccccccc"}; !reflect.DeepEqual(stored.AttachmentRefs, want) {
+		t.Fatalf("attachment refs = %v, want the uploaded attachments and files once each: %v", stored.AttachmentRefs, want)
 	}
 	if want := time.Date(2026, 2, 3, 4, 5, 6, 789_000_000, time.UTC); stored.ActivityAt == nil || !stored.ActivityAt.Equal(want) {
 		t.Fatalf("activity = %v, want the newest message's %s", stored.ActivityAt, want)
@@ -529,12 +530,15 @@ func TestAnOperationsGrantCoversWhatItIsFor(t *testing.T) {
 	ctx := context.Background()
 	h.push(t, "project", "project", `{"name":"House"}`)
 	h.push(t, "chat", "existing", `{"id":"existing"}`)
-	grant, err := h.rows.AuthorizeStorage(ctx, h.p, h.key, "project-upload", "project")
+	grant, err := h.rows.AuthorizeStorage(ctx, h.p, h.key, "project-upload", "project", "")
 	if err != nil || grant.Operation != "project-upload" || grant.ProjectID != "project" || grant.KeyID != h.kid {
 		t.Fatalf("grant = %+v (%v)", grant, err)
 	}
-	if _, err := h.rows.AuthorizeStorage(ctx, h.p, h.key, "project-upload", "a/b"); codeOf(err) != "BAD_REQUEST" {
+	if _, err := h.rows.AuthorizeStorage(ctx, h.p, h.key, "project-upload", "a/b", ""); codeOf(err) != "BAD_REQUEST" {
 		t.Fatalf("an upload to an invalid project was granted: %v", err)
+	}
+	if _, err := h.rows.AuthorizeStorage(ctx, h.p, h.key, "project-upload", "project", "../doc"); codeOf(err) != "BAD_REQUEST" {
+		t.Fatalf("a replacement of an invalid document was granted: %v", err)
 	}
 	upload := *h.p
 	upload.Grant = grant
@@ -566,10 +570,24 @@ func TestAnOperationsGrantCoversWhatItIsFor(t *testing.T) {
 	if _, err := h.rows.Load(ctx, &upload, h.key, "chat", "existing"); !errors.Is(err, errRunScope) {
 		t.Fatalf("an upload read a chat: %v", err)
 	}
+	// An upload that replaces a document overwrites that one alone.
+	h.push(t, "project_document", "project/kept", `{"projectId":"project","filename":"kept.md"}`)
+	replace := *h.p
+	replace.Grant, _ = h.rows.AuthorizeStorage(ctx, h.p, h.key, "project-upload", "project", "doc")
+	for id, allowed := range map[string]bool{"project/doc": true, "project/kept": false} {
+		row, _ := h.rows.Load(ctx, &replace, h.key, "project_document", id)
+		row.Project, row.ProjectSet = &project, true
+		if _, err := h.rows.Push(ctx, &replace, h.key, "project_document", row, "replace-"+id); allowed != (err == nil) {
+			t.Errorf("replacing %s under a grant for project/doc: %v", id, err)
+		}
+	}
+	if _, err := h.rows.Push(ctx, &replace, h.key, "project_document", &domain.StoredRow{ID: "project/new", Data: []byte(`{}`), Project: &project, ProjectSet: true}, "replace-create"); !errors.Is(err, errRunScope) {
+		t.Errorf("a replacement of project/doc created another document: %v", err)
+	}
 
 	export, imported := *h.p, *h.p
-	export.Grant, _ = h.rows.AuthorizeStorage(ctx, h.p, h.key, "export", "")
-	imported.Grant, _ = h.rows.AuthorizeStorage(ctx, h.p, h.key, "import", "")
+	export.Grant, _ = h.rows.AuthorizeStorage(ctx, h.p, h.key, "export", "", "")
+	imported.Grant, _ = h.rows.AuthorizeStorage(ctx, h.p, h.key, "import", "", "")
 	if page, err := h.rows.List(ctx, &export, h.key, "chat", "", "", 10); err != nil || len(page.Rows) != 1 || page.Rows[0].ID != "existing" {
 		t.Fatalf("an export's read of the chats = %+v (%v)", page, err)
 	}

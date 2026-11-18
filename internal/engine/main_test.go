@@ -240,7 +240,7 @@ func TestASnapshotFitsItsBudget(t *testing.T) {
 	// but not their text, and the chat's own message keeps it.
 	document := strings.Repeat("x", maxSnapshotBytes)
 	question := "Summarize this"
-	messages = []domain.MessageView{{ID: "q", Role: "user", Content: &question, Attachments: []domain.Attachment{{ID: "doc", Kind: "document", FileName: "report.md", TextContent: document}}}}
+	messages = []domain.MessageView{{ID: "q", Role: "user", Content: &question, Attachments: []domain.AttachmentView{{Attachment: domain.Attachment{ID: "doc", Kind: "document", FileName: "report.md", TextContent: document}}}}}
 	snapshot = fittedSnapshot(messages, false)
 	if encoded, err = domain.EncodeEvent(snapshot, api.Timestamp()); err != nil {
 		t.Fatal(err)
