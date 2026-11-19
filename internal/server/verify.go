@@ -60,11 +60,11 @@ func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
 	if !sbk.Configured() {
 		return fmt.Errorf("SEARCH_INDEXES_BUCKET %q is not a valid bucket name", searchBucket)
 	}
-	embedder, err := inference.NewEmbedder(apiKey, model)
+	embedder, err := inference.NewEmbedder(ctx, apiKey, model)
 	if err != nil {
 		return err
 	}
-	account, err := inference.NewAccount(apiKey, h.models.Services["router"])
+	account, err := inference.NewAccount(ctx, apiKey, h.models.Services["router"])
 	if err != nil {
 		return err
 	}

@@ -41,23 +41,22 @@ type Model struct {
 // chatCompletionsPath is where the router takes model turns.
 const chatCompletionsPath = "/v1/chat/completions"
 
-// Requests without a caller's own cache secret fall back to this one, so the
-// SDK never tries to persist a secret under the read-only home directory.
-var cacheFallback = tinfoil.WithUserCacheSecret(api.Token())
+// Requests without a caller's own cache secret fall back to this one.
+var cacheFallback = api.Token()
 
 // attestedTLS pins the TLS connection to the key an enclave's attestation
 // names, so headers, status codes and bodiless requests, which EHBP leaves
 // open, reach no one else. Every enclave the harness dials uses it.
-var attestedTLS = tinfoil.WithTransport(tinfoil.TransportTLS)
+const attestedTLS = tinfoil.TransportModeTLS
 
 // Attest verifies an enclave the harness dials directly.
 func Attest(ctx context.Context, enclave, repo, usageSecret string) (*http.Client, error) {
-	return startupAttestation.run(ctx, func() (*http.Client, error) {
-		verified, err := tinfoil.NewClientWithOptions(tinfoil.WithEnclave(enclave), tinfoil.WithRepo(repo), attestedTLS, cacheFallback)
+	return startupAttestation.run(ctx, func(ctx context.Context) (*http.Client, error) {
+		verified, err := tinfoil.NewEnclaveHTTPClient(ctx, enclave, tinfoil.Pin{Repo: repo}, &tinfoil.EnclaveOptions{TransportMode: attestedTLS, UserCacheSecret: cacheFallback})
 		if err != nil {
 			return nil, err
 		}
-		client := verified.HTTPClient()
+		client := verified.Client
 		client.Transport = &auth.CallerTransport{Inner: client.Transport, UsageSecret: usageSecret}
 		return client, nil
 	})

@@ -89,14 +89,14 @@ func TestEmbedRejectsNilResponse(t *testing.T) {
 }
 
 func TestConfigured(t *testing.T) {
-	c, err := NewEmbedder("", "m")
+	c, err := NewEmbedder(context.Background(), "", "m")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if c.Configured() {
 		t.Fatal("empty api key should not be configured")
 	}
-	c, err = NewEmbedder("k", "")
+	c, err = NewEmbedder(context.Background(), "k", "")
 	if err != nil {
 		t.Fatal(err)
 	}

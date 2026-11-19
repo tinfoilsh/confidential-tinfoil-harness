@@ -74,14 +74,11 @@ type modelAccount struct {
 // NewAccount calls models with apiKey through the Tinfoil SDK's attested,
 // enclave-bound transport, and those a caller pays for through router, whose
 // client signs each request with the caller's key and usage.
-func NewAccount(apiKey string, router *Service) (Account, error) {
-	secureClient, err := tinfoil.NewClientWithOptions(
-		attestedTLS,
-		cacheFallback,
-		tinfoil.WithOpenAIOptions(
-			option.WithAPIKey(apiKey),
-			option.WithMaxRetries(0),
-		),
+func NewAccount(ctx context.Context, apiKey string, router *Service) (Account, error) {
+	secureClient, err := tinfoil.NewRouterOpenAIClient(ctx,
+		&tinfoil.RouterOptions{TransportMode: attestedTLS, UserCacheSecret: cacheFallback},
+		option.WithAPIKey(apiKey),
+		option.WithMaxRetries(0),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("inference: initialize the attested account client: %w", err)

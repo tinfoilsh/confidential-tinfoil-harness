@@ -14,10 +14,10 @@ type attestationRunner struct {
 
 var startupAttestation = attestationRunner{timeout: attestationTimeout}
 
-// The SDK verifies a direct enclave at construction without a context, and may
-// retry a 30-second attestation fetch once. Bound how long startup waits and
-// discard late results; startup verifies its few enclaves one at a time.
-func (r *attestationRunner) run(ctx context.Context, verify func() (*http.Client, error)) (*http.Client, error) {
+// The SDK verifies a direct enclave at construction. Bound how long startup
+// waits and discard late results; startup verifies its few enclaves one at a
+// time.
+func (r *attestationRunner) run(ctx context.Context, verify func(context.Context) (*http.Client, error)) (*http.Client, error) {
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
@@ -29,7 +29,7 @@ func (r *attestationRunner) run(ctx context.Context, verify func() (*http.Client
 	}
 	done := make(chan result)
 	go func() {
-		client, err := verify()
+		client, err := verify(ctx)
 		select {
 		case done <- result{client, err}:
 		case <-ctx.Done():

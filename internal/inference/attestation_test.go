@@ -20,7 +20,7 @@ func TestAttestationTimeoutDiscardsLateClient(t *testing.T) {
 	release := make(chan struct{})
 	closed := make(chan struct{})
 	late := &http.Client{Transport: &discardedAttestationTransport{closed: closed}}
-	if client, err := runner.run(context.Background(), func() (*http.Client, error) {
+	if client, err := runner.run(context.Background(), func(context.Context) (*http.Client, error) {
 		<-release
 		return late, nil
 	}); client != nil || !errors.Is(err, context.DeadlineExceeded) {
@@ -33,7 +33,7 @@ func TestAttestationTimeoutDiscardsLateClient(t *testing.T) {
 		t.Fatal("late verification result was not discarded")
 	}
 	good := &http.Client{}
-	if client, err := runner.run(context.Background(), func() (*http.Client, error) { return good, nil }); client != good || err != nil {
+	if client, err := runner.run(context.Background(), func(context.Context) (*http.Client, error) { return good, nil }); client != good || err != nil {
 		t.Fatalf("prompt verification lost its client: client=%p err=%v", client, err)
 	}
 }
