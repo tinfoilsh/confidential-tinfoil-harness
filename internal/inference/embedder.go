@@ -32,18 +32,16 @@ type Embedder struct {
 	embeddings embeddingService
 }
 
-func NewEmbedder(apiKey, model string) (*Embedder, error) {
+func NewEmbedder(ctx context.Context, apiKey, model string) (*Embedder, error) {
 	client := &Embedder{model: model}
 	if apiKey == "" || model == "" {
 		return client, nil
 	}
-	secureClient, err := tinfoil.NewClientWithOptions(
-		attestedTLS,
-		tinfoil.WithOpenAIOptions(
-			option.WithAPIKey(apiKey),
-			option.WithRequestTimeout(defaultRequestTimeout),
-			option.WithMaxRetries(0),
-		),
+	secureClient, err := tinfoil.NewRouterOpenAIClient(ctx,
+		&tinfoil.RouterOptions{TransportMode: attestedTLS},
+		option.WithAPIKey(apiKey),
+		option.WithRequestTimeout(defaultRequestTimeout),
+		option.WithMaxRetries(0),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("inference: initialize attested embedder: %w", err)
