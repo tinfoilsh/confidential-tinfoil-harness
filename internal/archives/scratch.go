@@ -3,7 +3,6 @@ package archives
 import (
 	"context"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -137,28 +136,6 @@ func (l *Lease) Take(n int64) error {
 	}
 	l.held += n
 	return nil
-}
-
-// idleBody ends a request whose body sends nothing for the space's idle
-// time. The returned func lifts the limit once the body is read, so it
-// cannot end the request after; left in place, it also bounds the server
-// reading what a refused request still sends.
-func (s *Scratch) idleBody(w http.ResponseWriter, r *http.Request) func() {
-	rc := http.NewResponseController(w)
-	r.Body = &idleReader{ReadCloser: r.Body, rc: rc, idle: s.Idle}
-	return func() { rc.SetReadDeadline(time.Time{}) }
-}
-
-// idleReader gives each read of a body until the idle time to return.
-type idleReader struct {
-	io.ReadCloser
-	rc   *http.ResponseController
-	idle time.Duration
-}
-
-func (r *idleReader) Read(p []byte) (int, error) {
-	r.rc.SetReadDeadline(time.Now().Add(r.idle))
-	return r.ReadCloser.Read(p)
 }
 
 // Release deletes the lease's files and frees its space.

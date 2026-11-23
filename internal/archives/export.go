@@ -260,7 +260,7 @@ func (ar *Service) HandleExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer lease.Release()
-	lift := ar.Scratch.idleBody(w, r)
+	lift := api.IdleBody(w, r, ar.Scratch.Idle)
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	form, err := readExportForm(r, lease, func(options exportOptions) error {
 		if p.Anonymous && len(options.Key) != 0 {

@@ -94,7 +94,7 @@ func (ar *Service) HandleImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer lease.Release()
-	lift := ar.Scratch.idleBody(w, r)
+	lift := api.IdleBody(w, r, ar.Scratch.Idle)
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	upload, options, err := readImportForm(r, lease, func(options importOptions) error {
 		if p.Anonymous && (options.Target == "cloud" || len(options.Key) != 0) {

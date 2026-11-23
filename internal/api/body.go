@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 )
 
 func Respond(w http.ResponseWriter, result any, err error) {
@@ -83,6 +84,28 @@ func BodyError(err error, malformed string) *Error {
 		return Err(http.StatusRequestTimeout, "REQUEST_TIMEOUT", "The request stopped sending its body")
 	}
 	return Err(400, "BAD_REQUEST", malformed)
+}
+
+// IdleBody ends a request whose body sends nothing for idle. The returned
+// func lifts the limit once the body is read, so it cannot end the request
+// after; left in place, it also bounds the server reading what a refused
+// request still sends.
+func IdleBody(w http.ResponseWriter, r *http.Request, idle time.Duration) func() {
+	rc := http.NewResponseController(w)
+	r.Body = &idleReader{ReadCloser: r.Body, rc: rc, idle: idle}
+	return func() { rc.SetReadDeadline(time.Time{}) }
+}
+
+// idleReader gives each read of a body until the idle time to return.
+type idleReader struct {
+	io.ReadCloser
+	rc   *http.ResponseController
+	idle time.Duration
+}
+
+func (r *idleReader) Read(p []byte) (int, error) {
+	r.rc.SetReadDeadline(time.Now().Add(r.idle))
+	return r.ReadCloser.Read(p)
 }
 
 func IsObject(value json.RawMessage) bool {
