@@ -12,6 +12,8 @@ import (
 	"image/png"
 	"io"
 	"maps"
+	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -461,5 +463,44 @@ func TestAnImageKeepsOneFormFromUploadToView(t *testing.T) {
 		if got := fieldsOf(view); !slices.Equal(got, shown) || api.Obj(view)["thumbnail"] != sent["thumbnail"] || api.Obj(view)["fileName"] != "photo.png" {
 			t.Fatalf("an attachment is shown as %v", view)
 		}
+	}
+}
+
+// An upload whose body stops arriving is ended once it has sent nothing for
+// a while, freeing its slot, so uploads stalled on every slot do not refuse
+// the uploads after them; one whose body keeps arriving, however slowly, is
+// served.
+func TestStalledUploadsFreeTheirSlots(t *testing.T) {
+	idle := attach.UploadIdle
+	attach.UploadIdle = 500 * time.Millisecond
+	t.Cleanup(func() { attach.UploadIdle = idle })
+	h, _, _ := testChatHarness(t, nil)
+	server := httptest.NewServer(h.routes())
+	t.Cleanup(server.Close)
+
+	stalled := make([]net.Conn, cap(uploadSlots))
+	for i := range stalled {
+		stalled[i] = postRaw(t, server, "/v1/attachments/upload", "multipart/form-data; boundary=stall", 64<<10)
+		fmt.Fprintf(stalled[i], "--stall\r\nContent-Disposition: form-data; name=\"file\"; filename=\"notes.txt\"\r\n\r\n%s", strings.Repeat("x", 4<<10))
+	}
+	for _, conn := range stalled {
+		if r, body := rawResponse(t, conn); r.StatusCode != http.StatusRequestTimeout || !strings.Contains(body, "REQUEST_TIMEOUT") {
+			t.Fatalf("a stalled upload: HTTP %d %s", r.StatusCode, body)
+		}
+	}
+
+	var form bytes.Buffer
+	writer := multipart.NewWriter(&form)
+	file, _ := writer.CreateFormFile("file", "notes.txt")
+	file.Write([]byte("remember the blue door"))
+	writer.Close()
+	slow := postRaw(t, server, "/v1/attachments/upload", writer.FormDataContentType(), form.Len())
+	body := form.Bytes()
+	for piece := (len(body) + 7) / 8; len(body) > 0; body = body[min(piece, len(body)):] {
+		slow.Write(body[:min(piece, len(body))])
+		time.Sleep(attach.UploadIdle / 5)
+	}
+	if r, body := rawResponse(t, slow); r.StatusCode != 200 || !strings.Contains(body, "remember the blue door") {
+		t.Fatalf("an upload whose body kept arriving: HTTP %d %s", r.StatusCode, body)
 	}
 }
