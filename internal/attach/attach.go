@@ -15,6 +15,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -62,6 +63,10 @@ const (
 	MaxFormParts = 12
 	MaxFormField = 8 << 10
 )
+
+// UploadIdle bounds how long an upload's body may send nothing. An upload
+// holds one of the few upload slots while its body arrives.
+var UploadIdle = 30 * time.Second
 
 // UploadGroup is a kind of file uploads accept, named by extension, and the
 // largest file of that kind. Clients pick a file's group by its extension.
@@ -185,6 +190,7 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 		api.Respond(w, nil, auth.WithQuota(p, cred.Limit, err))
 		return
 	}
+	lift := api.IdleBody(w, r, UploadIdle)
 	r.Body = http.MaxBytesReader(w, r.Body, maxTextBytes+(1<<20))
 	reader, err := r.MultipartReader()
 	if err != nil {
@@ -204,7 +210,7 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		if err != nil || count >= MaxFormParts {
-			api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "Invalid multipart upload"))
+			api.Respond(w, nil, partError(err, api.Err(400, "BAD_REQUEST", "Invalid multipart upload")))
 			return
 		}
 		if part.FormName() == "file" {
@@ -229,14 +235,14 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 			filename = filepath.Base(part.FileName())
 			file, err = io.ReadAll(io.LimitReader(part, maxTextBytes+1))
 			if err != nil || len(file) > maxTextBytes {
-				api.Respond(w, nil, api.Err(413, "ATTACHMENT_TOO_LARGE", "The upload exceeds the size limit"))
+				api.Respond(w, nil, partError(err, api.Err(413, "ATTACHMENT_TOO_LARGE", "The upload exceeds the size limit")))
 				return
 			}
 		} else {
 			value, err := api.ReadWipeable(io.LimitReader(part, MaxFormField+1))
 			if err != nil || len(value) > MaxFormField {
 				clear(value)
-				api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "Multipart field is too large"))
+				api.Respond(w, nil, partError(err, api.Err(400, "BAD_REQUEST", "Multipart field is too large")))
 				return
 			}
 			if _, exists := fields[part.FormName()]; exists {
@@ -254,6 +260,7 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 		part.Close()
 	}
+	lift()
 	defer clear(file)
 	if filename == "" || len(file) == 0 {
 		api.Respond(w, nil, api.Err(400, "BAD_REQUEST", "A nonempty file is required"))
@@ -307,6 +314,15 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 }
 
 var errUnsupportedType = api.Err(415, "ATTACHMENT_UNSUPPORTED", "Unsupported file type")
+
+// partError answers a form whose part could not be read: as a timeout when
+// its body stopped arriving, and as otherwise when not.
+func partError(err error, otherwise *api.Error) *api.Error {
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return api.BodyError(err, otherwise.Message)
+	}
+	return otherwise
+}
 
 // fitsUpload refuses a descriptor no upload makes: one of a file uploads do
 // not take, an image without its bytes, or holding more than an upload of
